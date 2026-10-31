@@ -41,6 +41,8 @@
 //! （返回 unsupported），ConPTY 按 `portable_pty` 的 ConPtySystem 在 P3
 //! 落地——Windows 属"未验证"而非"必须验证后才合入"。
 
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::PathBuf;
 
 /// 会话后端。
@@ -104,6 +106,7 @@ enum SessionInner {
     Pty {
         child: Box<dyn portable_pty::Child + Send + Sync>,
         killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+        master_fd: OwnedFd,
     },
     #[cfg(unix)]
     Pipe { child: std::process::Child },
@@ -135,9 +138,9 @@ impl SpawnedSession {
                 Ok(child.try_wait()?.map(|status| pty_exit_of(&status)))
             }
             #[cfg(unix)]
-            SessionInner::Pipe { child } => {
-                Ok(child.try_wait()?.map(|status| SessionExit { code: status.code() }))
-            }
+            SessionInner::Pipe { child } => Ok(child.try_wait()?.map(|status| SessionExit {
+                code: status.code(),
+            })),
         }
     }
 
@@ -155,6 +158,32 @@ impl SpawnedSession {
     pub fn kill_group(&mut self) -> std::io::Result<()> {
         kill_session_group(self)
     }
+
+    /// Make the PTY master nonblocking so registry writes can observe
+    /// cancellation/deadlines instead of sleeping inside a blocked `write(2)`.
+    /// The duplicated master descriptors share this flag; the output pump must
+    /// retry `WouldBlock` while waiting for new output.
+    pub fn set_pty_writer_nonblocking(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        if let SessionInner::Pty { master_fd, .. } = &self.inner {
+            let fd = master_fd.as_raw_fd();
+            let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+            if flags == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if flags & libc::O_NONBLOCK != 0 {
+                return Ok(());
+            }
+            if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            return Ok(());
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "qaqh-pty: nonblocking master is only available for PTY sessions",
+        ))
+    }
 }
 
 /// 阻塞收割会话。
@@ -168,7 +197,9 @@ pub fn wait_session(session: &mut SpawnedSession) -> std::io::Result<SessionExit
         #[cfg(unix)]
         SessionInner::Pipe { child } => {
             let status = child.wait()?;
-            Ok(SessionExit { code: status.code() })
+            Ok(SessionExit {
+                code: status.code(),
+            })
         }
     }
 }
@@ -246,6 +277,64 @@ fn anyhow_to_io(error: anyhow::Error) -> std::io::Error {
     std::io::Error::other(error.to_string())
 }
 
+#[cfg(unix)]
+fn duplicate_owned_fd(fd: RawFd) -> std::io::Result<OwnedFd> {
+    let duplicate = unsafe { libc::dup(fd) };
+    if duplicate == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedFd::from_raw_fd(duplicate) })
+}
+
+/// Keep `Read`'s blocking contract while the shared PTY master fd is
+/// nonblocking for cancellable writes.
+#[cfg(unix)]
+struct PollingPtyReader {
+    reader: Box<dyn std::io::Read + Send>,
+    poll_fd: OwnedFd,
+}
+
+#[cfg(unix)]
+impl std::io::Read for PollingPtyReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            let mut descriptor = libc::pollfd {
+                fd: self.poll_fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let ready = unsafe { libc::poll(&mut descriptor, 1, -1) };
+            if ready == -1 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+
+            let terminal =
+                descriptor.revents & (libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0;
+            match self.reader.read(buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && terminal => {
+                    return Ok(0);
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    continue;
+                }
+                result => return result,
+            }
+        }
+    }
+}
+
 /// 在 **PTY** 后端上启动会话（`tty=true` 路径）。
 #[cfg(unix)]
 pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
@@ -264,6 +353,14 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
             pixel_height: 0,
         })
         .map_err(anyhow_to_io)?;
+    let master_raw_fd = pair
+        .master
+        .as_raw_fd()
+        .ok_or_else(|| std::io::Error::other("portable-pty master has no raw fd"))?;
+    // Keep one master descriptor in the session handle so the process executor
+    // can set O_NONBLOCK; PollingPtyReader preserves blocking reads on the shared fd.
+    let master_fd = duplicate_owned_fd(master_raw_fd)?;
+    let reader_poll_fd = duplicate_owned_fd(master_raw_fd)?;
 
     let mut command = portable_pty::CommandBuilder::new(&spec.argv[0]);
     for arg in &spec.argv[1..] {
@@ -280,11 +377,14 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
 
     // portable-pty 在 Unix 上把子进程建立为新会话 leader（PID == PGID），
     // 组级终止因此可以统一按 `kill(-pid)` 处理。
+    let reader = Box::new(PollingPtyReader {
+        reader: pair.master.try_clone_reader().map_err(anyhow_to_io)?,
+        poll_fd: reader_poll_fd,
+    });
+    let writer = pair.master.take_writer().map_err(anyhow_to_io)?;
     let child = pair.slave.spawn_command(command).map_err(anyhow_to_io)?;
     let pid = child.process_id().unwrap_or_default();
     let killer = child.clone_killer();
-    let reader = pair.master.try_clone_reader().map_err(anyhow_to_io)?;
-    let writer = pair.master.take_writer().map_err(anyhow_to_io)?;
     // 父进程必须关闭 slave 副本，子进程退出后 master 读端才能见到 EOF。
     drop(pair.slave);
 
@@ -293,7 +393,11 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
         kind: SessionKind::Pty,
         reader,
         writer,
-        inner: SessionInner::Pty { child, killer },
+        inner: SessionInner::Pty {
+            child,
+            killer,
+            master_fd,
+        },
     })
 }
 

@@ -99,6 +99,14 @@ pub(crate) fn pty_exec(
         }
     };
     let (io, mut handle) = session.into_parts();
+    if let Err(error) = handle.set_pty_writer_nonblocking() {
+        let _ = handle.kill_group();
+        let _ = handle.wait();
+        if let Some(path) = &payload_path {
+            let _ = std::fs::remove_file(path);
+        }
+        return failure_output(&display_name, &format!("PTY NONBLOCK FAILED: {error}"));
+    }
 
     // 合流读线程：PTY master → forward_progress（ANSI 原样合帧推流，
     // HeadTailBuffer 有界捕获经信道交回）。master EOF（子进程退出且

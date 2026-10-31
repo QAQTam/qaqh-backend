@@ -179,6 +179,9 @@ impl SubagentHost for QaqhService {
                 model,
                 base_url,
                 max_tokens,
+                // The requested workspace goes straight into the child's
+                // genesis fact; the session tree never re-derives it.
+                workspace: workspace.filter(|w| !w.is_empty() && *w != "."),
                 ephemeral: false,
                 permission_level,
             },

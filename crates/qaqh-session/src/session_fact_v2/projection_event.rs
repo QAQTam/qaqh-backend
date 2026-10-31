@@ -667,6 +667,29 @@ pub enum ConversationDelta {
         args: ContentValue,
         args_hash: ContentHash,
     },
+    /// In-flight assistant text or reasoning for the active attempt.
+    ///
+    /// Ephemeral and replaceable: `text` is the **cumulative** value so far, not
+    /// a provider chunk, so a dropped or duplicated delivery self-heals. The
+    /// `block_id` is allocated when generation starts; `AssistantBlockSealed`
+    /// with the same id is what turns it into durable history.
+    AssistantBlockProgress {
+        revision: u64,
+        turn_id: TurnId,
+        block_id: super::types::BlockId,
+        block_kind: AssistantBlockKind,
+        model: String,
+        text: String,
+    },
+    /// In-flight tool arguments. Display only: an incomplete JSON body must
+    /// never be dispatched, which is why this never carries a parsed value.
+    ToolInputProgress {
+        revision: u64,
+        turn_id: TurnId,
+        call_id: ToolCallId,
+        tool_name: String,
+        args: String,
+    },
     ToolFinished {
         revision: u64,
         call_id: ToolCallId,

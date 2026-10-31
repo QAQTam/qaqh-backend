@@ -22,7 +22,7 @@ use qaqh_session::session_fact_v2::{
     ActivityState as FactActivityState, CompactStatus, ConversationDelta, Delivery, EventId,
     InteractionKind, InterruptReason, LogId, MetaDelta, OperationFailure, ProjectionEvent,
     ProjectionPayload, SessionFact, SessionId, StreamKey, TeamAgentResidency, TeamBoardSnapshot,
-    TeamDelta, TeamTaskSnapshot, TitleSource, TurnTerminal,
+    TeamDelta, TeamTaskSnapshot, TitleSource, ToolCallId, TurnId, TurnTerminal,
 };
 use tokio::sync::broadcast;
 
@@ -616,6 +616,156 @@ impl V2ProjectionHub {
                 reason: view.reason.map(str::to_string),
             },
         )
+    }
+
+    /// Publish in-flight assistant text for one stable block identity.
+    ///
+    /// `text` is cumulative. The slot is keyed by block id, so a reconnect is
+    /// given the latest value only — never every token.
+    pub fn publish_assistant_progress(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        turn_id: &str,
+        block_id: &str,
+        block_kind: qaqh_session::session_fact_v2::AssistantBlockKind,
+        model: &str,
+        text: &str,
+    ) -> Result<(), V2HubError> {
+        let turn_id = TurnId::new(turn_id.to_string());
+        let block = qaqh_session::session_fact_v2::BlockId::new(block_id.to_string());
+        self.publish_replaceable_conversation(
+            session_dir.as_ref(),
+            session_id,
+            format!("conversation:block:{block_id}"),
+            false,
+            |revision| ConversationDelta::AssistantBlockProgress {
+                revision,
+                turn_id,
+                block_id: block,
+                block_kind,
+                model: model.to_string(),
+                text: text.to_string(),
+            },
+        )
+    }
+
+    /// Publish in-flight tool arguments. Display only; the call is executable
+    /// only after `ToolCallDeclared` carries a validated argument body.
+    pub fn publish_tool_input_progress(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        turn_id: &str,
+        call_id: &str,
+        tool_name: &str,
+        args: &str,
+    ) -> Result<(), V2HubError> {
+        let turn_id = TurnId::new(turn_id.to_string());
+        let call_id = ToolCallId::new(call_id.to_string());
+        self.publish_replaceable_conversation(
+            session_dir.as_ref(),
+            session_id,
+            format!("conversation:tool_input:{call_id:?}"),
+            false,
+            |revision| ConversationDelta::ToolInputProgress {
+                revision,
+                turn_id,
+                call_id,
+                tool_name: tool_name.to_string(),
+                args: args.to_string(),
+            },
+        )
+    }
+
+    /// Drop an in-flight block slot once the attempt sealed, failed or was
+    /// cancelled. A stale slot would resurrect old output on reconnect.
+    pub fn clear_assistant_progress(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        block_id: &str,
+    ) -> Result<(), V2HubError> {
+        self.clear_progress_slot(
+            session_dir.as_ref(),
+            session_id,
+            &format!("conversation:block:{block_id}"),
+        )
+    }
+
+    pub fn clear_tool_input_progress(
+        &self,
+        session_dir: impl AsRef<Path>,
+        session_id: &str,
+        call_id: &str,
+    ) -> Result<(), V2HubError> {
+        self.clear_progress_slot(
+            session_dir.as_ref(),
+            session_id,
+            &format!("conversation:tool_input:{call_id}"),
+        )
+    }
+
+    fn clear_progress_slot(
+        &self,
+        session_dir: &Path,
+        session_id: &str,
+        slot: &str,
+    ) -> Result<(), V2HubError> {
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        state.replaceables.remove(slot);
+        Ok(())
+    }
+
+    fn publish_replaceable_conversation(
+        &self,
+        session_dir: &Path,
+        session_id: &str,
+        slot: String,
+        clear: bool,
+        build: impl FnOnce(u64) -> ConversationDelta,
+    ) -> Result<(), V2HubError> {
+        let (canonical_session_id, log_id) = resolve_identity(session_dir, session_id)?;
+        let session = self.session_for(session_dir, canonical_session_id, log_id)?;
+        let mut state = session
+            .state
+            .lock()
+            .map_err(|_| V2HubError::Canonical("v2 session lock poisoned".into()))?;
+        let revision = state
+            .replaceables
+            .get(&slot)
+            .and_then(|event| match &event.delivery {
+                Delivery::Replaceable { revision } => Some(*revision),
+                _ => None,
+            })
+            .map_or(1, |previous| previous.saturating_add(1));
+        let event_id = EventId::new(generate_ulid());
+        let event = ProjectionEvent {
+            event_id: event_id.clone(),
+            source_fact_seq: state.last_fact_seq.max(1),
+            source_event_id: event_id,
+            causation_id: None,
+            ts_ms: None,
+            stream_key: StreamKey::Channel(qaqh_domain::RingingChannel::Conversation),
+            delivery: Delivery::Replaceable { revision },
+            projection_slot: None,
+            projection_index: None,
+            payload: ProjectionPayload::ConversationDelta(build(revision)),
+        };
+        if clear {
+            state.replaceables.remove(&slot);
+        } else {
+            state.replaceables.insert(slot, event.clone());
+        }
+        if let Some(envelope) = event_to_envelope(&self.epoch, session_id, &event) {
+            let _ = state.live_tx.send(envelope);
+        }
+        Ok(())
     }
 
     /// 转发一条「命令业务失败」通知（ephemeral，control 频道）。

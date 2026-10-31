@@ -19,9 +19,9 @@ use mutil_ai::{
     ChatRequest, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart,
     Message as WireMessage, ModelAdapter, Part, ProfileSelector, ProtocolSurface, ProviderProfile,
     ProviderRequestOptions, ReasoningConfig, ReasoningEffort, ReasoningSummary, RequestOptions,
-    Role, ServerTool, ServerToolItem, ServerToolState, StreamEvent as SdkEvent,
-    ToolCall as WireToolCall, ToolResult as WireToolResult, ToolSpec, TransportConfig,
-    Usage as WireUsage,
+    Role, ScopedToolDeclaration, ServerTool, ServerToolItem, ServerToolState,
+    StreamEvent as SdkEvent, ToolCall as WireToolCall, ToolDeclaration, ToolResult as WireToolResult,
+    ToolSpec, TransportConfig, CustomToolFormat, Usage as WireUsage,
 };
 #[cfg(feature = "native-tool-plan")]
 use qaqh_tool_core::model_tool_plan::{
@@ -790,18 +790,35 @@ fn build_request(
 ) -> ChatRequest {
     let compat = &provider.responses_compat;
     let mut request = ChatRequest::new(projected);
+    let mut declarations: Vec<ToolDeclaration> = Vec::new();
     let specs: Vec<ToolSpec> = tools
         .unwrap_or_default()
         .into_iter()
-        .map(|td| {
-            ToolSpec::new(
+        .filter_map(|td| {
+            // freeform 收口：DeepSeek Responses 端点的 custom 工具**只认**
+            // `{"type":"custom","name":"apply_patch"}`（其他名称 400），裸文本
+            // 输入即 V4A 补丁。空 description = 最小形状（mutil-ai 契约）。
+            if compat.apply_patch_freeform && td.function.name == "apply_patch" {
+                declarations.push(ToolDeclaration::Tool {
+                    tool: ScopedToolDeclaration::Custom {
+                        name: td.function.name,
+                        description: String::new(),
+                        format: CustomToolFormat::Text,
+                    },
+                });
+                return None;
+            }
+            Some(ToolSpec::new(
                 provider_function_name(&td.function.name, compat).to_string(),
                 td.function.description,
                 sanitize_openai_schema(&td.function.parameters),
-            )
+            ))
         })
         .collect();
     request.tools = specs;
+    if !declarations.is_empty() {
+        request.tool_declarations = declarations;
+    }
     // 服务端内置搜索工具（模型可自主触发）：typed server_tools，非 wire 手拼。
     // plan 直连路由不提供 hosted 工具（web search 在该路由也受账户策略约束）→ 不发。
     if compat.web_search && !compat.siwc_plan {
@@ -999,6 +1016,51 @@ fn adapt_native(
     Err(anyhow::anyhow!(
         "native tool call requires an explicit tool plan"
     ))
+}
+
+/// 生产路径（无 plan）的 freeform `apply_patch` 收口：DeepSeek Responses 的
+/// custom 工具只认 `{"type":"custom","name":"apply_patch"}`，模型返回
+/// `custom_tool_call`、`input` 为裸补丁文本。转成与 function_json 形态相同的
+/// `{"patch": raw}` ToolUse——执行器、审批、事件流零改动；并回存原样 provider
+/// item，下一轮按 `custom_tool_call` / `custom_tool_call_output` 配对回放
+/// （形状对齐 plan 路径的 `adapt_native` 双块输出）。
+///
+/// 返回 `None` = 不是本收口的目标调用（非 custom、非 apply_patch 或未完成），
+/// 交回调用方既有逻辑处置。
+fn freeform_custom_blocks(call: &mutil_ai::NativeToolCall) -> Option<Vec<ContentBlock>> {
+    if call.kind != mutil_ai::NativeToolKind::Custom || call.name != "apply_patch" {
+        return None;
+    }
+    call.validate_completed().ok()?;
+    let raw = match &call.payload {
+        mutil_ai::NativeToolPayload::RawText(text) => text.clone(),
+        mutil_ai::NativeToolPayload::JsonArguments(text) => text.clone(),
+    };
+    let mut item = call
+        .provider_state
+        .as_ref()
+        .map(|state| state.data.clone())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+    item["type"] = "custom_tool_call".into();
+    item["name"] = call.name.clone().into();
+    item["call_id"] = call.call_id.clone().into();
+    item["status"] = "completed".into();
+    if let Some(object) = item.as_object_mut() {
+        object.remove("qaqh_native_call");
+    }
+    if let Some(id) = &call.item_id {
+        item["id"] = id.clone().into();
+    }
+    item["input"] = raw.clone().into();
+    Some(vec![
+        ContentBlock::ToolUse {
+            id: call.call_id.clone(),
+            name: call.name.clone(),
+            input: serde_json::json!({ "patch": raw }),
+        },
+        ContentBlock::ResponseOutputItem { item },
+    ])
 }
 
 /// Responses usage：`input_tokens`/`output_tokens` +
@@ -1724,6 +1786,12 @@ async fn consume(
                 let mut seen = std::collections::HashSet::new();
                 for (_, call) in calls {
                     if !seen.insert(call.call_id.clone()) {
+                        continue;
+                    }
+                    if plan.is_none()
+                        && let Some(freeform) = freeform_custom_blocks(&call)
+                    {
+                        blocks.extend(freeform);
                         continue;
                     }
                     match adapt_native(&call, plan) {

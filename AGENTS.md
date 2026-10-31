@@ -8,3 +8,18 @@ In repositories indexed by CodeGraph (a `.codegraph/` directory exists at the re
 
 If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is the user's decision.
 <!-- CODEGRAPH_END -->
+项目宪法:
+1. 禁止为了做一个简单功能写一堆测试
+2. 为了快速上线,模型必须要遵守用户可能带来的破坏性改动,并且不允许拖泥带水
+3. 遇到架构冲突时,原则上以更好的架构推行,即使用户可能想反悔--不允许!必须要开快车
+4. 如果遇到兼容性架构,必须砍掉!因为不再建议为了兼容套一群兼容性代码
+5. 不允许写防御性代码:不能工作视为代码错误应该改正而非写补丁让它看起来能工作
+6. 允许在开工前分析GitHub同类项目的哪些架构值得参考并且尝试告诉用户
+7. 开工时必须要获取用户的disk usage/memory usage/cpu核心,并且确认资源受限的情况下优先和用户沟通接下来可能出现的卡顿
+8. 不得因为工具错误但是用户心切默认声称已经完工
+9. 针对本项目:QAQHarness的RingingV2协议和命令面视作最高准则,任何模块,包括agentloop必须为它让路,不得出现拧巴设计(为了声称兼容ringing而写一个转换层,这类属于懒政,必须批判)
+10. 针对ClaudeCode/Codex:不允许改一次代码做一次全局测试,磁盘空间受不了.
+11. 优先使用ApplyPatch/apply_patch进行修改;禁止使用rg -rn等错误表述,应该注意:rg -r==rg --replace
+12. 使用sed修改文件必须参带rg确保修改正确.
+13. 必须在工作前使用todo工具让用户知道你的修改流程
+14. 涉及到新的库时可以用find-docs skills去找最新API避免旧版用法性能低下或不可用

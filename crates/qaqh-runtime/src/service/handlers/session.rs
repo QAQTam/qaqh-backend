@@ -62,7 +62,11 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             let session_id = identity.session_id.as_str().to_string();
             service.sessions.clear_active();
 
-            let (canonical_cwd, model) = session_canonical_cwd(&service.sessions, &session_id);
+            let (canonical_cwd, model) =
+                session_canonical_cwd(&service.sessions, &session_id, args.cwd.as_deref())
+                    .inspect_err(|_| {
+                        let _ = service.sessions.delete(&session_id);
+                    })?;
             if let Err(error) = materialize_canonical_session(&session_id, &canonical_cwd, &model) {
                 let _ = service.sessions.delete(&session_id);
                 return Err(QaqhError::context(
@@ -321,7 +325,12 @@ fn create_new(
     // 纯 v2：session_create 即物化 canonical identity + 首个 `SessionCreated`
     // 事实。否则 bootstrap/events 要等首个工具事实才可用，新建会话在第一
     // 回合前一直处于 snapshot_missing 瞬态。
-    let (canonical_cwd, model) = session_canonical_cwd(&service.sessions, &session_id);
+    let (canonical_cwd, model) =
+        session_canonical_cwd(&service.sessions, &session_id, args.cwd.as_deref()).inspect_err(
+            |_| {
+                let _ = service.sessions.delete(&session_id);
+            },
+        )?;
     if let Err(error) = materialize_canonical_session(&session_id, &canonical_cwd, &model) {
         let _ = service.sessions.delete(&session_id);
         return Err(QaqhError::context(
@@ -379,12 +388,13 @@ fn spawn_subagent(
     service
         .registry()
         .map_err(QaqhError::message)?
-        .spawn_subagent(
+        .spawn_subagent_in_workspace(
             &session_id,
             &tools,
             model.as_deref(),
             base_url.as_deref(),
             max_tokens,
+            workspace.as_deref(),
         )
         .map_err(QaqhError::message)?;
     log::info!(

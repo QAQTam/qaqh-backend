@@ -190,7 +190,7 @@ pub struct AuthHeader {
     pub value_prefix: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderConfig {
     pub send_request_context: bool,
     pub request_context: Option<crate::RequestContext>,
@@ -206,9 +206,8 @@ pub struct ProviderConfig {
     /// `build_options` 统一下发；多账号/工作区按 id_token claim 路由。
     /// 空 = 不发。对标 codex `model-provider/src/auth.rs:105-111`。
     pub chatgpt_account_headers: Vec<(String, String)>,
-    /// DeepSeek OAuth 账号面请求头（`x-deepseek-harness-session-id` / `x-deepseek-harness-user-id`）。
-    /// 由账号类凭据来源（DeepseekAccount）每回合构建 provider 时注入，
-    /// 按会话严格隔离并统一下发；专用于官方网关会话粘性路由与 KV Cache 缓存命中。
+    /// DeepSeek OAuth 请求身份头（`x-client-*`，另可带账号网关路由头）。
+    /// 由账号类凭据来源（DeepseekAccount）每回合构建 provider 时注入并统一下发。
     pub deepseek_account_headers: Vec<(String, String)>,
     pub model: String,
     pub user_id_mode: Option<qaqh_types::UserSendMode>,
@@ -261,6 +260,29 @@ pub struct ProviderConfig {
     pub retry: Option<qaqh_types::RetrySpec>,
 }
 
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProviderConfig")
+            .field("kind", &self.kind)
+            .field("base_url", &self.base_url)
+            .field(
+                "api_key",
+                &if self.api_key.is_empty() {
+                    "<empty>"
+                } else {
+                    "<redacted>"
+                },
+            )
+            .field(
+                "auth_header",
+                &self.auth_header.as_ref().map(|auth| auth.header.as_str()),
+            )
+            .field("model", &self.model)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Responses API provider capability differences.
 ///
 /// Defaults follow OpenAI's official Responses API semantics — every
@@ -298,6 +320,15 @@ pub struct ResponsesCompat {
     /// 关闭 hosted 工具；且非流式入口会被改为流式。`prompt_cache_key` 不在禁用
     /// 清单里，照常下发（缓存亲和，见 `build_options`）。
     pub siwc_plan: bool,
+    /// 把名为 `apply_patch` 的工具改用 Responses 原生 **custom tool** 声明
+    /// （freeform 裸文本输入），而不是 JSON function。**默认关**（function_json）。
+    ///
+    /// 依据：DeepSeek 官方 Responses 端点只认
+    /// `{"type":"custom","name":"apply_patch"}`（Codex 兼容形状，其他名称 400；
+    /// 官方 Codex 接入配置对两个模型均声明 `apply_patch_tool_type: "freeform"`）。
+    /// 回程的 `custom_tool_call`（裸补丁文本）由 [`crate::responses_sdk`] 收口为
+    /// 与 function_json 等价的 `{"patch": raw}` ToolUse，执行器零改动。
+    pub apply_patch_freeform: bool,
 }
 
 impl Default for ResponsesCompat {
@@ -311,6 +342,7 @@ impl Default for ResponsesCompat {
             search_function_alias: None,
             echo_reasoning_content: true,
             siwc_plan: false,
+            apply_patch_freeform: false,
         }
     }
 }
