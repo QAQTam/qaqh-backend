@@ -2,16 +2,16 @@
 //!
 //! Follows the same pattern as qaqh-workspace::ToolManager.
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod actor;
 pub mod canonical;
-pub mod context_projection;
 mod commit_state;
-pub mod session_commit;
+pub mod context_projection;
 pub mod grouping;
 pub mod manager;
+pub mod meta;
 pub mod projection;
+pub mod session_commit;
 pub mod session_fact_v2;
 pub mod store;
 pub mod team;

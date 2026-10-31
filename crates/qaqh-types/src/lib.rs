@@ -1,4 +1,3 @@
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 // ── Type definitions for qaqh core types ──
 //
@@ -35,9 +34,8 @@ pub mod token;
 pub use api_types::UsageInfo;
 pub use config::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
-    PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
-    PersistentProfiles, PersistentSandboxConfig, PersistentSubagentConfig, ProfileConfig,
-    ProfileStore,
+    PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig, PersistentProfiles,
+    PersistentSandboxConfig, PersistentSubagentConfig, ProfileConfig, ProfileStore,
 };
 pub use context_usage::{
     ContextUsage, clear_api_context_usage, current_api_context_usage, note_api_context_usage,
@@ -59,8 +57,9 @@ pub use tool_def::{ToolDef, ToolFunction};
 pub use tool_result::{
     ContentRef, TOOL_MODEL_MAX_CHARS, TOOL_SUMMARY_MAX_CHARS, ToolContinuation, ToolError,
     ToolImage, ToolModelPayload, ToolResult, ToolResultDisplay, ToolResultDisplayBody,
-    ToolResultDisplayHeader, ToolResultDisplayOutcome, ToolResultDisplayOutcomeState,
-    ToolResultDisplayPathOp, ToolResultMetrics, ToolStatus,
+    ToolResultDisplayFile, ToolResultDisplayHeader, ToolResultDisplayItem,
+    ToolResultDisplayOutcome, ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
+    ToolResultMetrics, ToolStatus,
 };
 
 // ── Unified arg parsers ──

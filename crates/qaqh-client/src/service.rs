@@ -36,25 +36,25 @@ use serde_json::Value;
 /// 对齐关系由 `qaqh-runtime` 的测试机械保证（见模块文档）。
 pub const SERVICE_METHODS: &[&str] = &[
     // ── Sign in with ChatGPT（套餐用量）──
-    "siwc.status",           // qaqh_siwc::methods::STATUS
-    "siwc.profiles",         // PROFILES
-    "siwc.models",           // MODELS
-    "siwc.sign_in.start",    // SIGN_IN_START
-    "siwc.sign_in.status",   // SIGN_IN_STATUS
-    "siwc.sign_in.cancel",   // SIGN_IN_CANCEL
-    "siwc.profile.select",   // PROFILE_SELECT
-    "siwc.sign_out",         // SIGN_OUT
+    "siwc.status",         // qaqh_siwc::methods::STATUS
+    "siwc.profiles",       // PROFILES
+    "siwc.models",         // MODELS
+    "siwc.sign_in.start",  // SIGN_IN_START
+    "siwc.sign_in.status", // SIGN_IN_STATUS
+    "siwc.sign_in.cancel", // SIGN_IN_CANCEL
+    "siwc.profile.select", // PROFILE_SELECT
+    "siwc.sign_out",       // SIGN_OUT
     // ── DeepSeek 账号（账号余额）──
-    "dsaccount.status",          // qaqh_dsaccount::methods::STATUS
-    "dsaccount.balance",         // BALANCE
-    "dsaccount.bonuses",         // BONUSES
-    "dsaccount.sign_in.start",   // SIGN_IN_START
-    "dsaccount.sign_in.status",  // SIGN_IN_STATUS
-    "dsaccount.sign_in.cancel",  // SIGN_IN_CANCEL
-    "dsaccount.sign_out",        // SIGN_OUT
-    "dsaccount.bonus.ack",       // ACK_BONUS
-    "dsaccount.models",          // MODELS
-    "dsaccount.verify",          // VERIFY
+    "dsaccount.status",         // qaqh_dsaccount::methods::STATUS
+    "dsaccount.balance",        // BALANCE
+    "dsaccount.bonuses",        // BONUSES
+    "dsaccount.sign_in.start",  // SIGN_IN_START
+    "dsaccount.sign_in.status", // SIGN_IN_STATUS
+    "dsaccount.sign_in.cancel", // SIGN_IN_CANCEL
+    "dsaccount.sign_out",       // SIGN_OUT
+    "dsaccount.bonus.ack",      // ACK_BONUS
+    "dsaccount.models",         // MODELS
+    "dsaccount.verify",         // VERIFY
 ];
 
 /// 方法名是否在白名单内（`service_call` 与调用方的预检共用同一条判定）。
@@ -164,15 +164,15 @@ mod tests {
     fn non_json_error_body_falls_back_to_http() {
         let error = response_error(502, "/ringing/v2/service/x.y", "<html>bad gateway</html>");
         assert_eq!(error.code(), None);
-        assert!(matches!(error, crate::ClientError::Http { status: 502, .. }));
+        assert!(matches!(
+            error,
+            crate::ClientError::Http { status: 502, .. }
+        ));
     }
 
     #[test]
     fn params_object_drops_absent_keys() {
-        let params = params_object([
-            ("profile_id", Some(Value::from("p1"))),
-            ("label", None),
-        ]);
+        let params = params_object([("profile_id", Some(Value::from("p1"))), ("label", None)]);
         assert_eq!(params, serde_json::json!({ "profile_id": "p1" }));
     }
 }

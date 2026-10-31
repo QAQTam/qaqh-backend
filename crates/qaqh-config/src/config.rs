@@ -9,7 +9,6 @@ use std::collections::HashMap; // still used by profiles
 use std::sync::{Mutex, OnceLock};
 
 /// Subagent default configuration.
-///
 /// These are defaults applied when spawning sub-agents. The `spawn_subagent`
 /// tool schema only exposes `task_description` / `agent_name` / `context` /
 /// `timeout_secs`; the remaining fields are set through settings, not per-call.
@@ -96,7 +95,6 @@ impl Default for SandboxConfig {
 }
 
 /// Runtime agent configuration built from PersistentConfig + registry.
-///
 /// This is the fully-resolved config used by the agent at runtime. It combines
 /// user settings from config.toml with provider registry defaults and profile
 /// overrides. All fields are concrete (no Option wrapping).
@@ -160,15 +158,15 @@ pub struct Config {
     pub session_idle_unload_secs: u64,
     pub tool_allowlist_enabled: bool,
     pub tool_allowlist: Vec<String>,
-    /// MCP 客户端配置（docs/current/architecture.md；load 时已 fail-fast 校验）。
+    /// MCP 客户端配置。
     pub mcp: McpConfig,
-    /// LSP 客户端配置（docs/current/architecture.md；load 时已 fail-fast 校验）。
+    /// LSP 客户端配置。
     pub lsp: LspConfig,
     /// 沙箱执行配置。
     pub sandbox: SandboxConfig,
 }
 
-// ── MCP 客户端配置（docs/current/architecture.md）──
+// ── MCP 客户端配置──
 
 /// MCP server 传输形态。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -241,7 +239,7 @@ impl Default for McpConfig {
     }
 }
 
-// ── LSP 客户端配置（docs/current/architecture.md；L1–L6 决策）──
+// ── LSP 客户端配置──
 
 /// 单个 LSP server 的运行时配置（已通过 fail-fast 校验；stdio 唯一形态）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -281,7 +279,6 @@ impl Default for LspConfig {
 }
 
 /// PersistentMcpConfig → 运行时 [`McpConfig`]，含 fail-fast 校验。
-///
 /// 校验规则（设计 §6 + PLAN PR-M1-1）：
 /// - server 名非空、仅 `[a-z0-9_-]`、≤64 字符；
 /// - stdio/http 互斥：stdio 必须有非空 command 且无 url；http 必须有
@@ -291,7 +288,6 @@ impl Default for LspConfig {
 ///   会掩盖配置错误）；
 /// - `max_concurrent_calls` ∈ 1..=16（T-8-1 / O-4：上限从 64 收紧，
 ///   单 server 并发调用是 MCP 侧的资源放大面，16 为安全上限）。
-///
 /// 注意：TOML 层面的重复表（`[mcp.servers.x]` 写两次）由 toml 解析器拒绝，
 /// 走 `ConfigStore::load` 返回 None → 整体回退默认的既有语义（见 PLAN §8）。
 pub(crate) fn map_mcp_config(
@@ -394,8 +390,7 @@ pub(crate) fn map_mcp_config(
 }
 
 /// PersistentLspConfig → 运行时 [`LspConfig`]，含 fail-fast 校验。
-///
-/// 校验规则（docs/current/architecture.md）：
+/// 校验规则：
 /// - server 名非空、仅 `[a-z0-9_-]`、≤64 字符（与 mcp 同规）；
 /// - command 非空（stdio 唯一形态）；
 /// - extensions 条目：去点转小写后非空（空条目即错，不静默丢弃）；
@@ -621,7 +616,6 @@ fn validate_server_name(name: &str) -> Result<(), String> {
 pub const DEFAULT_CONTEXT_LENGTH: u32 = 128_000;
 
 /// 首次启动落盘的预设配置（带注释，可直接编辑）。
-///
 /// 存在的前提是"配置文件不在"（`load` 只在 `!store.exists()` 时写），因此损坏的
 /// 用户文件绝不会被它覆盖。示例端点用的是 DeepSeek 的 OpenAI 兼容端点——换成自己的
 /// 服务商只改 `base_url` / `wire` / `model` / `context_length` 四项；这里**不含任何
@@ -630,7 +624,7 @@ const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生�
 #
 # BYOK：一个端点只需要六个字段——
 #   1. endpoint        → base_url       （scheme + host + 可选前缀，不含协议自身路径）
-#   2. wire            → 协议            （openai | responses | anthropic | gemini）
+#   2. wire            → 协议            （chat | responses | messages | gemini）
 #   3. apikey          → 设置页填一次，密文进同目录 secrets.toml（这里只留 api_key = "set"）
 #   4. model           → model
 #   5. max_token       → max_tokens     （单次回复上限）
@@ -648,7 +642,7 @@ max_tokens = 16384
 effort = "high"
 context_length = 128000
 base_url = "https://api.deepseek.com"
-wire = "openai"
+wire = "chat"
 
 # 可选：只有该端点与 wire 缺省语义不一致时才需要写；整段删掉即全用缺省。
 # 这些字段描述的是"这一个端点的请求形状"，gate 照原样转发，不做厂商名判断。
@@ -681,7 +675,6 @@ wire = "openai"
 "#;
 
 /// 旧形状 profile → BYOK 记录。
-///
 /// 判据是 `endpoint` 键（预设内的 endpoint id）——BYOK 记录不会写出这个键，
 /// 而迁移前的保存路径每次都写。命中即按 BYOK 前语义从迁移表补 `wire` /
 /// `base_url` / `compat`，并把 `context_limit` + `context_window` 双口径折叠进
@@ -731,15 +724,12 @@ fn migrate_profile(
 }
 
 /// DeepSeek 账号额度 → 官方工具面开关的一次性迁移。
-///
 /// 判据：`credential = deepseek_account`，且配置文件里**没有**显式写
 /// `[profiles.<name>.compat] official_web_tools`。命中则补 `true` 并触发一次写回，
 /// 之后这个键就是磁盘上的显式值。
-///
 /// 为什么必须看**原始文档**：`EndpointCompat::official_web_tools` 带
 /// `#[serde(default)]`，反序列化后「键缺失」与「显式 false」都是 `false`，
 /// 类型层分不开；而迁移绝不能覆盖用户显式关掉的开关。
-///
 /// 为什么判据是凭据来源而不是 base_url：账号额度只允许官方 origin（这条约束在
 /// `apply_deepseek_account` 里已强制），按 URL 特判会变成第二真相源（I15）。
 fn migrate_official_web_tools(
@@ -831,7 +821,6 @@ impl Default for Config {
 
 impl Config {
     /// Serializes all process-local config read-modify-write cycles.
-    ///
     /// `ConfigStore` already uses atomic rename for corruption safety, but
     /// concurrent daemon actions (config.save + set_permission_level + profile
     /// actions) used to perform independent load→mutate→save transactions and
@@ -856,7 +845,6 @@ impl Config {
     }
 
     /// The single config write port (BUG-008 / roadmap 刀6).
-    ///
     /// Loads the current config, applies `mutate`, and persists it in one
     /// locked transaction. If `mutate` returns `Err`, nothing is written and
     /// the error is propagated. Daemon actions must mutate config exclusively
@@ -971,7 +959,8 @@ impl Config {
                 }
             }
             // ── 独立 profiles.toml 支持与平滑迁移 ──
-            let profile_store = qaqh_types::ProfileStore::new(store.path().with_file_name("profiles.toml"));
+            let profile_store =
+                qaqh_types::ProfileStore::new(store.path().with_file_name("profiles.toml"));
             if let Some(loaded_profiles) = profile_store.load() {
                 for (name, profile) in loaded_profiles.profiles {
                     cfg.profiles.insert(name, profile);
@@ -1364,7 +1353,8 @@ falling back to 1 (read-only)"
                 context_window: None,
             },
         );
-        let profile_store = qaqh_types::ProfileStore::new(store.path().with_file_name("profiles.toml"));
+        let profile_store =
+            qaqh_types::ProfileStore::new(store.path().with_file_name("profiles.toml"));
         let _ = profile_store.save(&qaqh_types::PersistentProfiles {
             profiles: profiles.clone(),
         });
@@ -1527,7 +1517,6 @@ falling back to 1 (read-only)"
     /// Pure profile switch: copies the profile's endpoint/model fields and marks
     /// it active. Persistence is the caller's responsibility via
     /// [`Config::update`] — profile methods must not create another write port.
-    ///
     /// **`api_key` is deliberately NOT touched.** `api_key` is the *main* key
     /// (the one [`Self::save_with`] writes to `SecretSlot::Main`); assigning a
     /// profile's key here would silently copy it into the main slot on the next
@@ -1558,7 +1547,6 @@ falling back to 1 (read-only)"
     }
 
     /// 合成一份**只属于某个会话**的有效配置（不落盘，不广播）。
-    ///
     /// `profile` = 该会话选定的 profile 名；`None` = 跟随全局 `active_profile`。
     /// `own_key` = 调用方从 `secrets.toml` 解析出的该 profile 自带密钥；
     /// `None` = 继承主密钥（profile 无自带 key，或名字进不了 secrets.toml）。
@@ -1858,7 +1846,7 @@ official_web_tools = false
             "active_profile = \"default\"
 [profiles.default]
 base_url = \"https://api.deepseek.com\"
-wire = \"openai\"
+wire = \"chat\"
 credential = \"api_key\"
 ",
         );
@@ -2234,7 +2222,7 @@ endpoint = \"openai\"
 model = \"m1\"
 max_tokens = 96000
 base_url = \"https://x/v1\"
-wire = \"openai\"
+wire = \"chat\"
 ",
         );
         let bare = Config::load_from_paths_with(store3, secrets3).expect("load bare");
@@ -2254,7 +2242,7 @@ model = \"ma\"
 max_tokens = 1000
 context_length = 200000
 base_url = \"https://a/v1\"
-wire = \"anthropic\"
+wire = \"messages\"
 
 [profiles.a.compat]
 thinking_budget_large = true
@@ -2289,7 +2277,6 @@ wire = \"responses\"
     }
 
     /// 回归守卫：`apply_profile` 不得改 `api_key`。
-    ///
     /// `api_key` 是**主**密钥（`save_with` 会把它写进 `SecretSlot::Main`）。
     /// 若切换 profile 时顺带赋值，下一次存盘就会把 profile 的密钥复制成主密钥
     /// ——静默换掉用户的主凭据。
@@ -2301,12 +2288,12 @@ wire = \"responses\"
 [profiles.a]
 model = \"ma\"
 base_url = \"https://a/v1\"
-wire = \"anthropic\"
+wire = \"messages\"
 
 [profiles.b]
 model = \"mb\"
 base_url = \"https://b/v1\"
-wire = \"anthropic\"
+wire = \"messages\"
 ",
         );
         let mut cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
@@ -2331,7 +2318,7 @@ wire = \"anthropic\"
 [profiles.a]
 model = \"ma\"
 base_url = \"https://a/v1\"
-wire = \"anthropic\"
+wire = \"messages\"
 ",
         );
         let mut cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
@@ -2364,7 +2351,7 @@ wire = \"anthropic\"
 [profiles.a]
 model = \"ma\"
 base_url = \"https://a/v1\"
-wire = \"anthropic\"
+wire = \"messages\"
 
 [profiles.b]
 model = \"mb\"

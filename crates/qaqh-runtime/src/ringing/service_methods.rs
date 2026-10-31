@@ -114,16 +114,61 @@ pub struct SessionGetActivityParams {
 }
 
 /// `session.get_activity` 的单条工具执行记录。`args` 是调用参数的
-/// JSON 字符串（原样保留模型侧形状，不二次结构化）；`time` 为触发消息
-/// 的 `msg_id` 字符串化，无 id 时为空串。
+/// JSON 字符串（原样保留模型侧形状，不二次结构化）；`finished_at_ms`
+/// 是该次调用终态事实的 epoch 毫秒（与 `ToolFinished.finished_at_ms` 同源）。
+/// 旧字段 `time: String` 曾同时承载 "msg_id" 与 "epoch 毫秒字符串" 两种语义，
+/// 现拆为强类型。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionToolActivity {
     pub tool_name: String,
     pub summary: String,
     pub status: qaqh_types::ToolStatus,
-    pub time: String,
+    pub finished_at_ms: i64,
     pub args: String,
+}
+
+/// `skills.catalog` 参数：按 `cwd` 发现技能目录，缺省取 daemon 的当前目录。
+///
+/// daemon 已完成解析、校验与**同名遮蔽**（先命中者胜），客户端只做展示：
+/// 不再自己扫目录、解析 YAML 或复刻优先级。
+#[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SkillsCatalogParams {
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+/// `skills.catalog` 的单个技能条目。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SkillCatalogEntry {
+    pub name: String,
+    pub description: String,
+    /// `project` | `user`
+    pub scope: String,
+    /// `project` | `user` | `bundled`
+    pub origin: String,
+    pub path: String,
+}
+
+/// 发现期诊断（目录不可读、SKILL.md 非法等）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SkillCatalogDiagnostic {
+    /// `warning` | `error`
+    pub severity: String,
+    pub path: String,
+    pub message: String,
+}
+
+/// `skills.catalog` 结果。`diagnostics` 为空数组表示全部干净——
+/// 客户端据此显示空态，而不是伪造「演示数据」。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SkillsCatalogResult {
+    pub skills: Vec<SkillCatalogEntry>,
+    pub diagnostics: Vec<SkillCatalogDiagnostic>,
 }
 
 /// `session.set_profile` 只改单会话的 profile 选择：`name` 空串 = 清除
@@ -286,6 +331,7 @@ validators! {
         validate_session_set_profile_params => SessionSetProfileParams,
         validate_session_set_effort_params => SessionSetEffortParams,
         validate_session_create_params => SessionCreateParams,
+        validate_skills_catalog_params => SkillsCatalogParams,
         validate_session_set_tool_mode_params => SessionSetToolModeParams,
         validate_workspace_get_params => WorkspaceGetParams,
         validate_workspace_list_params => WorkspaceListParams,
@@ -305,6 +351,7 @@ validators! {
         validate_session_activity_result => Vec<qaqh_domain::SessionActivity>,
         validate_session_get_activity_result => Vec<SessionToolActivity>,
         validate_session_create_result => SessionCreateResult,
+        validate_skills_catalog_result => SkillsCatalogResult,
         validate_workspace_list_result => Vec<qaqh_session::WorkspaceEntry>,
         validate_workspace_meta_result => qaqh_session::WorkspaceMeta,
 }
@@ -333,6 +380,18 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_session_rename_params,
         validate_result: validate_null_result,
+    },
+    TypedMethodInfo {
+        method: "skills.catalog",
+        params_type: "SkillsCatalogParams",
+        result_type: "SkillsCatalogResult",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_skills_catalog_params,
+        validate_result: validate_skills_catalog_result,
     },
     TypedMethodInfo {
         method: "fs.list",
@@ -719,6 +778,7 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     // 可能顺手清凭据，所以按写类报错（`action_failed`）而不是只读。
     ("dsaccount.verify", WRITE_ADMIN),
     // skills
+    ("skills.catalog", READ),
     ("skills.list_tools", READ),
     ("skills.operation", WRITE),
     ("skills.reload", WRITE),
@@ -1070,7 +1130,7 @@ mod tests {
                     "tool_name": "fs_read",
                     "summary": "read file",
                     "status": "ok",
-                    "time": "42",
+                    "finished_at_ms": 1_759_000_042_000i64,
                     "args": "{\"path\":\"/a\"}"
                 }])
             )
@@ -1082,7 +1142,7 @@ mod tests {
                 &serde_json::json!([{"tool_name": "fs_read", "status": "done"}])
             )
             .is_err(),
-            "summary/time/args 必填，status 是闭集枚举"
+            "summary/finished_at_ms/args 必填，status 是闭集枚举"
         );
         assert!(
             validate_typed_result("session.set_profile", &Value::Null)

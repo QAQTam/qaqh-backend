@@ -350,5 +350,4 @@ impl AgentRegistry {
             .release(reservation_id, reason)
             .map_err(QaqhError::from)
     }
-
 }

@@ -47,7 +47,6 @@ fn daemon_channel() -> String {
 }
 
 /// `qaqh-daemon server` 的网络配置。
-///
 /// 审计 H3（2026-10-01）：这是**明文 HTTP + Bearer token** 的控制面，token
 /// 一旦被截获即可完全接管 agent（读任意会话、驱动工具执行、直接设 L4）。
 /// 因此：默认只绑 loopback；非 loopback 绑定必须显式给出 token——这是唯一
@@ -139,11 +138,13 @@ fn guess_lan_ip() -> Option<std::net::IpAddr> {
 }
 
 /// LAN 模式自签证书的 SAN 集合：DNS 名 + 手机会去连的两个 IP。
-///
 /// ArkTS/系统信任链按 URL 主机名校验：只有 IP 字面量在 iPAddress SAN 里
 /// 才能直连 `https://<局域网 IP>:<port>`，否则只能关校验（等于没有 MITM
 /// 防护）或塞自定义 verifier。回环不进这里——回环从不启用 TLS。
-fn server_subject_alt_names(bind_ip: std::net::IpAddr, advertise_ip: std::net::IpAddr) -> Vec<String> {
+fn server_subject_alt_names(
+    bind_ip: std::net::IpAddr,
+    advertise_ip: std::net::IpAddr,
+) -> Vec<String> {
     let mut names: Vec<String> = vec!["qaqh-daemon".to_string(), "localhost".to_string()];
     for ip in [bind_ip, advertise_ip] {
         if ip.is_unspecified() {
@@ -159,7 +160,6 @@ pub async fn run() -> Result<(), String> {
 }
 
 /// `run` 模式的端口解析：显式 `--port` > `QAQH_SERVER_PORT` 环境变量 > 随机。
-///
 /// 固定端口是 webUI 开发体验的前置：浏览器书签 / PWA / 反向代理都要求
 /// 可预测的地址；随机端口下每次重启 daemon 都要重读 daemon.json。
 fn resolve_run_port(configured: u16) -> u16 {
@@ -186,10 +186,10 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         None
     } else {
         Some(
-            crate::tls::load_or_generate(&data_root, &server_subject_alt_names(
-                config.bind_ip,
-                advertise_ip,
-            ))
+            crate::tls::load_or_generate(
+                &data_root,
+                &server_subject_alt_names(config.bind_ip, advertise_ip),
+            )
             .map_err(stringify)?,
         )
     };
@@ -235,9 +235,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         endpoint: format!("http://{address}"),
         lan_endpoint: lan_address
             .map(|lan_address| format!("https://{advertise_ip}:{}", lan_address.port())),
-        tls_fingerprint: tls
-            .as_ref()
-            .map(|material| material.fingerprint.clone()),
+        tls_fingerprint: tls.as_ref().map(|material| material.fingerprint.clone()),
         token: token.clone(),
         pid: std::process::id(),
         server_epoch: epoch.clone(),
@@ -311,15 +309,13 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             qaqh_runtime::ringing::DeviceRegistry::new_persistent(),
         )),
         pairings: Arc::new(Mutex::new(crate::axum_server::PairingTable::new())),
-        tls_fingerprint: tls
-            .as_ref()
-            .map(|material| material.fingerprint.clone()),
+        tls_fingerprint: tls.as_ref().map(|material| material.fingerprint.clone()),
         challenges: Arc::new(crate::axum_server::ChallengeStore::default()),
         epoch: epoch.clone(),
         shutdown: shutdown.clone(),
         test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),
     };
-    // E: idle 会话卸载周期任务（docs/current/architecture.md）。
+    // E: idle 会话卸载周期任务。
     // 每 60s 读一次 config（热生效），对空闲超过阈值的 Session worker 走
     // 优雅 close（join + bundle drop + final flush/drain）。registry.close
     // 是阻塞 join，必须放 spawn_blocking，避免卡死 tokio worker 线程。
@@ -488,7 +484,6 @@ fn rotate_stale_writer_fences() {
 
 /// Rotate every canonical writer fence under `sessions_dir` and immediately
 /// release the rotated lease with `i64::MIN`.
-///
 /// This is a startup recovery step: the daemon has just acquired the
 /// single-instance lock and no worker exists yet, so a fence on disk cannot be
 /// a live writer of this process. Waiting for its TTL would block the first
@@ -648,7 +643,13 @@ mod tests {
         assert!(wildcard.contains(&"192.168.1.7".to_string()));
         assert!(!wildcard.contains(&"0.0.0.0".to_string()));
         // bind 与 advertise 不同时不重复出现。
-        assert_eq!(wildcard.len(), wildcard.iter().collect::<std::collections::HashSet<_>>().len());
+        assert_eq!(
+            wildcard.len(),
+            wildcard
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+        );
     }
 
     #[test]

@@ -107,7 +107,9 @@ impl std::fmt::Display for FenceReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OwnerGone => f.write_str("commit owner is gone or fenced"),
-            Self::DigestMismatch => f.write_str("committed fact does not match the identity digest"),
+            Self::DigestMismatch => {
+                f.write_str("committed fact does not match the identity digest")
+            }
             Self::UnsupportedIntent => f.write_str("committed intent is not dispatchable"),
         }
     }
@@ -170,11 +172,31 @@ impl CommittedExecution {
 
 impl Drop for SessionCommit {
     fn drop(&mut self) {
-        self.capability_live.store(false, std::sync::atomic::Ordering::Release);
+        self.capability_live
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 
 impl SessionCommit {
+    /// Open the session's writer, creating the journal only for an empty directory.
+    ///
+    /// Call sites must not probe `storage-format` themselves: three copies of that
+    /// probe is how "create vs open" drifted apart between the bootstrap path and
+    /// the spawn path.
+    pub fn open_or_create(
+        session_dir: impl AsRef<Path>,
+        session_id: SessionId,
+        log_id: LogId,
+        budget: ContextBudget,
+    ) -> Result<Self, SessionCommitError> {
+        let path = session_dir.as_ref().to_path_buf();
+        if crate::canonical::is_batch_root(&path) {
+            Self::open(path, session_id, log_id, budget)
+        } else {
+            Self::create(path, session_id, log_id, budget)
+        }
+    }
+
     /// Create an isolated store only for a newly allocated session directory.
     pub fn create(
         session_dir: impl AsRef<Path>,
@@ -384,7 +406,8 @@ impl SessionCommit {
             }
             Err(BatchCommitError::Unknown(error)) => {
                 self.fenced = true;
-                self.capability_live.store(false, std::sync::atomic::Ordering::Release);
+                self.capability_live
+                    .store(false, std::sync::atomic::Ordering::Release);
                 return Err(SessionCommitError::Unknown(error));
             }
         };
@@ -451,15 +474,17 @@ impl SessionCommit {
                             .identity
                             .as_ref()
                             .map_or(round.round, |identity| identity.attempt);
-                        (format!("model:{}", fact.event_id), u64::from(attempt).max(1))
+                        (
+                            format!("model:{}", fact.event_id),
+                            u64::from(attempt).max(1),
+                        )
                     }
                     // A tool execution id is already unique per declaration; a
                     // retry of the same execution is a reconciliation, not a
                     // new generation.
-                    FactPayload::ToolIntent(intent) => (
-                        format!("tool:{}", intent.execution_id.as_str()),
-                        1_u64,
-                    ),
+                    FactPayload::ToolIntent(intent) => {
+                        (format!("tool:{}", intent.execution_id.as_str()), 1_u64)
+                    }
                     _ => {
                         return Err(SessionCommitError::NotCommitted(
                             CanonicalError::NotWritable(
@@ -478,7 +503,8 @@ impl SessionCommit {
                 } else {
                     staged_state.active_input().cloned()
                 };
-                if !previous && matches!(fact.payload, FactPayload::ModelRoundStarted(_))
+                if !previous
+                    && matches!(fact.payload, FactPayload::ModelRoundStarted(_))
                     && (index != 0 || expected_head != self.context.head())
                 {
                     return Err(SessionCommitError::NotCommitted(

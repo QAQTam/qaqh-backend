@@ -33,7 +33,9 @@ pub(crate) fn handle(service: &QaqhService, command: SystemCommand) -> QaqhResul
                     QaqhError::invalid(format!("invalid config.save payload: {error}"))
                 })?;
             service.save_config(patch)?;
-            Ok(Value::Null)
+            // 返回归一化后的 ConfigDto（与 `config.load` 同一形状、同一来源），
+            // 保存方无需再发一次 config.load；其它客户端由 v2 `config_changed` 触发重拉。
+            load_config().map_err(QaqhError::message)
         }
         // 权限档位（三档：read-only / workspace-write / skip-permissions）：
         // 与 config.save 共用 Config::update 单写口；校验 → 写 config.toml →

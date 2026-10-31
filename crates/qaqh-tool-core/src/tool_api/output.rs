@@ -12,12 +12,14 @@ use std::time::Duration;
 use serde::Serialize;
 
 use super::display::{
-    PathOp, ToolBody, ToolDisplay, ToolDisplayOutcome, ToolHeader, ToolMetrics, ToolTerminalState,
+    PathOp, ToolBody, ToolDisplay, ToolDisplayFile, ToolDisplayItem, ToolDisplayOutcome,
+    ToolHeader, ToolMetrics, ToolTerminalState,
 };
 use super::error::{ToolError, ToolErrorKind};
 use qaqh_types::{
-    ContentRef, ToolImage, ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader,
-    ToolResultDisplayOutcome, ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
+    ContentRef, ToolImage, ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayFile,
+    ToolResultDisplayHeader, ToolResultDisplayItem, ToolResultDisplayOutcome,
+    ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
 };
 
 pub use qaqh_types::ToolStatus;
@@ -129,7 +131,8 @@ pub struct ToolExecutionMetrics {
     pub output_bytes: u64,
     /// 重试次数。
     pub retry_count: u32,
-    /// 别名/MCP 解析后的实际工具名；无别名时 = descriptor.name。
+    /// 实际执行的工具名（typed adapter 总是填 `descriptor.name`，MCP 别名
+    /// 解析后为上游原名的规范名）。`None` 只出现在手工构造的 legacy outcome 上。
     pub effective_tool_name: Option<String>,
     /// 调用来源是否为用户直接发起（宿主侧来源，非工具自报）。
     pub user_initiated: bool,
@@ -229,8 +232,11 @@ impl ToolOutcome {
             user_initiated: self.metrics.user_initiated,
         };
         let display = self.display_with_framework_outcome();
-        if display != ToolDisplay::default() {
-            result = result.with_display(to_wire_display(&display));
+        let tool_name = self.metrics.effective_tool_name.as_deref();
+        // 即使工具没声明任何 display，也要下发一个带 `header.kind = other`
+        // 的最小投影：`display = null` 会逼客户端回到「猜 args 键名」的老路。
+        if display != ToolDisplay::default() || tool_name.is_some() {
+            result = result.with_display(to_wire_display(&display, tool_name));
         }
         result
     }
@@ -337,14 +343,20 @@ fn body_terminal_fields(body: &ToolBody) -> (Option<i32>, Option<bool>) {
     }
 }
 
-fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
+/// `tool_name` 只用于给缺失 header 的工具兜出显式 `Other { label }`：
+/// wire 上的 `header = null` 会逼客户端按 args 键名去猜（path/file_path/
+/// command/cwd…），而「这个工具叫什么」是框架已知的事实。
+fn to_wire_display(display: &ToolDisplay, tool_name: Option<&str>) -> ToolResultDisplay {
     ToolResultDisplay {
         summary: display.summary.clone(),
         diff: display.diff.clone(),
+        files: display.files.iter().map(to_wire_display_file).collect(),
         lines_added: display.lines_added,
         lines_removed: display.lines_removed,
         header: match &display.header {
-            ToolHeader::None => None,
+            ToolHeader::None => tool_name.map(|label| ToolResultDisplayHeader::Other {
+                label: label.to_string(),
+            }),
             ToolHeader::Path { path, op } => Some(ToolResultDisplayHeader::Path {
                 path: path.clone(),
                 op: match op {
@@ -403,6 +415,10 @@ fn to_wire_display(display: &ToolDisplay) -> ToolResultDisplay {
                 name: name.clone(),
                 session_id: session_id.clone(),
             }),
+            ToolBody::Items { renderer, items } => Some(ToolResultDisplayBody::Items {
+                renderer: renderer.clone(),
+                items: items.iter().map(to_wire_display_item).collect(),
+            }),
         },
         outcome: display.outcome.as_ref().map(to_wire_outcome),
     }
@@ -425,10 +441,49 @@ fn to_wire_outcome(outcome: &ToolDisplayOutcome) -> ToolResultDisplayOutcome {
     }
 }
 
+fn to_wire_display_item(item: &ToolDisplayItem) -> ToolResultDisplayItem {
+    ToolResultDisplayItem {
+        id: item.id.clone(),
+        title: item.title.clone(),
+        status: item.status.clone(),
+        description: item.description.clone(),
+        evidence: item.evidence.clone(),
+    }
+}
+
+fn to_wire_display_file(file: &ToolDisplayFile) -> ToolResultDisplayFile {
+    ToolResultDisplayFile {
+        path: file.path.clone(),
+        op: file.op.clone(),
+        lines_added: file.lines_added,
+        lines_removed: file.lines_removed,
+    }
+}
+
+fn from_wire_display_file(file: &ToolResultDisplayFile) -> ToolDisplayFile {
+    ToolDisplayFile {
+        path: file.path.clone(),
+        op: file.op.clone(),
+        lines_added: file.lines_added,
+        lines_removed: file.lines_removed,
+    }
+}
+
+fn from_wire_display_item(item: &ToolResultDisplayItem) -> ToolDisplayItem {
+    ToolDisplayItem {
+        id: item.id.clone(),
+        title: item.title.clone(),
+        status: item.status.clone(),
+        description: item.description.clone(),
+        evidence: item.evidence.clone(),
+    }
+}
+
 pub fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
     ToolDisplay {
         summary: display.summary.clone(),
         diff: display.diff.clone(),
+        files: display.files.iter().map(from_wire_display_file).collect(),
         lines_added: display.lines_added,
         lines_removed: display.lines_removed,
         header: match &display.header {
@@ -491,6 +546,10 @@ pub fn from_wire_display(display: &ToolResultDisplay) -> ToolDisplay {
             Some(ToolResultDisplayBody::Subagent { name, session_id }) => ToolBody::Subagent {
                 name: name.clone(),
                 session_id: session_id.clone(),
+            },
+            Some(ToolResultDisplayBody::Items { renderer, items }) => ToolBody::Items {
+                renderer: renderer.clone(),
+                items: items.iter().map(from_wire_display_item).collect(),
             },
             Some(ToolResultDisplayBody::Unknown) => ToolBody::None,
         },
@@ -606,16 +665,16 @@ mod tests {
     #[test]
     fn wire_display_roundtrips_terminal_line_delta() {
         let display = ToolDisplay {
-            lines_added: 4,
-            lines_removed: 2,
+            lines_added: Some(4),
+            lines_removed: Some(2),
             ..Default::default()
         };
 
-        let wire = to_wire_display(&display);
-        assert_eq!((wire.lines_added, wire.lines_removed), (4, 2));
+        let wire = to_wire_display(&display, None);
+        assert_eq!((wire.lines_added, wire.lines_removed), (Some(4), Some(2)));
 
         let back = from_wire_display(&wire);
-        assert_eq!((back.lines_added, back.lines_removed), (4, 2));
+        assert_eq!((back.lines_added, back.lines_removed), (Some(4), Some(2)));
     }
 
     #[test]
@@ -623,8 +682,9 @@ mod tests {
         let wire = ToolResultDisplay {
             summary: Some("exit 0".into()),
             diff: None,
-            lines_added: 0,
-            lines_removed: 0,
+            files: Vec::new(),
+            lines_added: None,
+            lines_removed: None,
             header: None,
             body: None,
             outcome: Some(ToolResultDisplayOutcome {
@@ -649,8 +709,9 @@ mod tests {
         let result = qaqh_types::ToolResult::ok("ok").with_display(ToolResultDisplay {
             summary: Some("exit 0".into()),
             diff: None,
-            lines_added: 0,
-            lines_removed: 0,
+            files: Vec::new(),
+            lines_added: None,
+            lines_removed: None,
             header: None,
             body: Some(ToolResultDisplayBody::Shell {
                 output: "ok".into(),
@@ -689,7 +750,7 @@ mod tests {
                 interleaved: false,
             },
         );
-        let wire = to_wire_display(&display);
+        let wire = to_wire_display(&display, None);
         assert!(matches!(
             wire.body,
             Some(ToolResultDisplayBody::Streams {

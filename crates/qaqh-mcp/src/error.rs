@@ -1,5 +1,4 @@
-//! qaqh-mcp 错误模型（设计 `docs/current/architecture.md`）。
-//!
+//! qaqh-mcp 错误模型。
 //! 全量语义码对齐设计 §7 表格（M1-5 落地）；`Shutdown` 是 `shutting_down`
 //! 闸的拒绝码——设计 §7 未单列，作为闸门码保留；`Busy` 为
 //! `max_concurrent_calls` 执行点新增（§7 表格已同步补行）。
@@ -59,7 +58,6 @@ impl fmt::Display for McpErrorKind {
 }
 
 /// qaqh-mcp 生命周期错误：分类 + 人类可读细节。
-///
 /// M1-5 桥接层负责把它转成 `ToolResult::error` 的 JSON 结构
 /// （timeis / status=error / code / message / hint）。
 #[derive(Debug, Clone)]

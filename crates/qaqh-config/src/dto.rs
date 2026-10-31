@@ -1,9 +1,7 @@
 //! 引擎 [`Config`](crate::Config) ↔ wire DTO（`qaqh-config-api`）双向映射层。
-//!
-//! 当前架构见 docs/current/architecture.md：service 层不再手拼 config json，
+//! 当前架构：service 层不再手拼 config json，
 //! 所有字段同步收敛到本模块的**穷举字面量**里——任何一端新增字段而另一端
 //! 未映射，在此处直接编译失败（S2「人肉同步」病根由编译器接管）。
-//!
 //! 守卫语义冻结（与 2026-08 前 `update_string/update_u32` 行为对齐，见
 //! qaqh-config-api `ConfigPatch` 文档）：
 //! - apiKey / subagent.apiKey：`"****"` 或空串 = 保持现值（显式删除走专用接口）；
@@ -628,7 +626,6 @@ mod tests {
     }
 
     /// DeepSeek 账号：配错 wire 在保存期就报，且**双向**都拦（与套餐那条同规矩）。
-    ///
     /// 值域只有 responses：OAuth 路由不再维护 Chat；Anthropic 面拿不到账号
     /// 凭据头的形态，故也不开放。
     #[test]
@@ -675,7 +672,7 @@ mod tests {
         let err = apply_patch(
             &mut cfg,
             &ConfigPatch {
-                wire: Some("anthropic".into()),
+                wire: Some("chat".into()),
                 ..Default::default()
             },
         )
@@ -760,7 +757,6 @@ mod tests {
     /// **R3 镜像闸**：`qaqh_config_api::canonical_wire` 是「只依赖 serde」的
     /// 拼写镜像（K1），真源是 [`qaqh_types::Wire::parse`]。本测试逐个拼写对拍
     /// 两边，任何一边改名而另一边没跟就红——镜像可以不共享代码，但不能漂移。
-    ///
     /// 同时钉住「读出的规范名再写回去必须被接受」这条闭环（round-trip）。
     #[test]
     fn canonical_wire_mirrors_qaqh_types() {

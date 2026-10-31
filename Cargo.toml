@@ -7,7 +7,6 @@ members = [
     "crates/qaqh-profile",
     "crates/qaqh-domain",
     "crates/qaqh-skills",
-    "crates/qaqh-message",
     "crates/qaqh-types",
     "crates/qaqh-siwc",
     "crates/qaqh-dsaccount",

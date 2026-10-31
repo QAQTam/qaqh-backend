@@ -3,8 +3,8 @@
 //! The fact schema itself lives in [`crate::session_fact_v2`]. This module
 //! owns durable storage identity, writer fencing and commit high-water.
 
-mod blobs;
 mod batch;
+mod blobs;
 mod clock;
 mod identity;
 mod log;
@@ -15,15 +15,16 @@ mod recovery;
 mod recovery_executor;
 mod recovery_state;
 mod replay_window;
+mod session_facts;
 mod store;
 mod tool_ledger;
 mod types;
 
-pub use blobs::{BLOBS_DIR, SessionBlobStore, stable_workspace_resource_id};
 pub use batch::{
     BatchCommitError, BatchFaultPoint, BatchJournal, BatchReadError, BatchReceipt, is_batch_root,
     read_committed_facts,
 };
+pub use blobs::{BLOBS_DIR, SessionBlobStore, stable_workspace_resource_id};
 pub use clock::{
     CONTENT_CLOCK_FILE, CONTENT_CLOCK_SCHEMA, CONTENT_DIR, ContentClock, ContentClockRecord,
 };
@@ -57,6 +58,10 @@ pub use replay_window::{
     DEFAULT_WINDOW_CAPACITY_FACTS, REPLAY_WINDOW_FILE, REPLAY_WINDOW_SCHEMA, ReplayWindowConfig,
     ReplayWindowManifest, ReplayWindowReason, SnapshotStatus, load_replay_window_manifest,
     recover_replay_window_manifest, replay_window_path,
+};
+pub use session_facts::{
+    SessionFactView, has_committed_facts, open_session_identity, read_session_facts,
+    read_session_facts_from,
 };
 pub use store::{AppendOutcome, CanonicalSessionStore};
 pub use tool_ledger::{

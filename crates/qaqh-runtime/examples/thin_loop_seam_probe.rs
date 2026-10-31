@@ -39,9 +39,8 @@ use qaqh_session::{
         QueuedInputSettled, RecoveryAction, RecoveryId, RecoveryOutcome, RecoveryRef,
         RecoveryToolCompletion, RequestIdentity, SessionCreated, SessionFact, SessionId,
         SessionRecovered, SideEffectClass, ToolCallDeclared, ToolCallId, ToolError, ToolFinished,
-        ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
-        ToolTerminalStatus, TurnFinished, TurnId, TurnInterrupted, TurnMode, TurnStarted,
-        TurnTerminal,
+        ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+        TurnFinished, TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal,
     },
 };
 use qaqh_types::{ContentBlock, Message, ToolDef, ToolFunction, ToolResult};
@@ -161,9 +160,8 @@ fn text_message(role: &str, text: &str) -> Message {
 fn mint_capability(
     dir: &std::path::Path,
 ) -> (SessionCommit, CommittedExecution, SessionFact, TurnId) {
-    let mut commit =
-        SessionCommit::create(dir, SessionId::new(SESSION), LogId::new(LOG), budget())
-            .expect("create isolated session");
+    let mut commit = SessionCommit::create(dir, SessionId::new(SESSION), LogId::new(LOG), budget())
+        .expect("create isolated session");
 
     let created = SessionCreated {
         created_at_ms: NOW_MS + 1,
@@ -286,7 +284,11 @@ struct FakeTool {
 }
 
 impl ToolPort for FakeTool {
-    fn execute(&self, request: &ToolRequest, cancel: &AtomicBool) -> Result<ToolOutput, ToolFailure> {
+    fn execute(
+        &self,
+        request: &ToolRequest,
+        cancel: &AtomicBool,
+    ) -> Result<ToolOutput, ToolFailure> {
         self.runs.fetch_add(1, Ordering::SeqCst);
         if cancel.load(Ordering::Acquire) {
             return Err(ToolFailure::NotStarted("cancelled before start".into()));
@@ -308,7 +310,11 @@ struct UnstoppableBlockingTool {
 }
 
 impl ToolPort for UnstoppableBlockingTool {
-    fn execute(&self, _request: &ToolRequest, _cancel: &AtomicBool) -> Result<ToolOutput, ToolFailure> {
+    fn execute(
+        &self,
+        _request: &ToolRequest,
+        _cancel: &AtomicBool,
+    ) -> Result<ToolOutput, ToolFailure> {
         self.entered.store(true, Ordering::Release);
         while !self.release.load(Ordering::Acquire) {
             std::thread::sleep(Duration::from_millis(5));
@@ -481,7 +487,10 @@ fn probe_batch_fault_injection_and_reconciliation(root: &std::path::Path) {
             &event_id(21),
         )
         .expect("retry after torn tail truncation");
-    assert!(cap.is_some(), "fresh commit after torn tail must mint capability");
+    assert!(
+        cap.is_some(),
+        "fresh commit after torn tail must mint capability"
+    );
     assert_eq!(receipt.last_fact_seq, head_before + 1);
     println!("ok: [15] A03 fault before marker truncates torn tail and reconciles cleanly");
 
@@ -508,7 +517,11 @@ fn probe_batch_fault_injection_and_reconciliation(root: &std::path::Path) {
         .expect("start gate");
     reopened.inject_fault_once(BatchFaultPoint::AfterMarkerWrite);
     let err = reopened
-        .commit("batch-fault-after-marker", head_r2, vec![resp2_fact.clone()])
+        .commit(
+            "batch-fault-after-marker",
+            head_r2,
+            vec![resp2_fact.clone()],
+        )
         .expect_err("injected fault after marker must return Unknown");
     assert!(matches!(err, SessionCommitError::Unknown(_)));
     gate.unknown(&"batch-fault-after-marker".to_string())
@@ -826,6 +839,7 @@ fn probe_mid_turn_crash_recovery(root: &std::path::Path) {
             turn_id: turn_id.clone(),
             kind: InteractionKind::Permission,
             request_ref: req_ref,
+            choices: Vec::new(),
             expires_at_ms: None,
             requested_at_ms: NOW_MS + 43,
         }),
@@ -904,7 +918,11 @@ fn probe_mid_turn_crash_recovery(root: &std::path::Path) {
     );
     assert!(
         reopened
-            .commit("batch-premature-recovery", last_good_seq, vec![premature_recovered])
+            .commit(
+                "batch-premature-recovery",
+                last_good_seq,
+                vec![premature_recovered]
+            )
             .is_err(),
         "SessionRecovered must fail while turn/tools/interactions remain unsettled"
     );
@@ -1233,9 +1251,8 @@ async fn probe_mailbox_control_and_unstoppable_blocking_task(root: &std::path::P
 /// 20: RequestIdentity wire verification + incomplete response barrier + multimodal context (A07).
 async fn probe_request_identity_incomplete_barrier_and_multimodal(root: &std::path::Path) {
     let dir = root.join("session-a07-identity");
-    let mut owner =
-        SessionCommit::create(&dir, SessionId::new(SESSION), LogId::new(LOG), budget())
-            .expect("create session");
+    let mut owner = SessionCommit::create(&dir, SessionId::new(SESSION), LogId::new(LOG), budget())
+        .expect("create session");
     owner
         .commit(
             "b-1",
@@ -1331,7 +1348,10 @@ async fn probe_request_identity_incomplete_barrier_and_multimodal(root: &std::pa
         name: None,
         content: vec![
             ContentBlock::text("inspect pixel"),
-            ContentBlock::image("image/png", "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="),
+            ContentBlock::image(
+                "image/png",
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+            ),
         ],
     };
     let mm_ref = owner
@@ -1502,8 +1522,8 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
             let url = request.url().to_string();
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
-            let parsed = serde_json::from_str::<serde_json::Value>(&body)
-                .unwrap_or(serde_json::Value::Null);
+            let parsed =
+                serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::Value::Null);
             captured_for_server
                 .lock()
                 .unwrap()
@@ -1534,9 +1554,8 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
     });
 
     let dir = root.join("session-four-providers");
-    let mut owner =
-        SessionCommit::create(&dir, SessionId::new(SESSION), LogId::new(LOG), budget())
-            .expect("create session");
+    let mut owner = SessionCommit::create(&dir, SessionId::new(SESSION), LogId::new(LOG), budget())
+        .expect("create session");
     let frozen_sys = text_message("system", "Frozen system prompt v1");
     let sys_ref = owner
         .put_blob(&serde_json::to_vec(&frozen_sys).unwrap())
@@ -1672,7 +1691,10 @@ async fn probe_four_provider_protocols_and_opaque_replay_golden(root: &std::path
     )
     .unwrap();
     // ProviderResponseCommitted + sealed display block(s) + ToolCallDeclared
-    assert!(r1_facts.len() >= 2, "response, display blocks and tool declaration");
+    assert!(
+        r1_facts.len() >= 2,
+        "response, display blocks and tool declaration"
+    );
     let head = owner.head().unwrap();
     owner.commit("p-r1-commit", head, r1_facts).unwrap();
 
@@ -2179,9 +2201,9 @@ async fn probe_real_workspace_tool_port_permissions_quota_and_queued_inputs(
         )
         .unwrap();
 
-    let manager = Arc::new(Mutex::new(qaqh_workspace::registration::build_tool_manager(
-        &[],
-    )));
+    let manager = Arc::new(Mutex::new(
+        qaqh_workspace::registration::build_tool_manager(&[]),
+    ));
     let ledger = Arc::new(Mutex::new(
         QuotaLedger::open_at(
             &quota_dir,
@@ -2320,7 +2342,10 @@ async fn probe_real_workspace_tool_port_permissions_quota_and_queued_inputs(
     let bg_out = ws_port
         .execute(&bg_req, &bg_cancel)
         .expect("exec backgrounded");
-    assert!(bg_out.backgrounded, "exec with background_after_secs=0 must background");
+    assert!(
+        bg_out.backgrounded,
+        "exec with background_after_secs=0 must background"
+    );
     assert_eq!(ws_port.retained_owners_len(), 1);
     assert_eq!(
         ledger.lock().unwrap().snapshot().unwrap().held,
@@ -2868,8 +2893,7 @@ async fn main() {
     let (_, cancelled_capability) = owner
         .commit_with_effect("batch-12", head, vec![declared2, intent2], &event_id(13))
         .expect("commit second tool intent");
-    let cancelled_capability =
-        cancelled_capability.expect("second tool intent mints a capability");
+    let cancelled_capability = cancelled_capability.expect("second tool intent mints a capability");
     let cancelled_identity = cancelled_capability.identity().clone();
     let cancelled_ticket = tools
         .authorize(cancelled_identity.clone(), cancelled_capability)
@@ -2886,7 +2910,11 @@ async fn main() {
         ),
         Err(SupervisorError::UnknownEffect)
     ));
-    assert_eq!(runs.load(Ordering::SeqCst), 1, "cancelled tool must not run");
+    assert_eq!(
+        runs.load(Ordering::SeqCst),
+        1,
+        "cancelled tool must not run"
+    );
     println!("ok: [7 & 14] cancelling an unstarted authorization withdraws its ticket");
 
     // ── Interaction answers are revision- and target-checked ────────────────
@@ -2902,6 +2930,7 @@ async fn main() {
             turn_id: turn_id.clone(),
             kind: InteractionKind::Permission,
             request_ref,
+            choices: Vec::new(),
             expires_at_ms: None,
             requested_at_ms: NOW_MS + 30,
         }),
@@ -2964,8 +2993,7 @@ async fn main() {
             let header =
                 tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
                     .expect("static header");
-            let _ =
-                request.respond(tiny_http::Response::from_string(CHAT_SSE).with_header(header));
+            let _ = request.respond(tiny_http::Response::from_string(CHAT_SSE).with_header(header));
         }
     });
     let provider = qaqh_gate::ProviderConfig::chat(

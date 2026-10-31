@@ -46,7 +46,11 @@ fn titles(store: &TodoStore) -> Vec<String> {
 
 fn write_list(text: &str) -> serde_json::Value {
     parse_tool_result(
-        handle_write(&split_ctx("todo_write", serde_json::json!({ "list": text }))).model_text(),
+        handle_write(&split_ctx(
+            "todo_write",
+            serde_json::json!({ "list": text }),
+        ))
+        .model_text(),
     )
 }
 
@@ -80,9 +84,7 @@ fn split_ctx(_name: &str, args: Value) -> Value {
 #[test]
 fn write_parses_the_full_text_block() {
     with_isolated_todo(|_session| {
-        let out = write_list(
-            "- [ ] alpha | 描述 A\n- [~] beta\n- [x] gamma | | verified",
-        );
+        let out = write_list("- [ ] alpha | 描述 A\n- [~] beta\n- [x] gamma | | verified");
         assert_eq!(out["total"], 3);
         assert_eq!(out["in_progress"], 1);
         let items = out["items"].as_array().unwrap();
@@ -179,7 +181,12 @@ fn update_unknown_title_lists_the_current_list() {
         assert_eq!(error.code, "not_found");
         // 提示里带当前清单——模型可自行纠正拼写。
         assert!(
-            error.message.contains("real-task") || error.hint.as_deref().unwrap_or_default().contains("real-task"),
+            error.message.contains("real-task")
+                || error
+                    .hint
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains("real-task"),
             "错误面必须列出可用标题: {error:?}"
         );
     });
@@ -303,7 +310,13 @@ fn split_handlers_reject_cross_fields() {
 #[test]
 fn v1_v2_action_vocabulary_retired() {
     for verb in [
-        "create", "insert", "set", "list", "create_batch", "update", "cancel",
+        "create",
+        "insert",
+        "set",
+        "list",
+        "create_batch",
+        "update",
+        "cancel",
     ] {
         let out = handle_write(&split_ctx(
             "todo_write",

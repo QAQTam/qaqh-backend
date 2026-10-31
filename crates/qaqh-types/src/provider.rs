@@ -21,27 +21,21 @@ pub enum UserSendMode {
 ///
 /// 统一命名对齐各上游官方称谓：Chat（OpenAI Chat Completions）、
 /// Responses（OpenAI Responses）、Messages（Anthropic Messages）、
-/// Gemini（Gemini `generateContent`）。序列化键即官方短名；历史拼写
-/// （`"openai"` / `"anthropic"` / `"claude"` / `"chat_completions"` 等）
-/// 经 serde alias 与 [`Wire::parse`] 继续接受，旧配置零迁移。
+/// Gemini（Gemini `generateContent`）。序列化键即官方短名，**只此四种**：
+/// 历史拼写（`"openai"` / `"anthropic"` / `"claude"` / `"chat_completions"`
+/// 等）在 2026-10 硬切里删除，读入期直接失败而不是默默折叠。唯一的例外是
+/// BYOK 迁移表（`qaqh_config::registry::legacy_wire`），它自带旧词表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Wire {
     /// OpenAI Chat Completions (`/chat/completions`).
     #[default]
-    #[serde(
-        rename = "chat",
-        alias = "openai",
-        alias = "openai-compatible",
-        alias = "chat_completions",
-        alias = "chat/completions"
-    )]
+    #[serde(rename = "chat")]
     Chat,
     /// OpenAI Responses (`/responses`).
-    #[serde(alias = "openai-responses")]
     Responses,
     /// Anthropic Messages (`/v1/messages`).
-    #[serde(rename = "messages", alias = "anthropic", alias = "claude")]
+    #[serde(rename = "messages")]
     Messages,
     /// Gemini `generateContent` (`/models/{model}:generateContent`).
     ///
@@ -61,20 +55,16 @@ impl Wire {
         }
     }
 
-    /// Parse a wire name. Legacy protocol spellings are accepted so migrated
-    /// configurations keep resolving (`"openai-compatible"` → [`Wire::Chat`]).
+    /// Parse a wire name. Only the canonical spellings exist: the legacy
+    /// protocol aliases (`openai`, `anthropic`, `claude`, `google`, …) were
+    /// removed in the 2026-10 hard cut, so a stale configuration fails loudly
+    /// instead of silently resolving to a different protocol surface.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "openai" | "openai-compatible" | "chat" | "chat_completions" | "chat/completions" => {
-                Some(Self::Chat)
-            }
-            "responses" | "openai-responses" => Some(Self::Responses),
-            "anthropic" | "messages" | "claude" => Some(Self::Messages),
-            "gemini"
-            | "google"
-            | "generatecontent"
-            | "generate_content"
-            | "gemini-generate-content" => Some(Self::Gemini),
+            "chat" => Some(Self::Chat),
+            "responses" => Some(Self::Responses),
+            "messages" => Some(Self::Messages),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -410,20 +400,22 @@ mod tests {
             let row: Row = toml::from_str(&format!("wire = \"{name}\"")).expect(name);
             assert_eq!(row.wire, wire);
         }
-        // 旧拼写经 serde alias / parse 继续可用：已发布配置零迁移。
-        for (legacy, wire) in [
-            ("openai", Wire::Chat),
-            ("openai-compatible", Wire::Chat),
-            ("chat_completions", Wire::Chat),
-            ("anthropic", Wire::Messages),
-            ("claude", Wire::Messages),
+        // 旧拼写已随 D4 硬切删除：配置里残留旧名必须在读入期就失败，
+        // 而不是被悄悄折叠成某个新名字。
+        for legacy in [
+            "openai",
+            "openai-compatible",
+            "chat_completions",
+            "anthropic",
+            "claude",
         ] {
-            assert_eq!(Wire::parse(legacy), Some(wire), "parse: {legacy}");
-            let row: Row = toml::from_str(&format!("wire = \"{legacy}\"")).expect(legacy);
-            assert_eq!(row.wire, wire, "serde: {legacy}");
+            assert_eq!(Wire::parse(legacy), None, "parse must reject: {legacy}");
+            assert!(
+                toml::from_str::<Row>(&format!("wire = \"{legacy}\"")).is_err(),
+                "serde must reject: {legacy}"
+            );
         }
-        assert_eq!(Wire::parse("  OpenAI-Compatible "), Some(Wire::Chat));
-        assert_eq!(Wire::parse("google"), Some(Wire::Gemini));
+        assert_eq!(Wire::parse("google"), None);
         assert_eq!(Wire::parse("unknown"), None);
         assert_eq!(Wire::default(), Wire::Chat);
     }

@@ -13,8 +13,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use qaqh_types::{CredentialSource, EndpointCompat};
 use crate::tool_api::{OfficialHit, OfficialPage, OfficialWebBackend, OfficialWebTools};
+use qaqh_types::{CredentialSource, EndpointCompat};
 
 /// 该 profile 是否声明了官方网页工具面。
 ///

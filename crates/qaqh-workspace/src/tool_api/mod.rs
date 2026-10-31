@@ -8,5 +8,5 @@
 //! 0 引用——loop ↔ runtime 的实际边界由 `qaqh-agent-runtime` 自己的
 //! `PendingInteraction` 承担。
 
-pub use qaqh_tool_core::tool_api::*;
 pub(crate) use qaqh_tool_core::tool_api::display::clamp_display_body;
+pub use qaqh_tool_core::tool_api::*;

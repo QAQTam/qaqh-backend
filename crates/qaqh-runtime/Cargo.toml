@@ -21,6 +21,7 @@ qaqh-workspace = { path = "../qaqh-workspace" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-profile = { path = "../qaqh-profile" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
+qaqh-skills = { path = "../qaqh-skills" }
 sha2 = "0.11"
 thiserror = "2"
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
@@ -62,7 +63,6 @@ qaqh-client = { path = "../qaqh-client" }
 qaqh-tool-core = { path = "../qaqh-tool-core", features = ["native-tool-plan"] }
 # 集成测试里构造 mock 模型流与消息断言；core 本体不直接使用。
 qaqh-gate = { path = "../qaqh-gate" }
-qaqh-message = { path = "../qaqh-message" }
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc = "0.2"
