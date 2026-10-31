@@ -12,7 +12,7 @@ use qaqh_domain::InterAgentDelivery;
 use qaqh_runtime::ringing::V2ProjectionHub;
 use qaqh_runtime::{QaqhService, RingingHub};
 use qaqh_session::canonical::{
-    CanonicalLog, CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
+    CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
 };
 use qaqh_session::projection::{MailboxProjection, Projection, ProjectionSink};
 use qaqh_session::session_commit::SessionCommit;

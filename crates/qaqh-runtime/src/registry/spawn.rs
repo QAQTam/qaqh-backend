@@ -312,10 +312,6 @@ impl AgentRegistry {
         let (activity_generation, _) = self.activity.begin(session_id);
 
         let session_dir = self.sessions.session_path_dir(session_id);
-        let identity =
-            qaqh_session::canonical::CanonicalSessionIdentity::open_or_create(&session_dir)
-                .map_err(|e| format!("canonical identity for subagent {session_id}: {e}"))?;
-
         let (mut agent_config, _session_profile) =
             crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
@@ -332,50 +328,27 @@ impl AgentRegistry {
             agent_config.max_tokens = max_tokens;
         }
 
-        let budget = crate::session_agent::assembly::context_budget(&agent_config);
-        let commit = if !session_dir.join("storage-format").exists() {
-            qaqh_session::session_commit::SessionCommit::create(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("create subagent session commit for {session_id}: {e}"))?
-        } else {
-            qaqh_session::session_commit::SessionCommit::open(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("open subagent session commit for {session_id}: {e}"))?
-        };
-
         let ws_dir = self
             .sessions
             .workspace_cwd(session_id)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
-        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
-        tool_manager.apply_init(spec.tools.clone(), session_id);
-        let tool_defs = crate::session_agent::assembly::tool_defs(&tool_manager);
-        let manager = std::sync::Arc::new(std::sync::Mutex::new(tool_manager));
-        let provider_spec = crate::session_agent::assembly::provider_spec(&agent_config, tool_defs);
-        let policy = crate::session_agent::assembly::tool_policy(
-            &ws_dir,
-            spec.permission_level,
-            crate::session_agent::assembly::subagent_sandbox(),
-            HashSet::new(),
-        );
-        let port = std::sync::Arc::new(crate::tool_job::WorkspaceToolPort::new(
-            session_id, manager, policy, None,
-        ));
+        let prepared =
+            crate::session_agent::assembly::assemble(crate::session_agent::assembly::SpawnInput {
+                session_id,
+                session_dir: &session_dir,
+                config: &agent_config,
+                allowed_tools: spec.tools.clone(),
+                permission_level: spec.permission_level,
+                sandbox: crate::session_agent::assembly::subagent_sandbox(),
+                workspace_root: ws_dir,
+            })?;
 
         let (handle, task) = crate::session_agent::AgentHost::spawn_with_activity(
             session_id.to_string(),
-            commit,
-            provider_spec,
-            port,
+            prepared.commit,
+            prepared.provider,
+            prepared.port,
             Some(crate::session_agent::ActivityTap {
                 tracker: self.activity.clone(),
                 generation: activity_generation,
@@ -430,10 +403,6 @@ impl AgentRegistry {
         let (activity_generation, _) = self.activity.begin(session_id);
 
         let session_dir = self.sessions.session_path_dir(session_id);
-        let identity =
-            qaqh_session::canonical::CanonicalSessionIdentity::open_or_create(&session_dir)
-                .map_err(|e| format!("canonical identity for {session_id}: {e}"))?;
-
         let (agent_config, _session_profile) =
             crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
@@ -441,55 +410,25 @@ impl AgentRegistry {
             )
             .unwrap_or_default();
 
-        let budget = crate::session_agent::assembly::context_budget(&agent_config);
-        let commit = if !session_dir.join("storage-format").exists() {
-            qaqh_session::session_commit::SessionCommit::create(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("create session commit for {session_id}: {e}"))?
-        } else {
-            qaqh_session::session_commit::SessionCommit::open(
-                &session_dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                budget,
-            )
-            .map_err(|e| format!("open session commit for {session_id}: {e}"))?
-        };
-
         let ws_dir = self
             .sessions
             .workspace_cwd(session_id)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
-        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
-        let allowed_tools = if agent_config.tool_allowlist_enabled {
-            agent_config.tool_allowlist.clone()
-        } else {
-            Vec::new()
-        };
-        tool_manager.apply_init(allowed_tools, session_id);
-        let tool_defs = crate::session_agent::assembly::tool_defs(&tool_manager);
-        let manager = std::sync::Arc::new(std::sync::Mutex::new(tool_manager));
-        let spec = crate::session_agent::assembly::provider_spec(&agent_config, tool_defs);
-        let policy = crate::session_agent::assembly::tool_policy(
-            &ws_dir,
-            agent_config.permission_level,
-            qaqh_workspace::tool_api::SandboxMode::Main,
-            HashSet::new(),
-        );
-        let port = std::sync::Arc::new(crate::tool_job::WorkspaceToolPort::new(
-            session_id, manager, policy, None,
-        ));
+        let prepared = crate::session_agent::assembly::assemble(
+            crate::session_agent::assembly::SpawnInput::for_session(
+                session_id,
+                &session_dir,
+                &agent_config,
+                ws_dir,
+            ),
+        )?;
 
         let (handle, task) = crate::session_agent::AgentHost::spawn_with_activity(
             session_id.to_string(),
-            commit,
-            spec,
-            port,
+            prepared.commit,
+            prepared.provider,
+            prepared.port,
             Some(crate::session_agent::ActivityTap {
                 tracker: self.activity.clone(),
                 generation: activity_generation,
