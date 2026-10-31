@@ -465,6 +465,9 @@ fn validate_message(message: &Message) -> Result<(), ContextProjectionError> {
 
 fn validate_complete_sequence(messages: &[Message]) -> Result<(), ContextProjectionError> {
     let mut pending_calls = HashSet::new();
+    // Duplicate ids are only illegal *within one model response*. Providers
+    // reuse ids such as `call_1` across turns, so the ledger cannot be global:
+    // a later response legitimately hands out an id an earlier one used.
     let mut seen_calls = HashSet::new();
     for message in messages {
         if !pending_calls.is_empty()
@@ -478,6 +481,9 @@ fn validate_complete_sequence(messages: &[Message]) -> Result<(), ContextProject
             return Err(ContextProjectionError::InvalidCheckpoint(
                 "message interrupted outstanding tool results".into(),
             ));
+        }
+        if message.role == "assistant" {
+            seen_calls.clear();
         }
         for block in &message.content {
             match block {

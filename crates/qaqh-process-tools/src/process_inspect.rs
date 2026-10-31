@@ -163,15 +163,31 @@ fn handle_write(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutp
                 "Provide the text to write to stdin.",
             )
         })?;
-    match ProcessRegistry::write_to(id, text) {
+    let cancel = ctx.cancellation.shared_flag();
+    match ProcessRegistry::write_to(id, text, Some(cancel.as_ref()), ctx.timeout) {
         Ok(bytes) => Ok(ok_output(serde_json::json!({
             "content": format!("Wrote {bytes} bytes to process {id}.")
         }))),
-        Err(error) => Err(process_error(
-            "write_failed",
-            format!("process write: {error}"),
-            "Check that the process is still running.",
-        )),
+        Err(error) => {
+            let code = match (error.stop, error.bytes_written) {
+                (crate::process_registry::ProcessWriteStop::Cancelled, 0) => {
+                    "cancelled_before_start"
+                }
+                (crate::process_registry::ProcessWriteStop::Cancelled, _) => "cancelled",
+                (crate::process_registry::ProcessWriteStop::TimedOut, 0) => "write_timeout",
+                (crate::process_registry::ProcessWriteStop::TimedOut, _) => "partial",
+                (crate::process_registry::ProcessWriteStop::Io, 0) => "write_failed",
+                (crate::process_registry::ProcessWriteStop::Io, _) => "partial",
+            };
+            Err(process_error(
+                code,
+                format!(
+                    "process write: {error}; requested {} bytes",
+                    text.len()
+                ),
+                "Check that the process is still running; a partial write may have reached it.",
+            ))
+        }
     }
 }
 

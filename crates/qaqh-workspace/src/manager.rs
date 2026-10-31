@@ -714,6 +714,17 @@ impl ToolManager {
         }
     }
 
+    /// Remove an in-flight registration when execution unwinds before its
+    /// prepared call reaches the normal finalizer.
+    pub fn fail_inflight_after_panic(&mut self, id: &str) -> bool {
+        if self.inflight_tasks.remove(id).is_none() {
+            return false;
+        }
+        self.stats_total += 1;
+        self.stats_failures += 1;
+        true
+    }
+
     pub fn stats(&self) -> ToolStats {
         ToolStats {
             calls_total: self.stats_total,

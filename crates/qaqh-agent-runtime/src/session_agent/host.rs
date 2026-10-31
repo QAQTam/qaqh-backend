@@ -124,10 +124,20 @@ impl AgentHandle {
             })
     }
 
-    /// Replace the provider parameters after a configuration reload.
-    pub fn reload_provider(&self, spec: ProviderRequestSpec) -> Result<(), MailboxError> {
+    /// Replace the provider parameters, and optionally the tool policy, after a
+    /// configuration reload.
+    ///
+    /// A reload that changes the working directory or the sandbox switch must
+    /// reach the actor through the same boundary: the provider swap alone
+    /// leaves the existing port dispatching under the old root and policy.
+    pub fn reload_provider(
+        &self,
+        spec: ProviderRequestSpec,
+        policy: Option<crate::tool_job::ToolPolicySnapshot>,
+    ) -> Result<(), MailboxError> {
         self.mailbox.try_control(AgentControl::ReloadProvider {
             spec: Box::new(spec),
+            policy: policy.map(Box::new),
         })
     }
 
@@ -147,15 +157,17 @@ impl AgentHost {
         provider_spec: ProviderRequestSpec,
         tool_port: Arc<WorkspaceToolPort>,
     ) -> Result<(AgentHandle, JoinHandle<Result<(), SessionAgentError>>), SessionAgentError> {
-        Self::spawn_with_activity(session_id, commit, provider_spec, tool_port, None)
+        Self::spawn_with_activity(session_id, commit, provider_spec, tool_port, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_with_activity(
         session_id: String,
         commit: SessionCommit,
         provider_spec: ProviderRequestSpec,
         tool_port: Arc<WorkspaceToolPort>,
         activity: Option<ActivityTap>,
+        progress: Option<Arc<dyn crate::progress::ProgressSink>>,
     ) -> Result<(AgentHandle, JoinHandle<Result<(), SessionAgentError>>), SessionAgentError> {
         let (mailbox_handle, mailbox) = Mailbox::new(
             LaneBudget::COMMANDS,
@@ -183,6 +195,7 @@ impl AgentHost {
             provider_spec,
             tool_port,
             activity,
+            progress,
         );
 
         let handle = AgentHandle {

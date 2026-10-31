@@ -13,8 +13,8 @@ use std::{
 use qaqh_agentloop_core::{
     DispatchEvidence, EffectIdentity,
     driver::{InputHandler, Step},
-    mailbox::{CompletionReservation, MailboxHandle},
-    supervisor::{DispatchTicket, Supervisor, TaskOutcome},
+    mailbox::{CompletionReservation, FrameSize, LaneBudget, MailboxHandle},
+    supervisor::{DispatchTicket, Supervisor, SupervisorError, TaskOutcome},
 };
 use qaqh_session::{
     canonical::{BatchReceipt, causation_for_command, generate_ulid, sha256_content_hash},
@@ -35,9 +35,10 @@ use tokio::sync::watch;
 
 use crate::{
     activity::SessionActivityTracker,
+    progress::{AttemptBlocks, ProgressSink, ProgressStream},
     provider_job::{
         ProviderOutcome, ProviderRequestSpec, build_model_round_started,
-        prepare_response_commit_facts, run_verified,
+        prepare_response_commit_facts, run_verified, run_verified_with_progress,
     },
     tool_job::{
         ToolAdmission, ToolApprovalGrant, ToolOutcome, ToolRequest, WorkspaceToolPort,
@@ -126,6 +127,18 @@ struct PendingPermission {
     args: Vec<u8>,
 }
 
+/// One tool announced by the current model response that has not been
+/// dispatched, denied or suspended yet.
+///
+/// The provider decides how many calls one response may contain, so the owner
+/// keeps the whole list instead of looping once: an `ask` or permission prompt
+/// pauses the list, and the answer must resume exactly where it stopped.
+struct DeclaredTool {
+    call_id: ToolCallId,
+    name: String,
+    args: Vec<u8>,
+}
+
 enum PendingInteraction {
     Ask {
         call_id: ToolCallId,
@@ -151,10 +164,16 @@ pub struct SessionAgent {
     pub(crate) provider_spec: ProviderRequestSpec,
     pub(crate) tool_port: Arc<WorkspaceToolPort>,
     pub(crate) activity: Option<ActivityTap>,
+    /// Host-owned display channel for in-flight generation. Absent in tests.
+    pub(crate) progress: Option<Arc<dyn ProgressSink>>,
+    /// Block identities of the attempt in flight; reused when it seals.
+    pub(crate) current_blocks: Option<AttemptBlocks>,
     pub(crate) active_provider_identity: Option<EffectIdentity>,
     pub(crate) active_tool_identities: HashMap<ToolCallId, ActiveTool>,
     pub(crate) pending_permissions: HashMap<ToolCallId, PendingPermission>,
     pub(crate) pending_interaction: Option<PendingInteraction>,
+    /// Rest of the current response's tool list, in provider order.
+    pub(crate) declared_tools: VecDeque<DeclaredTool>,
     pub(crate) queued_inputs: VecDeque<QueuedUserInput>,
     /// Causation of the command currently being processed.
     pub(crate) causation: Option<EventId>,
@@ -174,11 +193,16 @@ impl SessionAgent {
         provider_spec: ProviderRequestSpec,
         tool_port: Arc<WorkspaceToolPort>,
         activity: Option<ActivityTap>,
+        progress: Option<Arc<dyn ProgressSink>>,
     ) -> Self {
         let mut queued_inputs = VecDeque::new();
-        if let Err(error) = recover_open_work(&mut commit, &mut queued_inputs) {
-            log::error!("[session-agent] recovery failed for {session_id}: {error}");
-        }
+        // A failed recovery must not be reported as a usable session: the next
+        // request would replay a context the journal could not settle.
+        let recovery_error = recover_open_work(&mut commit, &mut queued_inputs)
+            .err()
+            .inspect(|error| {
+                log::error!("[session-agent] recovery failed for {session_id}: {error}");
+            });
         let mut agent = Self {
             session_id,
             incarnation,
@@ -193,15 +217,24 @@ impl SessionAgent {
             provider_spec,
             tool_port,
             activity,
+            progress,
+            current_blocks: None,
             active_provider_identity: None,
             active_tool_identities: HashMap::new(),
             pending_permissions: HashMap::new(),
             pending_interaction: None,
+            declared_tools: VecDeque::new(),
             queued_inputs,
             causation: None,
             system_prompt_seeded: false,
             title_decided: false,
         };
+        if let Some(error) = recovery_error {
+            // The error reaches the session state (and the front end) instead
+            // of only the log while the agent pretends to be Ready.
+            agent.phase = SessionPhase::Blocked(error.to_string());
+            return agent;
+        }
         // Resume inputs that were durably accepted but never started.
         if agent.phase == SessionPhase::Ready
             && let Err(error) = agent.start_next_turn()
@@ -305,31 +338,27 @@ impl SessionAgent {
         }
 
         let sup_clone = Arc::clone(&self.supervisor);
+        let mailbox = self.mailbox_handle.clone();
         let ident_clone = identity;
         tokio::spawn(async move {
-            loop {
-                {
+            let completion = std::future::poll_fn(|cx| {
+                sup_clone
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .poll_collect(&ident_clone, cx)
+            })
+            .await;
+            match completion {
+                Ok(completion) => {
                     let mut sup = sup_clone
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    if sup.is_finished(&ident_clone) {
-                        // `collect` completes on the first poll once the handle
-                        // is finished, so it is polled outside async hold.
-                        match poll_once(sup.collect(&ident_clone)) {
-                            Some(Ok(_completion)) => {
-                                let _ = sup.deliver(&ident_clone);
-                            }
-                            Some(Err(error)) => log::warn!(
-                                "[session-agent] completion collection failed for {}: {error:?}",
-                                ident_clone.effect_id
-                            ),
-                            None => {}
-                        }
-                        return;
-                    }
+                    deliver_completion(&mut sup, &ident_clone, &completion, &mailbox);
                 }
-                // The task is still running; never block the actor on it.
-                tokio::task::yield_now().await;
+                Err(error) => log::warn!(
+                    "[session-agent] completion collection failed for {}: {error:?}",
+                    ident_clone.effect_id
+                ),
             }
         });
         Ok(())
@@ -343,7 +372,9 @@ impl SessionAgent {
         if !self.commit.request_messages()?.is_empty() {
             return Ok(());
         }
-        let prompt = crate::session_agent::prompt::system_prompt(&self.provider_spec);
+        let workspace_root = self.tool_port.workspace_root();
+        let prompt =
+            crate::session_agent::prompt::system_prompt(&self.provider_spec, &workspace_root);
         let message = text_message("system", &prompt);
         let bytes =
             serde_json::to_vec(&message).map_err(|e| SessionAgentError::Internal(e.to_string()))?;
@@ -362,6 +393,38 @@ impl SessionAgent {
             &format!("batch-prefix-{}", self.commit.head()? + 1),
             vec![fact],
         )?;
+        Ok(())
+    }
+
+    /// Record a working-directory change that happened after the frozen prefix
+    /// was committed.
+    ///
+    /// The prefix is immutable and cached, so the new directory is appended as
+    /// a feature message instead of rewriting it; the next request then carries
+    /// both the original context and the current working directory.
+    fn commit_workspace_changed(
+        &mut self,
+        workspace_root: &std::path::Path,
+    ) -> Result<(), SessionAgentError> {
+        let text = format!(
+            "[Environment] workspace changed to: {}",
+            workspace_root.display()
+        );
+        let message = text_message("system", &text);
+        let bytes =
+            serde_json::to_vec(&message).map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+        let message_ref = self.commit.put_blob(&bytes)?;
+        let fact = self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::ContextMessageCommitted(ContextMessageCommitted {
+                message_ref,
+                origin: ContextMessageOrigin::Feature,
+            }),
+            None,
+            None,
+            None,
+        );
+        self.commit_batch("batch-workspace-changed", vec![fact])?;
         Ok(())
     }
 
@@ -565,11 +628,26 @@ impl SessionAgent {
         };
 
         let spec = self.provider_spec.clone();
+        let blocks = AttemptBlocks::new(turn_id.as_str(), &spec.provider.model);
+        self.current_blocks = Some(blocks.clone());
+        let progress = self
+            .progress
+            .as_ref()
+            .map(|sink| ProgressStream {
+                sink: Arc::clone(sink),
+                blocks,
+            });
         self.dispatch_task(
             ticket,
             reservation,
             move |execution, cancel_rx| async move {
-                AgentOutcome::Provider(run_verified(spec, execution, cancel_rx).await)
+                let outcome = match progress {
+                    Some(progress) => {
+                        run_verified_with_progress(spec, execution, cancel_rx, progress).await
+                    }
+                    None => run_verified(spec, execution, cancel_rx).await,
+                };
+                AgentOutcome::Provider(outcome)
             },
         )?;
         self.phase = SessionPhase::Active(ActivePhase::AwaitingProvider {
@@ -583,20 +661,41 @@ impl SessionAgent {
         if self.active_turn.is_none() {
             return Ok(());
         }
-        if !self.active_tool_identities.is_empty() || self.pending_interaction.is_some() {
+        // Remaining declared calls are unfinished work: the next request may
+        // only start once every call of the response has a matching result and
+        // nothing is waiting for the user.
+        if !self.active_tool_identities.is_empty()
+            || !self.declared_tools.is_empty()
+            || self.pending_interaction.is_some()
+        {
             return Ok(());
         }
         let round = self.current_round.saturating_add(1);
         self.start_round(round)
     }
 
+    /// Drop every in-flight display identity of the finished attempt.
+    ///
+    /// Without this a stale replaceable slot would be replayed to a client that
+    /// reconnects after the attempt ended, resurrecting partial output.
+    fn end_attempt_progress(&mut self, call_ids: &[String]) {
+        let Some(blocks) = self.current_blocks.take() else {
+            return;
+        };
+        if let Some(sink) = &self.progress {
+            sink.attempt_finished(&blocks.turn_id, &blocks.all_block_ids(), call_ids);
+        }
+    }
+
     fn finish_turn(&mut self, terminal: TurnTerminal, usage: Option<qaqh_types::UsageInfo>) {
+        self.end_attempt_progress(&[]);
         self.active_turn = None;
         self.active_input = None;
         self.active_provider_identity = None;
         self.active_tool_identities.clear();
         self.pending_permissions.clear();
         self.pending_interaction = None;
+        self.declared_tools.clear();
         self.observe(match terminal {
             TurnTerminal::Cancelled => serde_json::json!({ "type": "cancelled" }),
             TurnTerminal::Failed => serde_json::json!({ "type": "failed" }),
@@ -873,7 +972,7 @@ impl SessionAgent {
                 },
                 effective_args_ref: Some(args_ref),
                 effective_args_hash: Some(args_hash),
-                sandbox_spec_hash: sha256_content_hash(b"sandbox_spec"),
+                sandbox_spec_hash: self.tool_port.sandbox_spec_hash(),
                 side_effect_class: SideEffectClass::WorkspaceWrite,
                 intent_at_ms: now_ms(),
             }),
@@ -948,14 +1047,53 @@ impl FactBackgrounded for SessionFact {
     }
 }
 
-/// Poll a future exactly once without an async context.
-fn poll_once<F: std::future::Future>(future: F) -> Option<F::Output> {
-    let mut future = std::pin::pin!(future);
-    let waker = std::task::Waker::noop();
-    let mut context = std::task::Context::from_waker(waker);
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(value) => Some(value),
-        std::task::Poll::Pending => None,
+/// Hand a finished effect back to the owner without silently losing it.
+///
+/// The reservation taken at dispatch time is a guess. When the real completion
+/// no longer fits, re-reserve the exact size instead of dropping the frame;
+/// only a completion above the lane's hard frame limit is unrepresentable, and
+/// that case is reported rather than swallowed.
+fn deliver_completion(
+    supervisor: &mut Supervisor<AgentOutcome, CommittedExecution>,
+    identity: &EffectIdentity,
+    completion: &Arc<AgentCompletion>,
+    mailbox: &MailboxHandle<AgentCommand, AgentControl, AgentCompletion>,
+) {
+    match supervisor.deliver(identity) {
+        Ok(()) => {}
+        Err(SupervisorError::Capacity) => {
+            let required = completion.retained_bytes();
+            let limit = LaneBudget::COMPLETIONS.max_frame_bytes;
+            if required > limit as usize {
+                log::error!(
+                    "[session-agent] completion for {} needs {required} bytes, above the {limit} byte completion frame limit; the result stays owned by the supervisor",
+                    identity.effect_id
+                );
+                return;
+            }
+            let reserved = u32::try_from(required).unwrap_or(limit).max(1);
+            let attempt = mailbox.try_reserve_completion(reserved).and_then(|reservation| {
+                supervisor
+                    .resize_reservation(identity, reservation)
+                    .map_err(|error| {
+                        log::error!(
+                            "[session-agent] oversized completion for {} could not be delivered: {error:?}",
+                            identity.effect_id
+                        );
+                        qaqh_agentloop_core::mailbox::MailboxError::Full
+                    })
+            });
+            if let Err(error) = attempt {
+                log::error!(
+                    "[session-agent] oversized completion for {} could not be delivered: {error:?}",
+                    identity.effect_id
+                );
+            }
+        }
+        Err(error) => log::error!(
+            "[session-agent] completion delivery failed for {}: {error:?}",
+            identity.effect_id
+        ),
     }
 }
 
@@ -1056,6 +1194,9 @@ fn recover_open_work(
             });
         }
         for tool in &obligations.unsettled_tools {
+            // No run evidence survived the previous incarnation, so this is a
+            // genuine "result unknown", never a reconciled success: claiming
+            // otherwise needs an evidence reference that does not exist.
             let status = if tool.execution_id.is_some() {
                 ToolTerminalStatus::Indeterminate
             } else {
@@ -1090,13 +1231,68 @@ fn recover_open_work(
                         output_bytes: 0,
                         progress_bytes_total: 0,
                     },
-                    reconciled: true,
+                    reconciled: false,
                     evidence_ref: None,
                     evidence_fact_seq: None,
                     evidence_event_id: None,
-                    recovery_ref: None,
+                    recovery_ref: Some(recovery_ref("recovery_tool_interrupted")),
                     finished_at_ms: now_ms(),
                 }),
+            });
+            // Close the model transcript for this call as well: the previous
+            // turn already committed the assistant tool_use block, so an
+            // interrupted turn without a matching result fails sequence
+            // validation and blocks the session forever.
+            let message = tool_result_message(
+                tool.call_id.as_str(),
+                "tool result unknown: the previous daemon session ended before this call settled",
+                false,
+            );
+            let bytes = serde_json::to_vec(&message)
+                .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+            let message_ref = commit.put_blob(&bytes)?;
+            facts.push(SessionFact {
+                schema: FactSchema::v2(),
+                session_id: commit.session_id().clone(),
+                log_id: commit.log_id().clone(),
+                fact_seq: 0,
+                event_id: EventId::new(generate_ulid()),
+                ts_ms: now_ms(),
+                causation_id: None,
+                turn_id: Some(tool.turn_id.clone()),
+                call_id: Some(tool.call_id.clone()),
+                interaction_id: None,
+                payload: FactPayload::ContextMessageCommitted(ContextMessageCommitted {
+                    message_ref,
+                    origin: ContextMessageOrigin::ToolResult,
+                }),
+            });
+            actions.push(RecoveryAction::ToolFinished {
+                completion: qaqh_session::session_fact_v2::RecoveryToolCompletion {
+                    call_id: tool.call_id.clone(),
+                    execution_id: tool.execution_id.clone(),
+                    terminal_status: status,
+                    output_ref: None,
+                    error: Some(ToolError {
+                        code: "tool_indeterminate".into(),
+                        message: "previous incarnation ended before the tool settled".into(),
+                        retryable: true,
+                        details_ref: None,
+                    }),
+                    metrics: ToolMetrics {
+                        started_at_ms: now_ms().saturating_sub(1),
+                        finished_at_ms: now_ms(),
+                        retry_count: 0,
+                        output_bytes: 0,
+                        progress_bytes_total: 0,
+                    },
+                    reconciled: false,
+                    recovery_ref: recovery_ref("recovery_tool_interrupted"),
+                    finished_at_ms: now_ms(),
+                    evidence_ref: None,
+                    evidence_fact_seq: None,
+                    evidence_event_id: None,
+                },
             });
         }
         if let Some(turn_id) = &obligations.active_turn {
@@ -1395,7 +1591,8 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                     round: self.current_round,
                     attempt: self.current_attempt,
                 });
-                self.next_round()?;
+                // Resume the calls this response declared after the question.
+                self.advance_declared_tools(&turn_id)?;
                 Ok(Step::Continue)
             }
             AgentControl::ToolPermissionRespond {
@@ -1403,17 +1600,21 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                 approved,
                 trust_folder,
             } => {
-                let Some(pending) = self.pending_permissions.remove(tool_call_id) else {
-                    return Ok(Step::Continue);
-                };
+                // Check the suspended call *before* consuming anything: an
+                // answer for a tool that is not the one being asked about must
+                // leave both the permission record and the interaction intact.
                 let Some(PendingInteraction::Permission { call_id }) =
-                    self.pending_interaction.take()
+                    self.pending_interaction.as_ref()
                 else {
                     return Ok(Step::Continue);
                 };
-                if &call_id != tool_call_id {
+                if call_id != tool_call_id {
                     return Ok(Step::Continue);
                 }
+                let Some(pending) = self.pending_permissions.remove(tool_call_id) else {
+                    return Ok(Step::Continue);
+                };
+                self.pending_interaction = None;
                 let Some(turn_id) = self.active_turn.clone() else {
                     return Ok(Step::Continue);
                 };
@@ -1480,20 +1681,38 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                             tool_call_id,
                             &format!("tool dispatch failed: {error}"),
                         )?;
-                        self.next_round()?;
+                        self.advance_declared_tools(&turn_id)?;
                         return Ok(Step::Continue);
                     }
-                    self.phase = SessionPhase::Active(ActivePhase::AwaitingTools {
-                        active_calls: self.active_tool_identities.keys().cloned().collect(),
-                    });
+                    self.advance_declared_tools(&turn_id)?;
                 } else {
                     self.deny_tool(&turn_id, tool_call_id, "permission denied by user")?;
-                    self.next_round()?;
+                    // A rejection settles one call; the rest of the response
+                    // still has to run.
+                    self.advance_declared_tools(&turn_id)?;
                 }
                 Ok(Step::Continue)
             }
-            AgentControl::ReloadProvider { spec } => {
-                self.provider_spec = (**spec).clone();
+            AgentControl::ReloadProvider { spec, policy } => {
+                // Config reload changes the endpoint settings, while the live
+                // session owns its already-filtered tool catalog. Keep that
+                // catalog (including dynamic tools) on the next request.
+                let mut next_spec = (**spec).clone();
+                next_spec.tools = self.provider_spec.tools.clone();
+                self.provider_spec = next_spec;
+                if let Some(policy) = policy {
+                    // Swap at the control boundary: subsequent dispatches see
+                    // the new root/sandbox switch, work already in flight keeps
+                    // the policy it started under.
+                    let previous_root = self.tool_port.workspace_root();
+                    self.tool_port.update_policy((**policy).clone());
+                    let workspace_root = self.tool_port.workspace_root();
+                    if workspace_root != previous_root {
+                        // The frozen system prompt names the old directory.
+                        // Record the change so the next request carries it.
+                        self.commit_workspace_changed(&workspace_root)?;
+                    }
+                }
                 Ok(Step::Continue)
             }
         }
@@ -1593,12 +1812,27 @@ impl SessionAgent {
             self.current_round,
             self.current_attempt,
             &model,
+            self.current_blocks.as_ref(),
             outcome,
             EventId::new(generate_ulid()),
             |_| EventId::new(generate_ulid()),
             |_| EventId::new(generate_ulid()),
             now_ms(),
         )?;
+        let declared_call_ids: Vec<String> = outcome
+            .message
+            .as_ref()
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|block| match block {
+                        qaqh_types::ContentBlock::ToolUse { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         for fact in &mut facts {
             fact.causation_id = self.causation.clone();
         }
@@ -1634,6 +1868,7 @@ impl SessionAgent {
                     ),
                     facts,
                 )?;
+                self.end_attempt_progress(&declared_call_ids);
                 self.start_declared_tools(&turn_id, outcome)
             }
             _ => {
@@ -1667,14 +1902,34 @@ impl SessionAgent {
         let Some(message) = &outcome.message else {
             return self.interrupt_turn(InterruptReason::Crash, None);
         };
+        self.declared_tools.clear();
         for block in &message.content {
             let qaqh_types::ContentBlock::ToolUse { id, name, input } = block else {
                 continue;
             };
-            let call_id = crate::provider_job::canonical_tool_call_id(id);
-            let args = serde_json::to_vec(input)
-                .map_err(|e| SessionAgentError::Internal(e.to_string()))?;
+            self.declared_tools.push_back(DeclaredTool {
+                // Provider ids are opaque and go back to the model verbatim.
+                call_id: ToolCallId::new(id.clone()),
+                name: name.clone(),
+                args: serde_json::to_vec(input)
+                    .map_err(|e| SessionAgentError::Internal(e.to_string()))?,
+            });
+        }
+        self.advance_declared_tools(turn_id)
+    }
 
+    /// Dispatch declared calls in provider order.
+    ///
+    /// A call that needs the user (`ask`, permission) suspends the list and
+    /// leaves the remaining calls queued, so answering resumes the response
+    /// instead of abandoning the tools the model also declared.
+    fn advance_declared_tools(&mut self, turn_id: &TurnId) -> Result<(), SessionAgentError> {
+        while let Some(DeclaredTool {
+            call_id,
+            name,
+            args,
+        }) = self.declared_tools.pop_front()
+        {
             if name == "ask" {
                 let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
                 let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
@@ -1698,7 +1953,7 @@ impl SessionAgent {
                         },
                         effective_args_ref: Some(args_ref),
                         effective_args_hash: Some(sha256_content_hash(&args)),
-                        sandbox_spec_hash: sha256_content_hash(b"sandbox_spec"),
+                        sandbox_spec_hash: self.tool_port.sandbox_spec_hash(),
                         side_effect_class: SideEffectClass::ReadOnly,
                         intent_at_ms: now_ms(),
                     }),
@@ -1737,10 +1992,10 @@ impl SessionAgent {
             }
 
             let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
-            let request = self.declaration_request(&call_id, name, &args);
+            let request = self.declaration_request(&call_id, &name, &args);
             match self.tool_port.precheck(&request) {
                 ToolAdmission::Authorized => {
-                    self.dispatch_tool(turn_id, &call_id, name, &args, &execution_id)?;
+                    self.dispatch_tool(turn_id, &call_id, &name, &args, &execution_id)?;
                 }
                 ToolAdmission::Denied(reason) => {
                     self.deny_tool(turn_id, &call_id, &reason)?;
@@ -1750,7 +2005,7 @@ impl SessionAgent {
                         turn_id,
                         &call_id,
                         &execution_id,
-                        name,
+                        &name,
                         &args,
                         &reason,
                     )?;
@@ -1758,10 +2013,18 @@ impl SessionAgent {
                 }
             }
         }
+        self.settle_round_progress()
+    }
 
-        if self.active_tool_identities.is_empty() && self.pending_interaction.is_none() {
+    /// Decide whether the current response is finished once the declaration
+    /// queue stopped advancing.
+    fn settle_round_progress(&mut self) -> Result<(), SessionAgentError> {
+        if !self.declared_tools.is_empty() || self.pending_interaction.is_some() {
+            return Ok(());
+        }
+        if self.active_tool_identities.is_empty() {
             self.next_round()?;
-        } else if !self.active_tool_identities.is_empty() {
+        } else {
             self.phase = SessionPhase::Active(ActivePhase::AwaitingTools {
                 active_calls: self.active_tool_identities.keys().cloned().collect(),
             });
@@ -1845,9 +2108,7 @@ impl SessionAgent {
             vec![finished, context],
         )?;
         self.active_tool_identities.remove(&call_id);
-        if self.active_tool_identities.is_empty() && self.pending_interaction.is_none() {
-            self.next_round()?;
-        }
+        self.settle_round_progress()?;
         Ok(())
     }
 }

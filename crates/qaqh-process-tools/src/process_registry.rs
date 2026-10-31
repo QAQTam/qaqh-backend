@@ -58,6 +58,28 @@ impl KillOutcome {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessWriteStop {
+    Cancelled,
+    TimedOut,
+    Io,
+}
+
+#[derive(Debug)]
+pub struct ProcessWriteError {
+    pub stop: ProcessWriteStop,
+    pub bytes_written: usize,
+    pub message: String,
+}
+
+impl std::fmt::Display for ProcessWriteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({} bytes written)", self.message, self.bytes_written)
+    }
+}
+
+impl std::error::Error for ProcessWriteError {}
+
 /// 字节预算内取尾部，起点前移到 char boundary（子进程输出是任意 UTF-8，
 /// 直接按字节索引切片会在多字节字符中点 panic）。
 fn char_safe_tail(s: &str, max_bytes: usize) -> &str {
@@ -135,6 +157,12 @@ pub struct ProcEntry {
     /// Final answer collected from subagent stdout.
     pub answer: Arc<Mutex<Option<String>>>,
     child: Arc<Mutex<Option<std::process::Child>>>,
+    /// Serializes slow kill/reap operations for this entry without holding the
+    /// process-wide registry lock.
+    kill_gate: Arc<Mutex<()>>,
+    /// Protected by the process-wide registry lock; terminal eviction skips an
+    /// entry while its kill operation is running outside that lock.
+    kill_in_progress: bool,
     /// W4：OS pid 快照——child 句柄被 try_wait 回收后仍可按 pid 清理
     /// 进程树（Windows taskkill /T、Unix killpg），不再依赖句柄存活。
     os_pid: Arc<Mutex<Option<u32>>>,
@@ -275,7 +303,7 @@ impl ProcessRegistry {
         let mut stale: Vec<(u32, Tombstone)> = Vec::new();
         for (id, e) in &self.entries {
             let status = e.status.lock().unwrap_or_else(|er| er.into_inner()).clone();
-            if matches!(status, ProcStatus::Running) {
+            if e.kill_in_progress || matches!(status, ProcStatus::Running) {
                 continue;
             }
             // 单次加锁读终态时刻；缺失（不应发生）则补记为当下，下一轮再驱逐。
@@ -418,6 +446,8 @@ impl ProcessRegistry {
                     stderr: Arc::new(Mutex::new(String::new())),
                     answer: Arc::new(Mutex::new(None)),
                     child: Arc::new(Mutex::new(None)),
+                    kill_gate: Arc::new(Mutex::new(())),
+                    kill_in_progress: false,
                     os_pid: Arc::new(Mutex::new(None)),
                     last_exit_code: Arc::new(Mutex::new(None)),
                     pty_writer: Arc::new(Mutex::new(None)),
@@ -447,7 +477,11 @@ impl ProcessRegistry {
     pub fn owner_of(id: u32) -> Option<String> {
         Self::with(|r| {
             if let Some(entry) = r.entries.get(&id) {
-                let owner = entry.owner.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let owner = entry
+                    .owner
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 return (!owner.is_empty()).then_some(owner);
             }
             r.tombstone(id)
@@ -458,13 +492,35 @@ impl ProcessRegistry {
 
     /// Attach an OS child handle to an entry.
     pub fn attach_child(id: u32, child: std::process::Child) {
-        Self::with(|r| {
-            if let Some(entry) = r.entries.get(&id) {
-                let os_pid = Some(child.id());
-                *entry.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
-                *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()) = os_pid;
+        let gate = Self::with(|r| r.entries.get(&id).map(|entry| Arc::clone(&entry.kill_gate)));
+        let Some(gate) = gate else {
+            Self::terminate_child_and_wait(child);
+            return;
+        };
+
+        let guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let mut child = Some(child);
+        let attached = Self::with(|r| {
+            let Some(entry) = r.entries.get(&id) else {
+                return false;
+            };
+            if entry.kill_in_progress
+                || !matches!(
+                    *entry.status.lock().unwrap_or_else(|e| e.into_inner()),
+                    ProcStatus::Running
+                )
+            {
+                return false;
             }
+            let process = child.take().expect("child is present until attached");
+            *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(process.id());
+            *entry.child.lock().unwrap_or_else(|e| e.into_inner()) = Some(process);
+            true
         });
+        drop(guard);
+        if !attached && let Some(child) = child {
+            Self::terminate_child_and_wait(child);
+        }
     }
 
     /// 登记一个 PTY 会话：无 `std::process::Child` 句柄可托管，但
@@ -473,12 +529,33 @@ impl ProcessRegistry {
     /// PID == PGID，等价 kill_session_group），后者为后续 write_stdin
     /// 铺路（`pty_writer` 字段即为此预留）。
     pub fn attach_pty_session(id: u32, os_pid: u32, writer: Box<dyn std::io::Write + Send>) {
-        Self::with(|r| {
-            if let Some(entry) = r.entries.get(&id) {
-                *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(os_pid);
-                *entry.pty_writer.lock().unwrap_or_else(|e| e.into_inner()) = Some(writer);
+        let gate = Self::with(|r| r.entries.get(&id).map(|entry| Arc::clone(&entry.kill_gate)));
+        let Some(gate) = gate else {
+            Self::cleanup_by_pid(os_pid);
+            return;
+        };
+        let guard = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let mut writer = Some(writer);
+        let attached = Self::with(|r| {
+            let Some(entry) = r.entries.get(&id) else {
+                return false;
+            };
+            if entry.kill_in_progress
+                || !matches!(
+                    *entry.status.lock().unwrap_or_else(|e| e.into_inner()),
+                    ProcStatus::Running
+                )
+            {
+                return false;
             }
+            *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()) = Some(os_pid);
+            *entry.pty_writer.lock().unwrap_or_else(|e| e.into_inner()) = writer.take();
+            true
         });
+        drop(guard);
+        if !attached {
+            Self::cleanup_by_pid(os_pid);
+        }
     }
 
     /// 非阻塞查询子进程是否退出；已退出返回 exit code 并释放句柄、更新状态。
@@ -520,7 +597,15 @@ impl ProcessRegistry {
     }
 
     /// Write text to a process's PTY stdin. Returns true if the write succeeded.
-    pub fn write_to(id: u32, text: &str) -> Result<usize, String> {
+    pub fn write_to(
+        id: u32,
+        text: &str,
+        cancel: Option<&std::sync::atomic::AtomicBool>,
+        timeout: Duration,
+    ) -> Result<usize, ProcessWriteError> {
+        if text.is_empty() {
+            return Ok(0);
+        }
         let writer_arc = Self::with(|r| {
             r.entries.get(&id).and_then(|e| {
                 if matches!(
@@ -533,18 +618,67 @@ impl ProcessRegistry {
                 }
             })
         })
-        .ok_or_else(|| format!("process {id} not found or not running"))?;
+        .ok_or_else(|| ProcessWriteError {
+            stop: ProcessWriteStop::Io,
+            bytes_written: 0,
+            message: format!("process {id} not found or not running"),
+        })?;
 
-        let mut guard = writer_arc.lock().map_err(|e| format!("lock: {e}"))?;
+        let started = Instant::now();
+        let mut guard = loop {
+            if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+                return Err(ProcessWriteError {
+                    stop: ProcessWriteStop::Cancelled,
+                    bytes_written: 0,
+                    message: "write cancelled".into(),
+                });
+            }
+            if started.elapsed() >= timeout {
+                return Err(ProcessWriteError {
+                    stop: ProcessWriteStop::TimedOut,
+                    bytes_written: 0,
+                    message: "write timed out waiting for PTY stdin".into(),
+                });
+            }
+            match writer_arc.try_lock() {
+                Ok(guard) => break guard,
+                Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(
+                        Duration::from_millis(2).min(timeout.saturating_sub(started.elapsed())),
+                    );
+                }
+            }
+        };
         match guard.as_mut() {
             Some(w) => {
-                // W5：write_all 保证部分写不谎报全成；WouldBlock 短暂轮询
-                // 直至写完或调用方超时放弃。
+                // W5：write_all 保证部分写不谎报全成；WouldBlock 会让出 CPU，
+                // 并在取消或调用方预算耗尽时退出。
                 let bytes = text.as_bytes();
                 let mut written = 0usize;
                 loop {
+                    if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)) {
+                        return Err(ProcessWriteError {
+                            stop: ProcessWriteStop::Cancelled,
+                            bytes_written: written,
+                            message: "write cancelled".into(),
+                        });
+                    }
+                    if started.elapsed() >= timeout {
+                        return Err(ProcessWriteError {
+                            stop: ProcessWriteStop::TimedOut,
+                            bytes_written: written,
+                            message: "write timed out waiting for PTY stdin".into(),
+                        });
+                    }
                     match w.write(&bytes[written..]) {
-                        Ok(0) => return Err("write: zero-length write".to_string()),
+                        Ok(0) => {
+                            return Err(ProcessWriteError {
+                                stop: ProcessWriteStop::Io,
+                                bytes_written: written,
+                                message: "write: zero-length write".into(),
+                            });
+                        }
                         Ok(n) => {
                             written += n;
                             if written == bytes.len() {
@@ -552,13 +686,26 @@ impl ProcessRegistry {
                             }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            std::thread::sleep(
+                                Duration::from_millis(20)
+                                    .min(timeout.saturating_sub(started.elapsed())),
+                            );
                         }
-                        Err(e) => return Err(format!("write: {e}")),
+                        Err(e) => {
+                            return Err(ProcessWriteError {
+                                stop: ProcessWriteStop::Io,
+                                bytes_written: written,
+                                message: format!("write: {e}"),
+                            });
+                        }
                     }
                 }
             }
-            None => Err(format!("process {id} has no PTY stdin (not interactive)")),
+            None => Err(ProcessWriteError {
+                stop: ProcessWriteStop::Io,
+                bytes_written: 0,
+                message: format!("process {id} has no PTY stdin (not interactive)"),
+            }),
         }
     }
 
@@ -819,16 +966,40 @@ impl ProcessRegistry {
     /// 两条路径都**收敛状态为 `Killed`**：kill 请求在注册表层面已被受理，
     /// 状态一致性是 subagent `RegistryRef::killed()`（只看 `status == "killed"`）
     /// 能否感知 kill 的前提；「有没有真清理到 OS 进程」由返回值区分。
-    fn kill_tombstoned(tombstone: &mut Tombstone) -> KillOutcome {
-        let pid = tombstone.os_pid;
-        tombstone.mark_killed();
-        match pid {
-            Some(pid) => {
-                Self::cleanup_by_pid(pid);
-                KillOutcome::TombstoneCleaned
+    fn finish_kill(id: u32) {
+        Self::with(|r| {
+            if let Some(entry) = r.entries.get_mut(&id) {
+                *entry.status.lock().unwrap_or_else(|e| e.into_inner()) = ProcStatus::Killed;
+                *entry.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+                entry.kill_in_progress = false;
             }
-            None => KillOutcome::NoOsPid,
+        });
+    }
+
+    /// Stop and reap an owned child without holding the registry mutex.
+    fn terminate_child_and_wait(mut child: std::process::Child) {
+        let pid = child.id();
+        #[cfg(windows)]
+        {
+            use std::process::Command;
+            let tree_killed = Command::new("taskkill")
+                .args(["/pid", &pid.to_string(), "/T", "/F"])
+                .status()
+                .is_ok_and(|status| status.success());
+            if !tree_killed {
+                let _ = child.kill();
+            }
         }
+        #[cfg(not(windows))]
+        {
+            // SAFETY: the pid is the owned Child id. If it is not a process-group
+            // leader or the group signal fails, kill the owned child directly.
+            let group_killed = unsafe { libc::killpg(pid as i32, libc::SIGKILL) } == 0;
+            if !group_killed {
+                let _ = child.kill();
+            }
+        }
+        let _ = child.wait();
     }
 
     /// Kill a process by id（Windows：杀整棵进程树，防止后代进程泄漏管道）。
@@ -841,76 +1012,93 @@ impl ProcessRegistry {
     /// 返回 [`KillOutcome`] 而非 `bool`：调用方必须能区分「真的清理了 os 进程」
     /// 与「有 id 但无 os_pid 可清理」（PR #57 reviewer 阻断 ②）。
     pub fn kill(id: u32) -> KillOutcome {
-        Self::with(|r| {
-            if !r.entries.contains_key(&id) {
-                return match r.tombstone_mut(id) {
-                    Some(tombstone) => Self::kill_tombstoned(tombstone),
-                    // id 从未登记，或墓碑已被容量淘汰（os_pid 已销毁）：
-                    // 不再按 pid 清理，避免误杀复用该 pid 的活进程组。
-                    None => KillOutcome::NotFound,
-                };
-            }
-            // 上面已确认在册，故此处必然命中（同一把锁内无并发修改）。
-            let Some(entry) = r.entries.get(&id) else {
-                return KillOutcome::NotFound;
+        enum Plan {
+            Missing,
+            AlreadyKilled,
+            Tombstone(Option<u32>),
+            Tracked(Option<std::process::Child>, Option<u32>),
+        }
+
+        let gate = Self::with(|r| r.entries.get(&id).map(|entry| Arc::clone(&entry.kill_gate)));
+        let Some(gate) = gate else {
+            let plan = Self::with(|r| match r.tombstone_mut(id) {
+                Some(tombstone) => {
+                    let pid = tombstone.os_pid;
+                    tombstone.mark_killed();
+                    Plan::Tombstone(pid)
+                }
+                None => Plan::Missing,
+            });
+            return match plan {
+                Plan::Tombstone(Some(pid)) => {
+                    Self::cleanup_by_pid(pid);
+                    KillOutcome::TombstoneCleaned
+                }
+                Plan::Tombstone(None) => KillOutcome::NoOsPid,
+                _ => KillOutcome::NotFound,
             };
-            let mut child_opt = entry.child.lock().unwrap_or_else(|e| e.into_inner());
-            match child_opt.take() {
-                Some(mut c) => {
-                    #[cfg(windows)]
-                    {
-                        use std::process::Command;
-                        let _ = Command::new("taskkill")
-                            .args(["/pid", &c.id().to_string(), "/T", "/F"])
-                            .status();
-                        let _ = c.wait();
+        };
+
+        // Multiple callers serialize per process. They wait without holding the
+        // process-wide registry lock, so unrelated process tools stay responsive.
+        let _gate = gate.lock().unwrap_or_else(|e| e.into_inner());
+        let plan = Self::with(|r| {
+            let Some(entry) = r.entries.get_mut(&id) else {
+                return match r.tombstone_mut(id) {
+                    Some(tombstone) => {
+                        let pid = tombstone.os_pid;
+                        tombstone.mark_killed();
+                        Plan::Tombstone(pid)
                     }
-                    #[cfg(not(windows))]
-                    {
-                        // H6：整组 SIGKILL（spawn 侧 process_group(0)），
-                        // 孙进程释放管道写端，reader 可 EOF。
-                        // SAFETY: `killpg` 无内存访问；进程组 id 来自本进程
-                        // `Child::id()`，且子进程由 `process_group(0)` 独立成组，
-                        // 不会误伤调用方所在组。失败（已退出）被有意忽略。
-                        unsafe {
-                            libc::killpg(c.id() as i32, libc::SIGKILL);
-                        }
-                        let _ = c.wait();
-                    }
-                }
-                None => {
-                    // 句柄已被 try_wait 回收：按 os_pid 快照尽力清树。
-                    if let Some(pid) = *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()) {
-                        #[cfg(windows)]
-                        {
-                            use std::process::Command;
-                            let _ = Command::new("taskkill")
-                                .args(["/pid", &pid.to_string(), "/T", "/F"])
-                                .status();
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            // SAFETY: 同 `cleanup_by_pid`：`killpg` 无内存访问，
-                            // pid 取自墓碑的 `os_pid` 快照，失败被有意忽略。
-                            unsafe {
-                                libc::killpg(pid as i32, libc::SIGKILL);
-                            }
-                        }
-                    }
-                }
+                    None => Plan::Missing,
+                };
+            };
+            let status = entry
+                .status
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            if matches!(status, ProcStatus::Killed) {
+                return Plan::AlreadyKilled;
             }
-            if let ProcStatus::Exited(code) =
-                *entry.status.lock().unwrap_or_else(|e| e.into_inner())
-            {
+            entry.kill_in_progress = true;
+            if let ProcStatus::Exited(code) = status {
                 *entry
                     .last_exit_code
                     .lock()
                     .unwrap_or_else(|e| e.into_inner()) = Some(code);
             }
-            *entry.status.lock().unwrap_or_else(|e| e.into_inner()) = ProcStatus::Killed;
-            *entry.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-            KillOutcome::Killed
-        })
+            let child = entry.child.lock().unwrap_or_else(|e| e.into_inner()).take();
+            let pid = child
+                .as_ref()
+                .map(std::process::Child::id)
+                .or_else(|| *entry.os_pid.lock().unwrap_or_else(|e| e.into_inner()));
+            Plan::Tracked(child, pid)
+        });
+
+        match plan {
+            Plan::Missing => KillOutcome::NotFound,
+            Plan::AlreadyKilled => KillOutcome::Killed,
+            Plan::Tombstone(Some(pid)) => {
+                Self::cleanup_by_pid(pid);
+                KillOutcome::TombstoneCleaned
+            }
+            Plan::Tombstone(None) => KillOutcome::NoOsPid,
+            Plan::Tracked(Some(child), _) => {
+                Self::terminate_child_and_wait(child);
+                Self::finish_kill(id);
+                KillOutcome::Killed
+            }
+            Plan::Tracked(None, Some(pid)) => {
+                Self::cleanup_by_pid(pid);
+                Self::finish_kill(id);
+                KillOutcome::Killed
+            }
+            Plan::Tracked(None, None) => {
+                Self::finish_kill(id);
+                KillOutcome::Killed
+            }
+        }
     }
 
     // ── 测试专用钩子（回归夹具用；生产代码不得调用） ──

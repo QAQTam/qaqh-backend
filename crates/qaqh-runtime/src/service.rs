@@ -150,14 +150,12 @@ impl QaqhService {
         if let Some(manager) = self.dsaccount.get() {
             return Ok(manager);
         }
-        let manager = qaqh_dsaccount::DsAccountManager::new(
-            qaqh_dsaccount::AccountStore::default_location(),
-            qaqh_dsaccount::DsClientConfig::default(),
-        );
-        // 进程级装配：`provider_for` 每回合重建 provider，深层调用点只认全局槽位
-        // （理由见 `qaqh_dsaccount::global`）。克隆共享同一份内部状态，不是两份。
-        qaqh_dsaccount::install_manager(manager.clone());
-        // 竞态：两个线程可能同时装配；`set` 失败即沿用先到者的实例。
+        if qaqh_dsaccount::manager().is_none() {
+            qaqh_dsaccount::install_default();
+        }
+        let manager = qaqh_dsaccount::manager()
+            .cloned()
+            .ok_or_else(|| "dsaccount manager unavailable".to_string())?;
         let _ = self.dsaccount.set(manager);
         self.dsaccount
             .get()
@@ -815,27 +813,100 @@ fn spawn_config_file_poller() {
 }
 
 /// `session.new` / `session.create` 共用的 canonical 基线：`(cwd, model)`。
-/// cwd 取 meta.cwd；未绑定工作区时兜底到与会话执行面同一个默认工作根
-/// （`load_session_workspace` 注入的就是这个目录）。旧实现兜底
-/// `std::env::current_dir()`，在 daemon 里就是安装目录，canonical
-/// `SessionCreated.cwd` 因此把 harness 自身目录投影给前端/模型。
+///
+/// cwd 的优先级：**创建请求里显式给出的路径** > 已绑定的 meta.cwd > 默认
+/// 会话工作根。显式路径必须已经存在且是目录，非法值直接拒绝，不降级——
+/// 创世事实、模型提示、工具上下文和沙箱可写根都用这同一个值。
+/// 默认目录由我们创建，与 `load_session_workspace` 注入的目录同源。
 /// 模型读不到配置时记 `unknown`（不阻塞建会话）。
 pub(crate) fn session_canonical_cwd(
     sessions: &qaqh_session::SessionManager,
     session_id: &str,
-) -> (String, String) {
-    let cwd = sessions
-        .workspace_cwd(session_id)
-        .filter(|cwd| !cwd.is_empty() && cwd != ".")
-        .unwrap_or_else(|| {
-            qaqh_types::platform::default_session_workspace_dir(session_id)
-                .to_string_lossy()
-                .into_owned()
-        });
+    requested: Option<&str>,
+) -> Result<(String, String), String> {
     let model = qaqh_config::Config::load()
         .map(|config| config.model)
         .unwrap_or_else(|_| "unknown".to_string());
-    (cwd, model)
+    // Creation must not read the request back out of metadata that genesis has
+    // not written yet: the explicit path wins and is resolved exactly once
+    // (report 2026-10-31 §11.1 F09). An invalid path is rejected, never
+    // downgraded to the default directory.
+    let requested = requested
+        .map(str::trim)
+        .filter(|cwd| !cwd.is_empty() && *cwd != ".");
+    if let Some(requested) = requested {
+        let path = std::path::PathBuf::from(requested);
+        let path = std::fs::canonicalize(&path)
+            .map(normalize_workspace_path)
+            .map_err(|error| {
+                format!(
+                    "session workspace does not exist: {} ({error})",
+                    path.display()
+                )
+            })?;
+        if !path.is_dir() {
+            return Err(format!(
+                "session workspace is not a directory: {}",
+                path.display()
+            ));
+        }
+        return Ok((path.to_string_lossy().into_owned(), model));
+    }
+    let bound = sessions
+        .workspace_cwd(session_id)
+        .filter(|cwd| !cwd.is_empty() && cwd != ".");
+    let cwd = match bound {
+        // A workspace the user picked must already exist: silently creating an
+        // empty directory with the same name hides a vanished project.
+        Some(cwd) => {
+            let path = std::path::PathBuf::from(&cwd);
+            if !path.is_dir() {
+                if !qaqh_types::platform::is_managed_session_workspace(&path) {
+                    return Err(format!(
+                        "session workspace does not exist: {}",
+                        path.display()
+                    ));
+                }
+                std::fs::create_dir_all(&path).map_err(|error| {
+                    format!("create session workspace {}: {error}", path.display())
+                })?;
+            }
+            cwd
+        }
+        // The default workspace is ours to create. It is the same path the
+        // model is told about, the sandbox is given as a writable root, and the
+        // process is started in — a path that does not exist fails the sandbox.
+        None => {
+            let path = qaqh_types::platform::default_session_workspace_dir(session_id);
+            std::fs::create_dir_all(&path).map_err(|error| {
+                format!(
+                    "create default session workspace {}: {error}",
+                    path.display()
+                )
+            })?;
+            path.to_string_lossy().into_owned()
+        }
+    };
+    Ok((cwd, model))
+}
+
+/// Strip the Windows verbatim prefix that `canonicalize` adds.
+///
+/// The resolved path is persisted as `SessionCreated.cwd`, shown in the UI and
+/// used as the sandbox writable root; keeping the verbatim prefix would change
+/// the path shape the user picked for no benefit.
+pub(crate) fn normalize_workspace_path(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+            return std::path::PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = text.strip_prefix(r"\\?\") {
+            return std::path::PathBuf::from(rest.to_string());
+        }
+    }
+    path
 }
 
 /// 在 `session.new` 的持久化阶段写入 canonical 基线。

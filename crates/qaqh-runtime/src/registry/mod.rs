@@ -294,6 +294,9 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     pub(crate) model: Option<&'a str>,
     pub(crate) base_url: Option<&'a str>,
     pub(crate) max_tokens: Option<u32>,
+    /// Workspace the caller explicitly requested for the child session.
+    /// `None` = inherit the parent workspace / default session root.
+    pub(crate) workspace: Option<&'a str>,
     pub(crate) ephemeral: bool,
     /// P1-⑤：父会话档位；legacy/bootstrap 路径回落全局 config。
     pub(crate) permission_level: u8,

@@ -548,6 +548,86 @@
     }
 
     #[test]
+    fn apply_patch_freeform_moves_the_tool_into_a_native_custom_declaration() {
+        // DeepSeek Responses 的 custom 工具只认 apply_patch（官方文档）：
+        // freeform 开启时 apply_patch 退出 function 表、以最小 custom 形状声明；
+        // 其余工具不受影响。
+        let mut p = provider();
+        p.responses_compat.apply_patch_freeform = true;
+        let td = |name: &str| ToolDef {
+            call_type: "function".into(),
+            function: qaqh_types::ToolFunction {
+                name: name.into(),
+                description: "d".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        };
+        let req = build_request(
+            &p,
+            vec![WireMessage::user("hi")],
+            Some(vec![td("apply_patch"), td("exec")]),
+            100,
+            None,
+            None,
+            true,
+        );
+        // apply_patch 不再是 function；exec 留在 function 表。
+        assert_eq!(req.tools.len(), 1);
+        assert_eq!(req.tools[0].name, "exec");
+        let [ToolDeclaration::Tool { tool }] = req.tool_declarations.as_slice() else {
+            panic!("expected exactly one top-level declaration: {:?}", req.tool_declarations);
+        };
+        let ScopedToolDeclaration::Custom { name, description, format } = tool else {
+            panic!("expected a custom declaration: {tool:?}");
+        };
+        assert_eq!(name, "apply_patch");
+        // 空 description = 线上最小形状 {"type":"custom","name":"apply_patch"}。
+        assert_eq!(description, "");
+        assert_eq!(*format, CustomToolFormat::Text);
+    }
+
+    #[test]
+    fn freeform_custom_call_wraps_raw_patch_into_the_canonical_field() {
+        // 回程收口：custom_tool_call 裸补丁文本 → {"patch": raw} ToolUse +
+        // 原样 custom_tool_call provider item（下一轮回放配对用）。
+        let call = mutil_ai::NativeToolCall {
+            kind: mutil_ai::NativeToolKind::Custom,
+            namespace: None,
+            name: "apply_patch".into(),
+            call_id: "call_1".into(),
+            item_id: Some("ctc_1".into()),
+            payload: mutil_ai::NativeToolPayload::RawText("*** Begin Patch\n*** End Patch".into()),
+            completion: mutil_ai::NativeToolCompletion::Completed,
+            provider_state: None,
+        };
+        let blocks = freeform_custom_blocks(&call).expect("custom apply_patch must adapt");
+        assert_eq!(blocks.len(), 2);
+        let ContentBlock::ToolUse { id, name, input } = &blocks[0] else {
+            panic!("expected a ToolUse block: {:?}", blocks[0]);
+        };
+        assert_eq!(id, "call_1");
+        assert_eq!(name, "apply_patch");
+        assert_eq!(
+            input,
+            &serde_json::json!({ "patch": "*** Begin Patch\n*** End Patch" })
+        );
+        let ContentBlock::ResponseOutputItem { item } = &blocks[1] else {
+            panic!("expected a ResponseOutputItem block: {:?}", blocks[1]);
+        };
+        assert_eq!(item["type"], "custom_tool_call");
+        assert_eq!(item["call_id"], "call_1");
+        assert_eq!(item["input"], "*** Begin Patch\n*** End Patch");
+
+        // 普通函数调用与未完成调用不归本收口管。
+        let mut function_call = call.clone();
+        function_call.kind = mutil_ai::NativeToolKind::Function;
+        assert!(freeform_custom_blocks(&function_call).is_none());
+        let mut incomplete = call.clone();
+        incomplete.completion = mutil_ai::NativeToolCompletion::Receiving;
+        assert!(freeform_custom_blocks(&incomplete).is_none());
+    }
+
+    #[test]
     fn effort_clamps_to_declared_bound() {
         // 端点声明 effort_max=high（OpenAI 缺省）：xhigh/max 都被夹到 high
         assert_eq!(
