@@ -2201,6 +2201,9 @@ async fn probe_real_workspace_tool_port_permissions_quota_and_queued_inputs(
         )
         .unwrap();
 
+    // 探针刻意与生产装配分叉：它要一个带配额的 port 和固定策略快照，而不是
+    // 会话配置推导出来的那一份。生产路径的唯一入口是
+    // `qaqh_agent_runtime::session_agent::assembly::assemble`（见 `registry::spawn`）。
     let manager = Arc::new(Mutex::new(
         qaqh_workspace::registration::build_tool_manager(&[]),
     ));
