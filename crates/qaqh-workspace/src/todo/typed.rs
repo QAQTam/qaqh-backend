@@ -14,8 +14,8 @@ use serde_json::Value;
 use crate::ToolRisk;
 use crate::permission::ToolCategory;
 use crate::tool_api::{
-    ToolBody, ToolContentBlock, ToolDisplay, ToolError, ToolErrorKind, ToolExecutionError,
-    ToolHeader, ToolMeta, ToolProjection, TypedTool,
+    ToolBody, ToolContentBlock, ToolDisplay, ToolDisplayItem, ToolError, ToolErrorKind,
+    ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 use super::model::{TODO_LOCK, TodoItem, TodoStatus};
@@ -101,7 +101,6 @@ impl From<&TodoItem> for TodoItemView {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -206,14 +205,31 @@ fn envelope_value<T: Serialize>(output: &T, label: &str) -> Result<Value, String
     Ok(value)
 }
 
-fn todo_display(summary: impl Into<String>) -> ToolDisplay {
+/// todo 的展示投影：除 summary 外，body 直接给结构化条目。
+///
+/// 客户端此前要复刻 `parse_todo_text`（`- [ ]|~|x|- title | desc | evidence`）
+/// 才能渲染卡片；状态词表在这里原样透传，展示层不解释、不归一化。
+fn todo_display(summary: impl Into<String>, items: &[TodoItemView]) -> ToolDisplay {
     ToolDisplay::new(
         ToolHeader::Other {
             label: "todo".to_string(),
         },
-        ToolBody::None,
+        ToolBody::Items {
+            renderer: "todo".to_string(),
+            items: items.iter().map(todo_display_item).collect(),
+        },
     )
     .with_summary(summary)
+}
+
+fn todo_display_item(item: &TodoItemView) -> ToolDisplayItem {
+    ToolDisplayItem {
+        id: Some(item.id.clone()),
+        title: item.title.clone(),
+        status: status_name(&TodoStatus::from(item.status)).to_string(),
+        description: (!item.description.is_empty()).then(|| item.description.clone()),
+        evidence: item.evidence.clone(),
+    }
 }
 
 impl ToolProjection for TodoListOutput {
@@ -224,7 +240,7 @@ impl ToolProjection for TodoListOutput {
     }
 
     fn display(&self, _args: &Value) -> ToolDisplay {
-        todo_display(self.summary_text())
+        todo_display(self.summary_text(), &self.items)
     }
 }
 
@@ -236,7 +252,7 @@ impl ToolProjection for TodoWriteOutput {
     }
 
     fn display(&self, _args: &Value) -> ToolDisplay {
-        todo_display(self.message.clone())
+        todo_display(self.message.clone(), &self.items)
     }
 }
 
@@ -248,7 +264,7 @@ impl ToolProjection for TodoUpdateOutput {
     }
 
     fn display(&self, _args: &Value) -> ToolDisplay {
-        todo_display(self.message.clone())
+        todo_display(self.message.clone(), &self.items)
     }
 }
 

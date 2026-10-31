@@ -2175,7 +2175,6 @@ dependencies = [
  "qaqh-gate",
  "qaqh-mcp",
  "qaqh-memwatch",
- "qaqh-message",
  "qaqh-ringing",
  "qaqh-session",
  "qaqh-skills",
@@ -2426,18 +2425,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qaqh-message"
-version = "2.0.20261028"
-dependencies = [
- "log",
- "qaqh-session",
- "qaqh-types",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
 name = "qaqh-permission"
 version = "2.0.20261028"
 dependencies = [
@@ -2533,7 +2520,6 @@ dependencies = [
  "log",
  "qaqh-domain",
  "qaqh-memwatch",
- "qaqh-message",
  "qaqh-ringing",
  "qaqh-session",
  "qaqh-types",
@@ -2562,12 +2548,12 @@ dependencies = [
  "qaqh-lsp",
  "qaqh-mcp",
  "qaqh-memwatch",
- "qaqh-message",
  "qaqh-profile",
  "qaqh-ringing",
  "qaqh-ringing-runtime",
  "qaqh-session",
  "qaqh-siwc",
+ "qaqh-skills",
  "qaqh-subagent",
  "qaqh-tool-core",
  "qaqh-types",
@@ -2608,7 +2594,6 @@ dependencies = [
  "log",
  "qaqh-agentloop-core",
  "qaqh-domain",
- "qaqh-message",
  "qaqh-types",
  "serde",
  "serde_json",

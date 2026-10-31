@@ -84,6 +84,12 @@ impl ToolProjection for EditOutput {
             self.diff.clone(),
         )
         .with_lines(self.lines_added, self.lines_removed)
+        .with_files(vec![crate::tool_api::ToolDisplayFile {
+            path: self.path.clone(),
+            op: "update".to_string(),
+            lines_added: Some(self.lines_added),
+            lines_removed: Some(self.lines_removed),
+        }])
     }
 }
 
@@ -162,7 +168,9 @@ impl TypedTool for EditTool {
                 return Err(mutation_error(
                     "read_failed",
                     format!("edit: cannot read {raw_path}: {error}"),
-                    Some("Check file permissions, or whether another process still holds the file."),
+                    Some(
+                        "Check file permissions, or whether another process still holds the file.",
+                    ),
                     json!({"path": &raw_path}),
                 ));
             }
@@ -267,10 +275,10 @@ impl TypedTool for EditTool {
         let model_text = if outcome.replaced == 1 {
             let start = outcome.lines[0];
             let end = start + count_lf(&new);
-                format!(
-                    "[OK] edit {raw_path}\n  replaced 1 occurrence (L{start}-L{end})\n  edited region:\n{}\n",
-                    render_success_snippet(&outcome.edited, start, &new)
-                )
+            format!(
+                "[OK] edit {raw_path}\n  replaced 1 occurrence (L{start}-L{end})\n  edited region:\n{}\n",
+                render_success_snippet(&outcome.edited, start, &new)
+            )
         } else {
             let shown = outcome
                 .lines

@@ -105,7 +105,7 @@ async fn materialized_batch_session_spawns_and_reopens_without_reset() {
     let identity = sessions.allocate_session(None).expect("allocate");
     let session_id = identity.session_id.as_str();
     let dir = sessions.session_path_dir(session_id);
-    crate::service::materialize_canonical_session_in(&dir, "/tmp", "test-model", None)
+    crate::service::materialize_canonical_session_in(&dir, "/tmp", "test-model", None, false)
         .expect("materialize");
     let journal_before =
         std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("baseline journal");
@@ -148,8 +148,14 @@ fn v2_residency_overlay_tracks_worker_lifecycle() {
         .expect("allocate root session");
     let session_id = identity.session_id.as_str().to_string();
     let session_dir = sessions.session_path_dir(&session_id);
-    crate::service::materialize_canonical_session_in(&session_dir, "/tmp", "test-model", None)
-        .expect("materialize canonical session");
+    crate::service::materialize_canonical_session_in(
+        &session_dir,
+        "/tmp",
+        "test-model",
+        None,
+        false,
+    )
+    .expect("materialize canonical session");
 
     let hub = Arc::new(V2ProjectionHub::new("registry-residency-test"));
     let mut registry = AgentRegistry::new(sessions.clone());

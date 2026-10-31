@@ -60,8 +60,8 @@ pub use descriptor::{
     ToolExposure, ToolMeta, ToolName, ToolSource,
 };
 pub use display::{
-    PathOp, ToolBody, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolHeader, ToolMetrics,
-    ToolTerminalState,
+    PathOp, ToolBody, ToolDisplay, ToolDisplayFile, ToolDisplayFn, ToolDisplayItem,
+    ToolDisplayOutcome, ToolHeader, ToolMetrics, ToolTerminalState,
 };
 pub use official_web::{OfficialHit, OfficialPage, OfficialWebBackend, OfficialWebTools};
 

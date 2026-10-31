@@ -70,10 +70,20 @@ async fn open_device(router: &Router, state: &AppState, scope: Scope) -> (String
         .issue("e2e-device", "node", scope);
     let response = router
         .clone()
-        .oneshot(request("POST", "/ringing/v2/clients/open", Some(&token), None, Some(open_body())))
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/clients/open",
+            Some(&token),
+            None,
+            Some(open_body()),
+        ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "device open should succeed");
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "device open should succeed"
+    );
     let json = body_json(response).await;
     let client_session = json["client_session_id"].as_str().unwrap().to_string();
     (token, device_id, client_session)
@@ -343,7 +353,11 @@ async fn view_token_can_attach_then_read() {
     let (token, _, cs) = open_device(&app, &state, Scope::View).await;
 
     let (status, json) = post_command(&app, &token, &cs, session_attach(SEED)).await;
-    assert_eq!(status, StatusCode::OK, "view token must be allowed to attach: {json}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "view token must be allowed to attach: {json}"
+    );
     assert_eq!(json["status"], "accepted");
 
     // attach 后归属建立；会话本身不存在 → 404（而非 403）。
@@ -454,7 +468,13 @@ async fn admin_is_exempt_from_ownership_and_scope() {
 
     let open = app
         .clone()
-        .oneshot(request("POST", "/ringing/v2/clients/open", Some(ADMIN), None, Some(open_body())))
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/clients/open",
+            Some(ADMIN),
+            None,
+            Some(open_body()),
+        ))
         .await
         .unwrap();
     let cs = body_json(open).await["client_session_id"]
@@ -483,7 +503,13 @@ async fn devices_list_excludes_token_material() {
     let (device_token, device_id) = pair_device(&app, "view").await;
 
     let response = app
-        .oneshot(request("GET", "/ringing/v2/devices", Some(ADMIN), None, None))
+        .oneshot(request(
+            "GET",
+            "/ringing/v2/devices",
+            Some(ADMIN),
+            None,
+            None,
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);

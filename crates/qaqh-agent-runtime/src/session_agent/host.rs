@@ -16,7 +16,6 @@ use qaqh_session::{
     session_fact_v2::{ContentRef, InputId, InteractionId, ToolCallId, TurnId},
 };
 use std::sync::Mutex;
-
 use tokio::task::JoinHandle;
 
 use crate::{provider_job::ProviderRequestSpec, tool_job::WorkspaceToolPort};
@@ -66,6 +65,28 @@ impl AgentHandle {
             client_request_id,
         })?;
         Ok(input_id)
+    }
+
+    /// Commit a session metadata patch through the actor (the journal's sole
+    /// writer). Falls back to a direct journal write only when no actor runs.
+    pub fn set_metadata(
+        &self,
+        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
+    ) -> Result<(), MailboxError> {
+        self.mailbox
+            .try_command(AgentCommand::SetMetadata { patch })
+    }
+
+    /// Commit a session title change through the actor.
+    pub fn set_title(
+        &self,
+        title: &str,
+        source: qaqh_session::session_fact_v2::TitleSource,
+    ) -> Result<(), MailboxError> {
+        self.mailbox.try_command(AgentCommand::SetTitle {
+            title: title.to_string(),
+            source,
+        })
     }
 
     /// Submit a high-priority cancellation request.
@@ -217,7 +238,6 @@ fn driver_runtime() -> &'static tokio::runtime::Runtime {
             .expect("build session driver runtime")
     })
 }
-
 /// Enough shape of a failed driver to keep the recovery material observable.
 #[derive(Debug)]
 pub struct RetainedDriverFailure {

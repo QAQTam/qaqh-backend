@@ -168,6 +168,7 @@ impl AgentRegistry {
             &cwd,
             options.model.unwrap_or("unknown"),
             Some(parent_identity.session_id.clone()),
+            true,
         )?;
 
         let identity = Some((parent.clone(), child_path.clone()));
@@ -355,9 +356,7 @@ impl AgentRegistry {
             .workspace_cwd(session_id)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
-        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
-            &[],
-        );
+        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
         tool_manager.apply_init(spec.tools.clone(), session_id);
         let tool_defs = crate::session_agent::assembly::tool_defs(&tool_manager);
         let manager = std::sync::Arc::new(std::sync::Mutex::new(tool_manager));
@@ -466,9 +465,7 @@ impl AgentRegistry {
             .workspace_cwd(session_id)
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| session_dir.clone());
-        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(
-            &[],
-        );
+        let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
         let allowed_tools = if agent_config.tool_allowlist_enabled {
             agent_config.tool_allowlist.clone()
         } else {

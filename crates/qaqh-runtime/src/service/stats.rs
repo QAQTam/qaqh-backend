@@ -49,43 +49,74 @@ pub(crate) fn activity(
     sessions: &qaqh_session::SessionManager,
     session_id: &str,
 ) -> Result<Value, String> {
-    let (_, messages) = sessions
-        .load(session_id)
-        .ok_or_else(|| "session not found".to_string())?;
-    let mut tools = std::collections::HashMap::new();
-    for message in &messages {
-        if message.role == "assistant" {
-            for block in &message.content {
-                if let qaqh_types::ContentBlock::ToolUse { id, name, input } = block {
-                    tools.insert(id.clone(), (name.clone(), input.to_string()));
-                }
-            }
+    use qaqh_session::session_fact_v2::{FactPayload, ToolTerminalStatus};
+
+    let session_dir = sessions.session_path_dir(session_id);
+    if !qaqh_session::canonical::has_committed_facts(&session_dir) {
+        return Err("session not found".to_string());
+    }
+    let identity = qaqh_session::canonical::open_session_identity(&session_dir)
+        .map_err(|error| error.to_string())?;
+    let commit = qaqh_session::session_commit::SessionCommit::open(
+        &session_dir,
+        identity.session_id,
+        identity.log_id,
+        crate::session_agent::assembly::default_context_budget(),
+    )
+    .map_err(|error| error.to_string())?;
+    let facts = commit
+        .committed_facts()
+        .map_err(|error| error.to_string())?;
+
+    // Tool calls are declared with their name and an args blob; completions only
+    // carry the call id, so the two passes have to meet here.
+    const MAX_ARGS_BYTES: usize = 64 * 1024;
+    let mut declared: std::collections::HashMap<String, (String, String)> = Default::default();
+    for fact in &facts {
+        if let FactPayload::ToolCallDeclared(call) = &fact.payload {
+            let args = commit
+                .get_blob(&call.args_ref, MAX_ARGS_BYTES)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes).ok())
+                .unwrap_or_default();
+            declared.insert(
+                call.call_id.as_str().to_string(),
+                (call.tool_name.clone(), args),
+            );
         }
     }
-    // 一手 DTO（service_methods::SessionToolActivity）：`session.get_activity`
-    // 的结果形状由该类型 + TYPED_METHODS 边界校验共同钉住，此处不再手拼 json。
+
     let mut result = Vec::new();
-    for message in &messages {
-        if message.role == "tool" {
-            for block in &message.content {
-                if let qaqh_types::ContentBlock::ToolResult {
-                    tool_use_id,
-                    result: tool_result,
-                } = block
-                {
-                    let (tool_name, args) = tools.get(tool_use_id).cloned().unwrap_or_default();
-                    result.push(SessionToolActivity {
-                        tool_name,
-                        summary: tool_result.summary().to_owned(),
-                        status: tool_result.status,
-                        time: message.msg_id.map(|v| v.to_string()).unwrap_or_default(),
-                        args,
-                    });
-                }
-            }
-        }
+    for fact in &facts {
+        let FactPayload::ToolFinished(finished) = &fact.payload else {
+            continue;
+        };
+        let (tool_name, args) = declared
+            .get(finished.call_id.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let status = match finished.terminal_status {
+            ToolTerminalStatus::Succeeded => qaqh_types::ToolStatus::Ok,
+            ToolTerminalStatus::Partial => qaqh_types::ToolStatus::Partial,
+            ToolTerminalStatus::Backgrounded => qaqh_types::ToolStatus::Backgrounded,
+            ToolTerminalStatus::Cancelled => qaqh_types::ToolStatus::Cancelled,
+            _ => qaqh_types::ToolStatus::Error,
+        };
+        let summary = finished
+            .error
+            .as_ref()
+            .map(|error| error.message.clone())
+            .unwrap_or_default();
+        result.push(SessionToolActivity {
+            tool_name,
+            summary,
+            status,
+            finished_at_ms: finished.finished_at_ms,
+            args,
+        });
     }
     result.reverse();
+    result.truncate(50);
     serde_json::to_value(result).map_err(err)
 }
 

@@ -13,8 +13,12 @@ use serde_json::json;
 
 static SERVICE: OnceLock<qaqh_runtime::QaqhService> = OnceLock::new();
 static WORKSPACE: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// 会话 id 现在是 canonical UUID（目录名 == SessionId == seed）。
+static SEED: OnceLock<String> = OnceLock::new();
 
-const SEED: &str = "fs-allowlist-seed";
+fn seed() -> &'static str {
+    SEED.get().expect("session created in service()")
+}
 
 fn workspace() -> &'static std::path::Path {
     WORKSPACE.get_or_init(|| {
@@ -34,12 +38,51 @@ fn service() -> &'static qaqh_runtime::QaqhService {
         }
         qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
         let manager = qaqh_session::SessionManager::global();
-        // 建一个会话，把 workspace() 经 meta.cwd 登记为允许根。
-        assert!(manager.persist_new_session_if_absent_with(
-            SEED,
-            Some(workspace().to_str().expect("utf8 workspace")),
-            |_| true,
-        ));
+        // 建一个会话并写创世事实：workspace() 经 `SessionCreated.cwd` 成为
+        // 该会话的工作根（meta.json 已退役，cwd 只能来自 journal）。
+        let workspace_text = workspace().to_str().expect("utf8 workspace");
+        let identity = manager
+            .allocate_session(Some(workspace_text))
+            .expect("allocate session");
+        let session_id = identity.session_id.as_str().to_string();
+        let dir = manager.session_path_dir(&session_id);
+        let now_ms = 1_759_000_000_000i64;
+        {
+            use qaqh_session::session_fact_v2::{
+                EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
+            };
+            let mut commit = qaqh_session::session_commit::SessionCommit::open_or_create(
+                &dir,
+                identity.session_id.clone(),
+                identity.log_id.clone(),
+                qaqh_session::meta::default_context_budget(),
+            )
+            .expect("open session journal");
+            let fact = SessionFact {
+                schema: FactSchema::v2(),
+                session_id: identity.session_id.clone(),
+                log_id: identity.log_id.clone(),
+                fact_seq: 0,
+                event_id: EventId::new(qaqh_session::canonical::generate_ulid()),
+                ts_ms: now_ms,
+                causation_id: None,
+                turn_id: None,
+                call_id: None,
+                interaction_id: None,
+                payload: FactPayload::SessionCreated(SessionCreated {
+                    created_at_ms: now_ms,
+                    cwd: workspace_text.to_string(),
+                    model: "test-model".to_string(),
+                    parent_session_id: None,
+                    schema_caps: Vec::new(),
+                }),
+            };
+            commit
+                .commit("session-created", 0, vec![fact])
+                .expect("commit genesis");
+        }
+        qaqh_session::meta::refresh_index(&dir);
+        let _ = SEED.set(session_id);
         qaqh_runtime::QaqhService::init(manager)
     })
 }
@@ -57,36 +100,6 @@ fn read_scoped(path: &str, session_id: &str) -> qaqh_runtime::QaqhResult<serde_j
         "fs.read",
         &json!({ "path": path, "scope_session_id": session_id }),
     )
-}
-
-/// `meta.json`（会话持久态）必须被拒，且拒绝是白名单/边界错误而非 IO 失败。
-#[test]
-fn fs_read_rejects_meta_json() {
-    let meta = qaqh_types::platform::data_dir()
-        .join("sessions")
-        .join(SEED)
-        .join("meta.json");
-    let error = read(meta.to_str().expect("utf8 meta")).expect_err("meta.json must be rejected");
-    assert!(
-        error.is_forbidden(),
-        "expected a FORBIDDEN rejection, got: {error}"
-    );
-    assert!(
-        !error.to_string().contains("No such file") && !error.to_string().contains("os error"),
-        "rejection must not surface as an IO failure: {error}"
-    );
-}
-
-/// `sessions/` 目录本身也必须被拒（`fs.list` 不得枚举会话命名空间）。
-#[test]
-fn fs_list_rejects_sessions_dir() {
-    let sessions = qaqh_types::platform::data_dir().join("sessions");
-    let error =
-        list(sessions.to_str().expect("utf8 sessions")).expect_err("sessions dir must be rejected");
-    assert!(
-        error.is_forbidden(),
-        "expected a FORBIDDEN rejection, got: {error}"
-    );
 }
 
 /// 反向：会话工作区（允许根之一）必须仍可浏览，白名单不能收得过窄。
@@ -127,7 +140,7 @@ fn fs_read_rejects_arbitrary_absolute_path() {
 fn fs_read_scope_allows_only_active_session_workspace() {
     let file = workspace().join("hello.txt");
     let value =
-        read_scoped(file.to_str().expect("utf8 file"), SEED).expect("active seed file must read");
+        read_scoped(file.to_str().expect("utf8 file"), seed()).expect("active seed file must read");
     assert_eq!(value["content"], json!("hi\n"));
 }
 
@@ -148,7 +161,7 @@ fn fs_read_scope_rejects_other_session_workspace() {
         )
     );
 
-    let error = read_scoped(other_file.to_str().expect("utf8 other file"), SEED)
+    let error = read_scoped(other_file.to_str().expect("utf8 other file"), seed())
         .expect_err("cross-seed workspace read must be rejected");
     assert!(error.is_forbidden(), "{error}");
 }

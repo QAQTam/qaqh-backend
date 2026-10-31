@@ -234,7 +234,11 @@ pub(crate) async fn handle_device_revoke(
         .unwrap_or_else(|error| error.into_inner())
         .revoke(&device_id);
     if revoked.is_none() {
-        return api_error_response(StatusCode::NOT_FOUND, "device_not_found", "unknown device id");
+        return api_error_response(
+            StatusCode::NOT_FOUND,
+            "device_not_found",
+            "unknown device id",
+        );
     }
     state
         .leases

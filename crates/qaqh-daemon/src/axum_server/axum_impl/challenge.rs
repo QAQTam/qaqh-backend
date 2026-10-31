@@ -292,10 +292,7 @@ mod tests {
     }
 
     /// device 面的输入是 admin 投影 DTO（与 handler 序列化同一份类型）。
-    fn interaction_pending(
-        id: &str,
-        kind: RingingV2InteractionKind,
-    ) -> RingingV2PendingApprovals {
+    fn interaction_pending(id: &str, kind: RingingV2InteractionKind) -> RingingV2PendingApprovals {
         RingingV2PendingApprovals {
             pending_permission: None,
             pending_interaction: Some(RingingV2PendingInteractionView {

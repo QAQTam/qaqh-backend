@@ -1,7 +1,7 @@
 //! Durable append-only BoardFact store.
 //!
-//! Storage layout and durability contract are frozen in
-//! `docs/current/spec/2026-09-26-team-message-board.md`.
+//! Storage layout and durability contract are frozen; the write path below is
+//! authoritative.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};

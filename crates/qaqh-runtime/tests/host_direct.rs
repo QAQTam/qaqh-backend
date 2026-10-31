@@ -12,10 +12,10 @@ use qaqh_domain::InterAgentDelivery;
 use qaqh_runtime::ringing::V2ProjectionHub;
 use qaqh_runtime::{QaqhService, RingingHub};
 use qaqh_session::canonical::{
-    CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid, read_committed_facts,
+    CanonicalLog, CanonicalSessionIdentity, CanonicalSessionStore, WriterId, generate_ulid,
 };
-use qaqh_session::session_commit::SessionCommit;
 use qaqh_session::projection::{MailboxProjection, Projection, ProjectionSink};
+use qaqh_session::session_commit::SessionCommit;
 use qaqh_session::session_fact_v2::{
     AgentPath, EventId, FactPayload, FactSchema, MailboxMessageState, SessionCreated, SessionFact,
     SessionId, SubagentSpawnConfig, SubagentSpawned, ToolCallId, TurnFinished, TurnId,
@@ -32,28 +32,32 @@ use qaqh_subagent::{
 
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
-/// 活格式（batch journal）里已提交的事实。
+/// 读取一个会话已提交的全部事实（batch journal 是唯一存储代）。
 ///
-/// 测试原用 legacy `CommittedFactReader`（读 `events.jsonl`）；两套格式互斥，
-/// spawn 写的是 batch journal。这里走只读视图 `read_committed_facts`
-/// （不抢写锁，worker 运行时可并发读）。
-fn committed_facts(session_dir: &std::path::Path) -> Vec<SessionFact> {
-    let identity = CanonicalSessionIdentity::open(session_dir).expect("session identity");
-    read_committed_facts(
-        session_dir,
-        identity.session_id.clone(),
-        identity.log_id.clone(),
-    )
-    .expect("read committed facts")
+/// 旧 `CommittedFactReader` 读的是已退役的 `events.commit.json` 世代（2026-10
+/// 硬切），测试侧统一走批量日志的读端口。
+fn read_all_facts(
+    dir: &std::path::Path,
+    session_id: SessionId,
+    log_id: qaqh_session::session_fact_v2::LogId,
+) -> Vec<SessionFact> {
+    qaqh_session::canonical::read_session_facts(dir, session_id, log_id)
+        .expect("read committed session facts")
 }
 
-/// 获取测试锁，容忍中毒：中毒只说明**别的**用例 panic 过，不代表本用例的
-/// 前置条件不成立（与 `session_inprocess` 同一口径；旧写法 `.expect()`
-/// 让一个用例 panic 连锁弄红同文件其余全部用例）。
-fn test_guard() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+/// Sync tests still drive tokio-spawned workers: the thin SessionAgent task is
+/// created with `tokio::spawn`, so the test thread must have an ambient
+/// runtime. One multi-thread runtime per test binary; the workers make progress
+/// on its worker threads while the test body blocks on std channels.
+fn test_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime")
+    })
 }
 
 /// Shared per-process test environment: unique temp root, `QAQH_DATA_DIR`,
@@ -87,9 +91,14 @@ fn shared_test_env() -> std::path::PathBuf {
 }
 
 #[test]
-#[ignore = "阻塞：batch owner 未实现 child delivery 转移（commit_state.rs:372 拒绝 InterAgentCommunication）"]
+#[ignore = "child delivery facts (SubagentSpawned / InterAgentCommunication) are still rejected by the batch CommitState — see the follow-up on commit_state.rs:372"]
 fn qaqh_service_host_spawn_subscribe_send_close() {
-    let _test_lock = test_guard();
+    let _test_lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 运行上下文是线程局部的：每个用例跑在自己的线程上，各自进入一次
+    // 并故意泄漏 guard，让同步用例体里的 `tokio::spawn` 有 reactor。
+    std::mem::forget(test_runtime().enter());
     let root = shared_test_env();
     let data = root.join("data");
 
@@ -98,7 +107,10 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     let host: &dyn SubagentHost = &service;
     let nohub_rx = host.subscribe("no-hub-seed");
     assert!(
-        nohub_rx.receiver().recv_timeout(Duration::from_millis(200)).is_err(),
+        nohub_rx
+            .receiver()
+            .recv_timeout(Duration::from_millis(200))
+            .is_err(),
         "subscribe without hub must not block forever"
     );
 
@@ -168,7 +180,11 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
     let child_identity =
         CanonicalSessionIdentity::open_or_create(&child_dir).expect("child canonical identity");
     assert_eq!(child_identity.session_id.as_str(), child_session_id);
-    let child_facts = committed_facts(&child_dir);
+    let child_facts = read_all_facts(
+        &child_dir,
+        child_identity.session_id.clone(),
+        child_identity.log_id.clone(),
+    );
     assert!(
         child_facts.iter().any(|fact| matches!(
             &fact.payload,
@@ -191,7 +207,11 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
 
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let delivered_facts = loop {
-        let facts = committed_facts(&child_dir);
+        let facts = read_all_facts(
+            &child_dir,
+            child_identity.session_id.clone(),
+            child_identity.log_id.clone(),
+        );
         let has_communication = facts
             .iter()
             .any(|fact| matches!(&fact.payload, FactPayload::InterAgentCommunication(_)));
@@ -207,7 +227,15 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out waiting for child mailbox delivery"
+            "timed out waiting for child mailbox delivery (comm={has_communication} input={has_input}; facts={:?})",
+            facts
+                .iter()
+                .map(|fact| format!("{:?}", fact.payload)
+                    .split(['(', ' '])
+                    .next()
+                    .unwrap_or("?")
+                    .to_string())
+                .collect::<Vec<_>>()
         );
         std::thread::sleep(Duration::from_millis(25));
     };
@@ -468,9 +496,14 @@ fn qaqh_service_host_spawn_subscribe_send_close() {
 }
 
 #[test]
-#[ignore = "阻塞：batch owner 未实现 SubagentSpawned，且 subagent_spawn_config 仍用 legacy reader"]
+#[ignore = "child delivery facts (SubagentSpawned / InterAgentCommunication) are still rejected by the batch CommitState — see the follow-up on commit_state.rs:372"]
 fn delivery_reloads_unloaded_child_through_loaded_parent() {
-    let _test_lock = test_guard();
+    let _test_lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 运行上下文是线程局部的：每个用例跑在自己的线程上，各自进入一次
+    // 并故意泄漏 guard，让同步用例体里的 `tokio::spawn` 有 reactor。
+    std::mem::forget(test_runtime().enter());
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-reload-test-{}-{}",
         std::process::id(),
@@ -697,7 +730,11 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
     let child_canonical = CanonicalSessionIdentity::open(&child_dir).expect("child identity");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let facts = committed_facts(&child_dir);
+        let facts = read_all_facts(
+            &child_dir,
+            child_canonical.session_id.clone(),
+            child_canonical.log_id.clone(),
+        );
         if facts.iter().any(|fact| {
             matches!(
                 &fact.payload,
@@ -730,7 +767,12 @@ fn delivery_reloads_unloaded_child_through_loaded_parent() {
 
 #[test]
 fn broadcast_targets_and_outbound_quota_are_rejected() {
-    let _test_lock = test_guard();
+    let _test_lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 运行上下文是线程局部的：每个用例跑在自己的线程上，各自进入一次
+    // 并故意泄漏 guard，让同步用例体里的 `tokio::spawn` 有 reactor。
+    std::mem::forget(test_runtime().enter());
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-quota-test-{}-{}",
         std::process::id(),
@@ -816,7 +858,12 @@ fn broadcast_targets_and_outbound_quota_are_rejected() {
 
 #[test]
 fn task_board_host_round_trips_task_lifecycle() {
-    let _test_lock = test_guard();
+    let _test_lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 运行上下文是线程局部的：每个用例跑在自己的线程上，各自进入一次
+    // 并故意泄漏 guard，让同步用例体里的 `tokio::spawn` 有 reactor。
+    std::mem::forget(test_runtime().enter());
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-task-board-test-{}-{}",
         std::process::id(),
@@ -927,7 +974,12 @@ fn task_board_host_round_trips_task_lifecycle() {
 
 #[test]
 fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
-    let _test_lock = test_guard();
+    let _test_lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 运行上下文是线程局部的：每个用例跑在自己的线程上，各自进入一次
+    // 并故意泄漏 guard，让同步用例体里的 `tokio::spawn` 有 reactor。
+    std::mem::forget(test_runtime().enter());
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-board-test-{}-{}",
         std::process::id(),
@@ -1030,7 +1082,11 @@ fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
 
     let child_dir = sessions.session_path_dir(&child);
     let child_identity = CanonicalSessionIdentity::open(&child_dir).expect("child identity");
-    let facts = committed_facts(&child_dir);
+    let facts = read_all_facts(
+        &child_dir,
+        child_identity.session_id.clone(),
+        child_identity.log_id.clone(),
+    );
     assert!(
         !facts
             .iter()
@@ -1043,9 +1099,14 @@ fn board_host_persists_posts_and_does_not_start_idle_subscribers() {
 }
 
 #[test]
-#[ignore = "阻塞：batch owner 未实现 child delivery 转移（commit_state.rs:372 拒绝 InterAgentCommunication）"]
+#[ignore = "child delivery facts (SubagentSpawned / InterAgentCommunication) are still rejected by the batch CommitState — see the follow-up on commit_state.rs:372"]
 fn steer_and_interject_are_canonical_safe_point_deliveries() {
-    let _test_lock = test_guard();
+    let _test_lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 运行上下文是线程局部的：每个用例跑在自己的线程上，各自进入一次
+    // 并故意泄漏 guard，让同步用例体里的 `tokio::spawn` 有 reactor。
+    std::mem::forget(test_runtime().enter());
     let root = std::env::temp_dir().join(format!(
         "qaqh-host-steer-test-{}-{}",
         std::process::id(),
@@ -1117,7 +1178,11 @@ fn steer_and_interject_are_canonical_safe_point_deliveries() {
     let child_identity = CanonicalSessionIdentity::open(&child_dir).expect("child identity");
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let facts = loop {
-        let facts = committed_facts(&child_dir);
+        let facts = read_all_facts(
+            &child_dir,
+            child_identity.session_id.clone(),
+            child_identity.log_id.clone(),
+        );
         let has_steer = facts.iter().any(|fact| {
             matches!(
                 &fact.payload,
@@ -1195,7 +1260,12 @@ fn steer_and_interject_are_canonical_safe_point_deliveries() {
 /// （600ms ≈ 25 次解析，断言为红）；修复后等待 commit 通知，恰 1 次。
 #[test]
 fn wait_agent_empty_wait_parses_canonical_log_once() {
-    let _test_lock = test_guard();
+    let _test_lock = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // 运行上下文是线程局部的：每个用例跑在自己的线程上，各自进入一次
+    // 并故意泄漏 guard，让同步用例体里的 `tokio::spawn` 有 reactor。
+    std::mem::forget(test_runtime().enter());
     let _root = shared_test_env();
 
     let service = QaqhService::init(qaqh_session::SessionManager::global());
@@ -1205,8 +1275,8 @@ fn wait_agent_empty_wait_parses_canonical_log_once() {
     let caller = identity.session_id.as_str().to_string();
 
     let no_cancel = || false;
-    let before = qaqh_runtime::MAILBOX_ACTIVITY_PARSE_COUNT
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let before =
+        qaqh_runtime::MAILBOX_ACTIVITY_PARSE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
     let outcome = service
         .wait_agent(WaitAgentRequest {
             caller_session_id: &caller,
@@ -1215,8 +1285,8 @@ fn wait_agent_empty_wait_parses_canonical_log_once() {
             targets: &[],
         })
         .expect("empty wait must not fail");
-    let after = qaqh_runtime::MAILBOX_ACTIVITY_PARSE_COUNT
-        .load(std::sync::atomic::Ordering::Relaxed);
+    let after =
+        qaqh_runtime::MAILBOX_ACTIVITY_PARSE_COUNT.load(std::sync::atomic::Ordering::Relaxed);
 
     assert_eq!(
         outcome,

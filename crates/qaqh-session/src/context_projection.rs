@@ -214,11 +214,12 @@ impl ContextProjector {
                 ));
             }
             FactPayload::ProviderResponseCommitted(payload) => {
-                let pending = self.pending_response.as_ref().ok_or(
-                    ContextProjectionError::InvalidPrefix(
-                        "provider response without a pending model round".into(),
-                    ),
-                )?;
+                let pending =
+                    self.pending_response
+                        .as_ref()
+                        .ok_or(ContextProjectionError::InvalidPrefix(
+                            "provider response without a pending model round".into(),
+                        ))?;
                 if pending != &payload.turn_id {
                     return Err(ContextProjectionError::InvalidPrefix(
                         "provider response does not match the pending round".into(),

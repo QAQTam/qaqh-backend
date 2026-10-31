@@ -82,11 +82,7 @@ fn parse_line(line: &str, line_no: usize) -> Result<TodoItem, String> {
     if title.chars().count() > 100 {
         return invalid("title max 100 chars".into());
     }
-    let description = fields
-        .next()
-        .map(str::trim)
-        .unwrap_or_default()
-        .to_string();
+    let description = fields.next().map(str::trim).unwrap_or_default().to_string();
     if description.chars().count() > 200 {
         return invalid("description max 200 chars".into());
     }
@@ -117,7 +113,10 @@ pub(crate) fn parse_todo_text(text: &str) -> Result<Vec<TodoItem>, String> {
             continue;
         }
         let item = parse_line(line, offset + 1)?;
-        if items.iter().any(|existing: &TodoItem| existing.title == item.title) {
+        if items
+            .iter()
+            .any(|existing: &TodoItem| existing.title == item.title)
+        {
             return Err(json_err_string(
                 "invalid_input",
                 format!(
@@ -146,11 +145,7 @@ pub(crate) fn render_todo_text(store: &TodoStore) -> String {
         .items
         .iter()
         .map(|item| {
-            let mut line = format!(
-                "- {} {}",
-                status_name(&item.status),
-                item.title
-            );
+            let mut line = format!("- {} {}", status_name(&item.status), item.title);
             if !item.description.is_empty() || item.evidence.is_some() {
                 line.push_str(&format!(" | {}", item.description));
             }
@@ -169,10 +164,9 @@ mod tests {
 
     #[test]
     fn parses_all_four_markers_with_optional_fields() {
-        let items = parse_todo_text(
-            "- [ ] a | desc a\n- [~] b\n- [x] c | | verified\n[-] d | gone",
-        )
-        .unwrap();
+        let items =
+            parse_todo_text("- [ ] a | desc a\n- [~] b\n- [x] c | | verified\n[-] d | gone")
+                .unwrap();
         assert_eq!(items.len(), 4);
         assert_eq!(items[0].status, TodoStatus::Pending);
         assert_eq!(items[0].description, "desc a");

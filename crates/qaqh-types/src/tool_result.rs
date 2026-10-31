@@ -95,7 +95,8 @@ pub struct ToolResultMetrics {
     pub output_bytes: u64,
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub retry_count: u32,
-    /// 别名/MCP 解析后的实际工具名；None = 与卡片 name 相同。
+    /// 实际执行的工具名（typed adapter 总是填充；`None` 仅见于手工构造的
+    /// legacy 结果，此时客户端回退卡片上的 name）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -126,11 +127,18 @@ pub struct ToolResultDisplay {
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
-    /// 终态行差（文件变更类工具）。0/0 = 无变更或未接线；旧 client 忽略即可。
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub lines_added: u32,
-    #[serde(default, skip_serializing_if = "is_zero_u32")]
-    pub lines_removed: u32,
+    /// 逐文件行差（文件变更类工具）。空数组 = 不知道该文件的权威行差；
+    /// 客户端不得用 `?? 1` / `step.name.includes("write")` 之类填补。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<ToolResultDisplayFile>,
+    /// 终态行差（文件变更类工具）。
+    ///
+    /// `None` = **未接线/不知道**；`Some(0)` = 已知无变化。旧 wire 用 `0/0`
+    /// 同时表示这两件事，客户端只能编一个默认值——这正是「把不知道写成知道」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_added: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_removed: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub header: Option<ToolResultDisplayHeader>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -138,6 +146,18 @@ pub struct ToolResultDisplay {
     /// 结构化终态。旧 client 忽略即可；新 client 不再从文本猜 `[OK]`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<ToolResultDisplayOutcome>,
+}
+
+/// 单个被改文件的权威行差（`ToolResultDisplay.files` 的元素）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultDisplayFile {
+    pub path: String,
+    /// `add` | `update` | `delete`（工具域词表，原样透传）。
+    pub op: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_added: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lines_removed: Option<u32>,
 }
 
 /// 展示面终态（#336 P2）。
@@ -239,8 +259,34 @@ pub enum ToolResultDisplayBody {
         name: String,
         session_id: String,
     },
+    /// v2 结构化条目列表（todo 类工具）。`renderer` 选择渲染器（如 `"todo"`），
+    /// `items` 可直接渲染。
+    ///
+    /// 字段名不能是 `kind`：会与本枚举的内部标签 `tag = "kind"` 冲突，
+    /// 使整个 `Serialize` / `Deserialize` derive 失败。
+    Items {
+        renderer: String,
+        #[serde(default)]
+        items: Vec<ToolResultDisplayItem>,
+    },
     #[serde(other)]
     Unknown,
+}
+
+/// `ToolResultDisplayBody::Items` 的元素。
+///
+/// `status` 是工具域自己的词表，wire 层不做归一化：未知值原样透传，
+/// 客户端不得把它折叠成某个默认状态（把「不知道」渲染成「pending」）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolResultDisplayItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub title: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -372,6 +418,22 @@ impl ToolResult {
                     ToolResultDisplayBody::Subagent { name, session_id } => {
                         usage.add_string(name, false);
                         usage.add_string(session_id, false);
+                    }
+                    ToolResultDisplayBody::Items { items, .. } => {
+                        usage.add_vec_capacity::<ToolResultDisplayItem>(items.capacity());
+                        for item in items {
+                            if let Some(id) = &item.id {
+                                usage.add_string(id, false);
+                            }
+                            usage.add_string(&item.title, false);
+                            usage.add_string(&item.status, false);
+                            if let Some(description) = &item.description {
+                                usage.add_string(description, true);
+                            }
+                            if let Some(evidence) = &item.evidence {
+                                usage.add_string(evidence, true);
+                            }
+                        }
                     }
                 }
             }
@@ -860,8 +922,9 @@ mod tests {
         let result = ToolResult::ok("typed").with_display(ToolResultDisplay {
             summary: Some("typed summary".into()),
             diff: None,
-            lines_added: 0,
-            lines_removed: 0,
+            files: Vec::new(),
+            lines_added: None,
+            lines_removed: None,
             header: Some(ToolResultDisplayHeader::Other {
                 label: "typed".into(),
             }),
