@@ -416,9 +416,38 @@ pub struct InteractionRequested {
     pub turn_id: TurnId,
     pub kind: InteractionKind,
     pub request_ref: ContentRef,
+    /// 该交互可选的按钮：daemon 按 `kind` 给出，客户端不再按 `kind` 猜。
+    /// 旧事实没有这个字段 → 反序列化为空 vec，客户端此时才回退到按 kind 渲染。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<InteractionChoice>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at_ms: Option<i64>,
     pub requested_at_ms: i64,
+}
+
+/// 交互按钮的视觉权重。`tone` 只影响渲染，不参与决策语义。
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionChoiceTone {
+    Primary,
+    #[default]
+    Secondary,
+    Destructive,
+}
+
+/// 交互的一个可选项：`decision` 是回传时写入
+/// [`InteractionResolved::decision`] 的值；`label` 由 daemon 拥有，
+/// 客户端不再为每个 `InteractionKind` 硬编码 approve/reject/trust。
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionChoice {
+    pub decision: InteractionDecision,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tone: InteractionChoiceTone,
 }
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -667,7 +696,7 @@ pub struct RecoveryRef {
 }
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SessionMetadataPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -681,6 +710,40 @@ pub struct SessionMetadataPatch {
     pub parent_session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_caps: Option<Vec<String>>,
+    /// Session-level BYOK profile. Empty string clears it (follow the global
+    /// `active_profile`); absent leaves it untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Reasoning effort override. Empty string clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// 0 = code, 1 = plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u8>,
+    /// standard | minimal | custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_tools: Option<Vec<String>>,
+    /// Skills session state (prompt-prefix relevant, so it must survive a restart).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<qaqh_types::SkillSessionStateV2>,
+    /// Frozen `[Environment]` annotation for the first user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_annotation: Option<String>,
+    /// Subagent sessions are thrown away on close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<bool>,
+    /// Accumulated provider usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageTotals>,
+}
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub totals: qaqh_types::UsageInfo,
+    pub requests: u32,
+    pub cache_reported_requests: u32,
 }
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]

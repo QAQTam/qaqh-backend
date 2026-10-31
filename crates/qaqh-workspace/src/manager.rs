@@ -475,9 +475,9 @@ impl ToolManager {
 
     /// Do not let the legacy all-unknown allowlist fallback widen a native plan.
     pub(crate) fn model_plan_has_invalid_allowlist(&self) -> bool {
-        self.allowed_raw.as_ref().is_some_and(|raw| {
-            !raw.is_empty() && self.allowed.is_none()
-        })
+        self.allowed_raw
+            .as_ref()
+            .is_some_and(|raw| !raw.is_empty() && self.allowed.is_none())
     }
 
     // ── Three-phase execution for parallel tool support ──
@@ -522,7 +522,8 @@ impl ToolManager {
     ) -> Result<PreparedCall, ToolExecReport> {
         if !self.is_allowed(name) {
             let msg = format!(
-                "[ERROR] Tool '{}' is not permitted by the tool allowlist.", name
+                "[ERROR] Tool '{}' is not permitted by the tool allowlist.",
+                name
             );
             return Err(ToolExecReport {
                 success: false,
@@ -929,7 +930,16 @@ mod tests {
         mgr.set_global_allowed(Some(vec!["read".into(), "unknown".into()]));
         assert_eq!(names(&mgr), vec!["read"]);
         assert!(mgr.search_tools("exec", 10).is_empty());
-        assert!(mgr.prepare_req("c1".into(), "exec", serde_json::json!({}), std::path::Path::new("."), None).is_err());
+        assert!(
+            mgr.prepare_req(
+                "c1".into(),
+                "exec",
+                serde_json::json!({}),
+                std::path::Path::new("."),
+                None
+            )
+            .is_err()
+        );
         mgr.set_allowed(vec!["exec".into()]);
         assert!(names(&mgr).is_empty());
         mgr.set_allowed(vec![]);
@@ -1488,9 +1498,9 @@ impl ToolManager {
         let max_results = max_results.max(1);
         let mut scored: Vec<(i64, SearchHit)> = Vec::new();
         let push = |scored: &mut Vec<(i64, SearchHit)>,
-                        name: &str,
-                        description: &str,
-                        exposure: ToolExposure| {
+                    name: &str,
+                    description: &str,
+                    exposure: ToolExposure| {
             if !self.is_allowed(name)
                 || matches!(exposure, ToolExposure::Hidden | ToolExposure::Internal)
                 || name == TOOL_SEARCH_NAME

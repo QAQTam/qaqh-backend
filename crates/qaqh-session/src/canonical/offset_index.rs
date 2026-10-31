@@ -221,4 +221,3 @@ pub(super) fn prefix_digest(index: &CommittedPrefixIndex) -> [u8; 32] {
 pub(super) fn checkpoint_event_id(checkpoint: &Checkpoint) -> &EventId {
     &checkpoint.last_event_id
 }
-

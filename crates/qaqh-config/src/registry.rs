@@ -154,9 +154,25 @@ struct LegacyEndpoint {
     retry: Option<qaqh_types::RetrySpec>,
 }
 
+/// 迁移表自己的旧协议词表 → 现行 wire。
+///
+/// `Wire::parse` 只认 `chat|responses|messages|gemini`（D4 硬切删掉了旧拼写
+/// 别名），但 `assets/legacy-providers.toml` 里写的是当年那套 `openai` /
+/// `anthropic` 字面量。迁移层是唯一还该理解旧词表的地方，所以映射留在本模块，
+/// 不再借 `Wire::parse` 的别名兜底。
+fn legacy_wire(protocol: &str) -> Option<Wire> {
+    match protocol.trim().to_ascii_lowercase().as_str() {
+        "chat" | "openai" | "openai-compatible" | "chat_completions" => Some(Wire::Chat),
+        "responses" => Some(Wire::Responses),
+        "messages" | "anthropic" | "claude" => Some(Wire::Messages),
+        "gemini" | "google" => Some(Wire::Gemini),
+        _ => None,
+    }
+}
+
 impl LegacyEndpoint {
     fn wire(&self) -> Wire {
-        Wire::parse(&self.protocol).unwrap_or_default()
+        legacy_wire(&self.protocol).unwrap_or_default()
     }
 
     /// 旧平铺字段 → compat：只保留"与该 wire 缺省不同"的表达，重复缺省的值归一掉，
@@ -282,9 +298,9 @@ mod tests {
                     provider.id,
                     endpoint.id
                 );
-                // 旧 protocol 字面量必须都能落到某条 wire。
+                // 旧 protocol 字面量必须都能落到某条 wire（走迁移层自己的词表）。
                 assert!(
-                    Wire::parse(&endpoint.protocol).is_some(),
+                    legacy_wire(&endpoint.protocol).is_some(),
                     "{}/{} 的 protocol 无法识别: {}",
                     provider.id,
                     endpoint.id,

@@ -16,7 +16,6 @@
 //! 门面在 `runtime::set_context` 首次调用时注册一个读 ctx 的 fn 指针，本 crate
 //! 不再依赖门面。
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod command_class;
 pub mod conflict;
@@ -29,7 +28,7 @@ pub use command_class::{
 };
 pub use permission::{
     PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory, TrustedFolderSet,
-    classify_risk, extract_target_paths, extract_target_paths_in, is_sensitive_session_path,
+    classify_risk, extract_target_paths, extract_target_paths_in, is_self_administration_path,
     normalize_lexically, patch_target_paths, path_within_dir, resolve_target_path,
     resolve_target_path_in,
 };

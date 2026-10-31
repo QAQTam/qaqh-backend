@@ -85,7 +85,10 @@ pub fn parse_ask_input(input: &str) -> Result<NormalizedAsk, AskUserError> {
             return Ok(());
         };
         if *options_seen && options.is_empty() {
-            return Err(invalid(line, "`Options:` requires at least one option".into()));
+            return Err(invalid(
+                line,
+                "`Options:` requires at least one option".into(),
+            ));
         }
         if options.is_empty() && !*allow_custom {
             return Err(invalid(
@@ -117,21 +120,33 @@ pub fn parse_ask_input(input: &str) -> Result<NormalizedAsk, AskUserError> {
         let line = raw.trim();
         if line.is_empty() {
             finish(
-                &mut questions, &mut question, &mut options, &mut options_seen,
-                &mut allow_custom, &mut allow_custom_seen, &mut unique_options, line_number,
+                &mut questions,
+                &mut question,
+                &mut options,
+                &mut options_seen,
+                &mut allow_custom,
+                &mut allow_custom_seen,
+                &mut unique_options,
+                line_number,
             )?;
             continue;
         }
         if let Some(text) = line.strip_prefix("Question: ") {
             if question.is_some() {
-                return Err(invalid(line_number, "separate question blocks with a blank line".into()));
+                return Err(invalid(
+                    line_number,
+                    "separate question blocks with a blank line".into(),
+                ));
             }
             let text = text.trim();
             if text.is_empty() {
                 return Err(invalid(line_number, "question text is required".into()));
             }
             if text.chars().count() > ASK_MAX_QUESTION_CHARS {
-                return Err(invalid(line_number, format!("question exceeds {ASK_MAX_QUESTION_CHARS} characters")));
+                return Err(invalid(
+                    line_number,
+                    format!("question exceeds {ASK_MAX_QUESTION_CHARS} characters"),
+                ));
             }
             question = Some(text.to_owned());
             continue;
@@ -141,52 +156,84 @@ pub fn parse_ask_input(input: &str) -> Result<NormalizedAsk, AskUserError> {
         }
         if line == "Options:" {
             if options_seen || allow_custom_seen {
-                return Err(invalid(line_number, "`Options:` must appear once before `Allow custom:`".into()));
+                return Err(invalid(
+                    line_number,
+                    "`Options:` must appear once before `Allow custom:`".into(),
+                ));
             }
             options_seen = true;
             continue;
         }
         if let Some(text) = line.strip_prefix("- ") {
             if !options_seen || allow_custom_seen {
-                return Err(invalid(line_number, "options must follow `Options:` and precede `Allow custom:`".into()));
+                return Err(invalid(
+                    line_number,
+                    "options must follow `Options:` and precede `Allow custom:`".into(),
+                ));
             }
             let text = text.trim();
             if text.is_empty() {
                 return Err(invalid(line_number, "option text is required".into()));
             }
             if text.chars().count() > ASK_MAX_OPTION_CHARS {
-                return Err(invalid(line_number, format!("option exceeds {ASK_MAX_OPTION_CHARS} characters")));
+                return Err(invalid(
+                    line_number,
+                    format!("option exceeds {ASK_MAX_OPTION_CHARS} characters"),
+                ));
             }
             if !unique_options.insert(text.to_owned()) {
                 return Err(invalid(line_number, format!("duplicate option `{text}`")));
             }
             options.push(text.to_owned());
             if options.len() > ASK_MAX_OPTIONS_PER_QUESTION {
-                return Err(invalid(line_number, format!("maximum is {ASK_MAX_OPTIONS_PER_QUESTION} options")));
+                return Err(invalid(
+                    line_number,
+                    format!("maximum is {ASK_MAX_OPTIONS_PER_QUESTION} options"),
+                ));
             }
             continue;
         }
         if let Some(value) = line.strip_prefix("Allow custom: ") {
             if allow_custom_seen {
-                return Err(invalid(line_number, "`Allow custom:` may appear once".into()));
+                return Err(invalid(
+                    line_number,
+                    "`Allow custom:` may appear once".into(),
+                ));
             }
             allow_custom = match value {
                 "yes" => true,
                 "no" => false,
-                _ => return Err(invalid(line_number, "expected exactly `Allow custom: yes` or `Allow custom: no`".into())),
+                _ => {
+                    return Err(invalid(
+                        line_number,
+                        "expected exactly `Allow custom: yes` or `Allow custom: no`".into(),
+                    ));
+                }
             };
             allow_custom_seen = true;
             continue;
         }
-        return Err(invalid(line_number, "unknown line; use `Question:`, `Options:`, `- option`, or `Allow custom:`".into()));
+        return Err(invalid(
+            line_number,
+            "unknown line; use `Question:`, `Options:`, `- option`, or `Allow custom:`".into(),
+        ));
     }
     let final_line = input.lines().count().max(1) + 1;
     finish(
-        &mut questions, &mut question, &mut options, &mut options_seen,
-        &mut allow_custom, &mut allow_custom_seen, &mut unique_options, final_line,
+        &mut questions,
+        &mut question,
+        &mut options,
+        &mut options_seen,
+        &mut allow_custom,
+        &mut allow_custom_seen,
+        &mut unique_options,
+        final_line,
     )?;
     if questions.is_empty() {
-        return Err(invalid(final_line, "at least one question is required".into()));
+        return Err(invalid(
+            final_line,
+            "at least one question is required".into(),
+        ));
     }
     let mode = if questions.len() == 1 {
         NormalizedAskMode::Single
@@ -265,8 +312,7 @@ impl ToolProjection for AskOutput {
 
 pub struct AskTool;
 
-pub fn ask_model_input_representation(
-) -> crate::tool_api::NativeTextRepresentation {
+pub fn ask_model_input_representation() -> crate::tool_api::NativeTextRepresentation {
     crate::tool_api::NativeTextRepresentation::text_tool(
         "input",
         serde_json::json!({}),
@@ -402,7 +448,13 @@ mod tests {
         assert_eq!(error.code, "invalid_arguments");
         assert!(error.retryable);
         assert!(error.message.contains("ASK_FORMAT_ERROR"));
-        assert!(error.hint.as_deref().unwrap_or_default().contains("not shown"));
+        assert!(
+            error
+                .hint
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not shown")
+        );
     }
 
     #[test]
@@ -411,12 +463,22 @@ mod tests {
             ("", "ask_format_invalid"),
             ("ASK v2\nQuestion: Q?", "ask_format_invalid"),
             ("ASK v1\nQuestion: Q?\nOptions:", "ask_format_invalid"),
-            ("ASK v1\nQuestion: Q?\nAllow custom: no", "ask_format_invalid"),
-            ("ASK v1\nQuestion: Q?\nOptions:\n- A\n- A", "ask_format_invalid"),
+            (
+                "ASK v1\nQuestion: Q?\nAllow custom: no",
+                "ask_format_invalid",
+            ),
+            (
+                "ASK v1\nQuestion: Q?\nOptions:\n- A\n- A",
+                "ask_format_invalid",
+            ),
             ("ASK v1\nQuestion: Q?\nUnknown: value", "ask_format_invalid"),
             ("ASK v1\nQuestion: Q?\nQuestion: Q2?", "ask_format_invalid"),
         ] {
-            assert_eq!(parse_ask_input(text).unwrap_err().code, expected, "{text:?}");
+            assert_eq!(
+                parse_ask_input(text).unwrap_err().code,
+                expected,
+                "{text:?}"
+            );
         }
     }
 

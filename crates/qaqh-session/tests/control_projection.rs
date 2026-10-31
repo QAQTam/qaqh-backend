@@ -160,6 +160,7 @@ fn interaction_requested_for(
             turn_id: turn.clone(),
             kind: InteractionKind::Ask,
             request_ref: content_ref(2),
+            choices: Vec::new(),
             expires_at_ms: Some(1_789_830_000_100),
             requested_at_ms: 1_789_830_000_006,
         }),

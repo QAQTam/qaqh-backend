@@ -7,7 +7,7 @@
 use serde_json::{Value, json};
 
 /// 把 `session.list` 的返回收敛为列表卡片字段:
-/// `session_id, title, created_at, updated_at, message_count, turn_count,
+/// `session_id, title, created_at, updated_at, turn_count,
 /// status, archived, ephemeral`。
 ///
 /// 非数组输入(防护)收敛为空数组;缺失字段以 Null/false 兜底,保证键总是存在
@@ -24,7 +24,6 @@ pub fn sanitize_session_list(value: Value) -> Value {
                 "title": entry.get("title").cloned().unwrap_or(Value::Null),
                 "created_at": entry.get("created_at").cloned().unwrap_or(Value::Null),
                 "updated_at": entry.get("updated_at").cloned().unwrap_or(Value::Null),
-                "message_count": entry.get("message_count").cloned().unwrap_or(Value::Null),
                 "turn_count": entry.get("turn_count").cloned().unwrap_or(Value::Null),
                 "status": entry.get("status").cloned().unwrap_or(json!("not_running")),
                 "archived": entry.get("archived").cloned().unwrap_or(Value::Bool(false)),
@@ -69,7 +68,6 @@ mod tests {
             "title",
             "created_at",
             "updated_at",
-            "message_count",
             "turn_count",
             "status",
             "archived",

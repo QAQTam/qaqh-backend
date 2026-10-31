@@ -236,6 +236,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         SessionActivityParams, SessionCreateParams, SessionCreateResult, SessionGetActivityParams,
         SessionListParams, SessionMetaParams, SessionRenameParams, SessionSetEffortParams,
         SessionSetProfileParams, SessionSetToolModeParams, SessionToolActivity,
+        SkillCatalogDiagnostic, SkillCatalogEntry, SkillsCatalogParams, SkillsCatalogResult,
         WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceDetachParams, WorkspaceGetParams,
         WorkspaceListParams, WorkspaceMoveSessionParams, WorkspaceRenameParams, WorkspaceSetParams,
     };
@@ -411,9 +412,34 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             tool_name: "fs_read".to_owned(),
             summary: "read synthetic file".to_owned(),
             status: qaqh_types::ToolStatus::Ok,
-            time: "42".to_owned(),
+            finished_at_ms: 42,
             args: "{\"path\":\"/synthetic/workspace/README.md\"}".to_owned(),
         }],
+    )?;
+    write_fixture(
+        stage,
+        "service-skills-catalog-params.json",
+        &SkillsCatalogParams {
+            cwd: Some("/synthetic/workspace".to_owned()),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-skills-catalog-result.json",
+        &SkillsCatalogResult {
+            skills: vec![SkillCatalogEntry {
+                name: "qaqh-core".to_owned(),
+                description: "synthetic skill".to_owned(),
+                scope: "user".to_owned(),
+                origin: "user".to_owned(),
+                path: "/synthetic/skills/qaqh-core".to_owned(),
+            }],
+            diagnostics: vec![SkillCatalogDiagnostic {
+                severity: "warning".to_owned(),
+                path: "/synthetic/skills/broken-skill".to_owned(),
+                message: "synthetic diagnostic".to_owned(),
+            }],
+        },
     )?;
     write_fixture(
         stage,
@@ -584,7 +610,6 @@ fn session_list_entry_fixture() -> qaqh_types::SessionListEntry {
     meta.created_at = 1_759_000_000_000;
     meta.updated_at = 1_759_000_060_000;
     meta.model = "synthetic-model".into();
-    meta.message_count = 3;
     meta.turn_count = 1;
     meta.title = Some("synthetic session".into());
     meta.cwd = Some("/synthetic/workspace".into());
@@ -842,7 +867,7 @@ fn write_index(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
          import type { RingingV2EventEnvelope } from \"./types/qaqh/RingingV2EventEnvelope\";\n\
          export type ClientV2Bootstrap = RingingV2Bootstrap<ClientV2ControlState, ConversationSnapshot, ClientV2ToolState>;\n\
          export type ClientV2Event = RingingV2EventEnvelope<ProjectionPayload>;\n\
-         export type ClientV2Payload = ProjectionPayload;\n",
+         export type fact::ProjectionPayload = ProjectionPayload;\n",
     );
     write(stage, "index.ts", &output)?;
     Ok(())

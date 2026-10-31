@@ -12,7 +12,6 @@ qaqh-domain = { path = "../qaqh-domain" }
 qaqh-gate = { path = "../qaqh-gate" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
-qaqh-message = { path = "../qaqh-message" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-skills = { path = "../qaqh-skills" }

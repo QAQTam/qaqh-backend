@@ -46,7 +46,10 @@ pub fn execute_authorized(
         }
     };
     let permission_level = PermissionLevel::from_u8(
-        ambient.as_ref().map(|ctx| ctx.permission_level).unwrap_or(0),
+        ambient
+            .as_ref()
+            .map(|ctx| ctx.permission_level)
+            .unwrap_or(0),
     );
     let context = ToolCallContext {
         call_id: call.call_id().to_string(),

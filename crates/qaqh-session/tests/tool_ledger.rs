@@ -7,16 +7,16 @@ use qaqh_session::{
         stable_workspace_resource_id, ulid_from_text,
     },
     session_fact_v2::{
-        ActorKind, ActorRef, AgentPath, ContentHash, ContentRef, EventId, ExecutionId, FactPayload,
-        InputAccepted, InputId, InputKind, InputPurpose, InterAgentCommunication,
-        InterAgentContent, InterAgentDelivery, InteractionDecision, InteractionExpired,
-        InteractionExpiryReason, InteractionId, InteractionKind, InteractionRequested,
-        InteractionResolved, InterruptReason, LogId, MessageId, PolicyDecisionRef, RecoveryId,
-        RecoveryRef, ResourceKind, SessionId, SideEffectClass, SubagentFinished,
-        SubagentSpawned, SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent,
-        ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-        AssistantBlockKind, AssistantBlockSealed, BlockId, ModelRoundStarted, TurnFinished,
-        TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal, UsageInfo,
+        ActorKind, ActorRef, AgentPath, AssistantBlockKind, AssistantBlockSealed, BlockId,
+        ContentHash, ContentRef, EventId, ExecutionId, FactPayload, InputAccepted, InputId,
+        InputKind, InputPurpose, InterAgentCommunication, InterAgentContent, InterAgentDelivery,
+        InteractionDecision, InteractionExpired, InteractionExpiryReason, InteractionId,
+        InteractionKind, InteractionRequested, InteractionResolved, InterruptReason, LogId,
+        MessageId, ModelRoundStarted, PolicyDecisionRef, RecoveryId, RecoveryRef, ResourceKind,
+        SessionId, SideEffectClass, SubagentFinished, SubagentSpawned, SubagentTerminalStatus,
+        ToolCallId, ToolError, ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics,
+        ToolReplayCapability, ToolTerminalStatus, TurnFinished, TurnId, TurnInterrupted, TurnMode,
+        TurnStarted, TurnTerminal, UsageInfo,
     },
 };
 
@@ -95,6 +95,7 @@ fn interaction_requested() -> InteractionRequested {
         turn_id: TurnId::new("turn_01J00000000000000000000050"),
         kind: InteractionKind::Permission,
         request_ref: content_ref(5),
+        choices: Vec::new(),
         expires_at_ms: None,
         requested_at_ms: NOW_MS + 39,
     }
@@ -237,21 +238,50 @@ fn turn_terminal_dedup_survives_reopen() {
     let dir = tempfile::tempdir().unwrap();
     let mut ledger = open_ledger(dir.path());
     let tid = turn_id(72);
-    ledger.append_turn_started(event_id(90), TurnStarted {
-        turn_id: tid.clone(), input_id: input_id(72), mode: TurnMode::Normal, recovery_ref: None,
-    }, NOW_MS + 1).unwrap();
-    let first = ledger.append_turn_finished(event_id(91), TurnFinished {
-        turn_id: tid.clone(), terminal: TurnTerminal::Completed, usage: None, error: None,
-        finished_at_ms: NOW_MS + 2,
-    }, NOW_MS + 2).unwrap();
+    ledger
+        .append_turn_started(
+            event_id(90),
+            TurnStarted {
+                turn_id: tid.clone(),
+                input_id: input_id(72),
+                mode: TurnMode::Normal,
+                recovery_ref: None,
+            },
+            NOW_MS + 1,
+        )
+        .unwrap();
+    let first = ledger
+        .append_turn_finished(
+            event_id(91),
+            TurnFinished {
+                turn_id: tid.clone(),
+                terminal: TurnTerminal::Completed,
+                usage: None,
+                error: None,
+                finished_at_ms: NOW_MS + 2,
+            },
+            NOW_MS + 2,
+        )
+        .unwrap();
     drop(ledger);
     let mut ledger = open_ledger(dir.path());
-    let repeated = ledger.append_turn_finished(event_id(92), TurnFinished {
-        turn_id: tid, terminal: TurnTerminal::Cancelled, usage: None, error: None,
-        finished_at_ms: NOW_MS + 3,
-    }, NOW_MS + 3).unwrap();
+    let repeated = ledger
+        .append_turn_finished(
+            event_id(92),
+            TurnFinished {
+                turn_id: tid,
+                terminal: TurnTerminal::Cancelled,
+                usage: None,
+                error: None,
+                finished_at_ms: NOW_MS + 3,
+            },
+            NOW_MS + 3,
+        )
+        .unwrap();
     assert_eq!(repeated.fact_seq, first.fact_seq);
-    assert!(matches!(repeated.payload, FactPayload::TurnFinished(ref end) if end.terminal == TurnTerminal::Completed));
+    assert!(
+        matches!(repeated.payload, FactPayload::TurnFinished(ref end) if end.terminal == TurnTerminal::Completed)
+    );
 }
 
 #[test]
@@ -327,12 +357,23 @@ fn turn_lifecycle_appends_flow_through_and_rebuild() {
         .expect("append turn finished");
     assert_eq!(finished.fact_seq, started.fact_seq + 3);
 
-    let duplicate = ledger.append_turn_finished(event_id(86), TurnFinished {
-        turn_id: tid.clone(), terminal: TurnTerminal::Cancelled, usage: None,
-        error: None, finished_at_ms: NOW_MS + 86,
-    }, NOW_MS + 86).expect("preserve first terminal");
+    let duplicate = ledger
+        .append_turn_finished(
+            event_id(86),
+            TurnFinished {
+                turn_id: tid.clone(),
+                terminal: TurnTerminal::Cancelled,
+                usage: None,
+                error: None,
+                finished_at_ms: NOW_MS + 86,
+            },
+            NOW_MS + 86,
+        )
+        .expect("preserve first terminal");
     assert_eq!(duplicate.fact_seq, finished.fact_seq);
-    assert!(matches!(duplicate.payload, FactPayload::TurnFinished(ref end) if end.terminal == TurnTerminal::Completed));
+    assert!(
+        matches!(duplicate.payload, FactPayload::TurnFinished(ref end) if end.terminal == TurnTerminal::Completed)
+    );
 
     // Interrupted facts carry the previous fact sequence and a recovery ref.
     ledger
@@ -361,9 +402,7 @@ fn turn_lifecycle_appends_flow_through_and_rebuild() {
             },
             NOW_MS + 85,
         ),
-        Err(ToolLedgerError::Canonical(
-            CanonicalError::Validation(_)
-        ))
+        Err(ToolLedgerError::Canonical(CanonicalError::Validation(_)))
     ));
 
     drop(ledger);

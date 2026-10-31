@@ -36,6 +36,11 @@ pub fn clamp_display_body(text: &str) -> (String, bool) {
 /// 有精确 op 语义（write/edit/delete）的工具应覆写 `ToolProjection::display`。
 pub(crate) fn derive_default_header(args: &serde_json::Value) -> ToolHeader {
     use super::args::field;
+    let path_arg = || {
+        field::PATH_ALIASES
+            .iter()
+            .find_map(|key| args.get(*key).and_then(serde_json::Value::as_str))
+    };
     if let Some(command) = args.get(field::COMMAND).and_then(serde_json::Value::as_str) {
         return ToolHeader::Shell {
             command: command.to_owned(),
@@ -44,13 +49,10 @@ pub(crate) fn derive_default_header(args: &serde_json::Value) -> ToolHeader {
     if let Some(query) = args.get(field::PATTERN).and_then(serde_json::Value::as_str) {
         return ToolHeader::Query {
             query: query.to_owned(),
-            scope: args
-                .get(field::PATH)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
+            scope: path_arg().map(str::to_owned),
         };
     }
-    if let Some(path) = args.get(field::PATH).and_then(serde_json::Value::as_str) {
+    if let Some(path) = path_arg() {
         return ToolHeader::Path {
             path: path.to_owned(),
             op: PathOp::Read,
@@ -81,11 +83,13 @@ pub struct ToolDisplay {
     pub summary: Option<String>,
     /// 统一 diff（文件变更类工具）。
     pub diff: Option<String>,
+    /// 逐文件行差。空 = 不知道该文件的权威行差（**不要**用 0 冒充）。
+    pub files: Vec<ToolDisplayFile>,
     /// 终态行差（文件变更类工具；与 summary 里的 `+N -M` 同源）。
-    /// 0/0 = 无变更或未接线。置于展示平面而非 `metrics`：metrics 由框架整段
-    /// 重建（H4），工具写入的取值会被冲掉。
-    pub lines_added: u32,
-    pub lines_removed: u32,
+    /// `None` = 未接线/不知道；`Some(0)` = 已知无变化。置于展示平面而非
+    /// `metrics`：metrics 由框架整段重建（H4），工具写入的取值会被冲掉。
+    pub lines_added: Option<u32>,
+    pub lines_removed: Option<u32>,
     pub header: ToolHeader,
     pub body: ToolBody,
     /// 由框架填充；工具实现不得决定取值（H4）。
@@ -115,8 +119,14 @@ impl ToolDisplay {
 
     /// 文件变更类工具的终态行差（本工具自己算出的权威值，框架不覆写）。
     pub fn with_lines(mut self, added: u32, removed: u32) -> Self {
-        self.lines_added = added;
-        self.lines_removed = removed;
+        self.lines_added = Some(added);
+        self.lines_removed = Some(removed);
+        self
+    }
+
+    /// 逐文件行差（文件变更类工具）。空表表示「不知道」，不是「零」。
+    pub fn with_files(mut self, files: Vec<ToolDisplayFile>) -> Self {
+        self.files = files;
         self
     }
 
@@ -207,6 +217,37 @@ pub enum ToolBody {
         name: String,
         session_id: String,
     },
+    /// v2 结构化条目列表。`renderer` 选择渲染器（如 `"todo"`），`items` 是
+    /// 可直接渲染的 DTO：客户端不再解析 `Text` 里的 `- [ ] title | desc`
+    /// 语法来还原状态。`status` 是工具域自己的词表，展示层不解释、不改写。
+    Items {
+        renderer: String,
+        items: Vec<ToolDisplayItem>,
+    },
+}
+
+/// 结构化条目（`ToolBody::Items` 的元素）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolDisplayItem {
+    /// 工具域内的稳定 id（todo 的 `title` 才是身份，故可为空）。
+    pub id: Option<String>,
+    pub title: String,
+    /// 工具域状态词表，原样透传（如 `pending|in_progress|completed|cancelled`）。
+    pub status: String,
+    pub description: Option<String>,
+    pub evidence: Option<String>,
+}
+
+/// 单个被改文件的权威行差（`ToolDisplay.files` 的元素）。
+///
+/// `op` 是工具域词表（`add` | `update` | `delete`），展示层原样透传；
+/// `lines_*` 为 `None` 表示该文件的计数未知。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ToolDisplayFile {
+    pub path: String,
+    pub op: String,
+    pub lines_added: Option<u32>,
+    pub lines_removed: Option<u32>,
 }
 
 /// 运行信息（契约 §3.2）。`elapsed_ms = None` 表示本期未接线 metrics，
@@ -216,6 +257,8 @@ pub struct ToolMetrics {
     pub elapsed_ms: Option<u64>,
     pub output_bytes: u64,
     pub retry_count: u32,
+    /// 实际执行的工具名（框架总是填充）。用于给缺失 header 的结果兜出
+    /// 显式 `header.kind = other`。
     pub effective_tool_name: Option<String>,
     pub user_initiated: bool,
 }

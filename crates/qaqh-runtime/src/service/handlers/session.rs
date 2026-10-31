@@ -7,6 +7,8 @@ use qaqh_ringing::RingingCommand;
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::QaqhService;
+use qaqh_session::session_fact_v2::{SessionMetadataPatch, TitleSource};
+
 use crate::service::command::SessionCommand;
 use crate::service::params::optional_tool_mode;
 use crate::service::stats::{activity, dashboard};
@@ -19,7 +21,7 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
         }
         SessionCommand::SessionMeta(args) => {
             let session_id = args.session_id;
-            let Some(meta) = service.sessions.load_meta(&session_id) else {
+            let Some(meta) = service.session_meta(&session_id) else {
                 return Ok(Value::Null);
             };
             // 单条与 `session.list` 的条目**同一个形状**（G2）：同样的
@@ -60,16 +62,6 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             let session_id = identity.session_id.as_str().to_string();
             service.sessions.clear_active();
 
-            if let Some(profile) = args.profile.as_deref().filter(|name| !name.is_empty()) {
-                service.sessions.persist_profile(&session_id, Some(profile));
-            }
-            if let Some(effort) = args.effort.as_deref().filter(|effort| !effort.is_empty()) {
-                service.sessions.persist_effort(&session_id, Some(effort));
-            }
-            if let Some(title) = args.title.as_deref().filter(|title| !title.is_empty()) {
-                service.sessions.update_title(&session_id, title);
-            }
-
             let (canonical_cwd, model) = session_canonical_cwd(&service.sessions, &session_id);
             if let Err(error) = materialize_canonical_session(&session_id, &canonical_cwd, &model) {
                 let _ = service.sessions.delete(&session_id);
@@ -78,10 +70,28 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
                     error,
                 ));
             }
+            let mut patch = SessionMetadataPatch::default();
+            if let Some(profile) = args.profile.as_deref().filter(|name| !name.is_empty()) {
+                patch.profile = Some(profile.to_string());
+            }
+            if let Some(effort) = args.effort.as_deref().filter(|effort| !effort.is_empty()) {
+                patch.effort = Some(effort.to_string());
+            }
+            if patch != SessionMetadataPatch::default() {
+                service
+                    .write_meta(&session_id, patch)
+                    .map_err(QaqhError::message)?;
+            }
+            if let Some(title) = args.title.as_deref().filter(|title| !title.is_empty()) {
+                service
+                    .write_title(&session_id, title, TitleSource::User)
+                    .map_err(QaqhError::message)?;
+            }
             service
                 .registry()
                 .map_err(QaqhError::message)?
-                .spawn_new(&session_id)?;
+                .spawn_new(&session_id)
+                .map_err(QaqhError::message)?;
             Ok(json!({ "session_id": session_id }))
         }
         SessionCommand::SessionResume(args) => {
@@ -89,7 +99,8 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             service
                 .registry()
                 .map_err(QaqhError::message)?
-                .get_or_spawn(&args.session_id)?;
+                .get_or_spawn(&args.session_id)
+                .map_err(QaqhError::message)?;
             Ok(Value::Null)
         }
         SessionCommand::SessionSetToolMode(args) => {
@@ -106,8 +117,14 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             // CK-PERSIST：持久化失败 → 400 返回前端，前端回滚乐观值；
             // 不允许「应用成功但没落盘」的假切换（重启即丢）。
             service
-                .sessions
-                .persist_tool_mode(&args.session_id, &tool_mode, &custom_tools)
+                .write_meta(
+                    &args.session_id,
+                    SessionMetadataPatch {
+                        tool_mode: Some(tool_mode.clone()),
+                        custom_tools: Some(custom_tools.clone()),
+                        ..Default::default()
+                    },
+                )
                 .map_err(|error| QaqhError::context("persist tool_mode failed", error))?;
             service.send_ringing_cmd(
                 args.session_id,
@@ -136,6 +153,55 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
         SessionCommand::SkillsListTools(_) => {
             Ok(json!(qaqh_workspace::runtime::process_all_tool_names()))
         }
+        SessionCommand::SkillsCatalog(args) => {
+            let workspace = match args.cwd {
+                Some(cwd) if !cwd.is_empty() => std::path::PathBuf::from(cwd),
+                _ => std::env::current_dir().map_err(|error| {
+                    QaqhError::message(format!("skills.catalog: resolve cwd: {error}"))
+                })?,
+            };
+            let catalog = qaqh_skills::discover(&workspace);
+            let skills = catalog
+                .skills
+                .iter()
+                .map(|skill| crate::ringing::service_methods::SkillCatalogEntry {
+                    name: skill.name.clone(),
+                    description: skill.description.clone(),
+                    scope: match skill.scope {
+                        qaqh_skills::SkillScope::Project => "project",
+                        qaqh_skills::SkillScope::User => "user",
+                    }
+                    .to_string(),
+                    origin: match skill.origin {
+                        qaqh_skills::SkillOrigin::Project => "project",
+                        qaqh_skills::SkillOrigin::User => "user",
+                        qaqh_skills::SkillOrigin::Bundled => "bundled",
+                    }
+                    .to_string(),
+                    path: skill.path.to_string_lossy().into_owned(),
+                })
+                .collect();
+            let diagnostics = catalog
+                .diagnostics
+                .iter()
+                .map(
+                    |diagnostic| crate::ringing::service_methods::SkillCatalogDiagnostic {
+                        severity: match diagnostic.severity {
+                            qaqh_skills::DiagnosticSeverity::Warning => "warning",
+                            qaqh_skills::DiagnosticSeverity::Error => "error",
+                        }
+                        .to_string(),
+                        path: diagnostic.path.to_string_lossy().into_owned(),
+                        message: diagnostic.message.clone(),
+                    },
+                )
+                .collect();
+            serde_json::to_value(crate::ringing::service_methods::SkillsCatalogResult {
+                skills,
+                diagnostics,
+            })
+            .map_err(QaqhError::message)
+        }
         // 只改本会话的 profile（不动全局 active_profile，也不广播）。落
         // meta.json 后定向重载该会话——`AgentReloadConfig` 走
         // `send_ringing_cmd` 而不是 registry 广播，所以别的会话不受影响。
@@ -143,7 +209,15 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
         SessionCommand::SessionSetProfile(args) => {
             let name = args.name;
             if name.is_empty() {
-                service.sessions.persist_profile(&args.session_id, None);
+                service
+                    .write_meta(
+                        &args.session_id,
+                        SessionMetadataPatch {
+                            profile: Some(String::new()),
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(QaqhError::message)?;
             } else {
                 let known = qaqh_config::watch::authoritative()
                     .is_some_and(|cfg| cfg.profiles.contains_key(&name));
@@ -151,8 +225,14 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
                     return Err(QaqhError::not_found(format!("profile '{name}' not found")));
                 }
                 service
-                    .sessions
-                    .persist_profile(&args.session_id, Some(name.as_str()));
+                    .write_meta(
+                        &args.session_id,
+                        SessionMetadataPatch {
+                            profile: Some(name.clone()),
+                            ..Default::default()
+                        },
+                    )
+                    .map_err(QaqhError::message)?;
             }
             service.send_ringing_cmd(
                 args.session_id,
@@ -164,13 +244,19 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
         // 落 meta.json 后定向重载该会话（AgentReloadConfig）。
         SessionCommand::SessionSetEffort(args) => {
             let effort = args.effort;
-            if effort.is_empty() {
-                service.sessions.persist_effort(&args.session_id, None);
-            } else {
-                service
-                    .sessions
-                    .persist_effort(&args.session_id, Some(effort.as_str()));
-            }
+            service
+                .write_meta(
+                    &args.session_id,
+                    SessionMetadataPatch {
+                        effort: Some(if effort.is_empty() {
+                            String::new()
+                        } else {
+                            effort.clone()
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .map_err(QaqhError::message)?;
             service.send_ringing_cmd(
                 args.session_id,
                 RingingCommand::Control(ControlCommand::AgentReloadConfig),
@@ -187,7 +273,9 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
                 return Err(QaqhError::invalid("title must be a non-empty string"));
             }
             let session_id = args.session_id;
-            service.sessions.update_title(&session_id, &title);
+            service
+                .write_title(&session_id, &title, TitleSource::User)
+                .map_err(QaqhError::message)?;
             if let Some(hub) = service.v2_hub.get() {
                 let session_dir = service.sessions.session_path_dir(&session_id);
                 if let Err(error) = hub.publish_title_changed(
@@ -230,12 +318,6 @@ fn create_new(
     service.sessions.clear_active();
     // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
     // 保证 `minimal` 等预置工具模式首轮就生效。
-    if let Some((tool_mode, custom_tools)) = preset {
-        service
-            .sessions
-            .persist_tool_mode(&session_id, &tool_mode, &custom_tools)
-            .map_err(|error| QaqhError::context("persist tool_mode failed", error))?;
-    }
     // 纯 v2：session_create 即物化 canonical identity + 首个 `SessionCreated`
     // 事实。否则 bootstrap/events 要等首个工具事实才可用，新建会话在第一
     // 回合前一直处于 snapshot_missing 瞬态。
@@ -247,10 +329,23 @@ fn create_new(
             error,
         ));
     }
+    if let Some((tool_mode, custom_tools)) = preset {
+        service
+            .write_meta(
+                &session_id,
+                SessionMetadataPatch {
+                    tool_mode: Some(tool_mode),
+                    custom_tools: Some(custom_tools),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| QaqhError::context("persist tool_mode failed", error))?;
+    }
     service
         .registry()
         .map_err(QaqhError::message)?
-        .spawn_new(&session_id)?;
+        .spawn_new(&session_id)
+        .map_err(QaqhError::message)?;
     Ok(json!(session_id))
 }
 
@@ -290,7 +385,8 @@ fn spawn_subagent(
             model.as_deref(),
             base_url.as_deref(),
             max_tokens,
-        )?;
+        )
+        .map_err(QaqhError::message)?;
     log::info!(
         "[subagent] spawned subagent worker seed={session_id} tools={}",
         tools.len()

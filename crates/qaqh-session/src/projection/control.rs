@@ -4,11 +4,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::session_fact_v2::{
     ActivityState, ActorRef, ContentHash, ContentRef, ContentValue, ControlDelta, ExecutionId,
-    FactPayload, InteractionDecision, InteractionExpired, InteractionExpiryReason, InteractionId,
-    InteractionKind, InteractionRequested, InteractionResolved, RecoveryOutcome, RecoveryRef,
-    SessionFact, SessionId, SessionRecovered, SubagentFinished, SubagentSpawned,
-    SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished, ToolIntent, ToolMetrics,
-    ToolTerminalStatus, TurnId,
+    FactPayload, InteractionChoice, InteractionDecision, InteractionExpired,
+    InteractionExpiryReason, InteractionId, InteractionKind, InteractionRequested,
+    InteractionResolved, RecoveryOutcome, RecoveryRef, SessionFact, SessionId, SessionRecovered,
+    SubagentFinished, SubagentSpawned, SubagentTerminalStatus, ToolCallId, ToolError, ToolFinished,
+    ToolIntent, ToolMetrics, ToolTerminalStatus, TurnId,
 };
 
 use super::Projection;
@@ -60,6 +60,9 @@ pub struct ControlInteractionState {
     pub turn_id: Option<TurnId>,
     pub kind: InteractionKind,
     pub request: ContentValue,
+    /// daemon 给出的可选项；空 = 该交互没有预设按钮。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<InteractionChoice>,
     pub expires_at_ms: Option<i64>,
     pub resolution: Option<ControlInteractionResolution>,
     pub expired_reason: Option<InteractionExpiryReason>,
@@ -179,6 +182,7 @@ impl Projection for ControlProjection {
                     call_id: payload.call_id.clone(),
                     kind: payload.kind,
                     request: content_ref_value(payload.request_ref.clone()),
+                    choices: payload.choices.clone(),
                     expires_at_ms: payload.expires_at_ms,
                 })
             }
@@ -314,6 +318,7 @@ impl ControlProjection {
         state.turn_id = turn_id.cloned();
         state.kind = payload.kind;
         state.request = content_ref_value(payload.request_ref.clone());
+        state.choices = payload.choices.clone();
         state.expires_at_ms = payload.expires_at_ms;
         state.resolution = None;
         state.expired_reason = None;
@@ -435,6 +440,7 @@ impl ControlProjection {
             request: ContentValue::Inline {
                 text: String::new(),
             },
+            choices: Vec::new(),
             expires_at_ms: None,
             resolution: None,
             expired_reason: None,

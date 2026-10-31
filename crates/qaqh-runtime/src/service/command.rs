@@ -288,6 +288,8 @@ pub enum SessionCommand {
     SkillsReload(SkillsSessionArgs),
     #[serde(rename = "skills.activate")]
     SkillsActivate(SkillsActivateArgs),
+    #[serde(rename = "skills.catalog")]
+    SkillsCatalog(SkillsCatalogArgs),
     #[serde(rename = "skills.list_tools")]
     SkillsListTools(SkillsListToolsArgs),
     #[serde(rename = "subagent.spawn")]
@@ -345,6 +347,8 @@ pub struct SkillsActivateArgs {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SkillsListToolsArgs {}
+
+pub type SkillsCatalogArgs = crate::ringing::service_methods::SkillsCatalogParams;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct SubagentSpawnArgs {

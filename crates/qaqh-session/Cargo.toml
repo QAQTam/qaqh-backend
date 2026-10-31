@@ -13,7 +13,6 @@ ts = ["dep:ts-rs", "qaqh-domain/ts"]
 [dependencies]
 qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
 qaqh-domain = { path = "../qaqh-domain" }
-qaqh-message = { path = "../qaqh-message" }
 qaqh-types = { path = "../qaqh-types" }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -27,7 +26,6 @@ uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
 # Test-only: deterministic WAL read-fault injection (BUG-2026-09-13-06).
-qaqh-message = { path = "../qaqh-message", features = ["test-harness"] }
 tempfile = "3"
 
 [lints.clippy]

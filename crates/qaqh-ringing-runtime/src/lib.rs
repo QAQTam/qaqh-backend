@@ -4,7 +4,7 @@
 //! 加上 `agent_graph`）。拆出时它是自洽的：
 //!
 //! - 内部只依赖 `qaqh-session` / `qaqh-domain` / `qaqh-types` / `qaqh-ringing` /
-//!   `qaqh-message` / `qaqh-memwatch`；
+//!   `qaqh-memwatch`；
 //! - 不引用 `QaqhService`、registry 或任何 RPC 分发逻辑。
 //!
 //! 留在 `qaqh-runtime::ringing` 的只剩 `service_methods`（方法表 + DTO +
@@ -30,7 +30,6 @@ pub mod hub;
 pub mod lease_store;
 pub mod operation_failure;
 pub mod pending_store;
-pub mod projection;
 pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;

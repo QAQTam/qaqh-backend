@@ -22,11 +22,12 @@ use qaqh_session::{
     session_fact_v2::{
         ActorKind, ActorRef, ContentRef, ContextMessageCommitted, ContextMessageOrigin, EventId,
         ExecutionId, FactPayload, FactSchema, InputAccepted, InputId, InputKind, InputPurpose,
-        InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind,
-        InteractionRequested, InteractionResolved, InterruptReason, PolicyDecisionRef,
-        ProviderFinish, RecoveryAction, RecoveryId, RecoveryOutcome, RecoveryRef, SessionFact,
-        SessionRecovered, SideEffectClass, ToolCallId, ToolError, ToolFinished, ToolIntent,
-        ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+        InteractionChoice, InteractionChoiceTone, InteractionDecision, InteractionExpiryReason,
+        InteractionId, InteractionKind, InteractionRequested, InteractionResolved, InterruptReason,
+        MetadataSource, PolicyDecisionRef, ProviderFinish, RecoveryAction, RecoveryId,
+        RecoveryOutcome, RecoveryRef, SessionFact, SessionMetadataChanged, SessionRecovered,
+        SessionTitleChanged, SideEffectClass, TitleSource, ToolCallId, ToolError, ToolFinished,
+        ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
         TurnFinished, TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal,
     },
 };
@@ -158,6 +159,8 @@ pub struct SessionAgent {
     /// Causation of the command currently being processed.
     pub(crate) causation: Option<EventId>,
     system_prompt_seeded: bool,
+    /// 首条输入后是否已经就标题做过决定（只探一次投影，避免每条输入都重放）。
+    title_decided: bool,
 }
 
 impl SessionAgent {
@@ -197,6 +200,7 @@ impl SessionAgent {
             queued_inputs,
             causation: None,
             system_prompt_seeded: false,
+            title_decided: false,
         };
         // Resume inputs that were durably accepted but never started.
         if agent.phase == SessionPhase::Ready
@@ -221,6 +225,10 @@ impl SessionAgent {
 
     pub fn incarnation(&self) -> u64 {
         self.incarnation
+    }
+
+    pub fn set_provider_spec(&mut self, spec: ProviderRequestSpec) {
+        self.provider_spec = spec;
     }
 
     fn observe(&self, event: serde_json::Value) {
@@ -378,11 +386,58 @@ impl SessionAgent {
             None,
             None,
         );
-        self.commit_batch(
-            &format!("batch-input-{}", input.input_id.as_str()),
-            vec![fact],
-        )?;
+        let mut facts = vec![fact];
+        // 首条用户输入顺带定标题：与 `InputAccepted` 同一批次，原子可见。
+        let title_written = match self.auto_title_fact(&input.text) {
+            Some(title_fact) => {
+                facts.push(title_fact);
+                true
+            }
+            None => false,
+        };
+        self.commit_batch(&format!("batch-input-{}", input.input_id.as_str()), facts)?;
+        if title_written {
+            // 标题已进日志，但 `SessionManager::list` 读的是 index.jsonl 缓存。
+            qaqh_session::meta::refresh_index(self.commit.session_dir());
+        }
         Ok(())
+    }
+
+    /// 首条用户输入派生标题（不调模型、不花额外 token）。
+    ///
+    /// 只在会话尚无标题时写 `SessionTitleChanged`（`TitleSource::Auto`），
+    /// 与用户手改标题走同一条读路径（投影 → `MetaDelta::TitleChanged` →
+    /// `session.list`）。要升级成模型摘要，只需把 [`derive_title`] 换成
+    /// 一次 provider 调用；事实形状不变。
+    fn auto_title_fact(&mut self, text: &str) -> Option<SessionFact> {
+        if self.title_decided {
+            return None;
+        }
+        self.title_decided = true;
+        let Ok(snapshot) = self.commit.snapshot() else {
+            // 读不到投影就不写标题：宁可没标题，也不要覆盖用户已有的标题。
+            return None;
+        };
+        if snapshot
+            .meta
+            .title
+            .as_deref()
+            .is_some_and(|title| !title.trim().is_empty())
+        {
+            return None;
+        }
+        let title = derive_title(text)?;
+        Some(self.fact(
+            EventId::new(generate_ulid()),
+            FactPayload::SessionTitleChanged(SessionTitleChanged {
+                title,
+                source: TitleSource::Auto,
+                changed_at_ms: now_ms(),
+            }),
+            None,
+            None,
+            None,
+        ))
     }
 
     fn push_input(&mut self, input: QueuedUserInput) -> Result<(), SessionAgentError> {
@@ -743,9 +798,11 @@ impl SessionAgent {
         reason: &str,
     ) -> Result<(), SessionAgentError> {
         let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+        let choices = permission_choices();
         let request = serde_json::json!({
             "tool": tool_name,
             "reason": reason,
+            "choices": &choices,
         });
         let request_bytes =
             serde_json::to_vec(&request).map_err(|e| SessionAgentError::Internal(e.to_string()))?;
@@ -758,6 +815,7 @@ impl SessionAgent {
                 turn_id: turn_id.clone(),
                 kind: InteractionKind::Permission,
                 request_ref,
+                choices,
                 expires_at_ms: None,
                 requested_at_ms: now_ms(),
             }),
@@ -909,8 +967,46 @@ fn truncate_text(text: &str, max_bytes: usize) -> String {
     while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    // `end` 已回退到字符边界；用 `get` 而不是下标切片，杜绝越界 panic。
-    text.get(..end).unwrap_or_default().to_string()
+    text[..end].to_string()
+}
+
+/// 权限交互的固定选项。文案与语义由 daemon 拥有，客户端只负责渲染。
+///
+/// 刻意**不提供**「本会话一直允许」：权限层没有对应的持久化语义，
+/// 放一个按钮却无法兑现，就是把「不知道」写成「知道」。
+fn permission_choices() -> Vec<InteractionChoice> {
+    vec![
+        InteractionChoice {
+            decision: InteractionDecision::Approved,
+            label: "允许".to_string(),
+            description: None,
+            tone: InteractionChoiceTone::Primary,
+        },
+        InteractionChoice {
+            decision: InteractionDecision::Rejected,
+            label: "拒绝".to_string(),
+            description: None,
+            tone: InteractionChoiceTone::Destructive,
+        },
+    ]
+}
+
+/// 从首条用户消息派生标题：压平空白后取前 `MAX_CHARS` 个字符。
+///
+/// 刻意不调模型：一次后台摘要要多一次 provider 请求，还要自建重试与失败
+/// 降级；标题只是列表页的导航辅助，原文前 40 字已经够用，而且**不会把
+/// 首条消息再发给模型一遍**。要换成模型摘要时，只替换本函数即可。
+fn derive_title(text: &str) -> Option<String> {
+    const MAX_CHARS: usize = 40;
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    let mut title: String = collapsed.chars().take(MAX_CHARS).collect();
+    if collapsed.chars().count() > MAX_CHARS {
+        title.push('…');
+    }
+    Some(title)
 }
 
 fn reason_name(reason: InterruptReason) -> &'static str {
@@ -1140,6 +1236,44 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                     accepted: false,
                 })?;
                 self.start_next_turn()?;
+                Ok(Step::Continue)
+            }
+            AgentCommand::SetMetadata { patch } => {
+                let fact = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::SessionMetadataChanged(SessionMetadataChanged {
+                        patch: patch.clone(),
+                        source: MetadataSource::User,
+                        changed_at_ms: now_ms(),
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+                self.commit_batch(
+                    &format!("batch-meta-{}", self.commit.head()? + 1),
+                    vec![fact],
+                )?;
+                qaqh_session::meta::refresh_index(self.commit.session_dir());
+                Ok(Step::Continue)
+            }
+            AgentCommand::SetTitle { title, source } => {
+                let fact = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::SessionTitleChanged(SessionTitleChanged {
+                        title: truncate_text(title, 4 * 1024),
+                        source: *source,
+                        changed_at_ms: now_ms(),
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+                self.commit_batch(
+                    &format!("batch-title-{}", self.commit.head()? + 1),
+                    vec![fact],
+                )?;
+                qaqh_session::meta::refresh_index(self.commit.session_dir());
                 Ok(Step::Continue)
             }
         }
@@ -1544,8 +1678,11 @@ impl SessionAgent {
             if name == "ask" {
                 let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
                 let execution_id = ExecutionId::new(format!("exec_{}", generate_ulid()));
-                let request_ref = self.commit.put_blob(b"ask-question")?;
-                let args_ref = self.commit.put_blob(&args)?;
+                // 请求内容就是已经校验过的 ask 参数（问题/选项都在里面）。
+                // 旧实现写死 `b"ask-question"`，客户端拿到 request_ref 也读不出问题。
+                let request_ref = self.commit.put_blob(&args)?;
+                // 同一份内容，复用同一个 ref（content-addressed，不必再写一次）。
+                let args_ref = request_ref.clone();
                 let intent = self.fact(
                     EventId::new(generate_ulid()),
                     FactPayload::ToolIntent(ToolIntent {
@@ -1577,6 +1714,7 @@ impl SessionAgent {
                         turn_id: turn_id.clone(),
                         kind: InteractionKind::Ask,
                         request_ref,
+                        choices: Vec::new(),
                         expires_at_ms: None,
                         requested_at_ms: now_ms(),
                     }),

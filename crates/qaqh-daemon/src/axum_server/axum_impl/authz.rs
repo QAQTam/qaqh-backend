@@ -7,7 +7,7 @@
 //! - `/health` 与 `/ringing/v2/pair` 免鉴权。
 
 use super::*;
-use qaqh_runtime::ringing::{device_registry, Scope};
+use qaqh_runtime::ringing::{Scope, device_registry};
 
 /// 请求主体。由 Bearer 解析而来，是全部授权判定的唯一来源。
 #[derive(Debug, Clone)]

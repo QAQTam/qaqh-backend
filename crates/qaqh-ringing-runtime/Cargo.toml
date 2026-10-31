@@ -8,7 +8,6 @@ description = "Ringing daemon transport/projection/queue layer (split out of qaq
 [dependencies]
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
-qaqh-message = { path = "../qaqh-message" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }

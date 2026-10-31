@@ -5,35 +5,24 @@
 //! aborts the load; callers must not fall back to an in-memory guess.
 
 use std::collections::{HashSet, VecDeque};
-use std::path::Path;
 
 use qaqh_session::SessionManager;
-use qaqh_session::canonical::{CanonicalError, CanonicalSessionIdentity, CommittedFactReader};
+use qaqh_session::canonical::{CanonicalSessionIdentity, open_session_identity};
 use qaqh_session::projection::AgentGraphStore;
-use qaqh_session::session_fact_v2::{FactPayload, LogId, SessionFact, SessionId};
+use qaqh_session::session_fact_v2::{FactPayload, SessionFact, SessionId};
 
 /// Read one session's committed facts from whichever store owns it.
 ///
-/// Batch-journal sessions take the lock-free view; legacy directories keep the
-/// committed-fact reader. Callers must never guess the format from file probes
-/// of their own.
-pub fn read_session_facts(
-    session_dir: &Path,
-    session_id: SessionId,
-    log_id: LogId,
-) -> Result<Vec<SessionFact>, CanonicalError> {
-    if qaqh_session::canonical::is_batch_root(session_dir) {
-        return qaqh_session::canonical::read_committed_facts(session_dir, session_id, log_id);
-    }
-    CommittedFactReader::open(session_dir, session_id, log_id)?.read_all()
-}
+/// The dispatch now lives in `qaqh_session::canonical`; this alias exists only
+/// so existing call sites keep one name.
+pub use qaqh_session::canonical::read_session_facts;
 
 pub fn load_agent_graph(
     sessions: &SessionManager,
     root_session: &str,
 ) -> Result<AgentGraphStore, String> {
     let root_dir = sessions.session_path_dir(root_session);
-    let root_identity = CanonicalSessionIdentity::open(&root_dir)
+    let root_identity = open_session_identity(&root_dir)
         .map_err(|error| format!("open root canonical identity for {root_session}: {error}"))?;
     let root_id = root_identity.session_id;
     let mut graph = AgentGraphStore::new(root_id.clone());
@@ -110,135 +99,5 @@ fn validate_parent_hint(
             "agent graph session {session_id} has no canonical SessionCreated parent hint for {expected}"
         )),
         (_, None) => Ok(()),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use qaqh_session::canonical::{CanonicalLog, WriterId, generate_ulid};
-    use qaqh_session::session_fact_v2::{
-        AgentPath, EventId, FactSchema, SessionCreated, SubagentSpawned, ToolCallId,
-    };
-
-    const NOW_MS: i64 = 1_789_830_000_000;
-    const LEASE_MS: i64 = 10_000;
-
-    #[test]
-    fn rebuilds_from_legacy_session_directories_via_identity_sidecars() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let sessions_dir = temp.path().join("sessions");
-        std::fs::create_dir_all(&sessions_dir).expect("sessions dir");
-        let manager =
-            SessionManager::new_for_test(sessions_dir.clone(), temp.path().join("active"));
-
-        let root_dir = sessions_dir.join("root-seed");
-        let root_identity =
-            CanonicalSessionIdentity::open_or_create(&root_dir).expect("root identity");
-        let child_dir = sessions_dir.join("child-seed");
-        let child_identity =
-            CanonicalSessionIdentity::open_or_create(&child_dir).expect("child identity");
-
-        let mut root_log = CanonicalLog::open(
-            &root_dir,
-            root_identity.session_id.clone(),
-            root_identity.log_id.clone(),
-        )
-        .expect("root log");
-        let root_lease = root_log
-            .acquire_writer(WriterId::new("graph-root"), NOW_MS, LEASE_MS)
-            .expect("root lease");
-        root_log
-            .append(
-                &root_lease,
-                fact(
-                    &root_identity,
-                    1,
-                    FactPayload::SessionCreated(SessionCreated {
-                        created_at_ms: NOW_MS,
-                        cwd: "/tmp/root".to_string(),
-                        model: "test".to_string(),
-                        parent_session_id: None,
-                        schema_caps: Vec::new(),
-                    }),
-                ),
-                NOW_MS,
-            )
-            .expect("root created");
-        root_log
-            .append(
-                &root_lease,
-                fact(
-                    &root_identity,
-                    2,
-                    FactPayload::SubagentSpawned(SubagentSpawned {
-                        child_session_id: child_identity.session_id.clone(),
-                        parent_call_id: ToolCallId::new("call_01J00000000000000000000000"),
-                        parent_agent_path: Some(AgentPath::root()),
-                        child_agent_path: Some(
-                            AgentPath::parse_absolute("/root/review").expect("child path"),
-                        ),
-                        role: Some("review".to_string()),
-                        spawn_config: None,
-                        spawned_at_ms: NOW_MS,
-                    }),
-                ),
-                NOW_MS,
-            )
-            .expect("spawn edge");
-
-        let mut child_log = CanonicalLog::open(
-            &child_dir,
-            child_identity.session_id.clone(),
-            child_identity.log_id.clone(),
-        )
-        .expect("child log");
-        let child_lease = child_log
-            .acquire_writer(WriterId::new("graph-child"), NOW_MS, LEASE_MS)
-            .expect("child lease");
-        child_log
-            .append(
-                &child_lease,
-                fact(
-                    &child_identity,
-                    1,
-                    FactPayload::SessionCreated(SessionCreated {
-                        created_at_ms: NOW_MS,
-                        cwd: "/tmp/root".to_string(),
-                        model: "test".to_string(),
-                        parent_session_id: Some(root_identity.session_id.clone()),
-                        schema_caps: Vec::new(),
-                    }),
-                ),
-                NOW_MS,
-            )
-            .expect("child created");
-
-        let graph = load_agent_graph(&manager, "root-seed").expect("load graph");
-        let snapshot = graph.snapshot();
-        assert_eq!(snapshot.root_session_id, Some(root_identity.session_id));
-        assert_eq!(snapshot.nodes.len(), 2);
-        assert_eq!(snapshot.edges.len(), 1);
-        assert_eq!(snapshot.edges[0].child_agent_id, child_identity.session_id);
-    }
-
-    fn fact(
-        identity: &CanonicalSessionIdentity,
-        fact_seq: u64,
-        payload: FactPayload,
-    ) -> SessionFact {
-        SessionFact {
-            schema: FactSchema::v2(),
-            session_id: identity.session_id.clone(),
-            log_id: identity.log_id.clone(),
-            fact_seq,
-            event_id: EventId::new(generate_ulid()),
-            ts_ms: NOW_MS,
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload,
-        }
     }
 }

@@ -9,7 +9,10 @@ use qaqh_session::{
     actor::ConnectionId,
     canonical::{CanonicalSessionIdentity, generate_ulid},
     session_commit::SessionCommit,
-    session_fact_v2::{EventId, FactPayload, FactSchema, SessionCreated, SessionFact, SessionId},
+    session_fact_v2::{
+        EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact, SessionId,
+        SessionMetadataChanged, SessionMetadataPatch,
+    },
 };
 use serde_json::Value;
 
@@ -67,7 +70,7 @@ impl QaqhService {
         // store 用默认位置（[secrets.mcp] 段）；禁用配置时 manager 以
         // disabled 形态拒绝一切调用（MCP_DISABLED）。
         qaqh_mcp::install_manager(qaqh_mcp::McpManager::new(config.mcp.clone()));
-        // LSP manager 装配（docs/current/architecture.md；与 MCP 同款单例；
+        // LSP manager 装配（；与 MCP 同款单例；
         // 默认关闭——enabled=false 时 disabled 形态拒一切调用 LSP_DISABLED）。
         qaqh_lsp::install_manager(qaqh_lsp::LspManager::new(config.lsp.clone()));
         // P2-1：热重载接线——①重载器：订阅 watch 单写口广播，[mcp] 段变化
@@ -110,7 +113,6 @@ impl QaqhService {
     }
 
     /// SIWC 会话管理器（懒装配到 `<data_dir>/siwc`）。
-    ///
     /// 懒装配而非 `init` 里装配：只有真正用到套餐用量时才建目录、读 host id；
     /// 不用该能力的用户不该多出任何磁盘副作用。
     pub(crate) fn siwc(&self) -> Result<Arc<qaqh_siwc::SiwcManager>, String> {
@@ -142,7 +144,6 @@ impl QaqhService {
     }
 
     /// DeepSeek 账号管理器（懒装配；凭据默认落在 config 目录）。
-    ///
     /// 懒装配的理由与 SIWC 相同：不用该能力的用户不该多出任何磁盘副作用。
     /// 构造本身不读盘、不联网——真正的读盘发生在第一次 `status()` / `token()`。
     pub(crate) fn dsaccount(&self) -> Result<&qaqh_dsaccount::DsAccountManager, String> {
@@ -260,7 +261,10 @@ impl QaqhService {
         qaqh_workspace::remove_session_cancel(session_id);
         // 临时会话（子代理）用完即走：关闭后删除会话目录，磁盘零残留。
         // 目录已不存在（重复 close / 已被清理）时静默跳过，保持幂等。
-        if self.sessions.is_ephemeral(session_id) {
+        if self
+            .session_meta(session_id)
+            .is_some_and(|meta| meta.ephemeral)
+        {
             match self.sessions.delete(session_id) {
                 Ok(()) => {
                     log::info!("[session] ephemeral session {session_id} cleaned up (auto-unload)")
@@ -293,7 +297,7 @@ impl QaqhService {
         }
     }
 
-    /// E: idle 卸载空闲会话 worker（docs/current/architecture.md）。
+    /// E: idle 卸载空闲会话 worker。
     /// `idle_secs` <= 0 时为 no-op（配置禁用）。对每个被卸载的 seed 做常驻
     /// 状态清理（Closed 广播已删，A1：wire 零消费方）。
     /// 返回被卸载的 seed 列表。registry.close 是阻塞 join——调用方
@@ -420,14 +424,26 @@ impl QaqhService {
         causation_id: Option<&str>,
     ) -> Result<(), String> {
         self.close_session(session_id, causation_id)?;
-        self.sessions.set_archived(session_id, true);
+        let _ = self.write_meta(
+            session_id,
+            qaqh_session::session_fact_v2::SessionMetadataPatch {
+                archived: Some(true),
+                ..Default::default()
+            },
+        );
         Ok(())
     }
 
     /// 恢复归档会话：meta `archived=false` + 重新拉起实例（resume 语义，
     /// 对齐 `session.resume` 查询——get_or_spawn + active seed 更新）。
     pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {
-        self.sessions.set_archived(session_id, false);
+        let _ = self.write_meta(
+            session_id,
+            qaqh_session::session_fact_v2::SessionMetadataPatch {
+                archived: Some(false),
+                ..Default::default()
+            },
+        );
         self.registry()?
             .get_or_spawn(session_id)
             .map_err(|error| error.to_string())
@@ -445,7 +461,6 @@ impl QaqhService {
     }
 
     /// 服务面唯一入口：wire `(method, params)` 在这里解码一次，然后按领域分派。
-    ///
     /// 强类型命令见 [`command`]（`service::command`），各领域的执行体在
     /// [`handlers`] 里。此前这里是一个 673 行、按字符串 `match` 分派、
     /// 再用 `pstr(params, "path")?` 手工取参的函数——参数错误只在运行时暴露，
@@ -499,6 +514,32 @@ impl QaqhService {
         (has_active_work, activities)
     }
 
+    /// Write a session metadata patch (actor first, journal fallback).
+    pub(crate) fn write_meta(
+        &self,
+        session_id: &str,
+        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
+    ) -> Result<(), String> {
+        let registry = self.registry()?;
+        crate::session_meta::patch(Some(&registry), session_id, patch)
+    }
+
+    /// Write a session title (actor first, journal fallback).
+    pub(crate) fn write_title(
+        &self,
+        session_id: &str,
+        title: &str,
+        source: qaqh_session::session_fact_v2::TitleSource,
+    ) -> Result<(), String> {
+        let registry = self.registry()?;
+        crate::session_meta::set_title(Some(&registry), session_id, title, source)
+    }
+
+    /// Session metadata read from committed facts.
+    pub(crate) fn session_meta(&self, session_id: &str) -> Option<qaqh_types::SessionMeta> {
+        crate::session_meta::read(session_id)
+    }
+
     pub(crate) fn registry(&self) -> Result<std::sync::MutexGuard<'_, AgentRegistry>, String> {
         self.registry
             .lock()
@@ -532,7 +573,6 @@ impl QaqhService {
     /// 统一运行状态（2026-10-06 归一裁决）：未加载 → `not_running`（不读投影、
     /// 不做任何合成）；已加载 → 优先 canonical fact 投影（持久可重放，重启后
     /// 语义可重建），投影不可读时退回 live tracker 的六态映射。
-    ///
     /// 注意此处**有意只对已加载会话**调 `projected_run_status`——hub 首次访问
     /// 一个会话会把整个 fact log 从磁盘重放，`session.list` 对未加载会话逐条
     /// 调用等于全库重放。
@@ -567,12 +607,10 @@ impl QaqhService {
     }
 
     /// `session.list` 的条目（前端契约 **G2**）。
-    ///
     /// 返回**类型化**条目而非 `Value`：形状由 `qaqh_types::SessionListEntry` 承载，
     /// 序列化只发生在 dispatch 边界。此前这里是 `to_value(&meta)` 之后再
     /// `value["running"] = …` 手工拼键——手拼的形状没有任何类型承载，三端前端
     /// 只能各自手解（TUI 那份手抄漏了 5 个键而无人察觉）。
-    ///
     /// 返回类型化值后，**新增字段的唯一途径是改类型**：想在回包里塞个临时键，
     /// 必须先拆掉类型才行。形状锁在 `qaqh-types` 的
     /// `session_list_entry_wire_keys_are_locked`。
@@ -610,8 +648,16 @@ impl QaqhService {
 
     /// 配置写后广播（所有 config.* / profile.* 写路径共用）。
     fn notify_config_changed(&self) {
-        // P2-D2 / 阶段 3b：ConfigChanged 的 v1 Control 频道广播已删（A1：wire
-        // 零消费方，前端重拉由 worker 侧 AgentReloadConfig 广播驱动）。
+        // v2：给驻留会话发一条 config_changed 信号（客户端据此重拉 config.load）。
+        // 在此之前前端只能靠自建广播 + 15s/焦点轮询兜底。
+        if let Some(hub) = self.v2_hub.get() {
+            match hub.publish_config_changed() {
+                Ok(published) => log::debug!("[config] v2 config_changed → {published} session(s)"),
+                Err(error) => log::warn!("[config] v2 config_changed broadcast failed: {error:?}"),
+            }
+        }
+        // worker 侧重载仍走 AgentReloadConfig 广播（改配置要作用到活跃 worker，
+        // 含子代理）。客户端侧的「重拉提示」已由上方的 v2 config_changed 承担。
         let failed = match self.registry() {
             Ok(mut registry) => registry
                 .broadcast_ringing(&RingingCommand::Control(ControlCommand::AgentReloadConfig)),
@@ -651,7 +697,6 @@ impl QaqhService {
 }
 
 /// P2-1：MCP 热重载器——订阅 watch 单写口广播，只对 `[mcp]` 段变化响应。
-///
 /// 链路：`Config::update`（webUI/CLI）或文件轮询发布 → `watch::subscribe`
 /// 唤醒 → 新配置的 [mcp] 与 manager 当前配置不等 → merge_external 重扫
 /// （外部 Codex/Claude 用户级文件的变化在此一并捕获）→ `apply_config`
@@ -692,7 +737,6 @@ fn spawn_mcp_reloader() {
 }
 
 /// 热重载事件循环（T-6-1 抽出的可测小函数）。
-///
 /// 语义契约：`qaqh_config::watch::subscribe()` 走 `Sender::subscribe`，返回的
 /// receiver **已消费到当前版本**——订阅前的任何快照都不会唤醒 `changed()`，
 /// 因此首次 `changed()` 等到的是**订阅后的第一次真实发布**。
@@ -740,7 +784,6 @@ fn spawn_lsp_reloader() {
 
 /// P2-1：config.toml 文件轮询器——手改文件（不经 `Config::update` 单写口）
 /// 也能触发热重载。
-///
 /// 策略：mtime 检测（1.5s 周期）→ 变化即 `reload_from_disk()`（内部：
 /// 解析失败——编辑器写一半——静默跳过，下轮再试；成功则统一发布，
 /// 重载器随之生效）。轮询而非 inotify：无新依赖，低频配置变更场景足够。
@@ -772,7 +815,6 @@ fn spawn_config_file_poller() {
 }
 
 /// `session.new` / `session.create` 共用的 canonical 基线：`(cwd, model)`。
-///
 /// cwd 取 meta.cwd；未绑定工作区时兜底到与会话执行面同一个默认工作根
 /// （`load_session_workspace` 注入的就是这个目录）。旧实现兜底
 /// `std::env::current_dir()`，在 daemon 里就是安装目录，canonical
@@ -797,12 +839,11 @@ pub(crate) fn session_canonical_cwd(
 }
 
 /// 在 `session.new` 的持久化阶段写入 canonical 基线。
-///
 /// Bootstrap and the actor use the same batch store. Drop this temporary owner
 /// before spawning the actor so there is only one journal writer at a time.
 fn materialize_canonical_session(session_id: &str, cwd: &str, model: &str) -> Result<(), String> {
     let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
-    materialize_canonical_session_in(&session_dir, cwd, model, None)
+    materialize_canonical_session_in(&session_dir, cwd, model, None, false)
 }
 
 pub(crate) fn materialize_canonical_session_in(
@@ -810,18 +851,16 @@ pub(crate) fn materialize_canonical_session_in(
     cwd: &str,
     model: &str,
     parent_session_id: Option<SessionId>,
+    ephemeral: bool,
 ) -> Result<(), String> {
     let identity =
         CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
     let session_id = identity.session_id.clone();
     let log_id = identity.log_id.clone();
     let budget = crate::session_agent::assembly::default_context_budget();
-    let mut store = if session_dir.join("storage-format").exists() {
-        SessionCommit::open(session_dir, session_id.clone(), log_id.clone(), budget)
-    } else {
-        SessionCommit::create(session_dir, session_id.clone(), log_id.clone(), budget)
-    }
-    .map_err(|error| error.to_string())?;
+    let mut store =
+        SessionCommit::open_or_create(session_dir, session_id.clone(), log_id.clone(), budget)
+            .map_err(|error| error.to_string())?;
     // Opening verifies business transitions, including SessionCreated at seq 1.
     if store.head().map_err(|error| error.to_string())? > 0 {
         return Ok(());
@@ -839,7 +878,7 @@ pub(crate) fn materialize_canonical_session_in(
     } else {
         model
     };
-    let fact = SessionFact {
+    let created = SessionFact {
         schema: FactSchema::v2(),
         session_id,
         log_id,
@@ -858,9 +897,39 @@ pub(crate) fn materialize_canonical_session_in(
             schema_caps: Vec::new(),
         }),
     };
+    let mut facts = vec![created];
+    if ephemeral {
+        // 子会话在创世批次里就带上 ephemeral：投影要求创世是第一事实，
+        // 之后单独补 patch 也行，但同一批次更省一次提交且没有中间态。
+        facts.push(SessionFact {
+            schema: FactSchema::v2(),
+            session_id: store.session_id().clone(),
+            log_id: store.log_id().clone(),
+            fact_seq: 0,
+            event_id: EventId::new(generate_ulid()),
+            ts_ms: now_ms,
+            causation_id: None,
+            turn_id: None,
+            call_id: None,
+            interaction_id: None,
+            payload: FactPayload::SessionMetadataChanged(SessionMetadataChanged {
+                patch: SessionMetadataPatch {
+                    ephemeral: Some(true),
+                    ..Default::default()
+                },
+                source: MetadataSource::Api,
+                changed_at_ms: now_ms,
+            }),
+        });
+    }
     store
-        .commit("session-created", 0, vec![fact])
+        .commit("session-created", 0, facts)
         .map_err(|error| error.to_string())?;
+    drop(store);
+    if !ephemeral {
+        // 列表缓存从 journal 重建：创世后立刻让会话出现在 `session.list`。
+        qaqh_session::meta::refresh_index(session_dir);
+    }
     Ok(())
 }
 
@@ -893,7 +962,7 @@ mod canonical_session_materialization_tests {
     #[test]
     fn session_creation_materializes_one_canonical_baseline() {
         let dir = tempfile::tempdir().expect("tempdir");
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
             .expect("materialize");
         assert!(dir.path().join(CANONICAL_IDENTITY_FILE).exists());
         assert!(dir.path().join("storage-format").exists());
@@ -930,7 +999,7 @@ mod canonical_session_materialization_tests {
         drop(journal);
 
         // 幂等：重复调用不得追加第二个 SessionCreated。
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
             .expect("second materialize");
         let journal =
             BatchJournal::open(dir.path(), identity.session_id, identity.log_id).expect("journal");
@@ -949,7 +1018,7 @@ mod canonical_session_materialization_tests {
             )
             .expect("empty journal"),
         );
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
+        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
             .expect("resume before baseline commit");
         let journal =
             BatchJournal::open(dir.path(), identity.session_id, identity.log_id).expect("journal");
@@ -961,9 +1030,14 @@ mod canonical_session_materialization_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let bytes = b"legacy session data\n";
         std::fs::write(dir.path().join(EVENTS_FILE), bytes).expect("legacy log");
-        let error =
-            materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None)
-                .expect_err("legacy stores require explicit migration");
+        let error = materialize_canonical_session_in(
+            dir.path(),
+            "/tmp/workspace",
+            "test-model",
+            None,
+            false,
+        )
+        .expect_err("legacy stores require explicit migration");
         assert!(error.contains("isolated data root"), "{error}");
         assert_eq!(std::fs::read(dir.path().join(EVENTS_FILE)).unwrap(), bytes);
         assert!(!dir.path().join("storage-format").exists());
