@@ -82,13 +82,14 @@ impl TypedTool for ExecTool {
 }
 
 /// exec 进度出口：runtime 直通 sender 优先，ProgressSink → v1 进度桥兜底。
-///
 /// 直通（`exec_progress`）是 v2.1 client-tools `Progress` 帧的生产点——
 /// 此前 runtime 的 sender 在 prepare 阶段被丢弃，exec 全程无实时进度。
 fn exec_progress_of(ctx: &ToolCallContext) -> Option<ExecProgressSender> {
-    ctx.exec_progress
-        .clone()
-        .or_else(|| ctx.progress.as_ref().map(crate::tool_api::result::bridge_progress))
+    ctx.exec_progress.clone().or_else(|| {
+        ctx.progress
+            .as_ref()
+            .map(crate::tool_api::result::bridge_progress)
+    })
 }
 
 fn exec_error(code: &str, message: impl Into<String>, hint: Option<&str>) -> ToolExecutionError {
@@ -421,7 +422,7 @@ pub(crate) fn available_shells() -> String {
 /// 孙进程持 fd1/fd2 = 管道写端，孤儿化 reparent 后长期滞留——阶段 2 的
 /// settle 机制保证读线程有界退出，但输出完整性仍以重定向到文件 + 受控移交
 /// （background_after_secs + process 工具）为正道。
-pub(crate) const BACKGROUND_DERIVATION_HINT: &str = "\n[!] 后台派生检测：命令包含 `&`（后台任务）。后台/孙进程可能持有输出管道，导致本结果遗漏其后继输出。长驻服务请改用 background_after_secs 参数移交后台，并以 process 工具（check/wait/kill）接管；后台命令应将 stdout/stderr 重定向到文件（证据：docs/current/debug-backlog.md）。\n";
+pub(crate) const BACKGROUND_DERIVATION_HINT: &str = "\n[!] 后台派生检测：命令包含 `&`（后台任务）。后台/孙进程可能持有输出管道，导致本结果遗漏其后继输出。长驻服务请改用 background_after_secs 参数移交后台，并以 process 工具（check/wait/kill）接管；后台命令应将 stdout/stderr 重定向到文件。\n";
 
 /// 检测 shell 命令中的后台派生操作符。
 /// 剥除逻辑与（`&&`）与重定向组合（`>&`/`&>`，覆盖 `2>&1`）后残留的

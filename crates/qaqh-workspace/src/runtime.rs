@@ -108,10 +108,7 @@ impl ToolExecutionScope {
 
     /// Bind an explicit session-owned `ToolManager` and `ToolCallContext`
     /// without reading actor thread-locals.
-    pub fn with_manager(
-        context: ToolCallContext,
-        manager: Arc<Mutex<crate::ToolManager>>,
-    ) -> Self {
+    pub fn with_manager(context: ToolCallContext, manager: Arc<Mutex<crate::ToolManager>>) -> Self {
         Self {
             context,
             manager: Some(manager),
@@ -524,4 +521,3 @@ pub fn files_read() -> Vec<String> {
 pub fn files_written() -> Vec<String> {
     global_stats().files_written
 }
-

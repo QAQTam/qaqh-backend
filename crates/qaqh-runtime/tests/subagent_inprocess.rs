@@ -16,11 +16,27 @@ static TEST_LOCK: Mutex<()> = Mutex::new(());
 /// `SessionManager::init` 只能成功一次。
 static ENV_INIT: Once = Once::new();
 
+/// 同步用例也要驱动 tokio 任务：thin SessionAgent worker 由 `tokio::spawn`
+/// 拉起，测试线程必须处在某个 runtime 上下文里。每个用例线程各进入一次并
+/// 故意泄漏 guard（guard 一 drop 就退出 runtime 上下文）。
+fn test_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime")
+    })
+}
+
 fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     // 中毒只说明别的用例 panic 过，不代表本用例的前置条件不成立。
-    TEST_LOCK
+    let guard = TEST_LOCK
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::mem::forget(test_runtime().enter());
+    guard
 }
 
 fn init_env(tag: &str) -> std::path::PathBuf {
@@ -59,7 +75,7 @@ fn spawn_linked_subagent(registry: &mut AgentRegistry, parent: &str, child: &str
 }
 
 #[test]
-#[ignore = "阻塞：thin agent 未挂 WorkerLiveness（spawn.rs:394 liveness: None），activity/idle 面不可观测"]
+#[ignore = "child delivery facts (SubagentSpawned / InterAgentCommunication) are still rejected by the batch CommitState — see the follow-up on commit_state.rs:372"]
 fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
     let _test_lock = test_guard();
     let _root = init_env("subagent-inprocess-test");
@@ -473,7 +489,7 @@ fn dead_parent_closes_child_tree_before_respawn() {
 
 /// #114：idle unload 走同一 close 路径，父 session 卸载后 child 不得继续运行。
 #[test]
-#[ignore = "阻塞：thin agent 未挂 WorkerLiveness（spawn.rs:394 liveness: None），idle unload 未接线"]
+#[ignore = "child delivery facts (SubagentSpawned / InterAgentCommunication) are still rejected by the batch CommitState — see the follow-up on commit_state.rs:372"]
 fn parent_idle_unload_cancels_and_joins_child_tree() {
     let _test_lock = test_guard();
     let _root = init_env("subagent-parent-idle-unload-test");

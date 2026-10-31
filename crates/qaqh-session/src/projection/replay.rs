@@ -109,6 +109,7 @@ pub fn replaceable_identity(payload: &ProjectionPayload) -> Option<String> {
             Some("control:driver".into())
         }
         ProjectionPayload::MetaDelta(MetaDelta::TitleChanged { .. }) => Some("meta:title".into()),
+        ProjectionPayload::MetaDelta(MetaDelta::ConfigChanged { .. }) => Some("meta:config".into()),
         ProjectionPayload::ResourceDelta(ResourceDelta::WorkspaceResourceChanged {
             resource_kind,
             resource_id,

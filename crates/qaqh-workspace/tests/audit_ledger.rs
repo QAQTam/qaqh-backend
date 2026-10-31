@@ -1,6 +1,5 @@
 //! 审计账本 v2 端到端验收（工具调用 → 双写账本 → 链校验）。
-//!
-//! 设计：`docs/current/architecture.md`。覆盖：
+//! 覆盖：
 //! 1. 成功调用：v2 记录带主体链（session/call_id）、工具面（category）、
 //!    授权路径（decision=auto）、对象（路径 + after 指纹）；
 //! 2. 被拒调用（Level 1 写操作需审批、通道不可用）：kind=tool_rejected、
@@ -10,7 +9,6 @@
 //! 5. 隐私：参数明文（content 里的敏感串）绝不落账本；
 //! 6. 完整性：seq 连续、prev_hash 逐条衔接、verify_ledger 全绿；
 //! 7. 双写：v1 CSV 同步落行（8 旧列 + 7 扩展列 = 15 列）。
-//!
 //! 隔离：本测试进程独占 `QAQH_DATA_DIR`/`HOME`/`USERPROFILE`（见 [`setup`]），
 //! 绝不写真实用户账本；文件内测试以 `SERIAL` 串行（env 是进程级状态）。
 
@@ -27,7 +25,6 @@ struct Env {
 }
 
 /// 钉住数据根与工作区，初始化工具 manager。
-///
 /// `data_dir()` 的优先级是 `QAQH_DATA_DIR` > `HOME`/`USERPROFILE`（unix/win），
 /// 全部钉住才能保证账本/会话/workspace 落进临时目录。
 fn setup(label: &str) -> Env {

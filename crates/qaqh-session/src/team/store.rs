@@ -1,7 +1,6 @@
 //! Durable append-only TeamFact store.
-//!
 //! Storage layout and durability contract are frozen in
-//! `docs/current/spec/2026-09-26-team-task-board.md`.
+//! .
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -47,7 +46,6 @@ pub struct TeamStore {
 
 impl TeamStore {
     /// Open an existing team aggregate or create its identity sidecar.
-    ///
     /// The first appended fact must be `TeamCreated`; an empty log is valid
     /// until then.
     pub fn open_or_create(dir: impl AsRef<Path>, team_id: TeamId, now_ms: i64) -> TeamResult<Self> {

@@ -2,8 +2,7 @@
 //!
 //! `git.*`（6 个方法：diff/branch/branches/file_diff/switch_branch/commit）
 //! 2026-10-31 整体删除：唯一的消费者是 `qaqh-client` 的 `Endpoint` 枚举，而
-//! 桌面端从未接线该面板。删除范围含 client 变体、命令枚举、方法表条目与
-//! `qaqh-workspace/src/git.rs`（251 行 git2 包装）。
+//! 桌面端从未接线该面板。删除范围含 client 变体、命令枚举与方法表条目。
 
 use serde_json::{Value, json};
 
@@ -33,8 +32,19 @@ pub(crate) fn handle(service: &QaqhService, command: WorkspaceCommand) -> QaqhRe
             if path.is_empty() {
                 return Err(QaqhError::invalid("workspace.set: empty path rejected"));
             }
-            // 统一数据源：运行环境工作目录存 meta.cwd（workspace.txt 退役）。
-            service.sessions.set_cwd(&args.session_id, &path, true);
+            // 统一数据源：运行环境工作目录是 journal 里的 `cwd`。
+            service
+                .write_meta(
+                    &args.session_id,
+                    qaqh_session::session_fact_v2::SessionMetadataPatch {
+                        cwd: Some(qaqh_session::grouping::canonical_cwd(std::path::Path::new(
+                            &path,
+                        ))),
+                        ..Default::default()
+                    },
+                )
+                .map_err(QaqhError::message)?;
+            qaqh_session::WorkspaceStore::global().attach_by_cwd(&args.session_id, &path);
             service.send_ringing_cmd(
                 args.session_id,
                 RingingCommand::Control(ControlCommand::AgentReloadConfig),

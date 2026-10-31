@@ -8,10 +8,9 @@ use qaqh_ringing::{
     RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot,
     RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
     RingingV2DeviceChallenges, RingingV2DriverState, RingingV2ExistingResult,
-    RingingV2InteractionKind,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
-    RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
-    RingingV2PendingPermissionView,
+    RingingV2InteractionKind, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
+    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteraction,
+    RingingV2PendingInteractionView, RingingV2PendingPermissionView,
 };
 use qaqh_runtime::ringing::V2StreamItem;
 use qaqh_session::projection::{ControlInteractionState, ConversationSnapshot};
@@ -883,15 +882,13 @@ pub(crate) async fn handle_command_status_v2(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .instance_for_session(&session_id);
-    let Some(status) = owner_key
-        .and_then(|owner_key| {
-            state
-                .pending
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .v2_status_for_session(&command_id, &owner_key)
-        })
-    else {
+    let Some(status) = owner_key.and_then(|owner_key| {
+        state
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .v2_status_for_session(&command_id, &owner_key)
+    }) else {
         return api_error_response(
             StatusCode::NOT_FOUND,
             "command_not_found",

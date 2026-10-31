@@ -28,6 +28,7 @@ mod host_impl;
 mod registry;
 pub mod ringing;
 mod service;
+mod session_meta;
 mod subagent_supervisor;
 
 // 已外移的执行层：同名重导出，路径不变。
@@ -38,10 +39,10 @@ pub use qaqh_agent_runtime::{
 // `read_session_facts`）。
 pub(crate) use qaqh_ringing_runtime::agent_graph;
 
-pub use qaqh_agent_runtime::SessionActivityTracker;
 pub use error::{QaqhError, QaqhResult};
 #[doc(hidden)]
 pub use host_impl::MAILBOX_ACTIVITY_PARSE_COUNT;
-pub use registry::{AgentRegistry, cache_system_path, detect_os_info, detect_shell};
+pub use qaqh_agent_runtime::SessionActivityTracker;
 pub use qaqh_ringing_runtime::RingingHub;
+pub use registry::{AgentRegistry, cache_system_path, detect_os_info, detect_shell};
 pub use service::QaqhService;

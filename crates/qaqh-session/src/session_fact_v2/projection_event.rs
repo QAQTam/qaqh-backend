@@ -14,9 +14,9 @@ use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIn
 use super::types::{
     ActivityState, ActorRef, AssistantBlockKind, CheckpointId, CompactStatus, ContentHash,
     ContentRef, ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind,
-    InputPurpose, InterAgentCommunication, InterAgentDelivery, InteractionDecision,
-    InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason, LogId,
-    MAX_SAFE_FACT_SEQ, MessageId, PolicyDecisionRef, ProjectionSlot, RecoveryAction,
+    InputPurpose, InterAgentCommunication, InterAgentDelivery, InteractionChoice,
+    InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason,
+    LogId, MAX_SAFE_FACT_SEQ, MessageId, PolicyDecisionRef, ProjectionSlot, RecoveryAction,
     RecoveryOutcome, RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId,
     SessionMetadataPatch, SideEffectClass, SubagentTerminalStatus, TitleSource, ToolCallId,
     ToolError, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnError, TurnId, TurnMode,
@@ -782,6 +782,9 @@ pub enum ControlDelta {
         call_id: Option<ToolCallId>,
         kind: InteractionKind,
         request: ContentValue,
+        /// daemon 给出的可选项；空 = 该交互没有预设按钮（如自由文本 ask）。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        choices: Vec<InteractionChoice>,
         expires_at_ms: Option<i64>,
     },
     InteractionResolved {
@@ -867,6 +870,11 @@ pub enum MetaDelta {
         title: String,
         source: TitleSource,
     },
+    /// daemon 全局配置变更信号（v2 只有按会话的流，故按会话广播）。
+    ///
+    /// 只发信号不发内容：配置 DTO 的形状由 `config.load` 独占定义，
+    /// 在这里再拷一份就会立刻漂移。客户端收到后重拉一次 `config.load`。
+    ConfigChanged { revision: u64 },
     Deleted {
         revision: u64,
         tombstone_at_ms: i64,

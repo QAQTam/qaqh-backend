@@ -22,11 +22,11 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
 use qaqh_types::{
     ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader, ToolResultDisplayOutcome,
     ToolResultDisplayOutcomeState,
 };
-use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
 use qaqh_workspace::{DynamicTool, MCP_DYNAMIC_PREFIX, ToolResult, ToolStatus, now_utc8};
 use rmcp::model::{CallToolResult, ContentBlock};
 
@@ -305,8 +305,9 @@ fn mcp_display(state: ToolResultDisplayOutcomeState, text: String) -> ToolResult
     ToolResultDisplay {
         summary: None,
         diff: None,
-        lines_added: 0,
-        lines_removed: 0,
+        files: Vec::new(),
+        lines_added: None,
+        lines_removed: None,
         header: Some(ToolResultDisplayHeader::Other {
             label: String::new(),
         }),

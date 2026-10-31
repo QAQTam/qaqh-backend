@@ -95,6 +95,10 @@ where
         args: serde_json::Value,
     ) -> Result<ToolOutcome, FatalToolError> {
         let started = Instant::now();
+        // 工具名是框架已知的事实：下发给 `effective_tool_name` 后，缺失 header
+        // 的结果也能被 wire 兜成显式 `header.kind = other`，客户端不必再猜 args 键名。
+        let meta = self.tool.meta();
+        let tool_name = meta.name.as_str();
         let raw_args = args.clone();
         // JSON types are part of the tool contract; never repair model values.
         let args = match serde_json::from_value::<T::Args>(args) {
@@ -107,6 +111,7 @@ where
                             &self.cached_input_schema(),
                         )),
                     started.elapsed(),
+                    tool_name,
                 ));
             }
         };
@@ -117,9 +122,10 @@ where
                 &raw_args,
                 ctx.source,
                 started.elapsed(),
+                tool_name,
             )),
             Err(ToolExecutionError::Recoverable(error)) => {
-                Ok(recoverable_outcome(error, started.elapsed()))
+                Ok(recoverable_outcome(error, started.elapsed(), tool_name))
             }
             Err(ToolExecutionError::Fatal(error)) => Err(error),
         }
@@ -131,6 +137,7 @@ fn project_output<O: ToolProjection>(
     args: &serde_json::Value,
     source: ToolCallSource,
     elapsed: Duration,
+    tool_name: &str,
 ) -> ToolOutcome {
     let blocks = output.model_blocks();
     let model_text = if blocks.is_empty() {
@@ -159,14 +166,14 @@ fn project_output<O: ToolProjection>(
             elapsed,
             output_bytes,
             retry_count: 0,
-            effective_tool_name: None,
+            effective_tool_name: Some(tool_name.to_owned()),
             user_initiated: matches!(source, ToolCallSource::User),
         },
         effects: output.effects(),
     }
 }
 
-fn recoverable_outcome(error: ToolError, elapsed: Duration) -> ToolOutcome {
+fn recoverable_outcome(error: ToolError, elapsed: Duration, tool_name: &str) -> ToolOutcome {
     let mut text = error.detail.clone();
     if let Some(hint) = error.hint.as_ref()
         && !hint.is_empty()
@@ -188,7 +195,7 @@ fn recoverable_outcome(error: ToolError, elapsed: Duration) -> ToolOutcome {
             elapsed,
             output_bytes: text.len() as u64,
             retry_count: 0,
-            effective_tool_name: None,
+            effective_tool_name: Some(tool_name.to_owned()),
             user_initiated: false,
         },
         effects: Vec::new(),
@@ -302,6 +309,7 @@ mod tests {
             &serde_json::json!({}),
             crate::tool_api::ToolCallSource::Model,
             Duration::ZERO,
+            "echo",
         );
         assert_eq!(outcome.model.text, "hi");
         let wire = outcome.to_tool_result();
@@ -316,6 +324,7 @@ mod tests {
             &serde_json::json!({}),
             crate::tool_api::ToolCallSource::Model,
             Duration::ZERO,
+            "echo",
         );
         assert_eq!(outcome.model.text, "hi");
         assert_eq!(

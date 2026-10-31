@@ -35,6 +35,46 @@ pub struct PatchStats {
     /// 全部 hunk 指向同一文件时给出该路径；出现第二个不同路径后置 `None`
     /// （多文件补丁没有「这一个文件」可报）。
     pub single_path: Option<PathBuf>,
+    /// 逐文件行差。与 `single_path` 不同：多文件补丁也有这一份，
+    /// 客户端不必再从 unified diff 文本里反推每个文件 +N −M。
+    pub files: Vec<PatchFileStat>,
+}
+
+/// 单个文件的补丁规模。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchFileStat {
+    pub path: PathBuf,
+    pub op: PatchFileOp,
+    pub lines_added: usize,
+    pub lines_removed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchFileOp {
+    Add,
+    Update,
+    Delete,
+}
+
+impl PatchFileOp {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Update => "update",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+impl PatchStats {
+    /// 给当前文件段累加行数。`index = None` 时静默跳过（没有文件段）。
+    fn bump(&mut self, index: Option<usize>, added: usize, removed: usize) {
+        let Some(file) = index.and_then(|index| self.files.get_mut(index)) else {
+            return;
+        };
+        file.lines_added += added;
+        file.lines_removed += removed;
+    }
 }
 
 #[derive(Debug, Default, Clone)]
@@ -50,6 +90,8 @@ struct StreamingParserState {
     hunks: Vec<Hunk>,
     environment_id: Option<String>,
     stats: PatchStats,
+    /// `stats.files` 中当前正在计数的文件下标（无文件段时为 `None`）。
+    current_file: Option<usize>,
     /// 已出现两个不同 hunk 路径：此后 `single_path` 永久为 `None`
     /// （否则第三个 hunk 会把它重新填回去）。
     multi_path_seen: bool,
@@ -132,6 +174,17 @@ impl StreamingPatchParser {
         }
     }
 
+    /// 开启一个文件段的逐文件计数。
+    fn begin_file(&mut self, path: &Path, op: PatchFileOp) {
+        self.state.stats.files.push(PatchFileStat {
+            path: path.to_path_buf(),
+            op,
+            lines_added: 0,
+            lines_removed: 0,
+        });
+        self.state.current_file = Some(self.state.stats.files.len() - 1);
+    }
+
     fn ensure_update_hunk_is_not_empty(&self, line: &str) -> Result<(), ParseError> {
         if let Some(UpdateFile { path, chunks, .. }) = self.state.hunks.last() {
             if chunks.is_empty()
@@ -191,6 +244,7 @@ impl StreamingPatchParser {
             validate_hunk_path(path, self.line_number)?;
             let path = PathBuf::from(path);
             self.note_hunk_path(&path);
+            self.begin_file(&path, PatchFileOp::Add);
             self.state.stats.files_created += 1;
             self.state.hunks.push(AddFile {
                 path,
@@ -204,6 +258,7 @@ impl StreamingPatchParser {
             validate_hunk_path(path, self.line_number)?;
             let path = PathBuf::from(path);
             self.note_hunk_path(&path);
+            self.begin_file(&path, PatchFileOp::Delete);
             self.state.stats.files_deleted += 1;
             self.state.hunks.push(DeleteFile { path });
             self.state.mode = StreamingParserMode::DeleteFile;
@@ -214,6 +269,7 @@ impl StreamingPatchParser {
             validate_hunk_path(path, self.line_number)?;
             let path = PathBuf::from(path);
             self.note_hunk_path(&path);
+            self.begin_file(&path, PatchFileOp::Update);
             self.state.hunks.push(UpdateFile {
                 path,
                 move_path: None,
@@ -297,6 +353,8 @@ impl StreamingPatchParser {
                     && let Some(AddFile { contents, .. }) = self.state.hunks.last_mut()
                 {
                     self.state.stats.lines_added += 1;
+                    let current = self.state.current_file;
+                    self.state.stats.bump(current, 1, 0);
                     contents.push_str(line_to_add);
                     contents.push('\n');
                     return Ok(());
@@ -428,6 +486,8 @@ impl StreamingPatchParser {
                         }
                         if let Some(chunk) = chunks.last_mut() {
                             self.state.stats.lines_added += 1;
+                            let current = self.state.current_file;
+                            self.state.stats.bump(current, 1, 0);
                             chunk.new_lines.push(line_to_add.to_string());
                         }
                         self.state.mode = StreamingParserMode::UpdateFile { hunk_line_number };
@@ -440,6 +500,8 @@ impl StreamingPatchParser {
                         }
                         if let Some(chunk) = chunks.last_mut() {
                             self.state.stats.lines_removed += 1;
+                            let current = self.state.current_file;
+                            self.state.stats.bump(current, 0, 1);
                             chunk.old_lines.push(line_to_remove.to_string());
                         }
                         self.state.mode = StreamingParserMode::UpdateFile { hunk_line_number };
@@ -542,6 +604,26 @@ mod tests {
             files_created: 1,
             files_deleted: 1,
             single_path: None,
+            files: vec![
+                PatchFileStat {
+                    path: PathBuf::from("new.txt"),
+                    op: PatchFileOp::Add,
+                    lines_added: 2,
+                    lines_removed: 0,
+                },
+                PatchFileStat {
+                    path: PathBuf::from("a.txt"),
+                    op: PatchFileOp::Update,
+                    lines_added: 2,
+                    lines_removed: 1,
+                },
+                PatchFileStat {
+                    path: PathBuf::from("gone.txt"),
+                    op: PatchFileOp::Delete,
+                    lines_added: 0,
+                    lines_removed: 0,
+                },
+            ],
         };
         for chunk_size in [1, 2, 3, 7, 13, 64, 4096] {
             assert_eq!(
@@ -640,6 +722,12 @@ mod tests {
                 files_created: 1,
                 files_deleted: 0,
                 single_path: Some(PathBuf::from("new.txt")),
+                files: vec![PatchFileStat {
+                    path: PathBuf::from("new.txt"),
+                    op: PatchFileOp::Add,
+                    lines_added: 2,
+                    lines_removed: 0,
+                }],
             }
         );
     }

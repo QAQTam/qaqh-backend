@@ -59,7 +59,6 @@ pub fn read_discovery() -> Result<DaemonDiscovery> {
 }
 
 /// Ensure a daemon is running and publish its discovery.
-///
 /// Synchronous (no tokio runtime needed): spawns `qaqh-daemon run` detached
 /// when no discovery file exists, then polls for up to `timeout`. Reuses an
 /// existing discovery when the daemon process is alive.
@@ -92,7 +91,6 @@ pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDisco
 }
 
 /// 一条 discovery 记录是否指向**真正可用**的 daemon。
-///
 /// 两道判据缺一不可：
 /// 1. **记录的 pid 存活** —— 挡住 daemon 崩溃/被 SIGKILL/重启后留下的陈旧
 ///    记录（此前非 Windows 的判活是恒 `true` 的 stub，等于完全没挡）；
@@ -100,7 +98,6 @@ pub fn ensure_daemon_running(timeout: std::time::Duration) -> Result<DaemonDisco
 ///    pid 被无关进程占用）与 **daemon 活着但没在听**（启动中卡住、监听 socket
 ///    已关闭）。少了这一条，客户端会拿一个死端点去连，`Connection refused`
 ///    之后**不会**回退到拉起 daemon。
-///
 /// 判据 2 是本地回环的一次 TCP 连接（≤[`ENDPOINT_PROBE_TIMEOUT`]），只在
 /// 「已有 discovery 记录」的连接路径上发生，不进热路径。
 pub(crate) fn discovery_is_live(discovery: &DaemonDiscovery) -> bool {
@@ -153,7 +150,6 @@ pub(crate) fn lock_holder_alive() -> bool {
 }
 
 /// Resolve the daemon executable.
-///
 /// Candidate order (first hit wins):
 ///   1. `QAQH_BACKEND_ROOT/target/debug/qaqh-daemon` — dev layout (explicit
 ///      env opt-in)
@@ -161,7 +157,6 @@ pub(crate) fn lock_holder_alive() -> bool {
 ///      the daemon inside the shell's resources dir; mirrors Electron sidecar)
 ///   3. `<exe_dir>/qaqh-daemon` — side-by-side layout
 ///   4. bare name (PATH lookup) — only with `QAQH_DAEMON_ALLOW_PATH=1`
-///
 /// 审计 M5（2026-10-01）：候选序**不含当前工作目录**——在含
 /// `target/debug/qaqh-daemon` 的目录里启动客户端（如克隆的恶意仓库）时，
 /// 旧序会拉起被投放的伪装 daemon 并交出 token。PATH 裸名兜底同理收窄为
@@ -221,7 +216,6 @@ pub fn daemon_executable() -> Result<std::path::PathBuf> {
 /// 以「脱离当前 shell」的方式拉起 daemon 进程。**daemon 的唯一 spawn 出口**
 /// （此前 `discovery::spawn_daemon_detached` 与 `client::spawn_detached` 各写一份，
 /// 加保护极易只改一处）。
-///
 /// **为什么必须脱离**（BUG-2026-09-15-04）：daemon 与 shell 同进程组、同会话时
 /// （实测：daemon 的 PGID == 起它的 TUI 的 PGID，PPID 即 TUI），终端一收尾——
 /// 关窗、Ctrl+C 打到前台组、父进程被 SIGTERM——daemon 会被一并收走。它来不及
@@ -229,7 +223,6 @@ pub fn daemon_executable() -> Result<std::path::PathBuf> {
 /// （BUG-2026-09-15-03），下一个 shell 就被那条记录永久卡死。设计上 daemon 本就
 /// 该跨 shell 复用（`daemon.lock` 单实例锁、`/control/v1/stop-if-idle` 都指向
 /// 这一点），原先的行为与设计相反。
-///
 /// Unix 用 `process_group(0)` 让 daemon 自成一个进程组（pgid = 自身 pid）——终端
 /// 关闭时的 SIGHUP 只发给**前台进程组**，故此一步即足以保命；std 自带，无需引
 /// libc。Windows 仍用 `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`。
@@ -272,7 +265,6 @@ fn spawn_daemon_detached() -> Result<()> {
 /// from [`qaqh_types::platform::process_is_running`]: on Windows this one uses
 /// the Win32 API directly (no `tasklist` subprocess latency). On non-Windows it
 /// **delegates** to that same function (`kill -0`).
-///
 /// 曾经这里在非 Windows 上是 `true` 的 stub（注释写「discovery 文件存在即视为
 /// 存活」）。那不是占位符无伤大雅，而是**把一个陈旧 `daemon.json` 变成永久
 /// 砖**：daemon 被 SIGKILL/崩溃/重启后记录仍在，于是
@@ -312,7 +304,7 @@ pub fn process_is_running(pid: u32) -> bool {
 mod tests {
     use super::*;
 
-    // 前端契约冻结面锚点：`docs/current/architecture.md`
+    // 前端契约冻结面锚点：
     // （原注释指向的 `frontend-contract.md` 从不存在，已改指该文件）。discovery endpoint 的兼容解析。
     // 旧形态 ws://host:port/control/v1 必须无损转 http://，新形态原样通过；
     // 破坏任一分支即破坏已发布客户端的 discovery 兼容。
@@ -453,7 +445,6 @@ mod tests {
     /// BUG-2026-09-15-04：daemon 必须**自成进程组**，否则终端收尾时会被连同
     /// shell 的前台进程组一起收走（实测：修复前 daemon 的 PGID == 起它的 TUI 的
     /// PGID，shell 退出后 daemon 消失并留下陈旧 `daemon.json`）。
-    ///
     /// 限定 Linux：读 `/proc/<pid>/stat` 的 pgrp 字段。
     /// 破坏验证：去掉 `configure_detached` 里的 `process_group(0)` → 本测试红。
     #[cfg(target_os = "linux")]

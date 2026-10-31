@@ -53,9 +53,9 @@ pub(crate) fn command_fingerprint(
 /// 其余一律 `Interact`。admin 由 `Identity::scope()` 返回 `Admin` 恒通过。
 fn required_scope_for_command(envelope: &RingingV2CommandEnvelope) -> Scope {
     match &envelope.command {
-        qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach { .. }) => {
-            Scope::View
-        }
+        qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
+            ..
+        }) => Scope::View,
         _ => Scope::Interact,
     }
 }
@@ -227,11 +227,8 @@ pub(crate) async fn execute_command(
         .unwrap_or_else(|| session_id.clone());
     let duplicate_check = {
         let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
-        match pending.record_fingerprint_for_session(
-            &envelope.command_id,
-            &fingerprint,
-            &owner_key,
-        ) {
+        match pending.record_fingerprint_for_session(&envelope.command_id, &fingerprint, &owner_key)
+        {
             Ok(v) => Ok(!v),
             Err(()) => Err(()),
         }

@@ -1,7 +1,4 @@
 //! qaqh-lsp：QAQ-Harness 的 LSP 客户端支持。
-//!
-//! 设计文档：`docs/current/architecture.md`。
-//!
 //! 与 qaqh-mcp 的关系：MCP 是"工具总线"（远端能力接进来），LSP 是
 //! "工作区语义面"（本地精确理解）——独立 crate，依赖方向单向
 //! （`qaqh-runtime → qaqh-lsp → {qaqh-workspace, qaqh-config, async-lsp}`），
@@ -21,7 +18,7 @@ pub use error::{LspError, LspErrorKind};
 pub use manager::{ApplyReport, LspManager};
 
 /// M0 起保留的 crate 用途标识。
-pub const CRATE_PURPOSE: &str = "QAQ-Harness LSP client support — see docs/current/architecture.md";
+pub const CRATE_PURPOSE: &str = "QAQ-Harness LSP client support";
 
 use std::sync::{Arc, OnceLock, RwLock};
 

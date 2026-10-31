@@ -41,6 +41,17 @@ pub enum AgentCommand {
         attachments: Vec<ContentRef>,
         client_request_id: Option<String>,
     },
+    /// Session metadata write (profile / effort / mode / archived / …). The
+    /// actor is the only writer of the journal, so meta writes ride the mailbox
+    /// instead of opening a second `SessionCommit`.
+    SetMetadata {
+        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
+    },
+    /// Title write, same reasoning as [`Self::SetMetadata`].
+    SetTitle {
+        title: String,
+        source: qaqh_session::session_fact_v2::TitleSource,
+    },
 }
 
 impl FrameSize for AgentCommand {
@@ -65,6 +76,19 @@ impl FrameSize for AgentCommand {
                 .saturating_add(text.len())
                 .saturating_add(attachments.len() * 96)
                 .saturating_add(client_request_id.as_ref().map_or(0, String::capacity))
+                .saturating_add(64),
+            AgentCommand::SetMetadata { patch } => std::mem::size_of::<Self>()
+                .saturating_add(256)
+                .saturating_add(
+                    patch
+                        .skills
+                        .as_ref()
+                        .map_or(0, |skills| skills.entries.len() * 48),
+                )
+                .saturating_add(patch.frozen_annotation.as_ref().map_or(0, String::capacity))
+                .saturating_add(patch.custom_tools.as_ref().map_or(0, |t| t.len() * 48)),
+            AgentCommand::SetTitle { title, .. } => std::mem::size_of::<Self>()
+                .saturating_add(title.len())
                 .saturating_add(64),
         }
     }

@@ -116,7 +116,7 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 "ClientV2ControlState",
                 "ClientV2ToolState",
                 "ConversationSnapshot",
-                "ClientV2Payload",
+                "fact::ProjectionPayload",
                 "ClientV2Event",
             ],
             vec!["bootstrap-response.json", "event-envelope-team-delta.json"],
@@ -185,9 +185,10 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // registry have been wired; the exporter must never infer completion.
     // timeline / approvals.device / content.download 的后端契约已由 DTO/handler
     // 测试钉住；remote（TLS/远端 transport）验收仍不在本轮范围。
-    for (id, reason) in [
-        ("daemon.control", "control endpoints not in first typed slice"),
-    ] {
+    for (id, reason) in [(
+        "daemon.control",
+        "control endpoints not in first typed slice",
+    )] {
         capabilities
             .push(json!({"id":id,"status":"pending","types":[],"fixtures":[],"reason":reason}));
     }
