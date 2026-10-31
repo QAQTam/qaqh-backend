@@ -47,6 +47,13 @@ use std::sync::{LazyLock, Mutex, RwLock};
 /// executing each tool. Reset via [`clear_cancel`] at the top of the runtime's
 /// `handle_user_input` so it is per-turn, not cross-session.
 pub static CANCEL: AtomicBool = AtomicBool::new(false);
+
+/// Fallback session id for **ambient** callers that have no `ToolCallContext`.
+///
+/// 2026-10-31：会话装配（`ToolManager::apply_init`）不再写它。此前每次 spawn
+/// 都会覆写这个进程级槽位，于是「最后 spawn 的会话」成了所有 ambient 读取者
+/// 的答案。现在只有显式调用 [`set_current_session`] 的代码（ambient 兼容入口、
+/// 测试）会写；执行期身份一律取 `ToolCallContext::session_id`。
 pub static CURRENT_SESSION: Mutex<Option<String>> = Mutex::new(None);
 
 pub fn set_current_session(session_id: &str) {
