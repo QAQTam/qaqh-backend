@@ -30,6 +30,7 @@ hex = "0.4"
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 # Test-only: deterministic WAL read-fault injection (BUG-2026-09-13-06).
 tempfile = "3"
 
