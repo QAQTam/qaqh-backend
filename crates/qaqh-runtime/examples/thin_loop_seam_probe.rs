@@ -44,6 +44,7 @@ use qaqh_session::{
     },
 };
 use qaqh_types::{ContentBlock, Message, ToolDef, ToolFunction, ToolResult};
+use tempfile;
 use std::{
     sync::{
         Arc, Mutex,
@@ -2221,11 +2222,19 @@ async fn probe_real_workspace_tool_port_permissions_quota_and_queued_inputs(
         .expect("open quota ledger"),
     ));
     let policy = ToolPolicySnapshot::workspace_write(&ws_dir);
+    let lifecycle = {
+        let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+        let db = std::sync::Arc::new(
+            qaqh_session::db::Db::open(dir.path().join("qaqh.db")).expect("open test db"),
+        );
+        qaqh_session::owner::SessionOwner::new(SESSION, db).lifecycle()
+    };
     let ws_port = Arc::new(WorkspaceToolPort::new(
         SESSION,
         Arc::clone(&manager),
         policy.clone(),
         Some(Arc::clone(&ledger)),
+        lifecycle,
     ));
 
     let (tool_handle, mut tool_mailbox) =

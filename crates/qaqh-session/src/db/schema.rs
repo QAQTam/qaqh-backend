@@ -47,7 +47,7 @@ CREATE INDEX idx_turns_session ON turns(session_id, seq);
 CREATE TABLE blocks (
     block_id      TEXT PRIMARY KEY,
     session_id    TEXT NOT NULL,
-    turn_id       TEXT NOT NULL REFERENCES turns(turn_id),
+    turn_id       TEXT REFERENCES turns(turn_id),
     ord           INTEGER NOT NULL,
     kind          TEXT NOT NULL,
     text          TEXT,
@@ -61,7 +61,7 @@ CREATE INDEX idx_blocks_session ON blocks(session_id, ord);
 CREATE TABLE tool_calls (
     call_id          TEXT PRIMARY KEY,
     session_id       TEXT NOT NULL,
-    turn_id          TEXT NOT NULL,
+    turn_id          TEXT,
     tool_name        TEXT NOT NULL,
     args_json        TEXT,
     status           TEXT NOT NULL,
@@ -70,6 +70,8 @@ CREATE TABLE tool_calls (
     output_truncated INTEGER NOT NULL DEFAULT 0,
     error_json       TEXT,
     meta_json        TEXT,
+    effects_json     TEXT,
+    code_delta_json  TEXT,
     started_at_ms    INTEGER,
     finished_at_ms   INTEGER
 );

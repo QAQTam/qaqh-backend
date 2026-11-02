@@ -122,6 +122,34 @@ impl Db {
         .await
         .map_err(|_| DbError::ExecutorStopped)?
     }
+
+    /// 串行写入(阻塞版):供同步线程(会话 owner 泵)使用,同一个写执行器。
+    pub fn write_blocking<T, E, F>(&self, f: F) -> Result<T, DbError>
+    where
+        T: Send + 'static,
+        E: Into<DbError> + Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, E> + Send + 'static,
+    {
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let job: Box<dyn FnOnce(&mut Connection) + Send> = Box::new(move |conn| {
+            let _ = reply_tx.send(f(conn).map_err(Into::into));
+        });
+        self.write_tx.send(WriteJob(job)).map_err(|_| DbError::ExecutorStopped)?;
+        reply_rx.recv().map_err(|_| DbError::ExecutorStopped)?
+    }
+
+    /// 只读查询(阻塞版):调用方必须已在同步线程上。
+    pub fn read_blocking<T, E, F>(&self, f: F) -> Result<T, DbError>
+    where
+        E: Into<DbError>,
+        F: FnOnce(&Connection) -> Result<T, E>,
+    {
+        let conn = self
+            .read_conn
+            .lock()
+            .map_err(|_| DbError::ReadLockPoisoned)?;
+        f(&conn).map_err(Into::into)
+    }
 }
 
 fn configure(conn: &mut Connection) -> Result<(), DbError> {

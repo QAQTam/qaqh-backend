@@ -104,8 +104,9 @@ pub struct ToolCallView {
     pub turn_id: Option<TurnId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_name: Option<String>,
+    /// 工具原始参数(裸 JSON 对象)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub args: Option<ContentValue>,
+    pub args: Option<serde_json::Value>,
     pub status: ToolCallStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output: Option<ContentValue>,
@@ -115,6 +116,38 @@ pub struct ToolCallView {
     pub error: Option<ToolError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<ToolMetrics>,
+    /// edit 类工具对代码的净变更统计(结构化结果,不压进正文)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_delta: Option<CodeDelta>,
+    /// 工具产生的结构化效果(owner 消费,不丢弃)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<ToolEffectInfo>,
+}
+
+/// 工具对代码的净变更统计。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct CodeDelta {
+    pub lines_added: usize,
+    pub lines_removed: usize,
+    pub files_created: usize,
+    pub files_deleted: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+}
+
+/// 工具产生的结构化效果的契约词表。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolEffectInfo {
+    SkillActivated { name: String },
+    SkillReleased { name: String },
+    SubagentSpawned {
+        child_session_id: String,
+        name: String,
+        task_text: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

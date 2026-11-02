@@ -9,8 +9,8 @@ use rusqlite::Connection;
 use serde::de::DeserializeOwned;
 
 use qaqh_ringing_contract::fact::{
-    ActivityState, ContentValue, InteractionDecision, InteractionId, InteractionKind, SessionId,
-    ToolCallId, ToolError, ToolMetrics, TurnId, TurnMode,
+    ActivityState, InteractionDecision, SessionId, ToolCallId, ToolError, ToolMetrics, TurnId,
+    TurnMode,
 };
 use qaqh_ringing_contract::state::{
     InteractionResolution, InteractionView, SessionState, TimelineEntry, ToolCallStatus,
@@ -150,7 +150,7 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
     };
     let who = format!("tool call {}", call.call_id);
     let args = match call.args_json {
-        Some(text) => Some(parse_typed::<ContentValue>(&who, "args", &text)?),
+        Some(text) => Some(parse_typed::<serde_json::Value>(&who, "args", &text)?),
         None => None,
     };
     let error = match call.error_json {
@@ -161,9 +161,21 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
         Some(text) => Some(parse_typed::<ToolMetrics>(&who, "metrics", &text)?),
         None => None,
     };
+    let code_delta = match call.code_delta_json {
+        Some(text) => Some(parse_typed::<qaqh_ringing_contract::state::CodeDelta>(
+            &who, "code_delta", &text,
+        )?),
+        None => None,
+    };
+    let effects = match call.effects_json {
+        Some(text) => parse_typed::<Vec<qaqh_ringing_contract::state::ToolEffectInfo>>(
+            &who, "effects", &text,
+        )?,
+        None => Vec::new(),
+    };
     Ok(ToolCallView {
         call_id: ToolCallId::new(call.call_id),
-        turn_id: Some(TurnId::new(call.turn_id)),
+        turn_id: call.turn_id.map(TurnId::new),
         tool_name: Some(call.tool_name),
         args,
         status,
@@ -173,29 +185,26 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
         output_truncated: call.output_truncated,
         error,
         metrics,
+        code_delta,
+        effects,
     })
 }
 
 fn interaction_view(row: InteractionRow) -> Result<InteractionView, DbError> {
     let who = format!("interaction {}", row.interaction_id);
+    // payload_json 保存写侧的完整 InteractionView(request/choices 随行);
+    // kind 列是查询冗余,以 payload 为准反序列化。
+    let mut view = parse_typed::<InteractionView>(&who, "payload", &row.payload_json)?;
     let resolution = match row.decision_json {
-        Some(text) => Some(InteractionResolution {
-            decision: parse_typed::<InteractionDecision>(&who, "decision", &text)?,
-            detail: None,
-            resolved_at_ms: row.resolved_at_ms.unwrap_or(row.created_at_ms),
-        }),
+        Some(text) => parse_typed::<Option<InteractionDecision>>(&who, "decision", &text)?.map(
+            |decision| InteractionResolution {
+                decision,
+                detail: None,
+                resolved_at_ms: row.resolved_at_ms.unwrap_or(row.created_at_ms),
+            },
+        ),
         None => None,
     };
-    Ok(InteractionView {
-        interaction_id: InteractionId::new(row.interaction_id),
-        call_id: row.call_id.map(ToolCallId::new),
-        turn_id: row.turn_id.map(TurnId::new),
-        kind: parse_typed::<InteractionKind>(&who, "kind", &row.kind)?,
-        request: qaqh_ringing_contract::fact::ContentValue::Inline {
-            text: row.payload_json,
-        },
-        choices: Vec::new(),
-        expires_at_ms: None,
-        resolution,
-    })
+    view.resolution = resolution;
+    Ok(view)
 }

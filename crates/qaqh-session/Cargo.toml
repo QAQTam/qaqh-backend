@@ -16,6 +16,7 @@ qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-profile = { path = "../qaqh-profile" }
+qaqh-tool-core = { path = "../qaqh-tool-core" }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
