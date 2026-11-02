@@ -5,6 +5,7 @@
 //! owner. Progress belongs elsewhere and cannot consume completion capacity.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
@@ -63,12 +64,43 @@ pub trait FrameSize {
 struct Frame<T> {
     value: T,
     _bytes: OwnedSemaphorePermit,
+    _usage: LaneUsageGuard,
+}
+
+struct LaneUsageGuard {
+    bytes: u32,
+    usage: Arc<LaneUsage>,
+}
+
+impl Drop for LaneUsageGuard {
+    fn drop(&mut self) {
+        self.usage.remove(self.bytes);
+    }
+}
+
+#[derive(Debug, Default)]
+struct LaneUsage {
+    items: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl LaneUsage {
+    fn add(&self, bytes: u32) {
+        self.items.fetch_add(1, Ordering::Relaxed);
+        self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+
+    fn remove(&self, bytes: u32) {
+        self.items.fetch_sub(1, Ordering::Relaxed);
+        self.bytes.fetch_sub(bytes as u64, Ordering::Relaxed);
+    }
 }
 
 struct Sender<T> {
     tx: mpsc::Sender<Frame<T>>,
     bytes: Arc<Semaphore>,
     budget: LaneBudget,
+    usage: Arc<LaneUsage>,
 }
 
 impl<T> Clone for Sender<T> {
@@ -77,6 +109,7 @@ impl<T> Clone for Sender<T> {
             tx: self.tx.clone(),
             bytes: self.bytes.clone(),
             budget: self.budget,
+            usage: Arc::clone(&self.usage),
         }
     }
 }
@@ -96,14 +129,25 @@ impl<T: FrameSize> Sender<T> {
                     tokio::sync::TryAcquireError::Closed => MailboxError::Closed,
                     tokio::sync::TryAcquireError::NoPermits => MailboxError::Full,
                 })?;
+        self.usage.add(bytes);
         self.tx
             .try_send(Frame {
                 value,
                 _bytes: permit,
+                _usage: LaneUsageGuard {
+                    bytes,
+                    usage: Arc::clone(&self.usage),
+                },
             })
             .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => MailboxError::Full,
-                mpsc::error::TrySendError::Closed(_) => MailboxError::Closed,
+                mpsc::error::TrySendError::Full(frame) => {
+                    drop(frame);
+                    MailboxError::Full
+                }
+                mpsc::error::TrySendError::Closed(frame) => {
+                    drop(frame);
+                    MailboxError::Closed
+                }
             })
     }
 }
@@ -113,6 +157,12 @@ pub struct MailboxHandle<C, K, D> {
     commands: Sender<C>,
     control: Sender<K>,
     completions: Sender<Arc<D>>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MailboxUsage {
+    pub items: u64,
+    pub bytes: u64,
 }
 
 impl<C, K, D> Clone for MailboxHandle<C, K, D> {
@@ -132,6 +182,18 @@ impl<C: FrameSize, K: FrameSize, D: FrameSize> MailboxHandle<C, K, D> {
     }
     pub fn try_control(&self, value: K) -> Result<(), MailboxError> {
         self.control.try_send(value)
+    }
+
+    /// Current queued frame count and retained bytes across all mailbox lanes.
+    pub fn queued_usage(&self) -> MailboxUsage {
+        MailboxUsage {
+            items: self.commands.usage.items.load(Ordering::Relaxed)
+                + self.control.usage.items.load(Ordering::Relaxed)
+                + self.completions.usage.items.load(Ordering::Relaxed),
+            bytes: self.commands.usage.bytes.load(Ordering::Relaxed)
+                + self.control.usage.bytes.load(Ordering::Relaxed)
+                + self.completions.usage.bytes.load(Ordering::Relaxed),
+        }
     }
 
     /// Reserve one reliable completion slot and byte budget before dispatch.
@@ -166,6 +228,7 @@ impl<C: FrameSize, K: FrameSize, D: FrameSize> MailboxHandle<C, K, D> {
             slot,
             bytes,
             max_bytes,
+            usage: Arc::clone(&self.completions.usage),
         })
     }
 }
@@ -175,6 +238,7 @@ pub struct CompletionReservation<D> {
     slot: mpsc::OwnedPermit<Frame<Arc<D>>>,
     bytes: OwnedSemaphorePermit,
     max_bytes: u32,
+    usage: Arc<LaneUsage>,
 }
 
 impl<D: FrameSize> CompletionReservation<D> {
@@ -187,9 +251,15 @@ impl<D: FrameSize> CompletionReservation<D> {
         if value.retained_bytes() > self.max_bytes as usize {
             return Err(self);
         }
+        let retained_bytes = value.retained_bytes() as u32;
+        self.usage.add(retained_bytes);
         self.slot.send(Frame {
             value: Arc::clone(value),
             _bytes: self.bytes,
+            _usage: LaneUsageGuard {
+                bytes: retained_bytes,
+                usage: Arc::clone(&self.usage),
+            },
         });
         Ok(())
     }
@@ -220,6 +290,7 @@ fn lane<T>(budget: LaneBudget) -> (Sender<T>, mpsc::Receiver<Frame<T>>) {
             tx,
             bytes: Arc::new(Semaphore::new(budget.bytes as usize)),
             budget,
+            usage: Arc::new(LaneUsage::default()),
         },
         rx,
     )

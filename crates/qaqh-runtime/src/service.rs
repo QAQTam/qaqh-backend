@@ -321,21 +321,22 @@ impl QaqhService {
 
     fn refresh_memory_components(&self) {
         let monitor = qaqh_memwatch::global();
-        if !monitor.is_enabled() {
-            return;
-        }
+        let mut component_count = 0usize;
         if let Ok(registry) = self.registry.lock() {
             for component in registry.memory_components() {
+                component_count += 1;
                 monitor.update_component(component);
             }
         }
         if let Some(hub) = self.hub.get() {
             for component in hub.memory_components() {
+                component_count += 1;
                 monitor.update_component(component);
             }
         }
         if let Some(hub) = self.v2_hub.get() {
             for component in hub.memory_components() {
+                component_count += 1;
                 monitor.update_component(component);
             }
         }
@@ -356,6 +357,7 @@ impl QaqhService {
             heap_estimate_bytes: None,
             ..Default::default()
         });
+        component_count += 1;
         monitor.update_component(qaqh_memwatch::ComponentMemory {
             name: "service.board_stores".into(),
             item_count: board_stores,
@@ -363,6 +365,7 @@ impl QaqhService {
             heap_estimate_bytes: None,
             ..Default::default()
         });
+        component_count += 1;
         let mcp_connections = qaqh_mcp::manager_slot().connections();
         let mcp_name_bytes = mcp_connections
             .iter()
@@ -375,6 +378,7 @@ impl QaqhService {
             heap_estimate_bytes: None,
             ..Default::default()
         });
+        component_count += 1;
         let lsp_connections = qaqh_lsp::manager_slot().connections();
         let lsp_name_bytes = lsp_connections
             .iter()
@@ -387,6 +391,7 @@ impl QaqhService {
             heap_estimate_bytes: None,
             ..Default::default()
         });
+        component_count += 1;
         let images = qaqh_workspace::read_image::memory_stats();
         monitor.update_component(qaqh_memwatch::ComponentMemory {
             name: "workspace.image_registry".into(),
@@ -395,6 +400,10 @@ impl QaqhService {
             heap_estimate_bytes: Some(images.heap_estimate_bytes),
             ..Default::default()
         });
+        component_count += 1;
+        if !monitor.is_enabled() || component_count == 0 {
+            monitor.mark_components_stale();
+        }
     }
 
     /// Whether the opt-in memory probe is currently recording.
@@ -556,7 +565,11 @@ impl QaqhService {
     /// off-actor workspace mutation. The RPC has already persisted its file, so
     /// a missing/unreachable worker (idle session, subagent race) only costs
     /// the notification — never fail the mutation for it.
-    fn publish_resource_changed_best_effort(&self, session_id: &str, resource_kind: &str) {
+    pub(crate) fn publish_resource_changed_best_effort(
+        &self,
+        session_id: &str,
+        resource_kind: &str,
+    ) {
         let command = RingingCommand::Control(ControlCommand::PublishResourceChanged {
             resource_kind: resource_kind.to_string(),
         });

@@ -7,6 +7,7 @@ description = "QAQ-Harness modular profile, provider, and model specification re
 
 [features]
 default = []
+ts = ["dep:ts-rs", "qaqh-types/ts"]
 
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
@@ -15,6 +16,7 @@ serde_json = "1"
 toml = "1.1"
 log = "0.4"
 thiserror = "2"
+ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -39,13 +39,6 @@ pub fn todo_set_value_for(session_id: &str, args: &Value) -> Result<Value, Strin
     super::typed::todo_update_for_typed(session_id, args)?.to_envelope_value()
 }
 
-pub(crate) fn exec_todo_list(args: &Value) -> Result<String, String> {
-    let session_id = crate::runtime::context()
-        .map(|ctx| ctx.active_session)
-        .unwrap_or_default();
-    todo_list_for(&session_id, args)
-}
-
 /// Seed 参数化的 todo.list 直访变体（HTTP service 面 / CLI 用）。
 pub fn todo_list_for(session_id: &str, args: &Value) -> Result<String, String> {
     super::typed::todo_list_for_typed(session_id, args)?.to_envelope_string()

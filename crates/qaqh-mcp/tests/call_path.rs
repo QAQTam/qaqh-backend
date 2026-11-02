@@ -31,7 +31,7 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, CancelledNotificationParam,
     ContentBlock, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities,
-    ServerInfo, Tool,
+    ServerConfig, Tool,
 };
 use rmcp::service::{
     ClientLifecycleMode, ClientServiceExt, NotificationContext, RequestContext, ServiceExt,
@@ -59,8 +59,8 @@ struct MockServer {
 }
 
 impl ServerHandler for MockServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info.name = "callpath-mock".into();
         info.server_info.version = "0.1.0".into();

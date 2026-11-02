@@ -16,6 +16,15 @@ impl AgentRegistry {
         let mut session_workers = 0_u64;
         let mut subagent_workers = 0_u64;
         let mut live_threads = 0_u64;
+        let mut context_messages = 0_u64;
+        let mut context_payload_bytes = 0_u64;
+        let mut context_heap_estimate_bytes = 0_u64;
+        let mut async_actors = 0_u64;
+        let mut active_tasks = 0_u64;
+        let mut mailbox_items = 0_u64;
+        let mut mailbox_bytes = 0_u64;
+        let mut journal_index_entries = 0_u64;
+        let mut journal_index_heap_bytes = 0_u64;
         for (session_id, instance) in &self.instances {
             session_id_bytes = session_id_bytes.saturating_add(session_id.capacity());
             worker_heap = worker_heap.saturating_add(std::mem::size_of::<AgentInstance>());
@@ -30,6 +39,23 @@ impl AgentRegistry {
             {
                 live_threads += 1;
             }
+            let AgentTransport::ThinAgent { handle, task } = &instance.transport;
+            async_actors = async_actors.saturating_add(1);
+            if !task.is_finished() {
+                active_tasks = active_tasks.saturating_add(1);
+                let memory = handle.memory_snapshot();
+                context_messages = context_messages.saturating_add(memory.context_messages);
+                context_payload_bytes =
+                    context_payload_bytes.saturating_add(memory.context_payload_bytes);
+                context_heap_estimate_bytes = context_heap_estimate_bytes
+                    .saturating_add(memory.context_heap_estimate_bytes);
+                mailbox_items = mailbox_items.saturating_add(memory.mailbox_items);
+                mailbox_bytes = mailbox_bytes.saturating_add(memory.mailbox_bytes);
+                journal_index_entries =
+                    journal_index_entries.saturating_add(memory.journal_index_entries);
+                journal_index_heap_bytes = journal_index_heap_bytes
+                    .saturating_add(memory.journal_index_heap_estimate_bytes);
+            }
             if instance
                 .reader
                 .as_ref()
@@ -38,7 +64,7 @@ impl AgentRegistry {
                 live_threads += 1;
             }
         }
-        vec![
+        let components = vec![
             qaqh_memwatch::ComponentMemory {
                 name: "agent_registry.workers".into(),
                 item_count: self.instances.len() as u64,
@@ -80,7 +106,43 @@ impl AgentRegistry {
                 heap_estimate_bytes: None,
                 ..Default::default()
             },
-        ]
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.async_actors".into(),
+                item_count: async_actors,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.active_tasks".into(),
+                item_count: active_tasks,
+                payload_bytes: None,
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.context".into(),
+                item_count: context_messages,
+                payload_bytes: Some(context_payload_bytes),
+                heap_estimate_bytes: Some(context_heap_estimate_bytes),
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.mailbox".into(),
+                item_count: mailbox_items,
+                payload_bytes: Some(mailbox_bytes),
+                heap_estimate_bytes: None,
+                ..Default::default()
+            },
+            qaqh_memwatch::ComponentMemory {
+                name: "agent_registry.journal_indexes".into(),
+                item_count: journal_index_entries,
+                payload_bytes: None,
+                heap_estimate_bytes: Some(journal_index_heap_bytes),
+                ..Default::default()
+            },
+        ];
+        components
     }
 
     /// Read logical metadata by stable `AgentId = session_id`.

@@ -45,8 +45,8 @@ pub use image_store::sha256_hex;
 pub use message::{ContentBlock, FunctionCall, Message, ReasoningKind, ToolCall};
 pub use provider::{
     ApplyPatchCustomGrammar, ApplyPatchInputFormat, CacheTokenField, CacheUsageSemantics,
-    CredentialSource, EndpointCompat, ResponsesToolLayout, RetrySpec, ThinkingParamMode,
-    UserSendMode, Wire,
+    CredentialSource, EndpointCompat, ModelCapabilities, ModelSelection, ModelSelectionOptions,
+    ResponsesToolLayout, RetrySpec, SettingValue, ThinkingParamMode, UserSendMode, Wire,
 };
 pub use session::{
     SessionListEntry, SessionMeta, SessionRunStatus, SkillSessionEntry, SkillSessionEntryState,

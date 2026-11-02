@@ -27,7 +27,7 @@ use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
     ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
     ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ServerCapabilities,
-    ServerInfo, Tool,
+    ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
@@ -39,8 +39,8 @@ use rmcp::transport::streamable_http_server::tower::StreamableHttpService;
 struct HttpMockServer;
 
 impl ServerHandler for HttpMockServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()

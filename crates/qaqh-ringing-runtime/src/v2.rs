@@ -18,11 +18,12 @@ use qaqh_session::projection::{
     ProjectionSetSnapshot, ProjectionSink, projection_events_for_fact,
     projection_replaceable_events_for_fact, replaceable_identity,
 };
+use qaqh_ringing_contract::team::{TeamAgentResidency, TeamBoardSnapshot, TeamDelta, TeamTaskSnapshot};
 use qaqh_session::session_fact_v2::{
     ActivityState as FactActivityState, CompactStatus, ConversationDelta, Delivery, EventId,
     InteractionKind, InterruptReason, LogId, MetaDelta, OperationFailure, ProjectionEvent,
-    ProjectionPayload, SessionFact, SessionId, StreamKey, TeamAgentResidency, TeamBoardSnapshot,
-    TeamDelta, TeamTaskSnapshot, TitleSource, ToolCallId, TurnId, TurnTerminal,
+    ProjectionPayload, SessionFact, SessionId, StreamKey, TitleSource, ToolCallId, TurnId,
+    TurnTerminal,
 };
 use tokio::sync::broadcast;
 
@@ -182,6 +183,8 @@ impl V2ProjectionHub {
             .saturating_mul(std::mem::size_of::<(SessionId, Arc<V2Session>)>());
         let mut overlay_items = 0_u64;
         let mut replaceable_items = 0_u64;
+        let mut overlay_payload_bytes = 0_u64;
+        let mut projection_payload_bytes = 0_u64;
         for session in sessions.values() {
             lower_bound = lower_bound.saturating_add(std::mem::size_of::<V2Session>());
             if let Ok(state) = session.state.lock() {
@@ -199,6 +202,28 @@ impl V2ProjectionHub {
                             .len()
                             .saturating_mul(std::mem::size_of::<(String, ProjectionEvent)>()),
                     );
+                lower_bound = lower_bound.saturating_add(
+                    state
+                        .runtime_residency
+                        .capacity()
+                        .saturating_mul(std::mem::size_of::<(SessionId, TeamAgentResidency)>()),
+                );
+                for (id, residency) in &state.runtime_residency {
+                    lower_bound = lower_bound.saturating_add(id.as_str().len());
+                    overlay_payload_bytes = overlay_payload_bytes
+                        .saturating_add(id.as_str().len() as u64)
+                        .saturating_add(std::mem::size_of_val(residency) as u64);
+                }
+                for (key, event) in &state.replaceables {
+                    let _ = event;
+                    lower_bound = lower_bound.saturating_add(key.capacity());
+                }
+                let (projection_items, projection_bytes, projection_heap) =
+                    state.projections.memory_usage_estimate();
+                lower_bound = lower_bound.saturating_add(projection_heap as usize);
+                projection_payload_bytes = projection_payload_bytes
+                    .saturating_add(projection_bytes)
+                    .saturating_add(projection_items);
                 overlay_items = overlay_items.saturating_add(state.runtime_residency.len() as u64);
                 replaceable_items =
                     replaceable_items.saturating_add(state.replaceables.len() as u64);
@@ -208,15 +233,15 @@ impl V2ProjectionHub {
             qaqh_memwatch::ComponentMemory {
                 name: "ringing.v2.projection_sessions".into(),
                 item_count: sessions.len() as u64,
-                payload_bytes: None,
+                payload_bytes: Some(projection_payload_bytes),
                 heap_estimate_bytes: Some(lower_bound as u64),
                 ..Default::default()
             },
             qaqh_memwatch::ComponentMemory {
                 name: "ringing.v2.runtime_overlays".into(),
                 item_count: overlay_items,
-                payload_bytes: None,
-                heap_estimate_bytes: None,
+                payload_bytes: Some(overlay_payload_bytes),
+                heap_estimate_bytes: Some(overlay_payload_bytes),
                 ..Default::default()
             },
             qaqh_memwatch::ComponentMemory {

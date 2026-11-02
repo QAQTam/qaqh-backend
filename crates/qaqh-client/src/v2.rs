@@ -95,7 +95,7 @@ pub use qaqh_session::team;
 /// BOARD-01d（message board）消费的都是这一个端点，避免壳层各拉一次。
 /// 所有权在 `qaqh_ringing_contract`（daemon handler 与 TS 契约导出共用）；
 /// 此处保留壳层既有命名。
-pub use qaqh_ringing_contract::ClientV2TeamResponse;
+pub use qaqh_ringing_contract::TeamResponse as ClientV2TeamResponse;
 
 /// Typed v2 SSE envelope.
 pub type ClientV2Event = RingingV2EventEnvelope<fact::ProjectionPayload>;
@@ -106,7 +106,9 @@ pub type ClientV2EventEnvelope = ClientV2Event;
 /// bootstrap `control.state` / `tool.state` 的具体组合。
 /// 所有权在 `qaqh_ringing_contract`：daemon handler 序列化、客户端反序列化
 /// 与 TS 契约导出共用同一份定义，不再各自维护镜像 struct。
-pub use qaqh_ringing_contract::{ClientV2ControlState, ClientV2ToolState};
+pub use qaqh_ringing_contract::SessionState;
+pub use qaqh_ringing_contract::team as contract_team;
+pub use qaqh_session::{ClientV2ControlState, ClientV2ToolState};
 
 pub type ClientV2ConversationState = qaqh_session::projection::ConversationSnapshot;
 

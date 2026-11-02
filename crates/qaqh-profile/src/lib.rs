@@ -11,13 +11,23 @@ pub mod model;
 pub mod resolver;
 pub mod store;
 
-pub use model::{ModelDef, ProfileDef, ProfilesDocument, ProviderDef};
-pub use resolver::{resolve_effective, EffectiveExecutionProfile, ProfileResolveError};
+pub use model::{ModelDef, ModelDefaults, ModelSelection, ProfileDef, ProfilesDocument, ProviderDef};
+pub use resolver::{resolve_effective, resolve_model_selection, EffectiveExecutionProfile, EffectiveModelConfig, ModelResolveError, ProfileResolveError};
 pub use store::{ProfilesStore, ProfileStoreError};
 
 use std::path::PathBuf;
 
-/// 获取默认 profiles.toml 路径（与 config.toml / secrets.toml 同目录）
+/// 获取默认 profiles.toml 路径（与 config.toml / secrets.toml 同目录）。
+///
+/// 旧 profile 名体系的落盘文件；新 BYOK 目录用 [`default_providers_path`]。
 pub fn default_profiles_path() -> PathBuf {
     qaqh_types::platform::config_path().with_file_name("profiles.toml")
+}
+
+/// 新 BYOK 目录（[`ProfilesDocument`]）的权威落盘路径。
+///
+/// `Config::load` 从这里装载 `profiles_catalog`，provider/model 的全部读写
+/// 必须落在这一个文件；旧 `profiles.toml` 属于已废除的 profile 名体系。
+pub fn default_providers_path() -> PathBuf {
+    qaqh_types::platform::config_path().with_file_name("providers.toml")
 }

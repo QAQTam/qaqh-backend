@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use qaqh_types::{CredentialSource, EndpointCompat, Wire};
 use thiserror::Error;
-use crate::model::ProfilesDocument;
+use crate::model::{ModelSelection, ProfilesDocument};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProfileResolveError {
@@ -55,6 +55,99 @@ pub struct EffectiveExecutionProfile {
     pub compat: Option<EndpointCompat>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveModelConfig {
+    pub provider_id: String,
+    pub model_id: String,
+    pub display_name: Option<String>,
+    pub context_window: u32,
+    pub max_output_tokens: u32,
+    pub reasoning_effort: Option<String>,
+    pub native_web_search: bool,
+    pub capabilities: qaqh_types::ModelCapabilities,
+    pub reasoning_levels: Vec<String>,
+    pub base_url: String,
+    pub wire: Wire,
+    pub credential: CredentialSource,
+    pub secret_slot: String,
+    pub headers: BTreeMap<String, String>,
+    pub compat: Option<EndpointCompat>,
+    pub catalog_revision: u64,
+    pub selection: ModelSelection,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum ModelResolveError {
+    #[error("Provider「{0}」未注册")]
+    ProviderNotFound(String),
+    #[error("模型 {0}/{1} 未注册")]
+    ModelNotFound(String, String),
+    #[error("模型 {0}/{1} 已禁用")]
+    ModelDisabled(String, String),
+    #[error("模型 {provider_id}/{model_id} 推理档位无效: {effort}")]
+    InvalidEffort { provider_id: String, model_id: String, effort: String },
+    #[error("模型 {provider_id}/{model_id} 不支持原生搜索")]
+    NativeSearchUnsupported { provider_id: String, model_id: String },
+    #[error("模型 {provider_id}/{model_id} 所属路由不支持原生搜索")]
+    NativeSearchRouteBlocked { provider_id: String, model_id: String },
+    #[error("模型 {provider_id}/{model_id} 输出上限 {requested} 超出最大值 {maximum}")]
+    InvalidOutputLimit { provider_id: String, model_id: String, requested: u32, maximum: u32 },
+}
+
+pub fn resolve_model_selection(
+    doc: &ProfilesDocument,
+    selection: &ModelSelection,
+) -> Result<EffectiveModelConfig, ModelResolveError> {
+    let provider = doc.providers.get(&selection.provider_id)
+        .ok_or_else(|| ModelResolveError::ProviderNotFound(selection.provider_id.clone()))?;
+    let model = provider.models.get(&selection.model_id)
+        .ok_or_else(|| ModelResolveError::ModelNotFound(selection.provider_id.clone(), selection.model_id.clone()))?;
+    if !model.enabled {
+        return Err(ModelResolveError::ModelDisabled(selection.provider_id.clone(), selection.model_id.clone()));
+    }
+    let max_output_tokens = selection.options.max_output_tokens
+        .or(model.defaults.max_output_tokens).unwrap_or(model.max_output_tokens);
+    if max_output_tokens == 0 || max_output_tokens > model.max_output_tokens {
+        return Err(ModelResolveError::InvalidOutputLimit {
+            provider_id: selection.provider_id.clone(), model_id: selection.model_id.clone(),
+            requested: max_output_tokens, maximum: model.max_output_tokens,
+        });
+    }
+    let reasoning_effort = selection.options.reasoning_effort.clone().or(model.defaults.reasoning_effort.clone());
+    if let Some(effort) = &reasoning_effort
+        && (!model.capabilities.reasoning || !model.reasoning_levels.contains(effort))
+    {
+        return Err(ModelResolveError::InvalidEffort {
+            provider_id: selection.provider_id.clone(), model_id: selection.model_id.clone(), effort: effort.clone(),
+        });
+    }
+    let native_web_search = selection.options.native_web_search.unwrap_or(model.defaults.native_web_search);
+    if native_web_search && !model.capabilities.native_web_search {
+        return Err(ModelResolveError::NativeSearchUnsupported {
+            provider_id: selection.provider_id.clone(), model_id: selection.model_id.clone(),
+        });
+    }
+    if native_web_search && (provider.credential == CredentialSource::ChatgptPlan
+        || (provider.wire == Wire::Responses && !provider.compat.as_ref().is_none_or(|compat| compat.responses_web_search)))
+    {
+        return Err(ModelResolveError::NativeSearchRouteBlocked {
+            provider_id: selection.provider_id.clone(), model_id: selection.model_id.clone(),
+        });
+    }
+    Ok(EffectiveModelConfig {
+        provider_id: selection.provider_id.clone(), model_id: selection.model_id.clone(),
+        display_name: model.display_name.clone(), context_window: model.context_window,
+        max_output_tokens, reasoning_effort: reasoning_effort.clone(), native_web_search,
+        capabilities: model.capabilities, reasoning_levels: model.reasoning_levels.clone(),
+        base_url: provider.base_url.clone(), wire: provider.wire, credential: provider.credential,
+        secret_slot: format!("secrets.providers.{}", selection.provider_id),
+        headers: provider.headers.clone(), compat: provider.compat.clone(), catalog_revision: doc.revision,
+        selection: ModelSelection { provider_id: selection.provider_id.clone(), model_id: selection.model_id.clone(),
+            options: crate::model::ModelSelectionOptions { max_output_tokens: Some(max_output_tokens),
+                reasoning_effort, native_web_search: Some(native_web_search) } },
+    })
+}
+
 /// 权威解析入口
 pub fn resolve_effective(
     doc: &ProfilesDocument,
@@ -63,12 +156,12 @@ pub fn resolve_effective(
     // 1. 确定最终选用的 profile_id
     let profile_id = match requested_profile_id {
         Some(id) if !id.trim().is_empty() => id.trim(),
-        _ => doc.default_profile.as_str(),
+        _ => doc.default_profile.as_deref().unwrap_or(""),
     };
 
     // 2. 获取 ProfileDef
     let profile = doc.profiles.get(profile_id).ok_or_else(|| {
-        if profile_id == doc.default_profile {
+        if doc.default_profile.as_deref() == Some(profile_id) {
             ProfileResolveError::DefaultProfileNotFound(profile_id.to_string())
         } else {
             ProfileResolveError::ProfileNotFound(profile_id.to_string())
@@ -94,13 +187,13 @@ pub fn resolve_effective(
 
     let max_tokens = profile
         .max_tokens
-        .or_else(|| model_def.map(|m| m.max_tokens))
+        .or_else(|| model_def.map(|m| m.max_output_tokens))
         .unwrap_or(8_192);
 
     let reasoning_effort = profile
         .reasoning_effort
         .clone()
-        .or_else(|| model_def.and_then(|m| m.default_effort.clone()));
+        .or_else(|| model_def.and_then(|m| m.defaults.reasoning_effort.clone()));
 
     Ok(EffectiveExecutionProfile {
         profile_id: profile_id.to_string(),
@@ -147,7 +240,7 @@ mod tests {
         assert_eq!(eff.model, "deepseek-chat");
         assert_eq!(eff.reasoning_effort, None);
         // 全局默认依然是 r1，不受解析影响
-        assert_eq!(doc.default_profile, "deepseek-r1");
+        assert_eq!(doc.default_profile.as_deref(), Some("deepseek-r1"));
     }
 
     #[test]
@@ -155,5 +248,20 @@ mod tests {
         let doc = ProfilesDocument::create_builtin_template();
         let err = resolve_effective(&doc, Some("non-existent")).expect_err("should fail");
         assert_eq!(err, ProfileResolveError::ProfileNotFound("non-existent".to_string()));
+    }
+
+    #[test]
+    fn model_selection_checks_identity_and_output_range() {
+        let doc = ProfilesDocument::create_builtin_template();
+        let mut selection = ModelSelection {
+            provider_id: "deepseek".into(),
+            model_id: "deepseek-reasoner".into(),
+            options: Default::default(),
+        };
+        let effective = resolve_model_selection(&doc, &selection).expect("resolve model");
+        assert_eq!(effective.provider_id, "deepseek");
+        assert_eq!(effective.selection.options.max_output_tokens, Some(8192));
+        selection.options.max_output_tokens = Some(9000);
+        assert!(matches!(resolve_model_selection(&doc, &selection), Err(ModelResolveError::InvalidOutputLimit { .. })));
     }
 }

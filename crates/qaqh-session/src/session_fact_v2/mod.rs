@@ -1,21 +1,10 @@
-//! Canonical session-fact/v2 contracts.
+//! fact → 投影 的内部映射。
 //!
-//! This module is a pure type and validation slice. It does not open session
-//! files, acquire writer locks, or mutate runtime state.
+//! 类型词表已迁至 [`qaqh_ringing_contract::fact`];本模块保留线上 delta
+//! (ProjectionPayload)与 fact→delta 映射,将在统一事件模型落地时删除。
 
-mod agent;
-mod projection;
+pub use qaqh_ringing_contract::fact::*;
+
 mod projection_event;
-mod types;
-mod validation;
 
-pub use agent::{
-    AGENT_PATH_MORPHEUS, AGENT_PATH_ROOT, AgentMetadata, AgentNamespace, AgentPath, AgentPathError,
-    AgentPathSegmentError,
-};
-pub use projection::{
-    END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex, projection_slots,
-};
 pub use projection_event::*;
-pub use types::*;
-pub use validation::{ValidationError, is_ulid_text};

@@ -1,5 +1,10 @@
 //! Mock OpenAI-compatible server for integration testing the gate.
 
+// 共享夹具：每个测试二进制只消费其中一部分（如 response_stream_limits 用
+// `Sequential`，codex_protocol_fixtures 用 `Fixed`），编译器按单二进制统计
+// dead_code 会误报未消费的另一半。夹具形状按「全集」维护，统一放行。
+#![allow(dead_code)]
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;

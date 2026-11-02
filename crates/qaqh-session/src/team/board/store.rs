@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::canonical::{EventsCommit, generate_ulid};
 use crate::session_fact_v2::LogId;
 
-use super::projection::{BoardDelta, BoardProjection, BoardSnapshot};
-use super::types::{BoardFact, BoardId};
+use qaqh_ringing_contract::team::{BoardDelta, BoardSnapshot};
+use super::projection::BoardProjection;
+use qaqh_ringing_contract::team::{BoardFact, BoardId};
 use crate::team::{TeamError, TeamResult};
 
 pub const BOARD_IDENTITY_FILE: &str = "board.json";

@@ -23,12 +23,10 @@
 
 pub mod agent_graph;
 pub mod attachment;
-pub mod compact_mirror;
 pub mod content_store;
 pub mod device_registry;
 pub mod hub;
 pub mod lease_store;
-pub mod operation_failure;
 pub mod pending_store;
 pub mod v2;
 

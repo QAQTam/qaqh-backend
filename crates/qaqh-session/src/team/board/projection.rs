@@ -1,94 +1,14 @@
 //! Rebuildable message board projection over the BoardFact log.
 
-use serde::{Deserialize, Serialize};
+use qaqh_ringing_contract::team::TeamActor;
+use qaqh_ringing_contract::team::{TeamError, TeamResult};
 
-use crate::team::types::{TaskId, TeamActor};
-use crate::team::{TeamError, TeamResult};
-
-use super::types::{
-    BoardFact, BoardId, BoardPayload, BoardSubscriptionTarget, ChannelCreated, ChannelId,
+use qaqh_ringing_contract::team::{BoardChannelView, BoardDelta, BoardPostView, BoardSnapshot, BoardSubscriptionView, BoardThreadView,
+    BoardFact, BoardPayload, BoardSubscriptionTarget, ChannelCreated, ChannelId,
     MAX_BOARD_CHANNELS, MAX_BOARD_POSTS, MAX_BOARD_SUBSCRIPTIONS, MAX_BOARD_THREADS, PostCreated,
     PostId, SubscriptionChanged, ThreadCreated, ThreadId,
 };
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoardSnapshot {
-    pub board_id: Option<BoardId>,
-    pub revision: u64,
-    pub last_fact_seq: u64,
-    pub channels: Vec<BoardChannelView>,
-    pub threads: Vec<BoardThreadView>,
-    pub posts: Vec<BoardPostView>,
-    pub subscriptions: Vec<BoardSubscriptionView>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoardChannelView {
-    pub channel_id: ChannelId,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub created_by: TeamActor,
-    pub created_at_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoardThreadView {
-    pub thread_id: ThreadId,
-    pub channel_id: ChannelId,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<TaskId>,
-    pub created_by: TeamActor,
-    pub created_at_ms: i64,
-    pub post_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoardPostView {
-    pub post_id: PostId,
-    pub thread_id: ThreadId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<TaskId>,
-    pub author: TeamActor,
-    pub body: String,
-    pub created_at_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_to: Option<PostId>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BoardSubscriptionView {
-    pub target: BoardSubscriptionTarget,
-    pub subscriber: TeamActor,
-    pub subscribed: bool,
-    pub updated_at_ms: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-pub enum BoardDelta {
-    BoardCreated {
-        revision: u64,
-        board_id: BoardId,
-    },
-    ChannelCreated {
-        revision: u64,
-        channel: Box<BoardChannelView>,
-    },
-    ThreadCreated {
-        revision: u64,
-        thread: Box<BoardThreadView>,
-    },
-    PostCreated {
-        revision: u64,
-        post: Box<BoardPostView>,
-    },
-    SubscriptionChanged {
-        revision: u64,
-        subscription: Box<BoardSubscriptionView>,
-    },
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct BoardProjection {

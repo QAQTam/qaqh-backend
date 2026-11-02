@@ -73,6 +73,9 @@ pub struct ContextProjector {
     head: u64,
     messages: Vec<Message>,
     payload_bytes: u64,
+    heap_estimate_bytes: u64,
+    text_bytes: u64,
+    image_bytes: u64,
     budget: ContextBudget,
     pending_input: Option<crate::session_fact_v2::TurnId>,
     pending_response: Option<crate::session_fact_v2::TurnId>,
@@ -91,6 +94,9 @@ impl ContextProjector {
             head: 0,
             messages: Vec::new(),
             payload_bytes: 0,
+            heap_estimate_bytes: 0,
+            text_bytes: 0,
+            image_bytes: 0,
             budget,
             pending_input: None,
             pending_response: None,
@@ -101,6 +107,42 @@ impl ContextProjector {
     pub fn head(&self) -> u64 {
         self.head
     }
+
+    /// Read-only counters maintained by the projector; this never clones the
+    /// message bodies or serializes them for diagnostics.
+    pub fn memory_usage_estimate(&self) -> qaqh_types::memory::MemoryUsageEstimate {
+        qaqh_types::memory::MemoryUsageEstimate {
+            heap_estimate_bytes: (std::mem::size_of::<Self>().saturating_add(
+                self.messages
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<Message>()),
+            ) as u64)
+                .saturating_add(self.heap_estimate_bytes),
+            item_count: self.messages.len() as u64,
+            payload_bytes: self.payload_bytes,
+            text_bytes: self.text_bytes,
+            image_bytes: self.image_bytes,
+        }
+    }
+
+    pub fn refresh_memory_estimate(&mut self) {
+        self.heap_estimate_bytes = (std::mem::size_of::<Self>().saturating_add(
+            self.messages
+                .capacity()
+                .saturating_mul(std::mem::size_of::<Message>()),
+        )) as u64;
+        self.text_bytes = 0;
+        self.image_bytes = 0;
+        for message in &self.messages {
+            let usage = message.memory_usage_estimate();
+            self.heap_estimate_bytes = self
+                .heap_estimate_bytes
+                .saturating_add(usage.heap_estimate_bytes);
+            self.text_bytes = self.text_bytes.saturating_add(usage.text_bytes);
+            self.image_bytes = self.image_bytes.saturating_add(usage.image_bytes);
+        }
+    }
+
     /// Apply one committed fact. A failing fact never advances the head.
     /// Model input comes solely from explicit complete-message facts; other
     /// business facts are not interpreted as partial context messages.
@@ -163,7 +205,8 @@ impl ContextProjector {
                         "provider response without matching model round".into(),
                     ));
                 }
-                let payload_bytes = message.memory_usage_estimate().payload_bytes;
+                let message_usage = message.memory_usage_estimate();
+                let payload_bytes = message_usage.payload_bytes;
                 if self.messages.len() >= self.budget.max_messages
                     || self.payload_bytes.saturating_add(payload_bytes)
                         > self.budget.max_payload_bytes
@@ -172,6 +215,11 @@ impl ContextProjector {
                 }
                 self.messages.push(message);
                 self.payload_bytes += payload_bytes;
+                self.heap_estimate_bytes = self
+                    .heap_estimate_bytes
+                    .saturating_add(message_usage.heap_estimate_bytes);
+                self.text_bytes = self.text_bytes.saturating_add(message_usage.text_bytes);
+                self.image_bytes = self.image_bytes.saturating_add(message_usage.image_bytes);
                 if matches!(payload.origin, ContextMessageOrigin::Input) {
                     self.pending_input = None;
                 }
@@ -202,11 +250,21 @@ impl ContextProjector {
                     self.head,
                     self.budget,
                 )?;
-                self.payload_bytes = messages
-                    .iter()
-                    .map(|m| m.memory_usage_estimate().payload_bytes)
-                    .sum();
+                self.payload_bytes = 0;
+                self.heap_estimate_bytes = 0;
+                self.text_bytes = 0;
+                self.image_bytes = 0;
+                for message in &messages {
+                    let usage = message.memory_usage_estimate();
+                    self.payload_bytes = self.payload_bytes.saturating_add(usage.payload_bytes);
+                    self.heap_estimate_bytes = self
+                        .heap_estimate_bytes
+                        .saturating_add(usage.heap_estimate_bytes);
+                    self.text_bytes = self.text_bytes.saturating_add(usage.text_bytes);
+                    self.image_bytes = self.image_bytes.saturating_add(usage.image_bytes);
+                }
                 self.messages = messages;
+                self.refresh_memory_estimate();
             }
             FactPayload::CompactionApplied(_) => {
                 return Err(ContextProjectionError::IncompleteFact(
@@ -278,7 +336,8 @@ impl ContextProjector {
                     ));
                 }
                 validate_message(&message)?;
-                let payload_bytes = message.memory_usage_estimate().payload_bytes;
+                let message_usage = message.memory_usage_estimate();
+                let payload_bytes = message_usage.payload_bytes;
                 if self.messages.len() >= self.budget.max_messages
                     || self.payload_bytes.saturating_add(payload_bytes)
                         > self.budget.max_payload_bytes
@@ -287,6 +346,11 @@ impl ContextProjector {
                 }
                 self.messages.push(message);
                 self.payload_bytes += payload_bytes;
+                self.heap_estimate_bytes = self
+                    .heap_estimate_bytes
+                    .saturating_add(message_usage.heap_estimate_bytes);
+                self.text_bytes = self.text_bytes.saturating_add(message_usage.text_bytes);
+                self.image_bytes = self.image_bytes.saturating_add(message_usage.image_bytes);
                 self.pending_response = None;
             }
             FactPayload::TurnStarted(payload) => {

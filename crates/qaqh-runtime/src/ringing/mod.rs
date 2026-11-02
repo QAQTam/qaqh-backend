@@ -2,7 +2,7 @@
 //!
 //! 传输 / 投影 / 队列层已于 2026-10-30 外移到 `qaqh-ringing-runtime`
 //! （`v2`、`content_store`、`pending_store`、`lease_store`、`hub`、`projection`、
-//! `device_registry`、`compact_mirror`、`operation_failure`、`attachment`、
+//! `device_registry`、`attachment`、
 //! `agent_graph`）。这里 `pub use` 它，保持
 //! `crate::ringing::V2ProjectionHub`、`qaqh_runtime::ringing::*` 等既有路径不变。
 //!

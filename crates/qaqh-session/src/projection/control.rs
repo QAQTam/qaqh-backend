@@ -282,6 +282,47 @@ impl Projection for ControlProjection {
 }
 
 impl ControlProjection {
+    pub(super) fn memory_usage_estimate(&self) -> (u64, u64, u64) {
+        let mut entries = 0u64;
+        let mut payload_bytes = 0u64;
+        let mut heap_bytes = (self.snapshot.tools.capacity()
+            * std::mem::size_of::<ControlToolState>()
+            + self.snapshot.interactions.capacity()
+                * std::mem::size_of::<ControlInteractionState>()
+            + self.snapshot.subagents.capacity() * std::mem::size_of::<ControlSubagentState>())
+            as u64;
+        for tool in &self.snapshot.tools {
+            entries = entries.saturating_add(1);
+            if let Some(output) = &tool.output
+                && let ContentValue::Inline { text } = output
+            {
+                payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+                heap_bytes = heap_bytes.saturating_add(text.capacity() as u64);
+            }
+        }
+        for interaction in &self.snapshot.interactions {
+            entries = entries.saturating_add(1);
+            if let ContentValue::Inline { text } = &interaction.request {
+                payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+                heap_bytes = heap_bytes.saturating_add(text.capacity() as u64);
+            }
+            if let Some(resolution) = &interaction.resolution
+                && let ContentValue::Inline { text } = &resolution.decision
+            {
+                payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+                heap_bytes = heap_bytes.saturating_add(text.capacity() as u64);
+            }
+        }
+        for subagent in &self.snapshot.subagents {
+            entries = entries.saturating_add(1);
+            if let Some(ContentValue::Inline { text }) = &subagent.result {
+                payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+                heap_bytes = heap_bytes.saturating_add(text.capacity() as u64);
+            }
+        }
+        (entries, payload_bytes, heap_bytes)
+    }
+
     fn apply_tool_intent(&mut self, payload: &ToolIntent) {
         self.snapshot.current_call_id = Some(payload.call_id.clone());
         let state = self.tool_state_mut(&payload.call_id);
