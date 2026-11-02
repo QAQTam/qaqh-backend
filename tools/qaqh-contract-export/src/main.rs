@@ -209,12 +209,13 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "constants.ts",
         &format!(
-            "export const RINGING_SCHEMA = {:?} as const;\nexport const RINGING_V2_VERSION = {} as const;\nexport const RINGING_V2_BASE_PATH = {:?} as const;\nexport const CLIENT_SESSION_HEADER = {:?} as const;\nexport const MAX_SAFE_INTEGER = {} as const;\n",
+            "export const RINGING_SCHEMA = {:?} as const;\nexport const RINGING_V2_VERSION = {} as const;\nexport const RINGING_V2_BASE_PATH = {:?} as const;\nexport const CLIENT_SESSION_HEADER = {:?} as const;\nexport const MAX_SAFE_INTEGER = {} as const;\nexport const UNIFIED_CONTRACT_REVISION = {:?} as const;\n",
             qaqh_ringing::RINGING_SCHEMA,
             qaqh_ringing::RINGING_V2_VERSION,
             qaqh_ringing::RINGING_V2_BASE_PATH,
             qaqh_ringing::CLIENT_SESSION_HEADER,
             qaqh_ringing::MAX_SAFE_INTEGER,
+            qaqh_ringing::UNIFIED_CONTRACT_REVISION,
         ),
     )?;
     write_service_map(stage)?;
@@ -264,6 +265,9 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         message: None,
         retry_after_ms: None,
         existing: None,
+        result: None,
+        operation: None,
+        revision: None,
     };
     write_fixture(stage, "command-ack-accepted.json", &ack)?;
 
@@ -682,15 +686,15 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // tool state 与事件 payload 都是一手契约类型（qaqh-session::client_v2 /
         // projection / ProjectionPayload），不再以 `()` 占位。
         RingingV2Bootstrap<
-            qaqh_ringing_contract::ClientV2ControlState,
+            qaqh_session::ClientV2ControlState,
             qaqh_session::projection::ConversationSnapshot,
-            qaqh_ringing_contract::ClientV2ToolState,
+            qaqh_session::ClientV2ToolState,
         >,
-        RingingV2ChannelSnapshot<qaqh_ringing_contract::ClientV2ControlState>,
+        RingingV2ChannelSnapshot<qaqh_session::ClientV2ControlState>,
         RingingV2EventEnvelope<qaqh_session::session_fact_v2::ProjectionPayload>,
-        qaqh_ringing_contract::ClientV2ControlState,
-        qaqh_ringing_contract::ClientV2TeamResponse,
-        qaqh_ringing_contract::ClientV2ToolState,
+        qaqh_session::ClientV2ControlState,
+        qaqh_ringing_contract::TeamResponse,
+        qaqh_session::ClientV2ToolState,
         qaqh_runtime::ringing::pending_store::ReceiptPolicy,
         qaqh_runtime::ringing::service_methods::DaemonVersionParams,
         qaqh_runtime::ringing::service_methods::FsEntry,
@@ -708,6 +712,8 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::SessionSetProfileParams,
         qaqh_runtime::ringing::service_methods::SessionSetToolModeParams,
         qaqh_runtime::ringing::service_methods::SessionToolActivity,
+        qaqh_runtime::ringing::service_methods::SkillsCatalogParams,
+        qaqh_runtime::ringing::service_methods::SkillsCatalogResult,
         qaqh_runtime::ringing::service_methods::WorkspaceCreateParams,
         qaqh_runtime::ringing::service_methods::WorkspaceDeleteParams,
         qaqh_runtime::ringing::service_methods::WorkspaceDetachParams,
@@ -725,6 +731,32 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_types::SkillSessionEntry,
         qaqh_types::SkillSessionEntryState,
         qaqh_types::SkillSessionStateV2,
+        // ── 配置 DTO 面（config.load / config.save 的读写形状）──
+        qaqh_config_api::ConfigDto,
+        qaqh_config_api::ConfigPatch,
+        qaqh_config_api::ProfileSummaryDto,
+        qaqh_config_api::SubagentDto,
+        qaqh_config_api::SubagentPatch,
+        qaqh_config_api::ExecDto,
+        qaqh_config_api::ExecPatch,
+        qaqh_config_api::SandboxDto,
+        qaqh_config_api::SandboxPatch,
+        qaqh_config_api::McpDto,
+        qaqh_config_api::McpServerDto,
+        qaqh_config_api::LspDto,
+        qaqh_config_api::LspServerDto,
+        qaqh_types::ReasoningKind,
+        // ── 统一命令面（§8.1）：封闭命令目录 + 信封 + 目标/前置条件 ──
+        qaqh_ringing::UnifiedCommand,
+        qaqh_ringing::UnifiedCommandEnvelope,
+        qaqh_ringing::UnifiedTarget,
+        qaqh_ringing::UnifiedPrecondition,
+        qaqh_ringing::SessionSettingsPatch,
+        qaqh_ringing::ToolsSettingPatch,
+        qaqh_ringing::ProviderUpsertDto,
+        qaqh_ringing::SecretWrite,
+        qaqh_profile::ModelDef,
+        qaqh_profile::ModelDefaults,
     );
     qaqh_runtime::ringing::service_methods::accounts::export_types(config)?;
     Ok(())
@@ -866,8 +898,7 @@ fn write_index(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
          import type { RingingV2Bootstrap } from \"./types/qaqh/RingingV2Bootstrap\";\n\
          import type { RingingV2EventEnvelope } from \"./types/qaqh/RingingV2EventEnvelope\";\n\
          export type ClientV2Bootstrap = RingingV2Bootstrap<ClientV2ControlState, ConversationSnapshot, ClientV2ToolState>;\n\
-         export type ClientV2Event = RingingV2EventEnvelope<ProjectionPayload>;\n\
-         export type fact::ProjectionPayload = ProjectionPayload;\n",
+         export type ClientV2Event = RingingV2EventEnvelope<ProjectionPayload>;\n",
     );
     write(stage, "index.ts", &output)?;
     Ok(())

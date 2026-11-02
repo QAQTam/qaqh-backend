@@ -355,6 +355,33 @@ impl BatchJournal {
         self.marker.fact_seq
     }
 
+    /// Current writer idempotency-index estimate. This is a shallow estimate:
+    /// hash-table buckets and allocator overhead are not observable here.
+    pub fn index_memory_usage(&self) -> (u64, u64) {
+        let entries = self.receipts.len().saturating_add(self.event_ids.len());
+        let heap_bytes = self
+            .receipts
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(String, BatchReceipt)>())
+            .saturating_add(
+                self.event_ids
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<String>()),
+            )
+            .saturating_add(
+                self.receipts
+                    .iter()
+                    .map(|(id, receipt)| {
+                        id.capacity()
+                            .saturating_add(receipt.batch_id.capacity())
+                            .saturating_add(receipt.digest.capacity())
+                    })
+                    .sum::<usize>(),
+            )
+            .saturating_add(self.event_ids.iter().map(String::capacity).sum::<usize>());
+        (entries as u64, heap_bytes as u64)
+    }
+
     /// Visit the current immutable committed prefix in batches. The visitor may
     /// stop on a domain error; bytes beyond the captured marker are never read.
     pub fn visit_committed<E>(

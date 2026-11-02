@@ -8,11 +8,29 @@
 
 use std::collections::BTreeMap;
 use qaqh_types::{CredentialSource, EndpointCompat, Wire};
+pub use qaqh_types::{ModelCapabilities, ModelSelection, ModelSelectionOptions};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
+
+/// 模型默认参数。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ModelDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub native_web_search: bool,
+}
 
 /// 模型能力与元数据定义
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ModelDef {
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     /// 界面友好展示名（如 "DeepSeek R1 (深度推理)"）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -20,14 +38,14 @@ pub struct ModelDef {
     #[serde(default = "default_context_window")]
     pub context_window: u32,
     /// 单次回合最大输出 Token 上限，默认 8,192
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u32,
-    /// 是否支持思考/推理过程 (Reasoning / Thinking)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub supports_thinking: Option<bool>,
-    /// 推荐思考档位（"low" | "medium" | "high" | "max"）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_effort: Option<String>,
+    #[serde(default = "default_max_tokens", alias = "max_tokens")]
+    pub max_output_tokens: u32,
+    #[serde(default)]
+    pub reasoning_levels: Vec<String>,
+    #[serde(default)]
+    pub capabilities: ModelCapabilities,
+    #[serde(default)]
+    pub defaults: ModelDefaults,
 }
 
 fn default_context_window() -> u32 {
@@ -38,14 +56,18 @@ fn default_max_tokens() -> u32 {
     8_192
 }
 
+fn default_enabled() -> bool { true }
+
 impl Default for ModelDef {
     fn default() -> Self {
         Self {
+            enabled: true,
             display_name: None,
             context_window: default_context_window(),
-            max_tokens: default_max_tokens(),
-            supports_thinking: None,
-            default_effort: None,
+            max_output_tokens: default_max_tokens(),
+            reasoning_levels: Vec::new(),
+            capabilities: ModelCapabilities::default(),
+            defaults: ModelDefaults::default(),
         }
     }
 }
@@ -100,8 +122,15 @@ pub struct ProfileDef {
 /// 完整的 profiles.toml 配置树
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfilesDocument {
-    /// 全局默认 Profile ID（未指定 profile 的会话默认采用此预设）
-    pub default_profile: String,
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model_selection: Option<ModelSelection>,
+    /// 旧目录迁移字段；不参与新执行路径。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
     /// 所有已注册的服务商字典 (ProviderId -> ProviderDef)
     #[serde(default)]
     pub providers: BTreeMap<String, ProviderDef>,
@@ -112,9 +141,12 @@ pub struct ProfilesDocument {
 
 impl Default for ProfilesDocument {
     fn default() -> Self {
-        Self::create_builtin_template()
+        Self { schema_version: 1, revision: 0, default_model_selection: None,
+            default_profile: None, providers: BTreeMap::new(), profiles: BTreeMap::new() }
     }
 }
+
+fn default_schema_version() -> u32 { 1 }
 
 impl ProfilesDocument {
     /// 创建开箱即用的官方规范化默认配置模板（包含 DeepSeek 官方双模型与 SiliconFlow 等）
@@ -127,21 +159,25 @@ impl ProfilesDocument {
         ds_models.insert(
             "deepseek-reasoner".to_string(),
             ModelDef {
+                enabled: true,
                 display_name: Some("DeepSeek R1 (推理)".to_string()),
                 context_window: 128_000,
-                max_tokens: 8_192,
-                supports_thinking: Some(true),
-                default_effort: Some("high".to_string()),
+                max_output_tokens: 8_192,
+                reasoning_levels: vec!["low".into(), "medium".into(), "high".into()],
+                capabilities: ModelCapabilities { tool_calls: true, reasoning: true, ..Default::default() },
+                defaults: ModelDefaults { reasoning_effort: Some("high".into()), ..Default::default() },
             },
         );
         ds_models.insert(
             "deepseek-chat".to_string(),
             ModelDef {
+                enabled: true,
                 display_name: Some("DeepSeek V3 (通用)".to_string()),
                 context_window: 128_000,
-                max_tokens: 8_192,
-                supports_thinking: Some(false),
-                default_effort: None,
+                max_output_tokens: 8_192,
+                reasoning_levels: Vec::new(),
+                capabilities: ModelCapabilities { tool_calls: true, ..Default::default() },
+                defaults: ModelDefaults::default(),
             },
         );
 
@@ -184,9 +220,22 @@ impl ProfilesDocument {
         );
 
         Self {
-            default_profile: "deepseek-r1".to_string(),
+            schema_version: 1,
+            revision: 1,
+            default_model_selection: Some(ModelSelection {
+                provider_id: "deepseek".into(), model_id: "deepseek-reasoner".into(),
+                options: ModelSelectionOptions::default(),
+            }),
+            default_profile: Some("deepseek-r1".to_string()),
             providers,
             profiles,
         }
+    }
+
+    pub fn is_empty(&self) -> bool { self.providers.is_empty() && self.profiles.is_empty() }
+
+    pub fn model_is_referenced(&self, provider_id: &str, model_id: &str) -> bool {
+        self.default_model_selection.as_ref().is_some_and(|s| s.provider_id == provider_id && s.model_id == model_id)
+            || self.profiles.values().any(|p| p.provider == provider_id && p.model == model_id)
     }
 }

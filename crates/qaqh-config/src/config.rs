@@ -100,6 +100,16 @@ impl Default for SandboxConfig {
 /// overrides. All fields are concrete (no Option wrapping).
 #[derive(Debug, Clone)]
 pub struct Config {
+    pub provider_id: String,
+    pub provider_name: String,
+    pub profile_id: String,
+    pub profile_name: String,
+    pub profiles_catalog: qaqh_profile::ProfilesDocument,
+    pub default_model_selection: Option<qaqh_profile::ModelSelection>,
+    pub model_capabilities: qaqh_types::ModelCapabilities,
+    pub model_reasoning_levels: Vec<String>,
+    pub model_native_web_search: bool,
+    pub provider_headers: std::collections::BTreeMap<String, String>,
     /// API key for the active endpoint (never persisted in clear text).
     pub api_key: String,
     /// BYOK 的 endpoint：scheme + host + 可选前缀，不含 wire 自身路径。
@@ -787,6 +797,16 @@ impl Default for Config {
         profiles.insert("default".into(), profile);
 
         Self {
+            provider_id: String::new(),
+            provider_name: String::new(),
+            profile_id: String::new(),
+            profile_name: String::new(),
+            profiles_catalog: Default::default(),
+            default_model_selection: None,
+            model_capabilities: Default::default(),
+            model_reasoning_levels: Vec::new(),
+            model_native_web_search: false,
+            provider_headers: Default::default(),
             api_key: String::new(),
             base_url: String::new(),
             wire,
@@ -974,6 +994,11 @@ impl Config {
                     profile_store.path().display()
                 );
             }
+            let provider_path = store.path().with_file_name("providers.toml");
+            let provider_store = qaqh_profile::ProfilesStore::load_or_create(&provider_path)
+                .map_err(|error| ConfigError::invalid(format!("load providers.toml: {error}")))?;
+            cfg.profiles_catalog = provider_store.document().clone();
+            cfg.default_model_selection = cfg.profiles_catalog.default_model_selection.clone();
             if let Some(k) = pc.api_key
                 && !k.is_empty()
             {

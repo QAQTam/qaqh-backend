@@ -1,0 +1,1146 @@
+//! Canonical `session-fact/v2` types.
+//!
+//! This module is intentionally storage-free: it defines the durable wire
+//! shape and the pure validation surface. Session-store and runtime wiring
+//! live outside this module.
+
+pub use qaqh_types::UsageInfo;
+use qaqh_types::SettingValue;
+use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
+
+use super::agent::AgentPath;
+
+pub const SESSION_FACT_SCHEMA_NAME: &str = "qaqh.session-fact";
+pub const SESSION_FACT_SCHEMA_VERSION: u16 = 2;
+pub const SESSION_FACT_PAYLOAD_VERSION: u16 = 2;
+pub const MAX_SAFE_FACT_SEQ: u64 = (1_u64 << 53) - 1;
+
+macro_rules! string_id {
+    ($name:ident) => {
+        #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+        pub struct $name(pub String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Self {
+                Self(value.into())
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str {
+                self.as_str()
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+string_id!(SessionId);
+string_id!(LogId);
+string_id!(EventId);
+string_id!(MessageId);
+string_id!(InputId);
+string_id!(TurnId);
+string_id!(ToolCallId);
+string_id!(ExecutionId);
+string_id!(InteractionId);
+string_id!(BlockId);
+string_id!(CheckpointId);
+string_id!(RecoveryId);
+string_id!(ResourceId);
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContentHash(pub String);
+
+impl ContentHash {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionContentRef")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ContentRef(pub ContentHash);
+
+impl ContentRef {
+    pub fn new(hash: ContentHash) -> Self {
+        Self(hash)
+    }
+
+    pub fn hash(&self) -> &ContentHash {
+        &self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum ContentUnavailableReason {
+    GarbageCollected,
+    Missing,
+    HashMismatch,
+    Offloaded,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ContentUnavailable {
+    pub content_ref: ContentRef,
+    pub reason: ContentUnavailableReason,
+    pub observed_at_logical_ms: i64,
+    pub source_fact_seq: Option<u64>,
+    pub gc_event_seq: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FactSchema {
+    pub name: String,
+    pub version: u16,
+    pub payload_version: u16,
+}
+
+impl FactSchema {
+    pub fn v2() -> Self {
+        Self {
+            name: SESSION_FACT_SCHEMA_NAME.to_owned(),
+            version: SESSION_FACT_SCHEMA_VERSION,
+            payload_version: SESSION_FACT_PAYLOAD_VERSION,
+        }
+    }
+}
+
+impl Default for FactSchema {
+    fn default() -> Self {
+        Self::v2()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionFact {
+    pub schema: FactSchema,
+    pub session_id: SessionId,
+    pub log_id: LogId,
+    pub fact_seq: u64,
+    pub event_id: EventId,
+    pub ts_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<ToolCallId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<InteractionId>,
+    pub payload: FactPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum FactPayload {
+    SessionCreated(SessionCreated),
+    InputAccepted(InputAccepted),
+    TurnStarted(TurnStarted),
+    ModelRoundStarted(ModelRoundStarted),
+    AssistantBlockSealed(AssistantBlockSealed),
+    ToolCallDeclared(ToolCallDeclared),
+    ToolIntent(ToolIntent),
+    ToolFinished(ToolFinished),
+    InteractionRequested(InteractionRequested),
+    InteractionResolved(InteractionResolved),
+    InteractionExpired(InteractionExpired),
+    TurnFinished(TurnFinished),
+    TurnInterrupted(TurnInterrupted),
+    SessionRecovered(SessionRecovered),
+    CompactionApplied(CompactionApplied),
+    SessionMetadataChanged(SessionMetadataChanged),
+    SessionTitleChanged(SessionTitleChanged),
+    SessionDeleted(SessionDeleted),
+    WorkspaceResourceChanged(WorkspaceResourceChanged),
+    SubagentSpawned(SubagentSpawned),
+    SubagentFinished(SubagentFinished),
+    InterAgentCommunication(InterAgentCommunication),
+    DriverChanged(DriverChanged),
+    ContextMessageCommitted(ContextMessageCommitted),
+    ContextCheckpointCommitted(ContextCheckpointCommitted),
+    ProviderResponseCommitted(ProviderResponseCommitted),
+    QueuedInputSettled(QueuedInputSettled),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueuedInputDisposition {
+    Cancelled,
+    Rejected,
+    Expired,
+}
+
+/// Settles an accepted input that never started a turn.
+///
+/// A queued input must never fabricate an empty `TurnStarted` just to leave the
+/// pending queue: this fact removes the input from the pending FIFO and records
+/// why it was not executed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedInputSettled {
+    pub input_id: InputId,
+    pub disposition: QueuedInputDisposition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_ref: Option<RecoveryRef>,
+    pub settled_at_ms: i64,
+}
+
+/// Full replayable message stored in a session-scoped blob.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextMessageCommitted {
+    pub message_ref: ContentRef,
+    pub origin: ContextMessageOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMessageOrigin {
+    FrozenPrefix,
+    Input,
+    ProviderResponse,
+    ToolResult,
+    Feature,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextCheckpointCommitted {
+    pub checkpoint_ref: ContentRef,
+    pub replaces_through_fact_seq: u64,
+}
+
+/// Complete, replayable response of one model attempt.
+///
+/// This is the barrier that allows tool dispatch and the next round: an
+/// incomplete or unknown finish is recorded here and never executes tools.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderResponseCommitted {
+    pub turn_id: TurnId,
+    pub round: u32,
+    pub attempt: u32,
+    /// Complete neutral assistant message, stored as a session-scoped blob.
+    pub message_ref: ContentRef,
+    /// Provider-specific replay material (signatures, reasoning items) the next
+    /// request must send back verbatim.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub opaque_refs: Vec<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageInfo>,
+    pub finish: ProviderFinish,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFinish {
+    /// The model finished its message; content is complete.
+    Stop,
+    /// The model stopped to call tools; the message carries the declarations.
+    ToolUse,
+    /// The provider truncated the message by token limit.
+    Length,
+    /// The provider reported an incomplete or filtered message.
+    Incomplete,
+    /// No usable terminal signal was observed.
+    Unknown,
+}
+
+impl ProviderFinish {
+    /// Only a complete response may start tools or the next round.
+    pub fn is_complete(self) -> bool {
+        matches!(self, Self::Stop | Self::ToolUse)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCreated {
+    pub created_at_ms: i64,
+    pub cwd: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<SessionId>,
+    pub schema_caps: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputAccepted {
+    pub input_id: InputId,
+    pub input_kind: InputKind,
+    pub input_purpose: InputPurpose,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_ref: Option<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_text: Option<String>,
+    pub attachments: Vec<ContentRef>,
+    pub actor: ActorRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnStarted {
+    pub turn_id: TurnId,
+    pub input_id: InputId,
+    pub mode: TurnMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_ref: Option<RecoveryRef>,
+}
+
+/// Everything that makes one model request reproducible.
+///
+/// The commit owner hashes the whole `ModelRoundStarted` fact into the effect
+/// identity, so changing provider, parameters, tools or the frozen prefix
+/// changes the authorization digest too.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestIdentity {
+    /// 1-based attempt inside this round. A retry is a new attempt; results of
+    /// different attempts are never merged into one response.
+    pub attempt: u32,
+    pub model: String,
+    pub provider_digest: ContentHash,
+    pub params_digest: ContentHash,
+    pub tool_catalog_digest: ContentHash,
+    /// Frozen system prompt / environment / skills digest.
+    pub prefix_digest: ContentHash,
+    /// Digest of the exact wire request the provider will receive.
+    pub request_digest: ContentHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRoundStarted {
+    pub turn_id: TurnId,
+    pub round: u32,
+    /// Hash of the frozen message list this round may send.
+    pub request_hash: ContentHash,
+    pub context_revision: u64,
+    /// Absent only on facts written before request identity existed. Such a
+    /// round cannot prove which provider, parameters or tools it was
+    /// authorized for and must not be resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<RequestIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantBlockSealed {
+    pub turn_id: TurnId,
+    pub block_id: BlockId,
+    pub kind: AssistantBlockKind,
+    pub content_ref: ContentRef,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageInfo>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallDeclared {
+    pub turn_id: TurnId,
+    pub call_id: ToolCallId,
+    pub tool_name: String,
+    pub args_ref: ContentRef,
+    pub args_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolIntent {
+    pub call_id: ToolCallId,
+    pub execution_id: ExecutionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    pub replay_capability: ToolReplayCapability,
+    pub policy_decision: PolicyDecisionRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_args_ref: Option<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_args_hash: Option<ContentHash>,
+    pub sandbox_spec_hash: ContentHash,
+    pub side_effect_class: SideEffectClass,
+    pub intent_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolFinished {
+    pub call_id: ToolCallId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<ExecutionId>,
+    pub terminal_status: ToolTerminalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolError>,
+    pub metrics: ToolMetrics,
+    pub reconciled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_ref: Option<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_fact_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_event_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_ref: Option<RecoveryRef>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionRequested {
+    pub interaction_id: InteractionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<ToolCallId>,
+    pub turn_id: TurnId,
+    pub kind: InteractionKind,
+    pub request_ref: ContentRef,
+    /// 该交互可选的按钮：daemon 按 `kind` 给出，客户端不再按 `kind` 猜。
+    /// 旧事实没有这个字段 → 反序列化为空 vec，客户端此时才回退到按 kind 渲染。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<InteractionChoice>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at_ms: Option<i64>,
+    pub requested_at_ms: i64,
+}
+
+/// 交互按钮的视觉权重。`tone` 只影响渲染，不参与决策语义。
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionChoiceTone {
+    Primary,
+    #[default]
+    Secondary,
+    Destructive,
+}
+
+/// 交互的一个可选项：`decision` 是回传时写入
+/// [`InteractionResolved::decision`] 的值；`label` 由 daemon 拥有，
+/// 客户端不再为每个 `InteractionKind` 硬编码 approve/reject/trust。
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionChoice {
+    pub decision: InteractionDecision,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub tone: InteractionChoiceTone,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+/// Structured interaction verdict.
+///
+/// `decision_ref` alone is a content hash, so a client (or a restarted daemon)
+/// could not tell what an already-resolved interaction decided. The structured
+/// value is additive: facts written before this field existed deserialize with
+/// `decision = None` and keep `decision_ref` as their only record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionDecision {
+    Approved,
+    Rejected,
+    Answered,
+    Dismissed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionResolved {
+    pub interaction_id: InteractionId,
+    pub decision_ref: ContentRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision: Option<InteractionDecision>,
+    pub resolved_by: ActorRef,
+    pub resolution_seq: u64,
+    pub resolved_at_ms: i64,
+}
+
+/// Driver seat handover.
+///
+/// `holder` is the daemon's `client_session_id`; `driver_epoch` is monotonic
+/// across handovers so a stale client can be rejected with
+/// `stale_driver_epoch`. This is a canonical fact (not daemon-local state) so
+/// the seat survives daemon restart and reaches clients as a reliable,
+/// cursor-ordered control event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DriverChanged {
+    /// `None` = the seat is vacant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub holder: Option<String>,
+    pub driver_epoch: u64,
+    pub changed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InteractionExpired {
+    pub interaction_id: InteractionId,
+    pub reason: InteractionExpiryReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_ref: Option<RecoveryRef>,
+    pub expired_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnFinished {
+    pub turn_id: TurnId,
+    pub terminal: TurnTerminal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<TurnError>,
+    pub finished_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnInterrupted {
+    pub turn_id: TurnId,
+    pub reason: InterruptReason,
+    pub last_fact_seq: u64,
+    pub recovery_ref: RecoveryRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionRecovered {
+    pub recovery_id: RecoveryId,
+    pub recovery_event_id: EventId,
+    pub recovery_input_fingerprint: ContentHash,
+    pub outcome: RecoveryOutcome,
+    pub last_good_fact_seq: u64,
+    pub torn_tail: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torn_bytes: Option<u64>,
+    pub actions: Vec<RecoveryAction>,
+    pub recovered_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionApplied {
+    pub checkpoint_id: CheckpointId,
+    pub replaces_through_fact_seq: u64,
+    pub summary_ref: ContentRef,
+    pub context_revision: u64,
+    pub applied_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMetadataChanged {
+    pub patch: SessionMetadataPatch,
+    pub source: MetadataSource,
+    pub changed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTitleChanged {
+    pub title: String,
+    pub source: TitleSource,
+    pub changed_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionDeleted {
+    pub tombstone_at_ms: i64,
+    pub reason: DeleteReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purge_after_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceResourceChanged {
+    pub resource_kind: ResourceKind,
+    pub resource_id: ResourceId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_call_id: Option<ToolCallId>,
+    pub revision: u64,
+    pub summary_ref: ContentRef,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentSpawnConfig {
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub ephemeral: bool,
+    #[serde(default = "default_subagent_timeout_secs")]
+    pub timeout_secs: u64,
+}
+
+const fn default_subagent_timeout_secs() -> u64 {
+    120
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentSpawned {
+    pub child_session_id: SessionId,
+    pub parent_call_id: ToolCallId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_agent_path: Option<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_agent_path: Option<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_config: Option<SubagentSpawnConfig>,
+    pub spawned_at_ms: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentFinished {
+    pub child_session_id: SessionId,
+    pub parent_call_id: ToolCallId,
+    pub status: SubagentTerminalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_ref: Option<ContentRef>,
+    pub finished_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recovery_ref: Option<RecoveryRef>,
+}
+
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionInterAgentDelivery")
+)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterAgentDelivery {
+    Queue,
+    #[default]
+    Trigger,
+    Interrupt,
+    Steer,
+    Interject,
+}
+
+impl InterAgentDelivery {
+    pub const fn triggers_idle_turn(self) -> bool {
+        matches!(self, Self::Trigger | Self::Interrupt)
+    }
+
+    pub const fn interrupts_turn(self) -> bool {
+        matches!(self, Self::Interrupt)
+    }
+
+    pub const fn is_safe_point_only(self) -> bool {
+        matches!(self, Self::Queue | Self::Steer | Self::Interject)
+    }
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum InterAgentContent {
+    Inline { text: String },
+    ContentRef { content_ref: ContentRef },
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterAgentCommunication {
+    pub message_id: MessageId,
+    pub root_session_id: SessionId,
+    pub author: AgentPath,
+    pub recipient: AgentPath,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub other_recipients: Vec<AgentPath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub content: InterAgentContent,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<EventId>,
+    pub delivery: InterAgentDelivery,
+    pub created_at_ms: i64,
+}
+
+impl InterAgentCommunication {
+    pub fn is_for(&self, recipient: &AgentPath) -> bool {
+        &self.recipient == recipient || self.other_recipients.contains(recipient)
+    }
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryRef {
+    pub recovery_id: RecoveryId,
+    pub recovery_event_id: EventId,
+    pub recovery_input_fingerprint: ContentHash,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SessionMetadataPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search_visibility: Option<SearchVisibility>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<SessionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_caps: Option<Vec<String>>,
+    /// Session-level BYOK profile. Empty string clears it (follow the global
+    /// `active_profile`); absent leaves it untouched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// 会话模型选择（新 BYOK 目录体系）：`Use` 设定，`Inherit` 清除并跟随
+    /// 全局 `default_model_selection`；缺省 = 不动。旧 profile 名体系废除后
+    /// 这是唯一的会话级模型选择通道。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<SettingValue<qaqh_types::ModelSelection>>,
+    /// 客户端最近一次显式请求的选择（审计位）；清除语义同上。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model_selection: Option<SettingValue<qaqh_types::ModelSelection>>,
+    /// Reasoning effort override. Empty string clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// 0 = code, 1 = plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<u8>,
+    /// standard | minimal | custom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_tools: Option<Vec<String>>,
+    /// Skills session state (prompt-prefix relevant, so it must survive a restart).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<qaqh_types::SkillSessionStateV2>,
+    /// Frozen `[Environment]` annotation for the first user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frozen_annotation: Option<String>,
+    /// Subagent sessions are thrown away on close.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<bool>,
+    /// Accumulated provider usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<UsageTotals>,
+}
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub totals: qaqh_types::UsageInfo,
+    pub requests: u32,
+    pub cache_reported_requests: u32,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActorRef {
+    pub kind: ActorKind,
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct PolicyDecisionRef {
+    pub outcome: ToolIntentPolicyOutcome,
+    pub rule_id: String,
+    pub decided_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason_ref: Option<ContentRef>,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolMetrics {
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+    pub retry_count: u32,
+    pub output_bytes: u64,
+    pub progress_bytes_total: u64,
+}
+
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionToolError")
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details_ref: Option<ContentRef>,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details_ref: Option<ContentRef>,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryToolCompletion {
+    pub call_id: ToolCallId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_id: Option<ExecutionId>,
+    pub terminal_status: ToolTerminalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_ref: Option<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ToolError>,
+    pub metrics: ToolMetrics,
+    pub reconciled: bool,
+    pub recovery_ref: RecoveryRef,
+    pub finished_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_ref: Option<ContentRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_fact_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_event_id: Option<EventId>,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RecoveryAction {
+    TurnInterrupted {
+        turn_id: TurnId,
+        last_fact_seq: u64,
+    },
+    TurnStarted {
+        turn_id: TurnId,
+        input_id: InputId,
+        mode: TurnMode,
+        recovery_ref: RecoveryRef,
+    },
+    ToolFinished {
+        completion: RecoveryToolCompletion,
+    },
+    InteractionExpired {
+        interaction_id: InteractionId,
+        reason: InteractionExpiryReason,
+    },
+    SubagentFinished {
+        child_session_id: SessionId,
+        child_log_id: LogId,
+        terminal_fact_seq: u64,
+        terminal_event_id: EventId,
+        parent_call_id: ToolCallId,
+        status: SubagentTerminalStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_ref: Option<ContentRef>,
+        finished_at_ms: i64,
+        recovery_ref: RecoveryRef,
+    },
+    UpgradeSuperseded {
+        previous_recovery_id: RecoveryId,
+    },
+    CommitRepaired {
+        previous_commit_generation: u64,
+        committed_fact_seq: u64,
+        committed_offset: u64,
+    },
+    MoveTornTail {
+        from: String,
+        to: String,
+        bytes: u64,
+        bytes_hash: ContentHash,
+    },
+    ProjectionRebuilt {
+        projection: ProjectionSlot,
+        through_fact_seq: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BoundedText {
+    pub text: String,
+    pub original_chars: u64,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListOutput<T> {
+    pub items: Vec<T>,
+    pub total: u32,
+    pub returned: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    pub truncated: bool,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActorKind {
+    User,
+    Api,
+    System,
+    Agent,
+    Subagent,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputKind {
+    UserText,
+    Command,
+    Approval,
+    Resume,
+    System,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputPurpose {
+    #[default]
+    TriggerTurn,
+    QueueOnly,
+    Steer,
+    Interject,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnMode {
+    Normal,
+    Plan,
+    Ask,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantBlockKind {
+    Reasoning,
+    Answer,
+    ToolCall,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum ToolIntentPolicyOutcome {
+    Allow,
+    Ask,
+    Amend,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum SideEffectClass {
+    ReadOnly,
+    WorkspaceWrite,
+    Process,
+    Network,
+    External,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionActivityState")
+)]
+pub enum ActivityState {
+    #[default]
+    Idle,
+    Running,
+    Interrupted,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ToolReplayCapability {
+    NoReplay,
+    IdempotentReplay,
+    Reconcile { probe_ref: ContentRef },
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolTerminalStatus {
+    Succeeded,
+    Failed,
+    Partial,
+    Cancelled,
+    TimedOut,
+    Backgrounded,
+    Indeterminate,
+    Denied,
+}
+
+#[cfg_attr(
+    feature = "ts",
+    derive(TS),
+    ts(export, export_to = "qaqh/", rename = "SessionInteractionKind")
+)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionKind {
+    Ask,
+    Plan,
+    Permission,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionExpiryReason {
+    Timeout,
+    SessionClosed,
+    RestartPolicy,
+    TurnCancelled,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnTerminal {
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterruptReason {
+    Crash,
+    Restart,
+    CancelBeforeSeal,
+    UnknownFact,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataSource {
+    User,
+    Api,
+    System,
+    Migration,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    User,
+    Auto,
+    Migration,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeleteReason {
+    User,
+    Api,
+    Retention,
+    Rollback,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResourceKind {
+    Todo,
+    Skill,
+    Plan,
+    Activity,
+    File,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentTerminalStatus {
+    Completed,
+    Failed,
+    Cancelled,
+    TimedOut,
+}
+
+/// Context compaction terminal status. Wire values mirror
+/// `qaqh_domain::CompactStatus`; declared here because the v2 delta vocabulary
+/// is self-contained and carries the TS export.
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactStatus {
+    Completed,
+    Skipped,
+    Failed,
+    Cancelled,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryOutcome {
+    Writable,
+    CommitRecoveryRequired,
+    ReadOnlyUpgradeRequired,
+    Tombstone,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchVisibility {
+    Visible,
+    Hidden,
+}
+
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[repr(u16)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectionSlot {
+    Conversation = 0,
+    Control = 2,
+    Resources = 3,
+    Meta = 4,
+    Mailbox = 5,
+    Team = 6,
+}

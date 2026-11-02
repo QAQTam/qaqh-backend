@@ -4,7 +4,6 @@
 //! captures payload text. It combines process-level measurements with
 //! caller-supplied logical/estimated gauges and a bounded phase-sample ring.
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -154,6 +153,10 @@ pub struct MemorySnapshot {
     pub enabled: bool,
     pub started_at_ms: u64,
     pub sampled_at_ms: u64,
+    /// Last time runtime-owned component gauges were refreshed. Independent
+    /// from process sampling and may be stale when diagnostics collection is off.
+    pub components_sampled_at_ms: Option<u64>,
+    pub components_stale: bool,
     pub process: ProcessMemory,
     pub peak_sampled_private_bytes: Option<u64>,
     pub peak_sampled_resident_bytes: Option<u64>,
@@ -173,6 +176,7 @@ pub struct MemorySnapshot {
 struct State {
     enabled: bool,
     started_at_ms: u64,
+    components_sampled_at_ms: Option<u64>,
     next_sequence: u64,
     peak_sampled_private_bytes: Option<u64>,
     peak_sampled_resident_bytes: Option<u64>,
@@ -204,6 +208,7 @@ impl MemoryMonitor {
             state: Mutex::new(State {
                 enabled: false,
                 started_at_ms: now_ms(),
+                components_sampled_at_ms: None,
                 next_sequence: 1,
                 peak_sampled_private_bytes: None,
                 peak_sampled_resident_bytes: None,
@@ -319,6 +324,13 @@ impl MemoryMonitor {
             }
         }
         state.components.insert(gauge.name.clone(), gauge);
+        state.components_sampled_at_ms = Some(now_ms());
+    }
+
+    /// Mark component gauges stale when runtime collection is stopped.
+    pub fn mark_components_stale(&self) {
+        let mut state = self.lock();
+        state.components_sampled_at_ms = None;
     }
 
     pub fn record_phase(
@@ -409,6 +421,8 @@ impl MemoryMonitor {
             enabled: state.enabled,
             started_at_ms: state.started_at_ms,
             sampled_at_ms: now_ms(),
+            components_sampled_at_ms: state.components_sampled_at_ms,
+            components_stale: !state.enabled || state.components_sampled_at_ms.is_none(),
             process,
             peak_sampled_private_bytes: state.peak_sampled_private_bytes,
             peak_sampled_resident_bytes: state.peak_sampled_resident_bytes,

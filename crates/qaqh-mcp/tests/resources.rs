@@ -41,7 +41,7 @@ use rmcp::model::{
     ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
     Prompt, PromptMessage, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
     ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role, ServerCapabilities,
-    ServerInfo, Tool,
+    ServerConfig, Tool,
 };
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RequestContext, ServiceExt};
 use serde_json::json;
@@ -61,8 +61,8 @@ struct ResourceServer {
 }
 
 impl ServerHandler for ResourceServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()

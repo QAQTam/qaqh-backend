@@ -216,8 +216,3 @@ pub(super) fn seek_checkpoint(index: &CommittedPrefixIndex, from_seq: u64) -> Op
 pub(super) fn prefix_digest(index: &CommittedPrefixIndex) -> [u8; 32] {
     index.digest.clone().finalize().into()
 }
-
-/// Access for seek-based reads: `(last_event_id at checkpoint)`.
-pub(super) fn checkpoint_event_id(checkpoint: &Checkpoint) -> &EventId {
-    &checkpoint.last_event_id
-}

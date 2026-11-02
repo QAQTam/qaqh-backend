@@ -37,7 +37,7 @@ use qaqh_mcp::{ConnStatus, McpManager, install_manager, manager_slot};
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RequestContext, ServiceExt};
 use serde_json::json;
@@ -48,8 +48,8 @@ use serde_json::json;
 struct MockServer;
 
 impl ServerHandler for MockServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info.name = "lifecycle-mock".into();
         info.server_info.version = "0.1.0".into();

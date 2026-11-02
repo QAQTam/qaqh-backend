@@ -9,12 +9,13 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-use super::agent::AgentPath;
-use super::projection::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex};
-use super::types::{
-    ActivityState, ActorRef, AssistantBlockKind, CheckpointId, CompactStatus, ContentHash,
-    ContentRef, ContentUnavailable, DeleteReason, EventId, ExecutionId, InputId, InputKind,
-    InputPurpose, InterAgentCommunication, InterAgentDelivery, InteractionChoice,
+
+use qaqh_ringing_contract::fact::{END_OF_FACT, MAX_RELIABLE_PROJECTION_INDEX, ProjectionIndex};
+use qaqh_ringing_contract::team::TeamDelta;
+use qaqh_ringing_contract::fact::{
+    ActivityState, ActorRef, AssistantBlockKind, CheckpointId, CompactStatus, ContentHash, ContentValue,
+    ContentRef, DeleteReason, EventId, ExecutionId, InputId, InputKind,
+    InputPurpose, InterAgentCommunication, InteractionChoice,
     InteractionDecision, InteractionExpiryReason, InteractionId, InteractionKind, InterruptReason,
     LogId, MAX_SAFE_FACT_SEQ, MessageId, PolicyDecisionRef, ProjectionSlot, RecoveryAction,
     RecoveryOutcome, RecoveryRef, ResourceId, ResourceKind, SessionFact, SessionId,
@@ -22,7 +23,7 @@ use super::types::{
     ToolError, ToolMetrics, ToolReplayCapability, ToolTerminalStatus, TurnError, TurnId, TurnMode,
     TurnTerminal,
 };
-use super::validation::ValidationError;
+use qaqh_ringing_contract::fact::ValidationError;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -392,14 +393,6 @@ impl ProjectionPayload {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum ContentValue {
-    Inline { text: String },
-    Ref { content_ref: ContentRef },
-    Unavailable(ContentUnavailable),
-}
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -419,202 +412,6 @@ pub struct MailboxMessage {
     pub delivered_fact_seq: Option<u64>,
 }
 
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TeamAgentStatus {
-    PendingInit,
-    Running,
-    WaitingUser,
-    Interrupted,
-    Completed,
-    Errored,
-    Shutdown,
-    NotFound,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TeamAgentResidency {
-    Loaded,
-    Unloaded,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamAgentSnapshot {
-    pub agent_id: SessionId,
-    pub agent_path: AgentPath,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub nickname: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<String>,
-    pub status: TeamAgentStatus,
-    pub residency: TeamAgentResidency,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_agent_path: Option<AgentPath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_task_id: Option<String>,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamInboxSummary {
-    pub message_id: MessageId,
-    pub author: AgentPath,
-    pub recipient: AgentPath,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    pub delivery: InterAgentDelivery,
-    pub created_at_ms: i64,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamTaskArtifact {
-    pub content_ref: ContentRef,
-    pub media_type: String,
-    pub added_at_ms: i64,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamTaskSnapshot {
-    pub task_id: String,
-    pub title: String,
-    pub state: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<AgentPath>,
-    pub claim_epoch: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<TeamTaskArtifact>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acceptance: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_ref: Option<ContentRef>,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamBoardChannel {
-    pub channel_id: String,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub topic: Option<String>,
-    pub created_by: AgentPath,
-    pub created_at_ms: i64,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamBoardThread {
-    pub thread_id: String,
-    pub channel_id: String,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    pub created_by: AgentPath,
-    pub created_at_ms: i64,
-    pub post_count: u64,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamBoardPost {
-    pub post_id: String,
-    pub thread_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    pub author: AgentPath,
-    pub body: String,
-    pub created_at_ms: i64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_to: Option<String>,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TeamBoardSubscriptionTarget {
-    Channel { channel_id: String },
-    Thread { thread_id: String },
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamBoardSubscription {
-    pub target: TeamBoardSubscriptionTarget,
-    pub subscriber: AgentPath,
-    pub subscribed: bool,
-    pub updated_at_ms: i64,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamBoardSnapshot {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub board_id: Option<SessionId>,
-    pub revision: u64,
-    pub last_fact_seq: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub channels: Vec<TeamBoardChannel>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub threads: Vec<TeamBoardThread>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub posts: Vec<TeamBoardPost>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub subscriptions: Vec<TeamBoardSubscription>,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-pub enum TeamDelta {
-    AgentJoined {
-        revision: u64,
-        agent: Box<TeamAgentSnapshot>,
-    },
-    AgentStatusChanged {
-        revision: u64,
-        agent_id: SessionId,
-        status: TeamAgentStatus,
-    },
-    AgentResidencyChanged {
-        revision: u64,
-        agent_id: SessionId,
-        residency: TeamAgentResidency,
-    },
-    AgentMessageQueued {
-        revision: u64,
-        message: Box<TeamInboxSummary>,
-    },
-    AgentMessageDelivered {
-        revision: u64,
-        message_id: MessageId,
-    },
-    AgentInterrupted {
-        revision: u64,
-        agent_id: SessionId,
-    },
-    AgentCompleted {
-        revision: u64,
-        agent_id: SessionId,
-        status: TeamAgentStatus,
-    },
-    TaskChanged {
-        revision: u64,
-        task: Box<TeamTaskSnapshot>,
-    },
-    BoardChanged {
-        revision: u64,
-        board: Box<TeamBoardSnapshot>,
-    },
-}
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

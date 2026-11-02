@@ -1,105 +1,12 @@
 //! Rebuildable task board projection over the TeamFact log.
 
-use serde::{Deserialize, Serialize};
 
-use super::error::{TeamError, TeamResult};
-use super::types::{
-    TaskArtifact, TaskCreated, TaskId, TaskState, TeamActor, TeamFact, TeamId, TeamPayload,
+use qaqh_ringing_contract::team::{TeamError, TeamResult};
+use qaqh_ringing_contract::team::{TaskBoardDelta,
+    TaskArtifact, TaskBoardSnapshot, TaskId, TaskState, TaskView, TeamActor, TeamFact,
+    TeamPayload,
 };
 
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskBoardSnapshot {
-    pub team_id: Option<TeamId>,
-    pub revision: u64,
-    pub last_fact_seq: u64,
-    pub tasks: Vec<TaskView>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-pub enum TaskBoardDelta {
-    TeamCreated {
-        revision: u64,
-        team_id: TeamId,
-    },
-    TaskCreated {
-        revision: u64,
-        task: Box<TaskView>,
-    },
-    TaskClaimed {
-        revision: u64,
-        task_id: TaskId,
-        owner: TeamActor,
-        claim_epoch: u64,
-        claimed_at_ms: i64,
-    },
-    TaskReleased {
-        revision: u64,
-        task_id: TaskId,
-        previous_owner: TeamActor,
-        claim_epoch: u64,
-        released_at_ms: i64,
-    },
-    TaskDependencyAdded {
-        revision: u64,
-        task_id: TaskId,
-        depends_on: TaskId,
-        added_at_ms: i64,
-    },
-    TaskArtifactAttached {
-        revision: u64,
-        task_id: TaskId,
-        artifact: TaskArtifact,
-    },
-    TaskAcceptanceSet {
-        revision: u64,
-        task_id: TaskId,
-        acceptance: Vec<String>,
-        updated_at_ms: i64,
-    },
-    TaskCompleted {
-        revision: u64,
-        task_id: TaskId,
-        result_ref: Option<crate::session_fact_v2::ContentRef>,
-        completed_at_ms: i64,
-    },
-    TaskClosed {
-        revision: u64,
-        task_id: TaskId,
-        closed_at_ms: i64,
-    },
-    TaskCancelled {
-        revision: u64,
-        task_id: TaskId,
-        reason: String,
-        cancelled_at_ms: i64,
-    },
-}
-
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TaskView {
-    pub task_id: TaskId,
-    pub title: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description_ref: Option<crate::session_fact_v2::ContentRef>,
-    pub state: TaskState,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<TeamActor>,
-    pub claim_epoch: u64,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub depends_on: Vec<TaskId>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub artifacts: Vec<TaskArtifact>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub acceptance: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub result_ref: Option<crate::session_fact_v2::ContentRef>,
-    pub created_by: TeamActor,
-    pub created_at_ms: i64,
-    pub updated_at_ms: i64,
-}
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskBoardProjection {
@@ -461,26 +368,6 @@ impl TaskBoardProjection {
             }
         }
         false
-    }
-}
-
-impl TaskView {
-    fn from_created(payload: &TaskCreated, ts_ms: i64) -> Self {
-        Self {
-            task_id: payload.task_id.clone(),
-            title: payload.title.clone(),
-            description_ref: payload.description_ref.clone(),
-            state: TaskState::Open,
-            owner: None,
-            claim_epoch: 0,
-            depends_on: Vec::new(),
-            artifacts: Vec::new(),
-            acceptance: Vec::new(),
-            result_ref: None,
-            created_by: payload.created_by.clone(),
-            created_at_ms: payload.created_at_ms,
-            updated_at_ms: ts_ms,
-        }
     }
 }
 

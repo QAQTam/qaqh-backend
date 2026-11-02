@@ -300,6 +300,20 @@ impl SessionCommit {
         Ok(self.context.request_messages()?)
     }
 
+    /// Context counters maintained by the in-memory projector; no bodies are
+    /// copied and no journal replay is performed.
+    pub fn context_memory_usage(&self) -> qaqh_types::memory::MemoryUsageEstimate {
+        self.context.memory_usage_estimate()
+    }
+
+    pub fn journal_index_memory_usage(&self) -> (u64, u64) {
+        self.journal.index_memory_usage()
+    }
+
+    pub fn refresh_memory_estimate(&mut self) {
+        self.context.refresh_memory_estimate();
+    }
+
     /// Inspect open turns, unsettled tool calls, unsettled interactions, and
     /// queued inputs folded from the committed prefix.
     pub fn obligations(&self) -> Result<RecoveredObligations, SessionCommitError> {

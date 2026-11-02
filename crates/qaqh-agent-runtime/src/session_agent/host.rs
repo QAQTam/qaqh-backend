@@ -3,7 +3,7 @@
 //! Replaces per-session physical threads with supervised Tokio async tasks.
 //! Exposes non-blocking ingress lanes for application commands and high-priority control.
 
-use std::sync::Arc;
+use std::sync::{Arc, mpsc};
 
 use qaqh_agentloop_core::{
     ActorIdentity, driver,
@@ -13,7 +13,7 @@ use qaqh_agentloop_core::{
 use qaqh_session::{
     canonical::generate_ulid,
     session_commit::{CommittedExecution, SessionCommit},
-    session_fact_v2::{ContentRef, InputId, InteractionId, ToolCallId, TurnId},
+    session_fact_v2::{ContentRef, InputId, InteractionId, ResourceKind, ToolCallId, TurnId},
 };
 use std::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -30,6 +30,7 @@ use super::{
 pub struct AgentHandle {
     pub session_id: String,
     pub(crate) mailbox: MailboxHandle<AgentCommand, AgentControl, AgentCompletion>,
+    memory: Arc<super::types::SessionAgentMemory>,
 }
 
 impl AgentHandle {
@@ -45,6 +46,23 @@ impl AgentHandle {
         Self {
             session_id,
             mailbox,
+            memory: Arc::new(super::types::SessionAgentMemory::default()),
+        }
+    }
+
+    pub fn memory_snapshot(&self) -> super::types::SessionAgentMemorySnapshot {
+        let mut snapshot = self.memory.snapshot();
+        let mailbox = self.mailbox.queued_usage();
+        snapshot.mailbox_items = mailbox.items;
+        snapshot.mailbox_bytes = mailbox.bytes;
+        snapshot
+    }
+
+    pub fn with_memory(&self, memory: Arc<super::types::SessionAgentMemory>) -> Self {
+        Self {
+            session_id: self.session_id.clone(),
+            mailbox: self.mailbox.clone(),
+            memory,
         }
     }
 
@@ -87,6 +105,22 @@ impl AgentHandle {
             title: title.to_string(),
             source,
         })
+    }
+
+    pub fn publish_resource_changed(
+        &self,
+        resource_kind: ResourceKind,
+    ) -> Result<(), MailboxError> {
+        let (committed, result) = mpsc::sync_channel(1);
+        self.mailbox
+            .try_command(AgentCommand::PublishResourceChanged {
+                resource_kind,
+                committed,
+            })?;
+        result
+            .recv()
+            .map_err(|_| MailboxError::Closed)?
+            .map_err(|_| MailboxError::Closed)
     }
 
     /// Submit a high-priority cancellation request.
@@ -147,6 +181,15 @@ impl AgentHandle {
     }
 }
 
+impl std::fmt::Debug for AgentHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AgentHandle")
+            .field("session_id", &self.session_id)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Host responsible for spawning and supervising the async SessionAgent task.
 pub struct AgentHost;
 
@@ -186,6 +229,7 @@ impl AgentHost {
         supervisor.adopt_actor(&actor);
 
         let sup_arc = Arc::new(Mutex::new(supervisor));
+        let memory = Arc::new(super::types::SessionAgentMemory::default());
         let agent = SessionAgent::new(
             session_id.clone(),
             incarnation,
@@ -196,11 +240,12 @@ impl AgentHost {
             tool_port,
             activity,
             progress,
+            Arc::clone(&memory),
         );
-
         let handle = AgentHandle {
             session_id: session_id.clone(),
             mailbox: mailbox_handle,
+            memory,
         };
 
         let driver = async move {

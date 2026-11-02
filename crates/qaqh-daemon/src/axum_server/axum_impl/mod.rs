@@ -24,7 +24,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-use qaqh_domain::{ControlCommand, RingingChannel};
+use qaqh_domain::RingingChannel;
 use qaqh_ringing::{
     RingingCommandAckStatus, RingingCommandState, RingingV2CommandAck, RingingV2CommandEnvelope,
     RingingV2ContentValue,
@@ -47,6 +47,7 @@ pub mod control;
 pub mod pairing;
 pub mod service_api;
 pub(crate) mod test_hooks;
+pub mod unified;
 pub mod v2;
 
 #[cfg(test)]
@@ -136,6 +137,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/ringing/v2/commands/{id}",
             post(handle_command_v2).get(handle_command_status_v2),
+        )
+        .route(
+            "/ringing/v2/commands",
+            post(unified::handle_unified_command),
         )
         .route(
             "/ringing/v2/sessions/{session_id}/approvals",
