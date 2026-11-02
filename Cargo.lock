@@ -2224,6 +2224,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.21",
+ "tiny_http",
  "tokio",
 ]
 
@@ -2593,6 +2595,7 @@ dependencies = [
  "qaqh-types",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
  "ts-rs",
  "uuid",

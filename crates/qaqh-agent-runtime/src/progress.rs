@@ -59,9 +59,9 @@ impl AttemptBlocks {
             model: model.to_string(),
             reasoning_block_id: format!(
                 "block_{}",
-                qaqh_session::canonical::generate_ulid()
+                qaqh_ringing_contract::ulid::generate_ulid()
             ),
-            answer_block_id: format!("block_{}", qaqh_session::canonical::generate_ulid()),
+            answer_block_id: format!("block_{}", qaqh_ringing_contract::ulid::generate_ulid()),
         }
     }
 

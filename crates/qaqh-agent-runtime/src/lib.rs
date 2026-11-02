@@ -30,6 +30,9 @@ pub mod progress;
 pub mod provider_job;
 pub mod quota_ledger;
 pub mod session_agent;
+pub mod session_loop;
+#[cfg(test)]
+mod session_loop_tests;
 pub mod tool_job;
 
 pub use activity::SessionActivityTracker;
