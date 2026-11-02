@@ -44,7 +44,7 @@ mod tests {
                 store::append_block(conn, &store::NewBlock {
                     block_id: "B1".into(),
                     session_id: "SES1".into(),
-                    turn_id: "T1".into(),
+                    turn_id: Some("T1".into()),
                     kind: "input",
                     text: Some("你好".into()),
                     call_id: None,
@@ -65,7 +65,7 @@ mod tests {
                 store::upsert_tool_call(conn, &store::ToolCallUpsert {
                     call_id: "C1".into(),
                     session_id: "SES1".into(),
-                    turn_id: "T1".into(),
+                    turn_id: Some("T1".into()),
                     tool_name: "shell".into(),
                     args_json: Some(r#"{"kind":"inline","data":{"text":"ls"}}"#.into()),
                     status: "running",
@@ -75,8 +75,18 @@ mod tests {
                     session_id: "SES1".into(),
                     turn_id: Some("T1".into()),
                     call_id: Some("C1".into()),
-                    kind: r#""permission""#,
-                    payload_json: r#"{"command":"rm"}"#.into(),
+                    kind: r#""permission""#.into(),
+                    payload_json: serde_json::to_string(&qaqh_ringing_contract::state::InteractionView {
+                        interaction_id: qaqh_ringing_contract::fact::InteractionId::new("I1"),
+                        call_id: Some(qaqh_ringing_contract::fact::ToolCallId::new("C1")),
+                        turn_id: Some(qaqh_ringing_contract::fact::TurnId::new("T1")),
+                        kind: qaqh_ringing_contract::fact::InteractionKind::Permission,
+                        request: ContentValue::Inline { text: "rm -rf /".into() },
+                        choices: vec![],
+                        expires_at_ms: None,
+                        resolution: None,
+                    })
+                    .expect("serialize interaction"),
                 })?;
                 Ok::<(), rusqlite::Error>(())
             })
@@ -101,13 +111,20 @@ mod tests {
             db.write(|conn| {
                 store::finish_tool_call(
                     conn,
-                    "C1",
-                    "finished",
-                    Some("file-a\nfile-b"),
-                    None,
-                    false,
-                    None,
-                    None,
+                    &store::ToolCallFinish {
+                        call_id: "C1".into(),
+                        session_id: "SES1".into(),
+                        turn_id: Some("T1".into()),
+                        tool_name: "shell".into(),
+                        status: "finished",
+                        output_text: Some("file-a\nfile-b".into()),
+                        output_ref: None,
+                        output_truncated: false,
+                        error_json: None,
+                        meta_json: None,
+                        effects_json: None,
+                        code_delta_json: None,
+                    },
                 )?;
                 assert!(store::resolve_interaction(conn, "I1", "resolved", r#""approved""#)?);
                 Ok::<(), rusqlite::Error>(())

@@ -509,6 +509,7 @@ impl AgentRegistry {
         }
 
         let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
+        let lifecycle = self.owners.get_or_create(session_id).lifecycle();
         let prepared =
             crate::session_agent::assembly::assemble(crate::session_agent::assembly::SpawnInput {
                 session_id,
@@ -518,6 +519,7 @@ impl AgentRegistry {
                 permission_level: spec.permission_level,
                 sandbox: crate::session_agent::assembly::subagent_sandbox(),
                 workspace_root: ws_dir,
+                lifecycle,
             })?;
 
         let (handle, task) = crate::session_agent::AgentHost::spawn_with_activity(
@@ -592,12 +594,14 @@ impl AgentRegistry {
             .unwrap_or_default();
 
         let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
+        let lifecycle = self.owners.get_or_create(session_id).lifecycle();
         let prepared = crate::session_agent::assembly::assemble(
             crate::session_agent::assembly::SpawnInput::for_session(
                 session_id,
                 &session_dir,
                 &agent_config,
                 ws_dir,
+                lifecycle,
             ),
         )?;
 

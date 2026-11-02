@@ -10,8 +10,11 @@
 //! about whether anything started.
 
 use qaqh_agentloop_core::{DispatchEvidence, mailbox::FrameSize};
+use qaqh_ringing_contract::fact::{ToolError, ToolMetrics};
+use qaqh_ringing_contract::state::{CodeDelta, ToolCallStatus, ToolEffectInfo};
 use qaqh_session::{
     canonical::sha256_content_hash,
+    owner::{ToolLifecycle, ToolRun, ToolTerminal},
     session_commit::{CommittedExecution, FenceReason},
     session_fact_v2::{FactPayload, SideEffectClass, ToolReplayCapability, ToolTerminalStatus},
 };
@@ -165,6 +168,9 @@ pub struct RetainedToolOwner {
 /// Real [`ToolPort`] backed by a session-scoped [`qaqh_workspace::ToolManager`],
 /// pre-dispatch permission/approval re-verification, and an optional durable
 /// [`QuotaLedger`].
+///
+/// 工具生命周期(运行状态、实时输出、结构化结果与 effects)经会话 owner 的
+/// [`ToolLifecycle`] 上报;这是 E09/E10 断点的接通点。
 pub struct WorkspaceToolPort {
     session_id: String,
     manager: Arc<Mutex<qaqh_workspace::ToolManager>>,
@@ -172,6 +178,7 @@ pub struct WorkspaceToolPort {
     approvals: Mutex<HashMap<String, ToolApprovalGrant>>,
     quota: Option<Arc<Mutex<QuotaLedger>>>,
     retained_owners: Mutex<HashMap<String, RetainedToolOwner>>,
+    lifecycle: ToolLifecycle,
 }
 
 impl WorkspaceToolPort {
@@ -180,6 +187,7 @@ impl WorkspaceToolPort {
         manager: Arc<Mutex<qaqh_workspace::ToolManager>>,
         policy: ToolPolicySnapshot,
         quota: Option<Arc<Mutex<QuotaLedger>>>,
+        lifecycle: ToolLifecycle,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -188,6 +196,7 @@ impl WorkspaceToolPort {
             approvals: Mutex::new(HashMap::new()),
             quota,
             retained_owners: Mutex::new(HashMap::new()),
+            lifecycle,
         }
     }
 
@@ -502,7 +511,14 @@ impl ToolPort for WorkspaceToolPort {
         request: &ToolRequest,
         cancel: Arc<AtomicBool>,
     ) -> Result<ToolOutput, ToolFailure> {
+        let args_json = String::from_utf8(request.args.clone()).ok();
         if cancel.load(Ordering::Acquire) {
+            self.lifecycle.settled(
+                &request.call_id,
+                &request.tool_name,
+                args_json.clone(),
+                failed_terminal("cancelled", "cancelled before dispatch", None, None),
+            );
             return Err(ToolFailure::NotStarted("cancelled before dispatch".into()));
         }
         let PreparedCall {
@@ -510,7 +526,13 @@ impl ToolPort for WorkspaceToolPort {
             invocation,
             policy,
             args_hash,
-        } = self.prepare(request)?;
+        } = match self.prepare(request) {
+            Ok(prepared) => prepared,
+            Err(failure) => {
+                self.settle_failure(request, args_json.as_deref(), &failure);
+                return Err(failure);
+            }
+        };
 
         let authorized = match qaqh_workspace::admit_with_context(
             invocation,
@@ -519,20 +541,36 @@ impl ToolPort for WorkspaceToolPort {
         ) {
             qaqh_workspace::Admission::Authorized(call) => call,
             qaqh_workspace::Admission::Denied(reason) => {
+                self.lifecycle.settled(
+                    &request.call_id,
+                    &request.tool_name,
+                    args_json.clone(),
+                    failed_terminal("permission_denied", &reason, None, None),
+                );
                 return Err(ToolFailure::Denied(reason));
             }
             qaqh_workspace::Admission::ApprovalRequired(challenge) => {
-                let grant = self
+                let grant = match self
                     .approvals
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .remove(&request.execution_id)
-                    .ok_or_else(|| {
-                        ToolFailure::Denied(format!(
+                {
+                    Some(grant) => grant,
+                    None => {
+                        let reason = format!(
                             "permission approval required or revoked for {}",
                             request.tool_name
-                        ))
-                    })?;
+                        );
+                        self.lifecycle.settled(
+                            &request.call_id,
+                            &request.tool_name,
+                            args_json.clone(),
+                            failed_terminal("permission_denied", &reason, None, None),
+                        );
+                        return Err(ToolFailure::Denied(reason));
+                    }
+                };
                 let normalized_ws =
                     qaqh_workspace::resolve_target_path(policy.workspace_root.clone());
                 let grant_ws = qaqh_workspace::resolve_target_path(grant.workspace_root);
@@ -541,18 +579,38 @@ impl ToolPort for WorkspaceToolPort {
                     || grant.args_hash != args_hash
                     || grant_ws != normalized_ws
                 {
-                    return Err(ToolFailure::Denied(
-                        "approval grant does not match execution identity, arguments, or workspace"
-                            .into(),
-                    ));
+                    let reason = "approval grant does not match execution identity, arguments, or workspace".to_string();
+                    self.lifecycle.settled(
+                        &request.call_id,
+                        &request.tool_name,
+                        args_json.clone(),
+                        failed_terminal("permission_denied", &reason, None, None),
+                    );
+                    return Err(ToolFailure::Denied(reason));
                 }
-                challenge.approve(true).map_err(|err| {
-                    ToolFailure::Denied(format!("approval challenge rejected: {err:?}"))
-                })?
+                match challenge.approve(true) {
+                    Ok(call) => call,
+                    Err(err) => {
+                        let reason = format!("approval challenge rejected: {err:?}");
+                        self.lifecycle.settled(
+                            &request.call_id,
+                            &request.tool_name,
+                            args_json.clone(),
+                            failed_terminal("permission_denied", &reason, None, None),
+                        );
+                        return Err(ToolFailure::Denied(reason));
+                    }
+                }
             }
         };
 
         if cancel.load(Ordering::Acquire) {
+            self.lifecycle.settled(
+                &request.call_id,
+                &request.tool_name,
+                args_json.clone(),
+                failed_terminal("cancelled", "cancelled before handler start", None, None),
+            );
             return Err(ToolFailure::NotStarted(
                 "cancelled before handler start".into(),
             ));
@@ -561,20 +619,27 @@ impl ToolPort for WorkspaceToolPort {
         self.reap_finished_process_owners();
 
         let reservation = match &self.quota {
-            Some(ledger) => Some(
-                ledger
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .reserve(
-                        QuotaKind::Tool,
-                        1,
-                        format!("tool:{}:{}", self.session_id, request.execution_id),
-                        None,
-                    )
-                    .map_err(|err| {
-                        ToolFailure::NotStarted(format!("tool quota reservation refused: {err}"))
-                    })?,
-            ),
+            Some(ledger) => match ledger
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .reserve(
+                    QuotaKind::Tool,
+                    1,
+                    format!("tool:{}:{}", self.session_id, request.execution_id),
+                    None,
+                ) {
+                Ok(reservation) => Some(reservation),
+                Err(err) => {
+                    let message = format!("tool quota reservation refused: {err}");
+                    self.lifecycle.settled(
+                        &request.call_id,
+                        &request.tool_name,
+                        args_json.clone(),
+                        failed_terminal("quota_refused", &message, None, None),
+                    );
+                    return Err(ToolFailure::NotStarted(message));
+                }
+            },
             None => None,
         };
 
@@ -587,8 +652,18 @@ impl ToolPort for WorkspaceToolPort {
         );
         let _guard = scope.install();
 
+        // 进入实际执行:E09/E10 断点接通——直通 sender 注入 exec 处理器,
+        // 实时输出经 owner 泵转成 tool.output.delta;终态带结构化结果与 effects。
+        let run = self
+            .lifecycle
+            .started(&request.call_id, &request.tool_name, args_json);
+        let progress_tx = run.exec_sender();
         let exec_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            qaqh_workspace::execution::execute_authorized_with_context(authorized, context, None)
+            qaqh_workspace::execution::execute_authorized_with_context(
+                authorized,
+                context,
+                Some(progress_tx),
+            )
         }));
         let exec_result = match exec_result {
             Ok(result) => result,
@@ -605,6 +680,16 @@ impl ToolPort for WorkspaceToolPort {
                     );
                 }
                 self.retain_owner(request, None, false, reservation);
+                let metrics = run_metrics(&run);
+                self.lifecycle.finished(
+                    run,
+                    failed_terminal(
+                        "tool_panicked",
+                        "tool handler panicked; side-effect status is unknown",
+                        None,
+                        Some(metrics),
+                    ),
+                );
                 return Err(ToolFailure::AfterStart(
                     "tool handler panicked; side-effect status is unknown".into(),
                 ));
@@ -627,6 +712,20 @@ impl ToolPort for WorkspaceToolPort {
         if is_backgrounded {
             self.retain_owner(request, process_id, true, reservation);
             self.reap_finished_process_owners();
+            let metrics = run_metrics(&run);
+            self.lifecycle.finished(
+                run,
+                ToolTerminal {
+                    // 调用结清但进程仍在跑:状态保持运行中,由后台收割落终态。
+                    status: ToolCallStatus::Running,
+                    output_text: Some(exec_result.content.clone()),
+                    output_truncated: false,
+                    error: None,
+                    metrics: Some(metrics),
+                    code_delta: code_delta_of(&exec_result),
+                    effects: effect_infos(&exec_result),
+                },
+            );
             return Ok(ToolOutput {
                 output: exec_result.content.into_bytes(),
                 backgrounded: true,
@@ -635,6 +734,19 @@ impl ToolPort for WorkspaceToolPort {
 
         if exec_result.success {
             self.release_reservation(reservation, ReleaseReason::Completed);
+            let metrics = run_metrics(&run);
+            self.lifecycle.finished(
+                run,
+                ToolTerminal {
+                    status: ToolCallStatus::Finished,
+                    output_text: Some(exec_result.content.clone()),
+                    output_truncated: false,
+                    error: None,
+                    metrics: Some(metrics),
+                    code_delta: code_delta_of(&exec_result),
+                    effects: effect_infos(&exec_result),
+                },
+            );
             return Ok(ToolOutput {
                 output: exec_result.content.into_bytes(),
                 backgrounded: false,
@@ -651,6 +763,8 @@ impl ToolPort for WorkspaceToolPort {
             "permission_denied" | "blocked_by_mode" | "session_mismatch" | "workspace_mismatch"
             | "resource_mismatch" => {
                 self.release_reservation(reservation, ReleaseReason::Cancelled);
+                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::Denied(exec_result.content))
             }
             "manager_unavailable"
@@ -658,6 +772,8 @@ impl ToolPort for WorkspaceToolPort {
             | "audit_unavailable"
             | "cancelled_before_start" => {
                 self.release_reservation(reservation, ReleaseReason::Cancelled);
+                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::NotStarted(exec_result.content))
             }
             "partial" | "audit_quarantined" | "tool_panicked" => {
@@ -667,6 +783,8 @@ impl ToolPort for WorkspaceToolPort {
                     false,
                     reservation,
                 );
+                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::AfterStart(exec_result.content))
             }
             "cancelled" if request.side_effect_class != SideEffectClass::ReadOnly => {
@@ -676,10 +794,14 @@ impl ToolPort for WorkspaceToolPort {
                     false,
                     reservation,
                 );
+                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Cancelled);
+                self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::AfterStart(exec_result.content))
             }
             _ => {
                 self.release_reservation(reservation, ReleaseReason::Completed);
+                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::TerminalError {
                     message: exec_result.content.clone(),
                     output: exec_result.content.into_bytes(),
@@ -687,6 +809,128 @@ impl ToolPort for WorkspaceToolPort {
             }
         }
     }
+}
+
+impl WorkspaceToolPort {
+    /// 调度前的拒绝:没有 Started 行,终态直落 owner。
+    fn settle_failure(
+        &self,
+        request: &ToolRequest,
+        args_json: Option<&str>,
+        failure: &ToolFailure,
+    ) {
+        let terminal = match failure {
+            ToolFailure::Denied(reason) => failed_terminal("permission_denied", reason, None, None),
+            ToolFailure::NotStarted(reason) => failed_terminal("not_started", reason, None, None),
+            // 其余变体只产生于 started 之后,走 finished。
+            _ => return,
+        };
+        self.lifecycle.settled(
+            &request.call_id,
+            &request.tool_name,
+            args_json.map(str::to_string),
+            terminal,
+        );
+    }
+}
+
+/// 执行期错误 → 业务终态:code 取执行器 typed 错误,正文保留完整输出。
+fn exec_error_terminal(
+    run: &ToolRun,
+    result: &qaqh_workspace::execution::ToolExecResult,
+    status: ToolCallStatus,
+) -> ToolTerminal {
+    let code = result
+        .result
+        .error
+        .as_ref()
+        .map(|e| e.code.as_str().to_string())
+        .unwrap_or_else(|| "tool_failed".into());
+    let mut terminal = failed_terminal(
+        &code,
+        &result.content,
+        Some(result.content.clone()),
+        Some(run_metrics(run)),
+    );
+    terminal.status = status;
+    terminal
+}
+
+fn failed_terminal(
+    code: &str,
+    message: &str,
+    output_text: Option<String>,
+    metrics: Option<ToolMetrics>,
+) -> ToolTerminal {
+    ToolTerminal {
+        status: ToolCallStatus::Failed,
+        output_text,
+        output_truncated: false,
+        error: Some(ToolError {
+            code: code.to_string(),
+            message: message.to_string(),
+            retryable: false,
+            details_ref: None,
+        }),
+        metrics,
+        code_delta: None,
+        effects: Vec::new(),
+    }
+}
+
+/// 终态指标:retry_count 恒 0(此 runner 从不重跑),progress 总量来自直通通道。
+fn run_metrics(run: &ToolRun) -> ToolMetrics {
+    let finished_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default();
+    ToolMetrics {
+        started_at_ms: run.started_at_ms(),
+        finished_at_ms,
+        retry_count: 0,
+        output_bytes: 0,
+        progress_bytes_total: run.progress_totals().total_bytes(),
+    }
+}
+
+/// workspace 结构化效果 → 契约词表;SubagentSpawned 的执行面字段留在 runtime。
+fn effect_infos(result: &qaqh_workspace::execution::ToolExecResult) -> Vec<ToolEffectInfo> {
+    result
+        .skill_effects
+        .iter()
+        .map(|effect| match effect {
+            qaqh_workspace::ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(activation)) => {
+                ToolEffectInfo::SkillActivated {
+                    name: activation.metadata.name.clone(),
+                }
+            }
+            qaqh_workspace::ToolEffect::Skill(qaqh_skills::SkillEffect::Release { name }) => {
+                ToolEffectInfo::SkillReleased { name: name.clone() }
+            }
+            qaqh_workspace::ToolEffect::SubagentSpawned {
+                child_session_id,
+                name,
+                task_text,
+                ..
+            } => ToolEffectInfo::SubagentSpawned {
+                child_session_id: child_session_id.clone(),
+                name: name.clone(),
+                task_text: task_text.clone(),
+            },
+        })
+        .collect()
+}
+
+fn code_delta_of(
+    result: &qaqh_workspace::execution::ToolExecResult,
+) -> Option<CodeDelta> {
+    result.code_delta.as_ref().map(|delta| CodeDelta {
+        lines_added: delta.lines_added,
+        lines_removed: delta.lines_removed,
+        files_created: delta.files_created,
+        files_deleted: delta.files_deleted,
+        file: delta.file.clone(),
+    })
 }
 
 pub async fn run<P: ToolPort>(

@@ -328,6 +328,8 @@ pub struct AgentRegistry {
     activity: SessionActivityTracker,
     /// 会话存储句柄（PR-3-1 注入化；spawn 诊断读 meta 用）。
     sessions: Arc<qaqh_session::SessionManager>,
+    /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。
+    owners: Arc<qaqh_session::owner::OwnerDirectory>,
     /// Ringing 运行时；None = 未启用 legacy worker-only 模式。
     hub: Option<Arc<RingingHub>>,
     /// daemon 正在关闭：worker 退出是预期的，禁止自动重生。
@@ -374,11 +376,15 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
-    pub fn new(sessions: Arc<qaqh_session::SessionManager>) -> Self {
+    pub fn new(
+        sessions: Arc<qaqh_session::SessionManager>,
+        owners: Arc<qaqh_session::owner::OwnerDirectory>,
+    ) -> Self {
         Self {
             instances: HashMap::new(),
             activity: SessionActivityTracker::default(),
             sessions,
+            owners,
             hub: None,
             shutting_down: false,
             last_spawn: HashMap::new(),
