@@ -94,7 +94,12 @@ impl QaqhService {
         // 不带 subagent 注册器：设置页勾选的是子代理可用工具，spawn_subagent
         // 本身不属于子代理工具集。
         qaqh_workspace::runtime::init_tools("daemon", &[], vec![]);
-        let mut registry = AgentRegistry::new(sessions.clone());
+        // 业务库:SQLite WAL 单权威(报告一 §7)。打不开就停止启动,不降级。
+        let owners = Arc::new(qaqh_session::owner::OwnerDirectory::open(
+            qaqh_types::platform::data_dir().join("qaqh.db"),
+        )
+        .expect("open business database"));
+        let mut registry = AgentRegistry::new(sessions.clone(), Arc::clone(&owners));
         registry.set_max_depth(config.subagent.max_depth as usize);
         registry.set_message_quota_limits(
             config.subagent.message_in_flight_per_pair,

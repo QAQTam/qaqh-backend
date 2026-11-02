@@ -86,7 +86,7 @@ fn session_spawns_inprocess_and_receives_created_event() {
 
     let session_id = format!("session-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("session-inprocess-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     registry
@@ -179,7 +179,7 @@ fn cross_session_cancel_does_not_leak() {
     qaqh_workspace::runtime::init_tools("daemon-test", &[], vec![]);
 
     let hub = Arc::new(RingingHub::new("cross-cancel-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     let session_a = format!("cross-cancel-a-{}", std::process::id());
@@ -260,7 +260,7 @@ fn idle_unload_then_respawn_preserves_history() {
 
     let session_id = format!("session-idle-unload-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("idle-unload-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     // 1. Spawn + wait for Created（worker 活着，liveness 全新）。
@@ -441,7 +441,7 @@ fn session_new_never_reuses_an_existing_session_directory() {
         std::fs::read_to_string(sentinel_dir.join("messages.jsonl")).expect("sentinel messages");
 
     let hub = Arc::new(RingingHub::new("session-collision-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
     let service = QaqhService::init(qaqh_session::SessionManager::global());
 
@@ -506,4 +506,13 @@ fn session_new_never_reuses_an_existing_session_directory() {
 
     registry.shutdown_all();
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// 测试 owner 目录:tempdir 业务库(dir 泄漏至进程结束,测试进程可接受)。
+fn test_owner_dir() -> std::sync::Arc<qaqh_session::owner::OwnerDirectory> {
+    let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+    std::sync::Arc::new(
+        qaqh_session::owner::OwnerDirectory::open(dir.path().join("qaqh.db"))
+            .expect("open owners db"),
+    )
 }

@@ -76,6 +76,12 @@ pub enum SessionEvent {
         output_truncated: bool,
         error: Option<ToolError>,
         metrics: Option<ToolMetrics>,
+        /// edit 类工具的结构化结果。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_delta: Option<crate::state::CodeDelta>,
+        /// 工具产生的结构化效果(owner 消费后随终态发布)。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        effects: Vec<crate::state::ToolEffectInfo>,
     },
     TimelineAppended {
         entry: TimelineEntry,

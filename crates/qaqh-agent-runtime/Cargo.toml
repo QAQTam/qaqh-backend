@@ -15,6 +15,7 @@ qaqh-gate = { path = "../qaqh-gate" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
 qaqh-ringing = { path = "../qaqh-ringing" }
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-process-tools = { path = "../qaqh-process-tools" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-skills = { path = "../qaqh-skills" }
