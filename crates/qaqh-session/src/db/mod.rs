@@ -12,6 +12,9 @@ use tokio::sync::oneshot;
 
 pub mod schema;
 pub mod store;
+pub mod view;
+#[cfg(test)]
+mod view_tests;
 
 /// SQLite ≥ 3.51.3 包含官方 WAL-reset 修复,低于该版本直接拒绝启动。
 const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
@@ -38,6 +41,10 @@ pub enum DbError {
     ExecutorStopped,
     #[error("read connection poisoned")]
     ReadLockPoisoned,
+    #[error("session {session_id} not found")]
+    SessionNotFound { session_id: String },
+    #[error("corrupt business row: {0}")]
+    Corrupt(String),
 }
 
 struct WriteJob(Box<dyn FnOnce(&mut Connection) + Send>);
@@ -85,30 +92,32 @@ impl Db {
     }
 
     /// 串行写入:闭包在写执行器线程上运行,可包含多条语句,提交由事务表达。
-    pub async fn write<T, F>(&self, f: F) -> Result<T, DbError>
+    pub async fn write<T, E, F>(&self, f: F) -> Result<T, DbError>
     where
         T: Send + 'static,
-        F: FnOnce(&mut Connection) -> Result<T, rusqlite::Error> + Send + 'static,
+        E: Into<DbError> + Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T, E> + Send + 'static,
     {
         let (reply_tx, reply_rx) = oneshot::channel();
         let job: Box<dyn FnOnce(&mut Connection) + Send> = Box::new(move |conn| {
             // 调用方被取消(oneshot 接收端丢弃)时,写入结果随之丢弃;事务边界不变。
-            let _ = reply_tx.send(f(conn));
+            let _ = reply_tx.send(f(conn).map_err(Into::into));
         });
         self.write_tx.send(WriteJob(job)).map_err(|_| DbError::ExecutorStopped)?;
         Ok(reply_rx.await.map_err(|_| DbError::ExecutorStopped)??)
     }
 
     /// 只读查询:在阻塞线程上使用共享只读连接,查询必须尽快结束。
-    pub async fn read<T, F>(&self, f: F) -> Result<T, DbError>
+    pub async fn read<T, E, F>(&self, f: F) -> Result<T, DbError>
     where
         T: Send + 'static,
-        F: FnOnce(&Connection) -> Result<T, rusqlite::Error> + Send + 'static,
+        E: Into<DbError> + Send + 'static,
+        F: FnOnce(&Connection) -> Result<T, E> + Send + 'static,
     {
         let conn = Arc::clone(&self.read_conn);
         tokio::task::spawn_blocking(move || {
             let conn = conn.lock().map_err(|_| DbError::ReadLockPoisoned)?;
-            f(&conn).map_err(DbError::from)
+            f(&conn).map_err(Into::into)
         })
         .await
         .map_err(|_| DbError::ExecutorStopped)?
