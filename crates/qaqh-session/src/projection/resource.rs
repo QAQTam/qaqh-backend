@@ -99,6 +99,31 @@ impl Projection for ResourceProjection {
 }
 
 impl ResourceProjection {
+    pub(super) fn memory_usage_estimate(&self) -> (u64, u64, u64) {
+        let mut payload_bytes = 0u64;
+        let mut heap_bytes = (self.snapshot.workspace.capacity()
+            * std::mem::size_of::<WorkspaceResourceState>()
+            + self.snapshot.graph.capacity() * std::mem::size_of::<GraphEdgeState>())
+            as u64;
+        for resource in &self.snapshot.workspace {
+            payload_bytes =
+                payload_bytes.saturating_add(resource.resource_id.as_str().len() as u64);
+            heap_bytes = heap_bytes
+                .saturating_add(resource.resource_id.as_str().len() as u64)
+                .saturating_add(resource.summary_ref.hash().as_str().len() as u64);
+        }
+        for edge in &self.snapshot.graph {
+            heap_bytes = heap_bytes
+                .saturating_add(edge.child_session_id.as_str().len() as u64)
+                .saturating_add(edge.parent_call_id.as_str().len() as u64);
+        }
+        (
+            (self.snapshot.workspace.len() + self.snapshot.graph.len()) as u64,
+            payload_bytes,
+            heap_bytes,
+        )
+    }
+
     fn upsert_workspace(&mut self, payload: &WorkspaceResourceChanged) {
         let state = WorkspaceResourceState {
             resource_kind: payload.resource_kind,

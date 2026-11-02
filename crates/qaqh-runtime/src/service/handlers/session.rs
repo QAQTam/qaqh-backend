@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use qaqh_domain::ControlCommand;
 use qaqh_ringing::RingingCommand;
+use qaqh_types::SettingValue;
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::QaqhService;
@@ -302,7 +303,7 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
 }
 
 /// `session.new`：分配 canonical identity → 落 worker 前置状态 → 物化首条事实 → spawn。
-fn create_new(
+pub(crate) fn create_new(
     service: &QaqhService,
     args: crate::service::command::SessionNewArgs,
 ) -> QaqhResult<Value> {
@@ -350,12 +351,62 @@ fn create_new(
             )
             .map_err(|error| QaqhError::context("persist tool_mode failed", error))?;
     }
+    // 统一命令面：创建即选定模型选择（spawn 前落 meta，worker 首轮即生效）；
+    // requested 位同步落审计值。
+    if let Some(selection) = &args.model_selection {
+        service
+            .write_meta(
+                &session_id,
+                SessionMetadataPatch {
+                    model_selection: Some(SettingValue::Use {
+                        value: selection.clone(),
+                    }),
+                    requested_model_selection: Some(SettingValue::Use {
+                        value: selection.clone(),
+                    }),
+                    ..Default::default()
+                },
+            )
+            .map_err(|error| QaqhError::context("persist model_selection failed", error))?;
+    }
+    // 显式标题：首个用户请求到来前即定名（TitleSource::User，抑制自动总结覆盖）。
+    if let Some(title) = args.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        service
+            .write_title(&session_id, title, TitleSource::User)
+            .map_err(QaqhError::message)?;
+    }
     service
         .registry()
         .map_err(QaqhError::message)?
         .spawn_new(&session_id)
         .map_err(QaqhError::message)?;
     Ok(json!(session_id))
+}
+
+impl QaqhService {
+    /// 统一命令面（§8.7 typed adapter）：`session.create`。
+    ///
+    /// 强类型入参，直连 [`create_new`] 业务实现，不走
+    /// `handle(method, Value)` 字符串 decoder。
+    pub fn create_session_unified(
+        &self,
+        cwd: Option<String>,
+        title: Option<String>,
+        model_selection: Option<qaqh_types::ModelSelection>,
+        tool_mode: Option<String>,
+        custom_tools: Option<Vec<String>>,
+    ) -> QaqhResult<Value> {
+        create_new(
+            self,
+            crate::service::command::SessionNewArgs {
+                cwd,
+                tool_mode,
+                custom_tools,
+                title,
+                model_selection,
+            },
+        )
+    }
 }
 
 fn spawn_subagent(

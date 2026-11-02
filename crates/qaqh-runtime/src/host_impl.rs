@@ -19,13 +19,13 @@ use qaqh_session::canonical::notify;
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{
     AgentPath, AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
-    ConversationDelta, EventId, LogId, ProjectionPayload, SessionId, TeamBoardChannel,
-    TeamBoardPost, TeamBoardSnapshot, TeamBoardSubscription, TeamBoardSubscriptionTarget,
-    TeamBoardThread, TeamTaskArtifact, TeamTaskSnapshot, TurnTerminal,
+    ConversationDelta, EventId, LogId, ProjectionPayload, SessionId, TurnTerminal,
 };
 use qaqh_session::team::{
     BoardFact, BoardId, BoardPayload, BoardStore, BoardSubscriptionTarget, ChannelCreated,
     ChannelId, PostCreated, PostId, SubscriptionChanged, TaskAcceptanceSet, TaskArtifactAttached,
+    TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot, TeamBoardSubscription,
+    TeamBoardSubscriptionTarget, TeamBoardThread, TeamTaskArtifact, TeamTaskSnapshot,
     TaskCancelled, TaskClaimed, TaskClosed, TaskCompleted, TaskCreated, TaskDependencyAdded,
     TaskId, TaskReleased, TaskState, TeamActor, TeamCreated, TeamFact, TeamId, TeamPayload,
     TeamStore, ThreadCreated, ThreadId, new_board_schema, new_team_schema,

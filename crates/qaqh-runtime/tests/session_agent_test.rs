@@ -22,9 +22,6 @@ use qaqh_session::{
     },
 };
 
-const SESSION: &str = "0198f1a0-0000-7000-8000-000000000001";
-const LOG: &str = "0198f1a0-0000-7000-8000-000000000002";
-
 const CHAT_SSE: &str = concat!(
     "data: {\"choices\":[{\"delta\":{\"content\":\"hello from agent\"},\"finish_reason\":null}]}\n\n",
     "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",

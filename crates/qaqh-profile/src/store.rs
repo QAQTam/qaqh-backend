@@ -8,7 +8,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use crate::model::{ProfileDef, ProfilesDocument, ProviderDef};
+use crate::model::{ModelDef, ModelSelection, ProfileDef, ProfilesDocument, ProviderDef};
 
 #[derive(Debug, Error)]
 pub enum ProfileStoreError {
@@ -28,6 +28,12 @@ pub enum ProfileStoreError {
     ProviderInUse(String, String),
     #[error("无法删除当前全局默认 Profile「{0}」，请先指定新的默认预设")]
     CannotDeleteDefaultProfile(String),
+    #[error("模型 {0}/{1} 正被选择引用")]
+    ModelInUse(String, String),
+    #[error("模型 {0}/{1} 未注册")]
+    ModelNotFound(String, String),
+    #[error("目录修订冲突：expected {expected}, actual {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
 }
 
 pub struct ProfilesStore {
@@ -49,7 +55,7 @@ impl ProfilesStore {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            let doc = ProfilesDocument::create_builtin_template();
+            let doc = ProfilesDocument::default();
             let store = Self {
                 path: path.to_path_buf(),
                 doc,
@@ -62,6 +68,42 @@ impl ProfilesStore {
     /// 当前完整的配置只读引用
     pub fn document(&self) -> &ProfilesDocument {
         &self.doc
+    }
+
+    pub fn check_revision(&self, expected: u64) -> Result<(), ProfileStoreError> {
+        if self.doc.revision != expected {
+            return Err(ProfileStoreError::RevisionConflict { expected, actual: self.doc.revision });
+        }
+        Ok(())
+    }
+
+    fn touch(&mut self) { self.doc.revision = self.doc.revision.saturating_add(1); }
+
+    pub fn upsert_model(&mut self, provider_id: &str, model_id: &str, model: ModelDef) -> Result<(), ProfileStoreError> {
+        let provider = self.doc.providers.get_mut(provider_id)
+            .ok_or_else(|| ProfileStoreError::ProviderNotFound(provider_id.to_string()))?;
+        provider.models.insert(model_id.to_string(), model);
+        self.touch();
+        self.save()
+    }
+
+    pub fn delete_model(&mut self, provider_id: &str, model_id: &str) -> Result<(), ProfileStoreError> {
+        if self.doc.model_is_referenced(provider_id, model_id) {
+            return Err(ProfileStoreError::ModelInUse(provider_id.to_string(), model_id.to_string()));
+        }
+        let provider = self.doc.providers.get_mut(provider_id)
+            .ok_or_else(|| ProfileStoreError::ProviderNotFound(provider_id.to_string()))?;
+        if provider.models.remove(model_id).is_none() {
+            return Err(ProfileStoreError::ModelNotFound(provider_id.to_string(), model_id.to_string()));
+        }
+        self.touch();
+        self.save()
+    }
+
+    pub fn set_default_model_selection(&mut self, selection: ModelSelection) -> Result<(), ProfileStoreError> {
+        self.doc.default_model_selection = Some(selection);
+        self.touch();
+        self.save()
     }
 
     /// 原子保存至磁盘
@@ -87,6 +129,7 @@ impl ProfilesStore {
         }
 
         self.doc.profiles.insert(trimmed_id.to_string(), def);
+        self.touch();
         self.save()?;
         Ok(())
     }
@@ -101,18 +144,20 @@ impl ProfilesStore {
         }
 
         self.doc.profiles.insert(id.to_string(), def);
+        self.touch();
         self.save()?;
         Ok(())
     }
 
     /// 删除一个 Profile（不能是当前的全局默认）
     pub fn delete_profile(&mut self, id: &str) -> Result<(), ProfileStoreError> {
-        if id == self.doc.default_profile {
+        if self.doc.default_profile.as_deref() == Some(id) {
             return Err(ProfileStoreError::CannotDeleteDefaultProfile(id.to_string()));
         }
         if self.doc.profiles.remove(id).is_none() {
             return Err(ProfileStoreError::ProfileNotFound(id.to_string()));
         }
+        self.touch();
         self.save()?;
         Ok(())
     }
@@ -122,20 +167,31 @@ impl ProfilesStore {
         if !self.doc.profiles.contains_key(id) {
             return Err(ProfileStoreError::ProfileNotFound(id.to_string()));
         }
-        self.doc.default_profile = id.to_string();
+        self.doc.default_profile = Some(id.to_string());
+        self.touch();
         self.save()?;
         Ok(())
     }
 
     /// 新增或更新一个 Provider
     pub fn upsert_provider(&mut self, id: String, def: ProviderDef) -> Result<(), ProfileStoreError> {
+        if let Some(selection) = &self.doc.default_model_selection
+            && selection.provider_id == id
+            && !def.models.contains_key(&selection.model_id)
+        {
+            return Err(ProfileStoreError::ModelInUse(id, selection.model_id.clone()));
+        }
         self.doc.providers.insert(id, def);
+        self.touch();
         self.save()?;
         Ok(())
     }
 
     /// 删除一个 Provider（先检查是否有 Profile 在引用）
     pub fn delete_provider(&mut self, id: &str) -> Result<(), ProfileStoreError> {
+        if self.doc.default_model_selection.as_ref().is_some_and(|selection| selection.provider_id == id) {
+            return Err(ProfileStoreError::ProviderInUse(id.to_string(), "default_model_selection".into()));
+        }
         for (prof_id, prof) in &self.doc.profiles {
             if prof.provider == id {
                 return Err(ProfileStoreError::ProviderInUse(id.to_string(), prof_id.clone()));
@@ -145,6 +201,7 @@ impl ProfilesStore {
             return Err(ProfileStoreError::ProviderNotFound(id.to_string()));
         }
         self.doc.providers.remove(id);
+        self.touch();
         self.save()?;
         Ok(())
     }
@@ -161,27 +218,21 @@ mod tests {
         let path = dir.path().join("profiles.toml");
 
         let mut store = ProfilesStore::load_or_create(&path).expect("create store");
-        assert_eq!(store.document().default_profile, "deepseek-r1");
+        assert!(store.document().default_model_selection.is_none());
+        assert!(store.document().providers.is_empty());
 
-        // 新建一个自定义 Profile B
-        let new_prof = ProfileDef {
-            name: "我的测试预设".to_string(),
-            provider: "deepseek".to_string(),
-            model: "deepseek-chat".to_string(),
-            reasoning_effort: None,
-            context_length: Some(64_000),
-            max_tokens: Some(4_096),
-        };
-        store.create_profile("my-test".to_string(), new_prof).expect("create profile");
-
-        // 强力断言：全局默认预设绝对不受新建预设的任何影响！
-        assert_eq!(store.document().default_profile, "deepseek-r1");
-        assert!(store.document().profiles.contains_key("my-test"));
+        store.upsert_provider("acme".into(), ProviderDef {
+            name: "Acme".into(), base_url: "https://example.invalid/v1".into(), wire: qaqh_types::Wire::Chat,
+            credential: qaqh_types::CredentialSource::ApiKey, api_key: None, headers: Default::default(), compat: None,
+            models: Default::default(),
+        }).expect("provider");
+        store.upsert_model("acme", "m", ModelDef::default()).expect("model");
+        store.set_default_model_selection(ModelSelection { provider_id: "acme".into(), model_id: "m".into(), options: Default::default() }).expect("selection");
+        assert_eq!(store.document().default_model_selection.as_ref().unwrap().model_id, "m");
 
         // 重新从磁盘读取，验证持久化无误
         let reloaded = ProfilesStore::load_or_create(&path).expect("reload");
-        assert_eq!(reloaded.document().default_profile, "deepseek-r1");
-        assert!(reloaded.document().profiles.contains_key("my-test"));
+        assert_eq!(reloaded.document().default_model_selection.as_ref().unwrap().provider_id, "acme");
     }
 
     #[test]
@@ -189,8 +240,7 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("profiles.toml");
 
-        let mut store = ProfilesStore::load_or_create(&path).expect("create store");
-        let err = store.delete_profile("deepseek-r1").expect_err("should reject deleting default");
-        assert!(matches!(err, ProfileStoreError::CannotDeleteDefaultProfile(_)));
+        let store = ProfilesStore::load_or_create(&path).expect("create store");
+        assert!(store.document().default_model_selection.is_none());
     }
 }

@@ -15,6 +15,7 @@ qaqh-domain = { path = "../qaqh-domain" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-lsp = { path = "../qaqh-lsp" }
 qaqh-ringing = { path = "../qaqh-ringing" }
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-workspace = { path = "../qaqh-workspace" }

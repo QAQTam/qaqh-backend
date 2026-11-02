@@ -16,6 +16,113 @@ use crate::protocol::{RINGING_SCHEMA, is_safe_integer};
 use crate::v2::cursor::{CanonicalCursor, CursorToken};
 use crate::v2::{RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
 
+pub use qaqh_types::SettingValue;
+
+/// 显式目标分类（统一命令面唯一指定目标的位置，统一切换设计 §8.2）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum UnifiedTarget {
+    Global,
+    Session { session_id: String },
+    Workspace { workspace_id: String },
+    ExecSession { id: String },
+}
+
+/// 统一命令前置条件（统一切换设计 §8.1/§8.8）：写操作可携带目标资源版本，
+/// owner 在同一串行边界比较，冲突拒绝。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum UnifiedPrecondition {
+    SettingsRevision { revision: u64 },
+    ExpectedRevision { revision: u64 },
+    ConfigRevision { revision: u64 },
+    DriverEpoch { epoch: u64 },
+}
+
+/// 统一命令信封（统一切换设计 §8.1）。业务提交端点
+/// `POST /ringing/v2/commands` 的新格式：目标只在信封出现一次，命令是封闭
+/// tagged union；`contract_revision` 钉死命令目录代际（`unified-commands-1`）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct UnifiedCommandEnvelope {
+    pub schema: String,
+    pub version: u32,
+    pub contract_revision: String,
+    pub command_id: String,
+    pub target: UnifiedTarget,
+    pub command: UnifiedCommand,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precondition: Option<UnifiedPrecondition>,
+}
+
+/// 统一命令目录的契约代际。目录变更（新增/删除操作、字段语义变化）必须
+/// 递增此代际，旧客户端按 unknown revision 显式失败而不是误判成功。
+pub const UNIFIED_CONTRACT_REVISION: &str = "unified-commands-1";
+
+impl UnifiedCommandEnvelope {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.schema != RINGING_SCHEMA || self.version != RINGING_V2_VERSION {
+            return Err("invalid_unified_envelope");
+        }
+        if self.contract_revision != UNIFIED_CONTRACT_REVISION {
+            return Err("unsupported_contract_revision");
+        }
+        if self.command_id.trim().is_empty() {
+            return Err("invalid_unified_envelope");
+        }
+        // 命令与目标的作用域错配在类型层拒绝（§8.2）：目录逐项校验在
+        // dispatch 侧完成，这里只挡「session 命令没有 session 目标」。
+        if self.command.requires_session_target() && !matches!(self.target, UnifiedTarget::Session { .. }) {
+            return Err("target_mismatch");
+        }
+        Ok(())
+    }
+}
+
+impl UnifiedCommand {
+    /// 该操作是否必须携带 Session 目标（§8.2 的 target_policy 静态面）。
+    /// `session.create` 是建立归属的入口，不借用虚假 Session（G08），走 Global。
+    pub fn requires_session_target(&self) -> bool {
+        matches!(self, UnifiedCommand::SessionSettingsPatch { .. })
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<SettingValue<qaqh_types::ModelSelection>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tools: Option<ToolsSettingPatch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum ToolsSettingPatch { Default, All, None, Custom { names: Vec<String> }, Preset { name: String } }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ProviderUpsertDto {
+    pub name: String,
+    pub base_url: String,
+    pub wire: qaqh_types::Wire,
+    pub credential: qaqh_types::CredentialSource,
+    pub headers: std::collections::BTreeMap<String, String>,
+    pub compat: Option<qaqh_types::EndpointCompat>,
+    pub expected_revision: u64,
+    pub api_key: SecretWrite,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", content = "value", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum SecretWrite { #[default] Keep, Set(String), Clear }
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2OpenRequest {
@@ -587,6 +694,41 @@ impl<C, V, T> RingingV2Bootstrap<C, V, T> {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum UnifiedCommand {
+    #[serde(rename = "session.create")]
+    SessionCreate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_selection: Option<qaqh_profile::ModelSelection>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_mode: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        custom_tools: Option<Vec<String>>,
+    },
+    #[serde(rename = "session.settings.patch")]
+    SessionSettingsPatch { patch: SessionSettingsPatch },
+    #[serde(rename = "provider.list")]
+    ProviderList {},
+    #[serde(rename = "provider.upsert")]
+    ProviderUpsert { id: String, provider: ProviderUpsertDto },
+    #[serde(rename = "provider.delete")]
+    ProviderDelete { id: String },
+    #[serde(rename = "provider.model.upsert")]
+    ProviderModelUpsert { provider_id: String, model_id: String, expected_revision: u64, model: qaqh_profile::ModelDef },
+    #[serde(rename = "provider.model.delete")]
+    ProviderModelDelete { provider_id: String, model_id: String },
+    #[serde(rename = "provider.models.discover")]
+    ProviderModelsDiscover { provider_id: String },
+    #[serde(rename = "model.selection.set_default")]
+    ModelSelectionSetDefault { expected_revision: u64, selection: qaqh_profile::ModelSelection },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2CommandEnvelope {
     pub schema: String,
@@ -696,6 +838,16 @@ pub struct RingingV2CommandAck {
     /// Already-recorded outcome this submission collided with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub existing: Option<RingingV2ExistingResult>,
+    /// Completed synchronous outcome (统一命令面的 completed 结果；通道命令
+    /// 不携带)。JSON 形态由各操作的 result DTO 决定。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    /// Operation name (for completed status)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+    /// 操作后观察到的资源 revision（配置/设置类操作回带，供客户端对账）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// Why a v2 submission collided with an already-recorded outcome.
@@ -971,6 +1123,9 @@ mod tests {
             code: None,
             message: Some("duplicate command_id (already completed)".into()),
             retry_after_ms: None,
+            result: None,
+            operation: None,
+            revision: None,
             existing: Some(RingingV2ExistingResult::CommandReceipt {
                 state: RingingCommandState::Succeeded,
                 terminal_event_id: Some("evt-1".into()),
@@ -998,6 +1153,9 @@ mod tests {
             code: Some("interaction_already_resolved".into()),
             message: Some("interaction was already resolved".into()),
             retry_after_ms: None,
+            result: None,
+            operation: None,
+            revision: None,
             existing: Some(RingingV2ExistingResult::InteractionResolved {
                 result: RingingV2CommandResult::PermissionResolved {
                     interaction_id: "int_1".into(),

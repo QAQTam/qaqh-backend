@@ -18,11 +18,7 @@ struct V2ProgressSink {
 }
 
 impl V2ProgressSink {
-    fn new(
-        hub: &Arc<V2ProjectionHub>,
-        session_dir: &std::path::Path,
-        session_id: &str,
-    ) -> Self {
+    fn new(hub: &Arc<V2ProjectionHub>, session_dir: &std::path::Path, session_id: &str) -> Self {
         Self {
             hub: Arc::clone(hub),
             session_dir: session_dir.to_path_buf(),
@@ -422,7 +418,6 @@ impl AgentRegistry {
                 model: model.map(str::to_string),
                 base_url: base_url.map(str::to_string),
                 max_tokens,
-                ephemeral,
                 permission_level,
             },
             parent_cancel,
@@ -540,7 +535,8 @@ impl AgentRegistry {
             }),
         )
         .map_err(|e| format!("spawn thin subagent for {session_id}: {e}"))?;
-
+        let handle =
+            handle.with_memory(Arc::new(crate::session_agent::SessionAgentMemory::default()));
         self.instances.insert(
             session_id.to_string(),
             AgentInstance {
@@ -620,7 +616,8 @@ impl AgentRegistry {
             }),
         )
         .map_err(|e| format!("spawn thin agent for {session_id}: {e}"))?;
-
+        let handle =
+            handle.with_memory(Arc::new(crate::session_agent::SessionAgentMemory::default()));
         self.instances.insert(
             session_id.to_string(),
             AgentInstance {
@@ -697,7 +694,6 @@ impl AgentRegistry {
                 model: config.model,
                 base_url: config.base_url,
                 max_tokens: config.max_tokens,
-                ephemeral: config.ephemeral,
                 // reload 路径无父会话上下文，回落全局 config（fail-closed 1）。
                 permission_level: qaqh_config::Config::load()
                     .ok()

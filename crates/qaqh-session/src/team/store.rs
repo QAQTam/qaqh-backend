@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 use crate::canonical::{EventsCommit, generate_ulid};
 use crate::session_fact_v2::LogId;
 
-use super::error::{TeamError, TeamResult};
-use super::projection::{TaskBoardDelta, TaskBoardProjection, TaskBoardSnapshot};
-use super::types::{TeamFact, TeamId};
+use qaqh_ringing_contract::team::{TeamError, TeamResult};
+use qaqh_ringing_contract::team::{TaskBoardDelta, TaskBoardSnapshot};
+use super::projection::TaskBoardProjection;
+use qaqh_ringing_contract::team::{TeamFact, TeamId};
 
 pub const TEAM_IDENTITY_FILE: &str = "team.json";
 pub const TEAM_EVENTS_FILE: &str = "events.jsonl";

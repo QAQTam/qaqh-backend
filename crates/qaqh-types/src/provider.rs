@@ -8,9 +8,55 @@
 //! request-shape switches the gate forwards without special-casing.
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "ts")]
+use ts_rs::TS;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ModelSelectionOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_web_search: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ModelSelection {
+    pub provider_id: String,
+    pub model_id: String,
+    #[serde(default)]
+    pub options: ModelSelectionOptions,
+}
+
+/// 可继承设置的统一表达：`Use` 明确设定值，`Inherit` 清除覆盖、回到上层
+/// 默认。取代旧「空串 = 清除」的隐式语义（统一切换设计 §8.1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum SettingValue<T> {
+    Use { value: T },
+    Inherit,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ModelCapabilities {
+    #[serde(default)]
+    pub tool_calls: bool,
+    #[serde(default)]
+    pub image_input: bool,
+    #[serde(default)]
+    pub native_web_search: bool,
+    #[serde(default)]
+    pub reasoning: bool,
+}
 
 /// Where the user identifier is placed in the API request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum UserSendMode {
     /// User ID is sent in the JSON request body.
     #[default]
@@ -26,6 +72,7 @@ pub enum UserSendMode {
 /// 等）在 2026-10 硬切里删除，读入期直接失败而不是默默折叠。唯一的例外是
 /// BYOK 迁移表（`qaqh_config::registry::legacy_wire`），它自带旧词表。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "lowercase")]
 pub enum Wire {
     /// OpenAI Chat Completions (`/chat/completions`).
@@ -72,6 +119,7 @@ impl Wire {
 
 /// How the reasoning/thinking parameter is sent to the model.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ThinkingParamMode {
     /// Standard OpenAI format: `{"type": "enabled"|"disabled"}` at top-level body.
     #[default]
@@ -84,6 +132,7 @@ pub enum ThinkingParamMode {
 
 /// Where the cache token count is located in the usage response.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum CacheTokenField {
     /// Top-level: `usage.prompt_cache_hit_tokens` + `usage.prompt_cache_miss_tokens`.
     #[default]
@@ -107,6 +156,7 @@ pub enum CacheTokenField {
 /// `Auto`（缺省）由 gate 按真实响应判定（两次一致才锁定，判不出时取协议契约
 /// 的 `Exclusive`），判定逻辑与阈值见 `qaqh-gate/src/usage_semantics.rs`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum CacheUsageSemantics {
     /// 按响应自动判定（缺省）。
@@ -122,6 +172,7 @@ pub enum CacheUsageSemantics {
 /// (5 attempts / 1s base / 30s cap / 300s idle watchdog), which is also what
 /// the unified transport SDK is configured with.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RetrySpec {
     /// 最大尝试次数（含首次）。
     #[serde(default)]
@@ -140,6 +191,7 @@ pub struct RetrySpec {
 /// Model-facing `apply_patch` representation. Default keeps the legacy JSON
 /// function so an old profile never changes wire shape implicitly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyPatchInputFormat {
     /// Legacy `apply_patch({patch, dry_run})` JSON function.
@@ -151,6 +203,7 @@ pub enum ApplyPatchInputFormat {
 
 /// Where Responses tool declarations are placed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum ResponsesToolLayout {
     /// Top-level function/custom declarations.
@@ -162,6 +215,7 @@ pub enum ResponsesToolLayout {
 
 /// Grammar attached to the native `apply_patch` custom declaration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyPatchCustomGrammar {
     /// Unconstrained raw text.
@@ -176,6 +230,7 @@ pub enum ApplyPatchCustomGrammar {
 /// Every field's default matches the protocol's own semantics, so an endpoint
 /// that behaves the way its wire says declares nothing at all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct EndpointCompat {
     /// Path appended to the endpoint base URL for the active wire.
     /// `None` = the wire's canonical path.
@@ -310,6 +365,7 @@ fn default_effort_max() -> String {
 /// 显式声明而不是靠「api_key 为空 + 某个 compat 位」隐式触发：隐式推导会让一个
 /// 配置错误变成「静默用了别的额度」——最难查、也最伤用户信任的一类问题。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialSource {
     /// 常规 BYOK：密钥来自 config/secrets（既有行为，缺省）。

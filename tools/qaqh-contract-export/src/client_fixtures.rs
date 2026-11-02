@@ -16,13 +16,15 @@ use qaqh_ringing::{
     RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
     RingingV2PendingPermissionView, RingingV2StreamKey,
 };
-use qaqh_ringing_contract::{
-    ClientV2ControlState, ClientV2TeamResponse, ClientV2ToolState, TEAM_SCHEMA,
-};
-use qaqh_session::projection::{ConversationSnapshot, TeamSnapshot};
+use qaqh_ringing_contract::{TEAM_SCHEMA, TeamResponse as ClientV2TeamResponse};
+use qaqh_session::{ClientV2ControlState, ClientV2ToolState};
+use qaqh_session::projection::ConversationSnapshot;
 use qaqh_session::session_fact_v2::{
-    AgentPath, InterAgentDelivery, MessageId, ProjectionPayload, SessionId, TeamAgentResidency,
-    TeamAgentSnapshot, TeamAgentStatus, TeamBoardSnapshot, TeamDelta, TeamInboxSummary,
+    AgentPath, InterAgentDelivery, MessageId, ProjectionPayload, SessionId,
+};
+use qaqh_ringing_contract::team::{
+    TeamAgentResidency, TeamAgentSnapshot, TeamAgentStatus, TeamBoardSnapshot, TeamDelta,
+    TeamInboxSummary, TeamSnapshot,
 };
 use qaqh_session::team::{TaskBoardSnapshot, TaskView};
 

@@ -28,8 +28,6 @@
 //! 要求它来定位 lease），从不注入 seed、也不要求 `attach`——和桌面端
 //! `service_requires_session` 的豁免语义一致。
 
-use serde_json::Value;
-
 /// 客户端放行的服务面方法（账号凭据面，全部 `admin_only`）。
 ///
 /// 逐条与 `qaqh_siwc::methods::*` / `qaqh_dsaccount::methods::*` 对齐；
@@ -90,22 +88,10 @@ pub(crate) fn response_error(status: u16, path: &str, body: &str) -> crate::Clie
     }
 }
 
-/// 参数构造函数：把 `None` 的键整条省掉（服务面按「键缺失」区分「没给」与「给空」）。
-pub(crate) fn params_object(
-    entries: impl IntoIterator<Item = (&'static str, Option<Value>)>,
-) -> Value {
-    let mut object = serde_json::Map::new();
-    for (key, value) in entries {
-        if let Some(value) = value {
-            object.insert(key.to_string(), value);
-        }
-    }
-    Value::Object(object)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     /// 18 条：8 个 `siwc.*` + 10 个 `dsaccount.*`。条数断言是**有意**的：
     /// 白名单缩水会立刻红，而不是等到某个壳层调不到时才发现。
@@ -172,6 +158,19 @@ mod tests {
 
     #[test]
     fn params_object_drops_absent_keys() {
+        /// 参数构造函数：把 `None` 的键整条省掉（服务面按「键缺失」区分「没给」与「给空」）。
+        fn params_object(
+            entries: impl IntoIterator<Item = (&'static str, Option<Value>)>,
+        ) -> Value {
+            let mut object = serde_json::Map::new();
+            for (key, value) in entries {
+                if let Some(value) = value {
+                    object.insert(key.to_string(), value);
+                }
+            }
+            Value::Object(object)
+        }
+
         let params = params_object([("profile_id", Some(Value::from("p1"))), ("label", None)]);
         assert_eq!(params, serde_json::json!({ "profile_id": "p1" }));
     }

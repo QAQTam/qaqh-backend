@@ -312,6 +312,48 @@ impl SecretStore {
         self.delete_named_slot("profiles", name)
     }
 
+    // ── 命名 provider 密钥（`[secrets.providers.<provider_id>]` map 段）──
+    //
+    // 新 BYOK 目录体系（ProfilesDocument）的凭据槽。明文只进本文件加密存储，
+    // providers.toml 只落 "set" 标记；id 字符集约束与 profile 名一致。
+
+    /// Load a provider's own key (decrypts). `None` = 未存储（继承 main）或
+    /// id 不可表示。
+    pub fn load_provider_key(&self, provider_id: &str) -> Option<String> {
+        validate_profile_secret_name(provider_id).ok()?;
+        self.load_named_slot("providers", provider_id)
+    }
+
+    /// True when the provider has its own stored key.
+    pub fn has_provider_key(&self, provider_id: &str) -> bool {
+        if validate_profile_secret_name(provider_id).is_err() {
+            return false;
+        }
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|data| toml::from_str::<toml::Value>(&data).ok())
+            .and_then(|doc| {
+                doc.get("secrets")?
+                    .get("providers")?
+                    .get(provider_id)?
+                    .as_str()
+                    .map(|raw| !raw.is_empty())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Encrypt and store a provider's own key (idempotent).
+    pub fn set_provider_key(&self, provider_id: &str, plaintext: &str) -> Result<(), String> {
+        validate_profile_secret_name(provider_id)?;
+        self.set_named_slot("providers", provider_id, plaintext)
+    }
+
+    /// Remove a provider's own key (idempotent).
+    pub fn delete_provider_key(&self, provider_id: &str) -> Result<(), String> {
+        validate_profile_secret_name(provider_id)?;
+        self.delete_named_slot("providers", provider_id)
+    }
+
     // ── 命名 map 段的通用实现（新调用方用；MCP 侧保留自己的实现不动）──
 
     fn load_named_slot(&self, section: &str, name: &str) -> Option<String> {

@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
-use rmcp::model::{ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool};
+use rmcp::model::{ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool};
 use rmcp::service::{RequestContext, ServiceExt};
 use serde_json::json;
 
@@ -24,8 +24,8 @@ use serde_json::json;
 struct MockServer;
 
 impl ServerHandler for MockServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info.name = "m0-mock".into();
         info.server_info.version = "0.1.0".into();

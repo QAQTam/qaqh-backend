@@ -1,5 +1,6 @@
 //! Rebuildable session metadata projection.
 
+use qaqh_types::SettingValue;
 use serde::{Deserialize, Serialize};
 
 use crate::session_fact_v2::{
@@ -23,6 +24,9 @@ pub struct SessionMetaSnapshot {
     /// Session preferences that used to live in `meta.json`.
     pub profile: Option<String>,
     pub effort: Option<String>,
+    /// 新 BYOK 目录体系的会话级模型选择（旧 profile 名体系的继任者）。
+    pub model_selection: Option<qaqh_types::ModelSelection>,
+    pub requested_model_selection: Option<qaqh_types::ModelSelection>,
     pub mode: u8,
     pub tool_mode: String,
     pub custom_tools: Vec<String>,
@@ -118,6 +122,52 @@ impl Projection for SessionMetaProjection {
 }
 
 impl SessionMetaProjection {
+    pub(super) fn memory_usage_estimate(&self) -> (u64, u64, u64) {
+        let snapshot = &self.snapshot;
+        let string_bytes = [
+            snapshot.cwd.as_ref(),
+            snapshot.model.as_ref(),
+            snapshot.title.as_ref(),
+            snapshot.profile.as_ref(),
+            snapshot.effort.as_ref(),
+            snapshot.frozen_annotation.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|value| value.capacity() as u64)
+        .sum::<u64>()
+        .saturating_add(snapshot.tool_mode.capacity() as u64);
+        let vector_items = snapshot
+            .schema_caps
+            .len()
+            .saturating_add(snapshot.custom_tools.len());
+        let vector_heap = snapshot
+            .schema_caps
+            .capacity()
+            .saturating_mul(std::mem::size_of::<String>())
+            .saturating_add(
+                snapshot
+                    .custom_tools
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<String>()),
+            ) as u64
+            + snapshot
+                .schema_caps
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>() as u64
+            + snapshot
+                .custom_tools
+                .iter()
+                .map(String::capacity)
+                .sum::<usize>() as u64;
+        (
+            vector_items as u64,
+            string_bytes,
+            string_bytes.saturating_add(vector_heap),
+        )
+    }
+
     fn apply_created(&mut self, session_id: &SessionId, payload: &SessionCreated) {
         self.snapshot.session_id = Some(session_id.clone());
         self.snapshot.cwd = Some(payload.cwd.clone());
@@ -154,6 +204,18 @@ impl SessionMetaProjection {
         }
         if let Some(profile) = &patch.profile {
             self.snapshot.profile = (!profile.is_empty()).then(|| profile.clone());
+        }
+        if let Some(selection) = &patch.model_selection {
+            self.snapshot.model_selection = match selection {
+                SettingValue::Use { value } => Some(value.clone()),
+                SettingValue::Inherit => None,
+            };
+        }
+        if let Some(selection) = &patch.requested_model_selection {
+            self.snapshot.requested_model_selection = match selection {
+                SettingValue::Use { value } => Some(value.clone()),
+                SettingValue::Inherit => None,
+            };
         }
         if let Some(effort) = &patch.effort {
             self.snapshot.effort = (!effort.is_empty()).then(|| effort.clone());

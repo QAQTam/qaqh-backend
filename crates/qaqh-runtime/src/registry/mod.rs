@@ -15,8 +15,9 @@ use qaqh_session::canonical::{
 };
 use qaqh_session::session_fact_v2::{
     AgentMetadata, AgentPath, FactPayload, SessionFact, SessionId, SubagentSpawnConfig,
-    SubagentTerminalStatus, TeamAgentResidency,
+    SubagentTerminalStatus,
 };
+use qaqh_session::team::TeamAgentResidency;
 use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
 #[derive(Clone, Debug)]
@@ -25,7 +26,6 @@ pub struct SubagentSpawnSpec {
     pub model: Option<String>,
     pub base_url: Option<String>,
     pub max_tokens: Option<u32>,
-    pub ephemeral: bool,
     pub permission_level: u8,
 }
 use crate::agent_catalog::AgentCatalog;
@@ -511,127 +511,6 @@ fn ringing_command_name(command: &qaqh_ringing::RingingCommand) -> &'static str 
         qaqh_ringing::RingingCommand::Conversation(_) => "conversation",
         qaqh_ringing::RingingCommand::Control(_) => "control",
         qaqh_ringing::RingingCommand::Tool(_) => "tool",
-    }
-}
-
-/// #345：把 pending interaction 的正文写进 content store 并 pin。
-///
-/// 正文的 content_id 必须与引擎写进 canonical fact 的 `request_ref` 一致：
-/// 两处都走 `qaqh_domain::interaction_body` 的同一个构造函数，**不要**在这里
-/// 另写一份序列化（哈希漂移不会有编译期错误，只会让客户端取不到 modal 正文）。
-///
-/// 超配额（[`ContentQuotaExceeded`]）时只记录错误、不写正文：客户端会拿到
-/// 404 并收掉 modal（契约要求把 404 当「正文不可用」）。pinned 额度按 seed 计
-/// 且交互终结即释放，正常会话不可能触达。
-pub(crate) fn stash_interaction_body(
-    hub: &RingingHub,
-    session_id: &str,
-    event: &qaqh_domain::DomainEvent,
-) {
-    use qaqh_domain::{ControlEvent, ToolEvent, interaction_body};
-    // (content store 的交互 key, 正文 bytes)。
-    //
-    // ask / plan 用 wire interaction_id 作 key 并 pin（resolve 时按同一个 key unpin）。
-    // permission 用 canonical interaction_id 作 key 并 pin：纯 v2 的 wire 上没有
-    // tool 频道快照，详情只能从正文取；终结信号是同一 tool_call_id 的 ToolFinished
-    // （grant/reject/cancel 都会落到该终态），hub 在发布 ToolFinished 时按 canonical
-    // interaction id 解除 pin。重启后 live 表为空，pin_key 持久化兜底。
-    let (interaction_id, bytes) = match event {
-        qaqh_domain::DomainEvent::Control(ControlEvent::InteractionRequested {
-            interaction_id,
-            mode,
-            questions,
-            ..
-        }) => (
-            interaction_id.clone(),
-            interaction_body::ask_body(*mode, questions),
-        ),
-        qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewRequested {
-            interaction_id,
-            plan_content,
-            review_type,
-            todo_items,
-            ..
-        }) => (
-            interaction_id.clone(),
-            interaction_body::plan_body(plan_content, review_type, todo_items.as_deref()),
-        ),
-        qaqh_domain::DomainEvent::Tool(ToolEvent::ToolPermissionRequested {
-            tool_call_id,
-            tool_name,
-            action_summary,
-            reason,
-            paths,
-            category,
-            level,
-            risk,
-            consequence,
-            ..
-        }) => (
-            crate::agent::util::canonical_interaction_id(tool_call_id)
-                .as_str()
-                .to_string(),
-            interaction_body::permission_body(
-                tool_name,
-                action_summary.as_deref(),
-                reason,
-                paths,
-                *category,
-                *level,
-                *risk,
-                consequence,
-            ),
-        ),
-        _ => return,
-    };
-    match hub.put_interaction_content(
-        session_id,
-        &interaction_id,
-        interaction_body::INTERACTION_BODY_MEDIA_TYPE,
-        bytes,
-    ) {
-        Ok(content_id) => log::debug!(
-            "[ringing] interaction body stashed for {session_id}/{interaction_id} -> {content_id}"
-        ),
-        Err(error) => log::error!(
-            "[ringing] interaction body rejected for {session_id}/{interaction_id}: {error} \
-             (client will 404 the request ref)"
-        ),
-    }
-}
-
-/// §4.0.5：publish 内隐式副作用的迁移落点（事件产生侧）。
-///
-/// 交互正文 pin 释放：交互 resolved / permission tool finished 时解除，
-/// 否则 content store 泄漏。
-///
-/// 调用方：Ringing 事件桥（worker 事件 → hub 发布前）。
-pub(crate) fn apply_interaction_side_effects(
-    hub: &RingingHub,
-    session_id: &str,
-    event: &qaqh_domain::DomainEvent,
-) {
-    use qaqh_domain::{ControlEvent, ToolEvent};
-    match event {
-        qaqh_domain::DomainEvent::Control(ControlEvent::InteractionResolved {
-            interaction_id,
-            ..
-        })
-        | qaqh_domain::DomainEvent::Control(ControlEvent::PlanReviewResolved {
-            interaction_id,
-            ..
-        }) => {
-            // #345：交互终结 → 正文解除 pin，回到普通 TTL/淘汰语义。
-            hub.release_interaction_content(session_id, interaction_id);
-        }
-        // permission 的正文用 canonical interaction id 作为 pin_key；
-        // 权限答复本身没有 Ringing 终态事件，工具完成/取消就是它的
-        // 终结信号（拒绝路径同样会落到 ToolFinished(Cancelled/Denied)）。
-        qaqh_domain::DomainEvent::Tool(ToolEvent::ToolFinished { tool_call_id, .. }) => {
-            let interaction_id = crate::agent::util::canonical_interaction_id(tool_call_id);
-            hub.release_interaction_content(session_id, interaction_id.as_str());
-        }
-        _ => {}
     }
 }
 

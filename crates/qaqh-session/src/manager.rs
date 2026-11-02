@@ -224,6 +224,11 @@ impl SessionManager {
             .filter(|eff| !eff.is_empty())
     }
 
+    /// 会话级模型选择（新 BYOK 目录体系）。`None` = 未设定（跟随全局默认）。
+    pub fn session_model_selection(&self, session_id: &str) -> Option<qaqh_types::ModelSelection> {
+        self.load_meta(session_id)?.model_selection
+    }
+
     /// Mark a session's cleanup policy without adding it to the session index.
     ///
     /// V2 subagents are durable canonical sessions but remain hidden from the

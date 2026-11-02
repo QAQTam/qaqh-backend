@@ -478,13 +478,6 @@ impl ToolManager {
             .collect()
     }
 
-    /// Do not let the legacy all-unknown allowlist fallback widen a native plan.
-    pub(crate) fn model_plan_has_invalid_allowlist(&self) -> bool {
-        self.allowed_raw
-            .as_ref()
-            .is_some_and(|raw| !raw.is_empty() && self.allowed.is_none())
-    }
-
     // ── Three-phase execution for parallel tool support ──
 
     /// Phase 1: validate, safety-check, register inflight. Returns a [`PreparedCall`]

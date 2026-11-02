@@ -121,10 +121,7 @@ fn apply_endpoint_compat(
 /// 这些是端点事实而非用户偏好，且 OAuth 凭据被 origin 校验钉死在该端点上
 /// （`provider_job::resolve_provider_credential`），所以在 config.compat 之后
 /// 无条件收口——与 ChatGPT plan 路由的 `siwc_plan` 收口同一设计。
-fn apply_deepseek_responses_facts(
-    provider: &mut qaqh_gate::ProviderConfig,
-    model: &str,
-) {
+fn apply_deepseek_responses_facts(provider: &mut qaqh_gate::ProviderConfig, model: &str) {
     let compat = &mut provider.responses_compat;
     compat.effort_max = "max".into();
     compat.send_include = false;

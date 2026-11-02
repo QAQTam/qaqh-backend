@@ -105,6 +105,9 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 message: None,
                 retry_after_ms: None,
                 existing: Some(RingingV2ExistingResult::InteractionResolved { result }),
+                result: None,
+                operation: None,
+                revision: None,
             },
         )?;
     }

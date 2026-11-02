@@ -8,6 +8,7 @@ description = "Single-session agent runtime: state machine, engines, provider/to
 [dependencies]
 qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
 qaqh-config = { path = "../qaqh-config" }
+qaqh-profile = { path = "../qaqh-profile" }
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 qaqh-gate = { path = "../qaqh-gate" }
