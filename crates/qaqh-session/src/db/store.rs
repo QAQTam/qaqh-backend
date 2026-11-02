@@ -191,6 +191,7 @@ pub fn start_turn(
     conn: &mut Connection,
     turn_id: &str,
     session_id: &str,
+    input_id: Option<&str>,
     mode: Option<&str>,
 ) -> rusqlite::Result<()> {
     let seq: i64 = conn.query_row(
@@ -199,22 +200,23 @@ pub fn start_turn(
         |row| row.get(0),
     )?;
     conn.execute(
-        "INSERT INTO turns (turn_id, session_id, seq, mode, status, started_at_ms)
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
-        params![turn_id, session_id, seq, mode, now_ms()],
+        "INSERT INTO turns (turn_id, session_id, seq, input_id, mode, status, started_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6)",
+        params![turn_id, session_id, seq, input_id, mode, now_ms()],
     )?;
     Ok(())
 }
 
+/// `outcome_json` 保存 serde 形式的契约 `TurnOutcome`;视图层反序列化,坏数据报错。
 pub fn finish_turn(
     conn: &mut Connection,
     turn_id: &str,
     status: &str,
-    outcome: Option<&str>,
+    outcome_json: Option<&str>,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE turns SET status = ?2, outcome = ?3, finished_at_ms = ?4 WHERE turn_id = ?1",
-        params![turn_id, status, outcome, now_ms()],
+        "UPDATE turns SET status = ?2, outcome_json = ?3, finished_at_ms = ?4 WHERE turn_id = ?1",
+        params![turn_id, status, outcome_json, now_ms()],
     )?;
     Ok(())
 }
@@ -236,13 +238,15 @@ pub struct NewBlock {
     pub kind: &'static str,
     pub text: Option<String>,
     pub call_id: Option<String>,
+    /// 完整契约 `TimelineEntry` 的 serde 形式;kind/call_id/text 是查询用冗余列。
+    pub payload_json: String,
 }
 
 pub fn append_block(conn: &mut Connection, block: &NewBlock) -> rusqlite::Result<i64> {
     let ord = next_block_ord(conn, &block.session_id)?;
     conn.execute(
-        "INSERT INTO blocks (block_id, session_id, turn_id, ord, kind, text, call_id, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT INTO blocks (block_id, session_id, turn_id, ord, kind, text, call_id, payload_json, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             block.block_id,
             block.session_id,
@@ -251,6 +255,7 @@ pub fn append_block(conn: &mut Connection, block: &NewBlock) -> rusqlite::Result
             block.kind,
             block.text,
             block.call_id,
+            block.payload_json,
             now_ms(),
         ],
     )?;
@@ -265,7 +270,7 @@ pub fn read_transcript_page(
     limit: u32,
 ) -> rusqlite::Result<Vec<BlockRow>> {
     let mut stmt = conn.prepare(
-        "SELECT block_id, turn_id, ord, kind, text, call_id, created_at_ms
+        "SELECT block_id, turn_id, ord, kind, text, call_id, payload_json, created_at_ms
          FROM blocks
          WHERE session_id = ?1 AND (?2 IS NULL OR ord < ?2)
          ORDER BY ord DESC
@@ -280,7 +285,8 @@ pub fn read_transcript_page(
                 kind: row.get(3)?,
                 text: row.get(4)?,
                 call_id: row.get(5)?,
-                created_at_ms: row.get(6)?,
+                payload_json: row.get(6)?,
+                created_at_ms: row.get(7)?,
             })
         })?
         .collect::<Result<_, _>>()?;
@@ -296,6 +302,7 @@ pub struct BlockRow {
     pub kind: String,
     pub text: Option<String>,
     pub call_id: Option<String>,
+    pub payload_json: Option<String>,
     pub created_at_ms: i64,
 }
 
@@ -340,13 +347,13 @@ pub fn finish_tool_call(
     output_text: Option<&str>,
     output_ref: Option<&str>,
     output_truncated: bool,
-    error: Option<&str>,
+    error_json: Option<&str>,
     meta_json: Option<&str>,
 ) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE tool_calls
          SET status = ?2, output_text = ?3, output_ref = ?4, output_truncated = ?5,
-             error = ?6, meta_json = ?7, finished_at_ms = ?8
+             error_json = ?6, meta_json = ?7, finished_at_ms = ?8
          WHERE call_id = ?1",
         params![
             call_id,
@@ -354,7 +361,7 @@ pub fn finish_tool_call(
             output_text,
             output_ref,
             i64::from(output_truncated),
-            error,
+            error_json,
             meta_json,
             now_ms(),
         ],
@@ -385,7 +392,7 @@ fn read_tool_calls_where(
 ) -> rusqlite::Result<Vec<ToolCallRow>> {
     let sql = format!(
         "SELECT call_id, turn_id, tool_name, args_json, status, output_text, output_ref,
-                output_truncated, error, meta_json, started_at_ms, finished_at_ms
+                output_truncated, error_json, meta_json, started_at_ms, finished_at_ms
          FROM tool_calls WHERE session_id = ?1 {suffix}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -399,7 +406,7 @@ fn read_tool_calls_where(
             output_text: row.get(5)?,
             output_ref: row.get(6)?,
             output_truncated: row.get::<_, i64>(7)? != 0,
-            error: row.get(8)?,
+            error_json: row.get(8)?,
             meta_json: row.get(9)?,
             started_at_ms: row.get(10)?,
             finished_at_ms: row.get(11)?,
@@ -418,7 +425,7 @@ pub struct ToolCallRow {
     pub output_text: Option<String>,
     pub output_ref: Option<String>,
     pub output_truncated: bool,
-    pub error: Option<String>,
+    pub error_json: Option<String>,
     pub meta_json: Option<String>,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,

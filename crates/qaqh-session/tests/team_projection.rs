@@ -1,10 +1,10 @@
 use qaqh_session::projection::{Projection, ProjectionSet, TeamProjection};
+use qaqh_ringing_contract::team::{TeamAgentResidency, TeamAgentStatus, TeamDelta};
 use qaqh_session::session_fact_v2::{
     ActorKind, ActorRef, AgentPath, EventId, FactPayload, FactSchema, InputAccepted, InputId,
     InputKind, InputPurpose, InterAgentCommunication, InterAgentContent, InterAgentDelivery, LogId,
     MessageId, ProjectionPayload, ProjectionSlot, SessionCreated, SessionFact, SessionId,
-    SubagentFinished, SubagentSpawned, SubagentTerminalStatus, TeamAgentResidency, TeamAgentStatus,
-    TeamDelta, ToolCallId, TurnId,
+    SubagentFinished, SubagentSpawned, SubagentTerminalStatus, ToolCallId, TurnId,
 };
 
 const NOW_MS: i64 = 1_789_830_000_200;
