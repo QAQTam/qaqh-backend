@@ -13,8 +13,8 @@ use std::sync::{mpsc, Arc, Mutex};
 
 use qaqh_ringing_contract::events::{InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame};
 use qaqh_ringing_contract::fact::{
-    ContentValue, InteractionDecision, InteractionId, ToolCallId, ToolError, ToolMetrics, TurnId,
-    TurnMode,
+    BlockId, ContentValue, InteractionDecision, InteractionId, ToolCallId, ToolError, ToolMetrics,
+    TurnId, TurnMode,
 };
 use qaqh_ringing_contract::state::{
     CodeDelta, InteractionView, SessionState, TimelineEntry, ToolCallStatus, ToolEffectInfo,
@@ -252,6 +252,65 @@ impl SessionOwner {
         }
         Ok(changed)
     }
+
+    // ---- 流式展示(同步 API:provider 阻塞线程直接调用;不落库) ----
+
+    /// 模型文本流式片段:同一 block_id 的后续事件替换已展示内容。
+    pub fn message_delta(&self, turn_id: &TurnId, block_id: &BlockId, text: &str) {
+        emit(
+            &self.events,
+            &self.next_seq,
+            SessionEvent::MessageDelta {
+                turn_id: turn_id.clone(),
+                block_id: block_id.clone(),
+                text: text.to_string(),
+            },
+        );
+    }
+
+    /// 工具参数流式片段(仅展示;不代表参数已合法或工具已执行)。
+    pub fn tool_arguments_delta(&self, turn_id: &TurnId, call_id: &ToolCallId, text: &str) {
+        emit(
+            &self.events,
+            &self.next_seq,
+            SessionEvent::ToolArgumentsDelta {
+                turn_id: turn_id.clone(),
+                call_id: call_id.clone(),
+                text: text.to_string(),
+            },
+        );
+    }
+
+    // ---- 工具声明(回合循环侧;port 侧 lifecycle 接管 running 之后) ----
+
+    /// 模型声明工具调用:declared 行落库(无事件;快照可见)。
+    pub async fn declare_tool_call(
+        &self,
+        call_id: &ToolCallId,
+        turn_id: &TurnId,
+        tool_name: &str,
+        args_json: Option<String>,
+    ) -> Result<(), DbError> {
+        let upsert = store::ToolCallUpsert {
+            call_id: call_id.as_ref().to_string(),
+            session_id: self.session_id.clone(),
+            turn_id: Some(turn_id.as_ref().to_string()),
+            tool_name: tool_name.to_string(),
+            args_json,
+            status: "declared",
+        };
+        self.db
+            .write(move |conn| store::upsert_tool_call(conn, &upsert))
+            .await
+    }
+
+    /// 权限交互挂起:declared → awaiting_permission(快照可见,无事件)。
+    pub async fn tool_awaiting_permission(&self, call_id: &ToolCallId) -> Result<(), DbError> {
+        let call = call_id.as_ref().to_string();
+        self.db
+            .write(move |conn| store::set_tool_call_status(conn, &call, "awaiting_permission"))
+            .await
+    }
 }
 
 /// 序号 + 广播:单流事件出口的唯一写入点。
@@ -308,6 +367,17 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             "tool_call",
             Some(call_id.as_ref().to_string()),
             None,
+        ),
+        TimelineEntry::ToolResult {
+            call_id,
+            turn_id,
+            content,
+        } => (
+            call_id.as_ref().to_string(),
+            turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
+            "tool_result",
+            Some(call_id.as_ref().to_string()),
+            inline_text(content),
         ),
         TimelineEntry::Compaction { summary } => (
             // 压缩块没有独立 block_id,按时间派生保证多次压缩不冲突。
