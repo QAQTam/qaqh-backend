@@ -1,7 +1,73 @@
 //! Types and state machine definitions for SessionAgent (RLC-3).
 
 use qaqh_agentloop_core::{mailbox::FrameSize, supervisor::TaskCompletion};
-use qaqh_session::session_fact_v2::{ContentRef, InputId, InteractionId, ToolCallId, TurnId};
+use qaqh_session::session_fact_v2::{
+    ContentRef, InputId, InteractionId, ResourceKind, ToolCallId, TurnId,
+};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+#[derive(Debug, Default)]
+pub struct SessionAgentMemory {
+    context_messages: AtomicU64,
+    context_payload_bytes: AtomicU64,
+    context_heap_estimate_bytes: AtomicU64,
+    journal_index_entries: AtomicU64,
+    journal_index_heap_estimate_bytes: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SessionAgentMemorySnapshot {
+    pub context_messages: u64,
+    pub context_payload_bytes: u64,
+    pub context_heap_estimate_bytes: u64,
+    pub journal_index_entries: u64,
+    pub journal_index_heap_estimate_bytes: u64,
+    pub mailbox_items: u64,
+    pub mailbox_bytes: u64,
+}
+
+impl SessionAgentMemory {
+    pub(crate) fn update_context(&self, commit: &qaqh_session::session_commit::SessionCommit) {
+        let usage = commit.context_memory_usage();
+        self.context_messages
+            .store(usage.item_count, Ordering::Release);
+        self.context_payload_bytes
+            .store(usage.payload_bytes, Ordering::Release);
+        self.context_heap_estimate_bytes
+            .store(usage.heap_estimate_bytes, Ordering::Release);
+        let (entries, heap_bytes) = commit.journal_index_memory_usage();
+        self.journal_index_entries.store(entries, Ordering::Release);
+        self.journal_index_heap_estimate_bytes
+            .store(heap_bytes, Ordering::Release);
+    }
+
+    pub(crate) fn clear(&self) {
+        self.context_messages.store(0, Ordering::Release);
+        self.context_payload_bytes.store(0, Ordering::Release);
+        self.context_heap_estimate_bytes.store(0, Ordering::Release);
+        self.journal_index_entries.store(0, Ordering::Release);
+        self.journal_index_heap_estimate_bytes
+            .store(0, Ordering::Release);
+    }
+
+    pub(crate) fn refresh(&self, commit: &mut qaqh_session::session_commit::SessionCommit) {
+        commit.refresh_memory_estimate();
+        self.update_context(commit);
+    }
+
+    pub fn snapshot(&self) -> SessionAgentMemorySnapshot {
+        SessionAgentMemorySnapshot {
+            context_messages: self.context_messages.load(Ordering::Acquire),
+            context_payload_bytes: self.context_payload_bytes.load(Ordering::Acquire),
+            context_heap_estimate_bytes: self.context_heap_estimate_bytes.load(Ordering::Acquire),
+            journal_index_entries: self.journal_index_entries.load(Ordering::Acquire),
+            journal_index_heap_estimate_bytes: self
+                .journal_index_heap_estimate_bytes
+                .load(Ordering::Acquire),
+            ..Default::default()
+        }
+    }
+}
 
 use crate::provider_job::{ProviderOutcome, ProviderRequestSpec};
 use crate::tool_job::{ToolOutcome, ToolPolicySnapshot};
@@ -52,6 +118,10 @@ pub enum AgentCommand {
         title: String,
         source: qaqh_session::session_fact_v2::TitleSource,
     },
+    PublishResourceChanged {
+        resource_kind: ResourceKind,
+        committed: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
 }
 
 impl FrameSize for AgentCommand {
@@ -90,6 +160,7 @@ impl FrameSize for AgentCommand {
             AgentCommand::SetTitle { title, .. } => std::mem::size_of::<Self>()
                 .saturating_add(title.len())
                 .saturating_add(64),
+            AgentCommand::PublishResourceChanged { .. } => std::mem::size_of::<Self>() + 64,
         }
     }
 }
@@ -97,6 +168,9 @@ impl FrameSize for AgentCommand {
 /// Control lane signals that have scheduling priority over commands.
 #[derive(Debug, Clone)]
 pub enum AgentControl {
+    PublishResourceChanged {
+        resource_kind: ResourceKind,
+    },
     CancelTurn {
         turn_id: Option<TurnId>,
         reason: String,
@@ -127,6 +201,7 @@ pub enum AgentControl {
 impl FrameSize for AgentControl {
     fn retained_bytes(&self) -> usize {
         match self {
+            AgentControl::PublishResourceChanged { .. } => std::mem::size_of::<Self>() + 32,
             AgentControl::CancelTurn { reason, .. } => {
                 std::mem::size_of::<Self>() + reason.len() + 32
             }
@@ -142,13 +217,11 @@ impl FrameSize for AgentControl {
                     + spec.provider.model.len()
                     + spec.provider.base_url.len()
                     + spec.effort.as_ref().map_or(0, String::capacity)
-                    + policy
-                        .as_ref()
-                        .map_or(0, |policy| {
-                            std::mem::size_of::<ToolPolicySnapshot>()
-                                + policy.workspace_root.as_os_str().len()
-                                + policy.sandbox_spec.writable_roots.len() * 96
-                        })
+                    + policy.as_ref().map_or(0, |policy| {
+                        std::mem::size_of::<ToolPolicySnapshot>()
+                            + policy.workspace_root.as_os_str().len()
+                            + policy.sandbox_spec.writable_roots.len() * 96
+                    })
             }
             AgentControl::Shutdown => std::mem::size_of::<Self>(),
         }

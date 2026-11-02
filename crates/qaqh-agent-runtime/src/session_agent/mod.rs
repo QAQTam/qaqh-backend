@@ -8,5 +8,5 @@ pub use agent::{ActivityTap, SessionAgent};
 pub use host::{AgentHandle, AgentHost};
 pub use types::{
     ActivePhase, AgentCommand, AgentCompletion, AgentControl, AgentOutcome, QueuedUserInput,
-    SessionAgentError, SessionPhase,
+    SessionAgentError, SessionAgentMemory, SessionAgentMemorySnapshot, SessionPhase,
 };

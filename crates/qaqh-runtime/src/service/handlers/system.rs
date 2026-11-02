@@ -162,7 +162,7 @@ fn create_profile(
             .map_err(|error| QaqhError::context("failed to create provider", error))?;
         pid
     } else {
-        store.document().default_profile.clone()
+        store.document().default_profile.clone().unwrap_or_default()
     };
 
     let reasoning_effort = args.reasoning_effort.clone();

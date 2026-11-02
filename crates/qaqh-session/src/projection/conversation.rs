@@ -257,6 +257,54 @@ impl Projection for ConversationProjection {
 }
 
 impl ConversationProjection {
+    pub(super) fn snapshot_for_memory(&self) -> ConversationMemoryUsage {
+        let mut payload_bytes = 0u64;
+        for entry in &self.snapshot.context {
+            match &entry.kind {
+                ConversationContextKind::Input(input) => match &input.content {
+                    ContentValue::Inline { text } => {
+                        payload_bytes = payload_bytes.saturating_add(text.len() as u64)
+                    }
+                    ContentValue::Ref { .. } | ContentValue::Unavailable(_) => {}
+                },
+                ConversationContextKind::AssistantBlock(block) => match &block.content {
+                    ContentValue::Inline { text } => {
+                        payload_bytes = payload_bytes.saturating_add(text.len() as u64)
+                    }
+                    ContentValue::Ref { .. } | ContentValue::Unavailable(_) => {}
+                },
+                ConversationContextKind::ToolCall(call) => {
+                    if let Some(args) = &call.args
+                        && let ContentValue::Inline { text } = args
+                    {
+                        payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+                    }
+                    if let Some(result) = &call.result
+                        && let Some(ContentValue::Inline { text }) = &result.output
+                    {
+                        payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+                    }
+                }
+                ConversationContextKind::Compaction(compaction) => {
+                    if let ContentValue::Inline { text } = &compaction.summary {
+                        payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+                    }
+                }
+            }
+        }
+        ConversationMemoryUsage {
+            turn_count: self.snapshot.turns.len() as u64,
+            context_count: self.snapshot.context.len() as u64,
+            turn_capacity_bytes: (self.snapshot.turns.capacity()
+                * std::mem::size_of::<ConversationTurnState>())
+                as u64,
+            context_capacity_bytes: (self.snapshot.context.capacity()
+                * std::mem::size_of::<ConversationContextEntry>())
+                as u64,
+            payload_bytes,
+        }
+    }
+
     fn apply_turn_started(&mut self, payload: &TurnStarted) {
         self.snapshot.current_turn_id = Some(payload.turn_id.clone());
         if let Some(turn) = self.turn_mut(&payload.turn_id) {
@@ -443,6 +491,14 @@ impl ConversationProjection {
         self.snapshot.revision = self.snapshot.revision.saturating_add(1);
         self.snapshot.revision
     }
+}
+
+pub(super) struct ConversationMemoryUsage {
+    pub turn_count: u64,
+    pub context_count: u64,
+    pub turn_capacity_bytes: u64,
+    pub context_capacity_bytes: u64,
+    pub payload_bytes: u64,
 }
 
 fn input_content(payload: &InputAccepted) -> ContentValue {

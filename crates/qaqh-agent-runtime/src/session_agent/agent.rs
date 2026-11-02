@@ -25,10 +25,11 @@ use qaqh_session::{
         InteractionChoice, InteractionChoiceTone, InteractionDecision, InteractionExpiryReason,
         InteractionId, InteractionKind, InteractionRequested, InteractionResolved, InterruptReason,
         MetadataSource, PolicyDecisionRef, ProviderFinish, RecoveryAction, RecoveryId,
-        RecoveryOutcome, RecoveryRef, SessionFact, SessionMetadataChanged, SessionRecovered,
-        SessionTitleChanged, SideEffectClass, TitleSource, ToolCallId, ToolError, ToolFinished,
-        ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
-        TurnFinished, TurnId, TurnInterrupted, TurnMode, TurnStarted, TurnTerminal,
+        RecoveryOutcome, RecoveryRef, ResourceKind, SessionFact, SessionMetadataChanged,
+        SessionRecovered, SessionTitleChanged, SideEffectClass, TitleSource, ToolCallId, ToolError,
+        ToolFinished, ToolIntent, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability,
+        ToolTerminalStatus, TurnFinished, TurnId, TurnInterrupted, TurnMode, TurnStarted,
+        TurnTerminal, WorkspaceResourceChanged,
     },
 };
 use tokio::sync::watch;
@@ -113,13 +114,14 @@ impl ActivityTap {
 }
 
 /// A tool that has been declared and intended, but whose result is still owed.
-struct ActiveTool {
+pub(crate) struct ActiveTool {
     identity: EffectIdentity,
     execution_id: ExecutionId,
+    tool_name: String,
 }
 
 /// A tool waiting for a user permission decision.
-struct PendingPermission {
+pub(crate) struct PendingPermission {
     interaction_id: InteractionId,
     execution_id: ExecutionId,
     args_hash: String,
@@ -133,13 +135,13 @@ struct PendingPermission {
 /// The provider decides how many calls one response may contain, so the owner
 /// keeps the whole list instead of looping once: an `ask` or permission prompt
 /// pauses the list, and the answer must resume exactly where it stopped.
-struct DeclaredTool {
+pub(crate) struct DeclaredTool {
     call_id: ToolCallId,
     name: String,
     args: Vec<u8>,
 }
 
-enum PendingInteraction {
+pub(crate) enum PendingInteraction {
     Ask {
         call_id: ToolCallId,
         interaction_id: InteractionId,
@@ -166,6 +168,7 @@ pub struct SessionAgent {
     pub(crate) activity: Option<ActivityTap>,
     /// Host-owned display channel for in-flight generation. Absent in tests.
     pub(crate) progress: Option<Arc<dyn ProgressSink>>,
+    pub(crate) memory: Arc<super::types::SessionAgentMemory>,
     /// Block identities of the attempt in flight; reused when it seals.
     pub(crate) current_blocks: Option<AttemptBlocks>,
     pub(crate) active_provider_identity: Option<EffectIdentity>,
@@ -194,6 +197,7 @@ impl SessionAgent {
         tool_port: Arc<WorkspaceToolPort>,
         activity: Option<ActivityTap>,
         progress: Option<Arc<dyn ProgressSink>>,
+        memory: Arc<super::types::SessionAgentMemory>,
     ) -> Self {
         let mut queued_inputs = VecDeque::new();
         // A failed recovery must not be reported as a usable session: the next
@@ -218,6 +222,7 @@ impl SessionAgent {
             tool_port,
             activity,
             progress,
+            memory,
             current_blocks: None,
             active_provider_identity: None,
             active_tool_identities: HashMap::new(),
@@ -229,6 +234,7 @@ impl SessionAgent {
             system_prompt_seeded: false,
             title_decided: false,
         };
+        agent.memory.refresh(&mut agent.commit);
         if let Some(error) = recovery_error {
             // The error reaches the session state (and the front end) instead
             // of only the log while the agent pretends to be Ready.
@@ -299,7 +305,9 @@ impl SessionAgent {
         facts: Vec<SessionFact>,
     ) -> Result<BatchReceipt, SessionAgentError> {
         let head = self.commit.head()?;
-        Ok(self.commit.commit(batch_id, head, facts)?)
+        let receipt = self.commit.commit(batch_id, head, facts)?;
+        self.memory.refresh(&mut self.commit);
+        Ok(receipt)
     }
 
     /// Reserve completion capacity *before* an intent is committed, so a full
@@ -630,13 +638,10 @@ impl SessionAgent {
         let spec = self.provider_spec.clone();
         let blocks = AttemptBlocks::new(turn_id.as_str(), &spec.provider.model);
         self.current_blocks = Some(blocks.clone());
-        let progress = self
-            .progress
-            .as_ref()
-            .map(|sink| ProgressStream {
-                sink: Arc::clone(sink),
-                blocks,
-            });
+        let progress = self.progress.as_ref().map(|sink| ProgressStream {
+            sink: Arc::clone(sink),
+            blocks,
+        });
         self.dispatch_task(
             ticket,
             reservation,
@@ -836,6 +841,17 @@ impl SessionAgent {
             .with_backgrounded(backgrounded))
     }
 
+    fn todo_resource_summary(&self) -> Result<Vec<u8>, SessionAgentError> {
+        let session_id = self.session_id.clone();
+        let value = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async move {
+                qaqh_workspace::todo::todo_list_value_for(&session_id, &serde_json::json!({}))
+            })
+        })
+        .map_err(SessionAgentError::Internal)?;
+        serde_json::to_vec(&value).map_err(|error| SessionAgentError::Internal(error.to_string()))
+    }
+
     fn tool_result_context_fact(
         &self,
         turn_id: &TurnId,
@@ -998,6 +1014,7 @@ impl SessionAgent {
             ActiveTool {
                 identity: identity.clone(),
                 execution_id: execution_id.clone(),
+                tool_name: tool_name.to_string(),
             },
         );
         let ticket = {
@@ -1392,6 +1409,7 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
     type Error = SessionAgentError;
 
     fn command(&mut self, command: &AgentCommand) -> Result<Step, Self::Error> {
+        self.memory.refresh(&mut self.commit);
         match command {
             AgentCommand::UserInput {
                 input_id,
@@ -1472,11 +1490,77 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                 qaqh_session::meta::refresh_index(self.commit.session_dir());
                 Ok(Step::Continue)
             }
+            AgentCommand::PublishResourceChanged {
+                resource_kind,
+                committed,
+            } => {
+                let outcome = (|| {
+                    let summary = serde_json::to_vec(
+                        &serde_json::json!({"resource_kind": format!("{resource_kind:?}")}),
+                    )
+                    .map_err(|error| SessionAgentError::Internal(error.to_string()))?;
+                    let summary_ref = self.commit.put_blob(&summary)?;
+                    let fact = self.fact(
+                        EventId::new(generate_ulid()),
+                        FactPayload::WorkspaceResourceChanged(WorkspaceResourceChanged {
+                            resource_kind: *resource_kind,
+                            resource_id: qaqh_session::canonical::stable_workspace_resource_id(
+                                &self.session_id,
+                                *resource_kind,
+                            ),
+                            source_call_id: None,
+                            revision: self.commit.head()?.saturating_add(1),
+                            summary_ref,
+                            deleted: false,
+                        }),
+                        None,
+                        None,
+                        None,
+                    );
+                    self.commit_batch(
+                        &format!("batch-resource-{}", self.commit.head()?.saturating_add(1)),
+                        vec![fact],
+                    )?;
+                    Ok::<(), SessionAgentError>(())
+                })();
+                let _ = committed.send(outcome.as_ref().map(|_| ()).map_err(ToString::to_string));
+                outcome?;
+                Ok(Step::Continue)
+            }
         }
     }
 
     fn control(&mut self, control: &AgentControl) -> Result<Step, Self::Error> {
         match control {
+            AgentControl::PublishResourceChanged { resource_kind } => {
+                let summary = serde_json::to_vec(
+                    &serde_json::json!({"resource_kind": format!("{resource_kind:?}")}),
+                )
+                .map_err(|error| SessionAgentError::Internal(error.to_string()))?;
+                let summary_ref = self.commit.put_blob(&summary)?;
+                let fact = self.fact(
+                    EventId::new(generate_ulid()),
+                    FactPayload::WorkspaceResourceChanged(WorkspaceResourceChanged {
+                        resource_kind: *resource_kind,
+                        resource_id: qaqh_session::canonical::stable_workspace_resource_id(
+                            &self.session_id,
+                            *resource_kind,
+                        ),
+                        source_call_id: None,
+                        revision: self.commit.head()?.saturating_add(1),
+                        summary_ref,
+                        deleted: false,
+                    }),
+                    None,
+                    None,
+                    None,
+                );
+                self.commit_batch(
+                    &format!("batch-resource-{}", self.commit.head()?.saturating_add(1)),
+                    vec![fact],
+                )?;
+                Ok(Step::Continue)
+            }
             AgentControl::Shutdown => {
                 self.phase = SessionPhase::Closing;
                 // Never exit with open obligations: the next owner would have
@@ -1484,6 +1568,7 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                 if self.active_turn.is_some() {
                     let _ = self.interrupt_turn(InterruptReason::CancelBeforeSeal, None);
                 }
+                self.memory.clear();
                 Ok(Step::Stop)
             }
             AgentControl::CancelTurn { turn_id, reason } => {
@@ -1740,6 +1825,7 @@ impl InputHandler<AgentCommand, AgentControl, AgentCompletion> for SessionAgent 
                 completion.identity.effect_id
             ),
         }
+        self.memory.refresh(&mut self.commit);
         result.map(|()| Step::Continue)
     }
 }
@@ -2044,11 +2130,17 @@ impl SessionAgent {
             );
             return Ok(());
         };
-        let Some((call_id, tool)) = self
+        let Some((call_id, tool, tool_name)) = self
             .active_tool_identities
             .iter()
             .find(|(_, tool)| tool.identity.effect_id == identity.effect_id)
-            .map(|(call_id, tool)| (call_id.clone(), tool.execution_id.clone()))
+            .map(|(call_id, tool)| {
+                (
+                    call_id.clone(),
+                    tool.execution_id.clone(),
+                    tool.tool_name.clone(),
+                )
+            })
         else {
             // Cancellation and recovery settle these; a late completion must
             // not abort the whole actor.
@@ -2103,12 +2195,45 @@ impl SessionAgent {
                 | ToolTerminalStatus::TimedOut
         );
         let context = self.tool_result_context_fact(&turn_id, &call_id, &text, ok)?;
+        let mut facts = vec![finished, context];
+        if matches!(tool_name.as_str(), "todo_write" | "todo_update")
+            && matches!(
+                status,
+                ToolTerminalStatus::Succeeded | ToolTerminalStatus::Backgrounded
+            )
+        {
+            let summary = self.todo_resource_summary()?;
+            let summary_ref = self.commit.put_blob(&summary)?;
+            facts.push(self.fact(
+                EventId::new(generate_ulid()),
+                FactPayload::WorkspaceResourceChanged(WorkspaceResourceChanged {
+                    resource_kind: ResourceKind::Todo,
+                    resource_id: qaqh_session::canonical::stable_workspace_resource_id(
+                        &self.session_id,
+                        ResourceKind::Todo,
+                    ),
+                    source_call_id: Some(call_id.clone()),
+                    revision: self.commit.head()?.saturating_add(1),
+                    summary_ref,
+                    deleted: false,
+                }),
+                Some(turn_id.clone()),
+                Some(call_id.clone()),
+                None,
+            ));
+        }
         self.commit_batch(
             &format!("batch-{}-tool-{}", turn_id.as_str(), call_id.as_str()),
-            vec![finished, context],
+            facts,
         )?;
         self.active_tool_identities.remove(&call_id);
         self.settle_round_progress()?;
         Ok(())
+    }
+}
+
+impl Drop for SessionAgent {
+    fn drop(&mut self) {
+        self.memory.clear();
     }
 }

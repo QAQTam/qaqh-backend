@@ -34,7 +34,6 @@
 /// Credential-free service response DTOs.
 pub mod service;
 
-mod account;
 mod error;
 mod global;
 mod host_id;

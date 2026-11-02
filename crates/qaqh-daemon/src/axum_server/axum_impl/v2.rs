@@ -14,6 +14,7 @@ use qaqh_ringing::{
 };
 use qaqh_runtime::ringing::V2StreamItem;
 use qaqh_session::projection::{ControlInteractionState, ConversationSnapshot};
+use qaqh_session::{ClientV2ControlState as V2ControlState, ClientV2ToolState as V2ToolState};
 use qaqh_session::session_fact_v2::{ContentValue, InteractionDecision, InteractionKind};
 use serde::Serialize;
 
@@ -22,7 +23,7 @@ use super::*;
 // bootstrap 的具体 state 组合契约在 qaqh_ringing_contract（与 qaqh-client、
 // TS 契约导出共用同一份定义）；本文件只做 canonical→wire 的映射。
 use qaqh_ringing_contract::{
-    ClientV2ControlState as V2ControlState, ClientV2TeamResponse, ClientV2ToolState as V2ToolState,
+    TeamResponse as ClientV2TeamResponse,
     TEAM_SCHEMA,
 };
 
@@ -684,6 +685,9 @@ pub(crate) async fn handle_command_v2(
                     message: Some("command_id was already used with another payload".into()),
                     retry_after_ms: None,
                     existing: None,
+                    result: None,
+                    operation: None,
+                    revision: None,
                 },
             );
         }
@@ -707,6 +711,9 @@ pub(crate) async fn handle_command_v2(
                 message: Some(message.into()),
                 retry_after_ms: None,
                 existing: Some(existing.into_existing()),
+                result: None,
+                operation: None,
+                revision: None,
             },
         );
     }
@@ -727,6 +734,9 @@ pub(crate) async fn handle_command_v2(
                 message: Some("interaction was already resolved".into()),
                 retry_after_ms: None,
                 existing: Some(existing),
+                result: None,
+                operation: None,
+                revision: None,
             },
         );
     }

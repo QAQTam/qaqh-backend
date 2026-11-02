@@ -11,6 +11,7 @@ default = []
 [dependencies]
 thiserror = "2"
 qaqh-policy = { path = "../qaqh-policy" }
+qaqh-profile = { path = "../qaqh-profile" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-config-api = { path = "../qaqh-config-api" }
 serde = { version = "1", features = ["derive"] }

@@ -42,6 +42,40 @@ pub struct ProjectionSet {
 }
 
 impl ProjectionSet {
+    /// Approximate owned heap and text payload for the in-memory projection.
+    /// Calculated from borrowed state without materializing a snapshot.
+    pub fn memory_usage_estimate(&self) -> (u64, u64, u64) {
+        let conversation = self.conversation.snapshot_for_memory();
+        let (control_entries, control_payload, control_heap) = self.control.memory_usage_estimate();
+        let (resource_entries, resource_payload, resource_heap) =
+            self.resources.memory_usage_estimate();
+        let (meta_entries, meta_payload, meta_heap) = self.meta.memory_usage_estimate();
+        let (mailbox_entries, mailbox_payload, mailbox_heap) = self.mailbox.memory_usage_estimate();
+        let (team_entries, team_payload, team_heap) = self.team.memory_usage_estimate();
+        let entries = control_entries
+            .saturating_add(resource_entries)
+            .saturating_add(meta_entries)
+            .saturating_add(mailbox_entries)
+            .saturating_add(team_entries)
+            .saturating_add(conversation.turn_count)
+            .saturating_add(conversation.context_count);
+        let payload = control_payload
+            .saturating_add(resource_payload)
+            .saturating_add(meta_payload)
+            .saturating_add(mailbox_payload)
+            .saturating_add(team_payload)
+            .saturating_add(conversation.payload_bytes);
+        let heap = (std::mem::size_of::<ProjectionSet>() as u64)
+            .saturating_add(conversation.turn_capacity_bytes)
+            .saturating_add(conversation.context_capacity_bytes)
+            .saturating_add(control_heap)
+            .saturating_add(resource_heap)
+            .saturating_add(meta_heap)
+            .saturating_add(mailbox_heap)
+            .saturating_add(team_heap);
+        (entries, payload, heap)
+    }
+
     /// Apply one canonical fact to every projection.
     ///
     /// Every reducer sees the fact so it can maintain cross-slot state.

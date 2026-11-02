@@ -25,6 +25,29 @@ pub struct MailboxProjection {
 }
 
 impl MailboxProjection {
+    pub(super) fn memory_usage_estimate(&self) -> (u64, u64, u64) {
+        let mut payload_bytes = 0u64;
+        let mut heap_bytes = (self.snapshot.messages.capacity()
+            * std::mem::size_of::<crate::session_fact_v2::MailboxMessage>())
+            as u64;
+        for message in &self.snapshot.messages {
+            heap_bytes = heap_bytes
+                .saturating_add(message.communication.author.as_str().len() as u64)
+                .saturating_add(message.communication.recipient.as_str().len() as u64);
+            if let crate::session_fact_v2::InterAgentContent::Inline { text } =
+                &message.communication.content
+            {
+                heap_bytes = heap_bytes.saturating_add(text.capacity() as u64);
+                payload_bytes = payload_bytes.saturating_add(text.len() as u64);
+            }
+        }
+        (
+            self.snapshot.messages.len() as u64,
+            payload_bytes,
+            heap_bytes,
+        )
+    }
+
     pub fn pending(&self) -> impl Iterator<Item = &MailboxMessage> {
         self.snapshot
             .messages

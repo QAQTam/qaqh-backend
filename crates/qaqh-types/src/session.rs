@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::provider::ModelSelection;
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
@@ -79,6 +80,10 @@ pub struct SessionMeta {
     /// endpoint/model/wire，以及（若该 profile 自带密钥）用哪把 key。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<ModelSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_model_selection: Option<ModelSelection>,
     /// Number of conversation turns (one user query + its assistant/tool chain).
     #[serde(default)]
     pub turn_count: usize,
@@ -308,6 +313,8 @@ mod tests {
             model: "m1".into(),
             effort: Some("high".into()),
             profile: Some("deep".into()),
+            model_selection: Some(ModelSelection::default()),
+            requested_model_selection: Some(ModelSelection::default()),
             turn_count: 4,
             compact_skip: 5,
             compact_covered_through_msg_id: Some(9),

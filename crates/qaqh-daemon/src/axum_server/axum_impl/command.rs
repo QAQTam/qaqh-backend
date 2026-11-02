@@ -17,6 +17,9 @@ pub(crate) fn reject_ack(command_id: String, code: &str, message: String) -> Rin
         message: Some(message),
         retry_after_ms: None,
         existing: None,
+        result: None,
+        operation: None,
+        revision: None,
     }
 }
 
@@ -29,6 +32,9 @@ pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> Ringing
         message,
         retry_after_ms: None,
         existing: None,
+        result: None,
+        operation: None,
+        revision: None,
     }
 }
 
@@ -609,7 +615,7 @@ fn rollback_pending(state: &AppState, command_id: &str) {
 }
 
 /// 成功收尾：回执置终态并 ACK。
-fn complete(state: &AppState, command_id: String) -> (StatusCode, RingingV2CommandAck) {
+pub(crate) fn complete(state: &AppState, command_id: String) -> (StatusCode, RingingV2CommandAck) {
     state
         .pending
         .lock()
@@ -619,7 +625,7 @@ fn complete(state: &AppState, command_id: String) -> (StatusCode, RingingV2Comma
 }
 
 /// 失败收尾：回滚回执并拒绝。所有拒绝路径共用，避免「回滚了但没拒」或反之。
-fn fail(
+pub(crate) fn fail(
     state: &AppState,
     command_id: String,
     status: StatusCode,

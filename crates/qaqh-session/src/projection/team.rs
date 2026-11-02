@@ -1,23 +1,13 @@
 //! Rebuildable team roster and inbox projection.
 
-use serde::{Deserialize, Serialize};
 
-use crate::session_fact_v2::{
-    AgentPath, FactPayload, SessionFact, SessionId, SubagentTerminalStatus, TeamAgentResidency,
-    TeamAgentSnapshot, TeamAgentStatus, TeamDelta, TeamInboxSummary,
+use crate::session_fact_v2::{AgentPath, FactPayload, SessionFact, SessionId, SubagentTerminalStatus};
+pub use qaqh_ringing_contract::team::{
+    TeamAgentResidency, TeamAgentSnapshot, TeamAgentStatus, TeamDelta, TeamInboxSummary,
+    TeamSnapshot,
 };
 
 use super::Projection;
-
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TeamSnapshot {
-    pub root_session_id: Option<SessionId>,
-    pub agents: Vec<TeamAgentSnapshot>,
-    pub unread_messages: Vec<TeamInboxSummary>,
-    pub revision: u64,
-    pub last_fact_seq: u64,
-}
 
 #[derive(Debug, Default)]
 pub struct TeamProjection {
@@ -25,6 +15,31 @@ pub struct TeamProjection {
 }
 
 impl TeamProjection {
+    pub(super) fn memory_usage_estimate(&self) -> (u64, u64, u64) {
+        let payload_bytes = 0u64;
+        let mut heap_bytes = (self.snapshot.agents.capacity()
+            * std::mem::size_of::<TeamAgentSnapshot>()
+            + self.snapshot.unread_messages.capacity() * std::mem::size_of::<TeamInboxSummary>())
+            as u64;
+        for agent in &self.snapshot.agents {
+            heap_bytes = heap_bytes
+                .saturating_add(agent.agent_id.as_str().len() as u64)
+                .saturating_add(agent.agent_path.as_str().len() as u64)
+                .saturating_add(agent.nickname.as_ref().map_or(0, String::capacity) as u64)
+                .saturating_add(agent.role.as_ref().map_or(0, String::capacity) as u64);
+        }
+        for message in &self.snapshot.unread_messages {
+            heap_bytes = heap_bytes
+                .saturating_add(message.author.as_str().len() as u64)
+                .saturating_add(message.recipient.as_str().len() as u64);
+        }
+        (
+            (self.snapshot.agents.len() + self.snapshot.unread_messages.len()) as u64,
+            payload_bytes,
+            heap_bytes,
+        )
+    }
+
     fn next_revision(&mut self) -> u64 {
         self.snapshot.revision = self.snapshot.revision.saturating_add(1);
         self.snapshot.revision

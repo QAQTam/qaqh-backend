@@ -313,6 +313,11 @@ pub struct SessionNewArgs {
     /// 可选工具模式预置；空串 = 未指定。
     pub tool_mode: Option<String>,
     pub custom_tools: Option<Vec<String>>,
+    /// 统一命令面：创建即锁定的标题（None = 首条消息自动生成）。
+    pub title: Option<String>,
+    /// 统一命令面：创建即选定的模型选择（新 BYOK 目录体系；spawn 前落 meta，
+    /// worker 首轮即生效）。
+    pub model_selection: Option<qaqh_types::ModelSelection>,
 }
 
 #[derive(Debug, Deserialize)]

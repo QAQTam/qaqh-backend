@@ -6,15 +6,6 @@ use qaqh_client::{
     ClientError, ClientV2Bootstrap, ClientV2ControlState, ClientV2ConversationState, ClientV2Event,
     ClientV2EventEnvelope, ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent,
     ClientV2TeamResponse, ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
-    fact::ActorRef, fact::ContentValue, fact::ControlDelta, fact::InterAgentDelivery,
-    fact::InteractionDecision, fact::InteractionExpiryReason, fact::InteractionId,
-    fact::InteractionKind, fact::ProjectionPayload, fact::TeamAgentResidency,
-    fact::TeamAgentSnapshot, fact::TeamAgentStatus, fact::TeamBoardSnapshot, fact::TeamDelta,
-    fact::TeamInboxSummary, fact::TeamTaskSnapshot, fact::ToolCallId, ringing::CanonicalCursor,
-    ringing::CursorToken, ringing_v2::RingingV2AskOutcome, ringing_v2::RingingV2CommandAck,
-    ringing_v2::RingingV2CommandResult, ringing_v2::RingingV2CommandStatus,
-    ringing_v2::RingingV2ExistingResult, ringing_v2::RingingV2ResetReason,
-    ringing_v2::RingingV2ResetRequired, session_projection::TeamSnapshot, team::TaskBoardSnapshot,
 };
 
 use qaqh_client::{fact, ringing, ringing_v2, session_projection, team};

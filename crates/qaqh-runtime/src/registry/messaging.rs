@@ -41,38 +41,33 @@ impl AgentRegistry {
         // of reporting a generic "unavailable".
         let reload = matches!(
             &env.command,
-            qaqh_ringing::RingingCommand::Control(
-                qaqh_domain::ControlCommand::AgentReloadConfig
-            )
+            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::AgentReloadConfig)
         )
         .then(|| {
-            crate::agent::session_config::session_effective_config(
-                Some(&self.sessions),
-                session_id,
-            )
-            .ok_or_else(|| format!("effective config unavailable for {session_id}"))
-            .and_then(|(config, _)| {
-                // This command reloads provider settings. The session actor
-                // keeps the tool catalog created with its live ToolManager.
-                let provider =
-                    crate::session_agent::assembly::provider_spec(&config, Vec::new());
-                let workspace_root =
-                    super::spawn::ensure_session_workspace(&self.sessions, session_id)?;
-                let role = match self.agent_catalog.get_by_id(session_id) {
-                    Some(metadata) if !metadata.agent_path.is_root() => {
-                        crate::session_agent::assembly::subagent_sandbox()
-                    }
-                    _ => qaqh_workspace::tool_api::SandboxMode::Main,
-                };
-                let policy = crate::session_agent::assembly::tool_policy(
-                    workspace_root,
-                    config.permission_level,
-                    role,
-                    std::collections::HashSet::new(),
-                    config.sandbox.enabled,
-                );
-                Ok((provider, policy))
-            })
+            crate::agent::session_config::session_effective_config(Some(&self.sessions), session_id)
+                .ok_or_else(|| format!("effective config unavailable for {session_id}"))
+                .and_then(|(config, _)| {
+                    // This command reloads provider settings. The session actor
+                    // keeps the tool catalog created with its live ToolManager.
+                    let provider =
+                        crate::session_agent::assembly::provider_spec(&config, Vec::new());
+                    let workspace_root =
+                        super::spawn::ensure_session_workspace(&self.sessions, session_id)?;
+                    let role = match self.agent_catalog.get_by_id(session_id) {
+                        Some(metadata) if !metadata.agent_path.is_root() => {
+                            crate::session_agent::assembly::subagent_sandbox()
+                        }
+                        _ => qaqh_workspace::tool_api::SandboxMode::Main,
+                    };
+                    let policy = crate::session_agent::assembly::tool_policy(
+                        workspace_root,
+                        config.permission_level,
+                        role,
+                        std::collections::HashSet::new(),
+                        config.sandbox.enabled,
+                    );
+                    Ok((provider, policy))
+                })
         });
         let write = |instance: &AgentInstance| -> QaqhResult<()> {
             match &instance.transport {
@@ -159,15 +154,32 @@ impl AgentRegistry {
                     ) => {
                         let (provider, policy) = reload
                             .clone()
-                            .ok_or_else(|| {
-                                format!("reload config unavailable for {session_id}")
-                            })?
+                            .ok_or_else(|| format!("reload config unavailable for {session_id}"))?
                             .map_err(|error| {
                                 format!("reload config failed for {session_id}: {error}")
                             })?;
                         handle
                             .reload_provider(provider, Some(policy))
                             .map_err(|e| format!("thin agent reload error: {e:?}").into())
+                    }
+                    qaqh_ringing::RingingCommand::Control(
+                        qaqh_domain::ControlCommand::PublishResourceChanged { resource_kind },
+                    ) => {
+                        let kind = match resource_kind.as_str() {
+                            "todo" => qaqh_session::session_fact_v2::ResourceKind::Todo,
+                            "skill" => qaqh_session::session_fact_v2::ResourceKind::Skill,
+                            "plan" => qaqh_session::session_fact_v2::ResourceKind::Plan,
+                            "activity" => qaqh_session::session_fact_v2::ResourceKind::Activity,
+                            "file" => qaqh_session::session_fact_v2::ResourceKind::File,
+                            _ => {
+                                return Err(
+                                    format!("unknown resource kind: {resource_kind}").into()
+                                );
+                            }
+                        };
+                        handle.publish_resource_changed(kind).map_err(|error| {
+                            format!("resource notification failed: {error:?}").into()
+                        })
                     }
                     other => Err(format!(
                         "thin agent for {session_id} does not implement command {}",

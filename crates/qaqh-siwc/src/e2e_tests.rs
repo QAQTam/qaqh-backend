@@ -97,6 +97,8 @@ impl Harness {
         store.save(&file).expect("save");
     }
 
+    /// 磁盘断言仅在 Windows 编译（调用点同理），非 Windows 平台不产生 dead_code。
+    #[cfg(windows)]
     fn store_text(&self) -> String {
         let store = CredentialStore::new(self.manager.dir());
         std::fs::read_to_string(store.path()).expect("read store")
