@@ -7,7 +7,7 @@
 //! that happens after the gate call has begun is `StartedUnknown` until a
 //! terminal response from the provider stream is observed and classified.
 
-use qaqh_agentloop_core::{DispatchEvidence, mailbox::FrameSize};
+use qaqh_agentloop_core::mailbox::FrameSize;
 use qaqh_session::{
     canonical::sha256_content_hash,
     session_commit::{CommittedExecution, FenceReason, SessionCommit, SessionCommitError},
@@ -51,6 +51,17 @@ pub struct ProviderRequestSpec {
     pub tools: Option<Vec<ToolDef>>,
     pub max_tokens: u32,
     pub effort: Option<String>,
+}
+
+/// 一次模型请求实际走到哪(证明链外的最小等价物)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Evidence {
+    /// 未出发(取消/凭据失败):无任何可见输出。
+    NotStarted,
+    /// 已出发但无终态(网络断/取消中):部分文本仍在。
+    StartedUnknown,
+    /// 拿到完整终态响应。
+    Terminal,
 }
 
 impl ProviderRequestSpec {
@@ -182,9 +193,8 @@ pub fn build_model_round_started(
 
 #[derive(Debug, Clone)]
 pub struct ProviderOutcome {
-    /// How far the effect actually got. Only [`DispatchEvidence::NotStarted`]
-    /// may be authorized again without reconciling against the commit log.
-    pub evidence: DispatchEvidence,
+    /// How far the effect actually got.
+    pub evidence: Evidence,
     /// Neutral assistant message (`Reasoning`, `Text`, `ToolUse`, `WebSearchCall`).
     /// Provider-specific `ResponseOutputItem` entries are separated into
     /// [`Self::opaque_items`] so they can be persisted in `opaque_refs`.
@@ -450,6 +460,226 @@ pub async fn run(
     .await
 }
 
+/// 一次模型请求(新回合循环直驱;无执行证明链)。
+///
+/// 取消语义与证明链时代一致:gate 调用开始后取消不算终态,返回
+/// `StartedUnknown` 并保留已流出的部分文本。
+pub async fn run_round(
+    spec: ProviderRequestSpec,
+    messages: Vec<Message>,
+    user_id: String,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    progress: Option<ProgressStream>,
+) -> ProviderOutcome {
+    if *cancel.borrow() {
+        return not_started("cancelled before provider request started");
+    }
+    let spec = match resolve_provider_credential(spec) {
+        Ok(spec) => spec,
+        Err(error) => {
+            log::error!("[provider] credential resolution failed: {error}");
+            return not_started(&error);
+        }
+    };
+    let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));
+    let flag = cancelled.clone();
+    let display = progress.clone();
+    let mut job = tokio::task::spawn_blocking(move || {
+        stream_once(spec, messages, user_id, &flag, display)
+    });
+    let mut finished: Option<ProviderOutcome> = None;
+    loop {
+        tokio::select! {
+            result = &mut job => {
+                finished = Some(match result {
+                    Ok(value) => value,
+                    Err(error) => {
+                        failed_after_start(&format!("provider worker join failed: {error}"))
+                    }
+                });
+                break;
+            }
+            changed = cancel.changed() => {
+                if changed.is_err() || *cancel.borrow() {
+                    cancelled.store(true, Ordering::Release);
+                    break;
+                }
+            }
+        }
+    }
+    let outcome = match finished {
+        Some(value) => value,
+        // Never drop a running blocking handle and claim the provider stopped.
+        None => match job.await {
+            Ok(value) => value,
+            Err(error) => failed_after_start(&format!("provider worker join failed: {error}")),
+        },
+    };
+    // Publish the final cumulative value regardless of the throttle window so a
+    // cancelled or failed attempt still shows everything that was generated.
+    if let Some(display) = &progress {
+        if let Some(text) = outcome.partial_text.as_deref() {
+            publish_block(display, ProgressBlockKind::Answer, text);
+        }
+        if let Some(text) = outcome.partial_reasoning.as_deref() {
+            publish_block(display, ProgressBlockKind::Reasoning, text);
+        }
+    }
+    outcome
+}
+
+/// 阻塞执行一次 gate 流式调用并分类结果(run_round 的同步核心)。
+fn stream_once(
+    spec: ProviderRequestSpec,
+    messages: Vec<Message>,
+    user_id: String,
+    flag: &Arc<AtomicBool>,
+    display: Option<ProgressStream>,
+) -> ProviderOutcome {
+    let mut final_event = None;
+    let mut stream_usage = None;
+    let mut stream_error = None;
+    let mut duplicate_done = false;
+    let mut partial_text = String::new();
+    let mut partial_reasoning = String::new();
+    let mut last_emit: Option<Instant> = None;
+    let mut tool_args: HashMap<usize, (String, String, String)> = HashMap::new();
+    let result = qaqh_gate::chat_stream(
+        &spec.provider,
+        messages,
+        spec.tools,
+        spec.max_tokens,
+        spec.effort,
+        Some(user_id),
+        Some(flag),
+        &mut |event| match event {
+            qaqh_gate::StreamEvent::Done {
+                raw_message,
+                usage,
+                stop_reason,
+            } => {
+                if final_event.is_some() {
+                    duplicate_done = true;
+                }
+                final_event = Some((raw_message, usage, stop_reason));
+            }
+            qaqh_gate::StreamEvent::UsageUpdate(usage) => {
+                stream_usage = Some(usage);
+            }
+            qaqh_gate::StreamEvent::Error { message, .. } => {
+                stream_error = Some(message);
+            }
+            qaqh_gate::StreamEvent::ContentDelta(text) => {
+                if partial_text.len() < MAX_PARTIAL_TEXT_BYTES {
+                    partial_text.push_str(&text);
+                }
+                if let Some(display) = &display
+                    && due(&mut last_emit)
+                {
+                    publish_block(display, ProgressBlockKind::Answer, &partial_text);
+                }
+            }
+            qaqh_gate::StreamEvent::ReasoningDelta { kind, text } => {
+                if !kind.is_displayable() {
+                    return;
+                }
+                if partial_reasoning.len() < MAX_PARTIAL_TEXT_BYTES {
+                    partial_reasoning.push_str(&text);
+                }
+                if let Some(display) = &display
+                    && due(&mut last_emit)
+                {
+                    publish_block(display, ProgressBlockKind::Reasoning, &partial_reasoning);
+                }
+            }
+            qaqh_gate::StreamEvent::ToolCallProgress {
+                index,
+                id,
+                name,
+                args_chunk,
+            } => {
+                if id.is_empty() {
+                    return;
+                }
+                let entry = tool_args
+                    .entry(index)
+                    .or_insert_with(|| (id, name.clone(), String::new()));
+                entry.1 = name;
+                entry.2.push_str(&args_chunk);
+                if let Some(display) = &display
+                    && due(&mut last_emit)
+                {
+                    publish_tool_input(display, &entry.0, &entry.1, &entry.2);
+                }
+            }
+            qaqh_gate::StreamEvent::NativeToolProgress {
+                index,
+                call_id,
+                name,
+                input_so_far,
+                ..
+            } => {
+                let Some(call_id) = call_id.filter(|id| !id.is_empty()) else {
+                    return;
+                };
+                let name = name.unwrap_or_default();
+                tool_args.insert(index, (call_id.clone(), name.clone(), input_so_far.clone()));
+                if let Some(display) = &display
+                    && due(&mut last_emit)
+                {
+                    publish_tool_input(display, &call_id, &name, &input_so_far);
+                }
+            }
+            qaqh_gate::StreamEvent::WebSearchStatus(_)
+            | qaqh_gate::StreamEvent::Retrying { .. } => {}
+        },
+    );
+    if let Err(error) = result {
+        let detail = stream_error.unwrap_or_else(|| error.to_string());
+        let mut outcome = failed_after_start(&detail);
+        outcome.partial_text = (!partial_text.is_empty()).then_some(partial_text);
+        outcome.partial_reasoning = (!partial_reasoning.is_empty()).then_some(partial_reasoning);
+        return outcome;
+    }
+    if duplicate_done {
+        return failed_after_start("provider emitted multiple terminal Done events");
+    }
+    let Some((raw_message, done_usage, stop_reason)) = final_event else {
+        return failed_after_start("missing terminal provider response");
+    };
+    if raw_message.role != "assistant" {
+        return failed_after_start("provider response role is not assistant");
+    }
+
+    let mut neutral_blocks = Vec::with_capacity(raw_message.content.len());
+    let mut opaque_items = Vec::new();
+    for block in raw_message.content {
+        match block {
+            ContentBlock::ResponseOutputItem { item } => opaque_items.push(item),
+            other => neutral_blocks.push(other),
+        }
+    }
+    let message = Message {
+        msg_id: raw_message.msg_id,
+        role: raw_message.role,
+        name: raw_message.name,
+        content: neutral_blocks,
+    };
+    let (finish, incomplete_reason) = classify(stop_reason.as_deref(), &message);
+    ProviderOutcome {
+        evidence: Evidence::Terminal,
+        message: Some(message),
+        opaque_items,
+        usage: done_usage.or(stream_usage),
+        stop_reason,
+        finish: Some(finish),
+        incomplete_reason,
+        partial_text: (!partial_text.is_empty()).then_some(partial_text),
+        partial_reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
+        error: None,
+    }
+}
+
 /// Run a committed model intent and verify that its `RequestIdentity` matches
 /// the exact `ProviderRequestSpec` and frozen context before touching the wire.
 pub async fn run_verified(
@@ -528,152 +758,7 @@ pub async fn run_spec(
     let flag = cancelled.clone();
     let display = progress.clone();
     let mut job = tokio::task::spawn_blocking(move || {
-        let mut final_event = None;
-        let mut stream_usage = None;
-        let mut stream_error = None;
-        let mut duplicate_done = false;
-        let mut partial_text = String::new();
-        let mut partial_reasoning = String::new();
-        let mut last_emit: Option<Instant> = None;
-        let mut tool_args: HashMap<usize, (String, String, String)> = HashMap::new();
-        let result = qaqh_gate::chat_stream(
-            &spec.provider,
-            messages,
-            spec.tools,
-            spec.max_tokens,
-            spec.effort,
-            Some(user_id),
-            Some(&flag),
-            &mut |event| match event {
-                qaqh_gate::StreamEvent::Done {
-                    raw_message,
-                    usage,
-                    stop_reason,
-                } => {
-                    if final_event.is_some() {
-                        duplicate_done = true;
-                    }
-                    final_event = Some((raw_message, usage, stop_reason));
-                }
-                qaqh_gate::StreamEvent::UsageUpdate(usage) => {
-                    stream_usage = Some(usage);
-                }
-                qaqh_gate::StreamEvent::Error { message, .. } => {
-                    stream_error = Some(message);
-                }
-                qaqh_gate::StreamEvent::ContentDelta(text) => {
-                    if partial_text.len() < MAX_PARTIAL_TEXT_BYTES {
-                        partial_text.push_str(&text);
-                    }
-                    if let Some(display) = &display
-                        && due(&mut last_emit)
-                    {
-                        publish_block(display, ProgressBlockKind::Answer, &partial_text);
-                    }
-                }
-                qaqh_gate::StreamEvent::ReasoningDelta { kind, text } => {
-                    if !kind.is_displayable() {
-                        return;
-                    }
-                    if partial_reasoning.len() < MAX_PARTIAL_TEXT_BYTES {
-                        partial_reasoning.push_str(&text);
-                    }
-                    if let Some(display) = &display
-                        && due(&mut last_emit)
-                    {
-                        publish_block(display, ProgressBlockKind::Reasoning, &partial_reasoning);
-                    }
-                }
-                qaqh_gate::StreamEvent::ToolCallProgress {
-                    index,
-                    id,
-                    name,
-                    args_chunk,
-                } => {
-                    if id.is_empty() {
-                        return;
-                    }
-                    let entry = tool_args
-                        .entry(index)
-                        .or_insert_with(|| (id, name.clone(), String::new()));
-                    entry.1 = name;
-                    entry.2.push_str(&args_chunk);
-                    if let Some(display) = &display
-                        && due(&mut last_emit)
-                    {
-                        publish_tool_input(display, &entry.0, &entry.1, &entry.2);
-                    }
-                }
-                qaqh_gate::StreamEvent::NativeToolProgress {
-                    index,
-                    call_id,
-                    name,
-                    input_so_far,
-                    ..
-                } => {
-                    let Some(call_id) = call_id.filter(|id| !id.is_empty()) else {
-                        return;
-                    };
-                    let name = name.unwrap_or_default();
-                    tool_args.insert(
-                        index,
-                        (call_id.clone(), name.clone(), input_so_far.clone()),
-                    );
-                    if let Some(display) = &display
-                        && due(&mut last_emit)
-                    {
-                        publish_tool_input(display, &call_id, &name, &input_so_far);
-                    }
-                }
-                qaqh_gate::StreamEvent::WebSearchStatus(_)
-                | qaqh_gate::StreamEvent::Retrying { .. } => {}
-            },
-        );
-        if let Err(error) = result {
-            let detail = stream_error.unwrap_or_else(|| error.to_string());
-            let mut outcome = failed_after_start(&detail);
-            outcome.partial_text = (!partial_text.is_empty()).then_some(partial_text);
-            outcome.partial_reasoning =
-                (!partial_reasoning.is_empty()).then_some(partial_reasoning);
-            return outcome;
-        }
-        if duplicate_done {
-            return failed_after_start("provider emitted multiple terminal Done events");
-        }
-        let Some((raw_message, done_usage, stop_reason)) = final_event else {
-            return failed_after_start("missing terminal provider response");
-        };
-        if raw_message.role != "assistant" {
-            return failed_after_start("provider response role is not assistant");
-        }
-
-        let mut neutral_blocks = Vec::with_capacity(raw_message.content.len());
-        let mut opaque_items = Vec::new();
-        for block in raw_message.content {
-            match block {
-                ContentBlock::ResponseOutputItem { item } => opaque_items.push(item),
-                other => neutral_blocks.push(other),
-            }
-        }
-        let message = Message {
-            msg_id: raw_message.msg_id,
-            role: raw_message.role,
-            name: raw_message.name,
-            content: neutral_blocks,
-        };
-        let (finish, incomplete_reason) = classify(stop_reason.as_deref(), &message);
-        ProviderOutcome {
-            evidence: DispatchEvidence::StartedTerminal,
-            message: Some(message),
-            opaque_items,
-            usage: done_usage.or(stream_usage),
-            stop_reason,
-            finish: Some(finish),
-            incomplete_reason,
-            partial_text: (!partial_text.is_empty()).then_some(partial_text),
-            partial_reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
-            error: None,
-        }
+        stream_once(spec, messages, user_id, &flag, display)
     });
     let mut finished: Option<ProviderOutcome> = None;
     loop {
@@ -861,7 +946,7 @@ fn json_hash<T: serde::Serialize + ?Sized>(value: &T) -> ContentHash {
 /// Nothing was submitted to the provider under this identity.
 fn not_started(message: &str) -> ProviderOutcome {
     ProviderOutcome {
-        evidence: DispatchEvidence::NotStarted,
+        evidence: Evidence::NotStarted,
         message: None,
         opaque_items: Vec::new(),
         usage: None,
@@ -877,7 +962,7 @@ fn not_started(message: &str) -> ProviderOutcome {
 /// The request may have reached the upstream service; a result is missing.
 fn failed_after_start(message: &str) -> ProviderOutcome {
     ProviderOutcome {
-        evidence: DispatchEvidence::StartedUnknown,
+        evidence: Evidence::StartedUnknown,
         message: None,
         opaque_items: Vec::new(),
         usage: None,

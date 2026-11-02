@@ -411,6 +411,19 @@ pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusql
     Ok(())
 }
 
+/// 状态单列迁移(declared → awaiting_permission 等)。
+pub fn set_tool_call_status(
+    conn: &mut Connection,
+    call_id: &str,
+    status: &'static str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE tool_calls SET status = ?2 WHERE call_id = ?1",
+        params![call_id, status],
+    )?;
+    Ok(())
+}
+
 /// 运行中/待授权/后台工具:快照必须包含未完成卡片。
 pub fn unfinished_tool_calls(
     conn: &Connection,
