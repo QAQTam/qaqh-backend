@@ -375,8 +375,10 @@ mod tests {
         config.tool_allowlist = vec!["read".into(), "exec".into()];
 
         config.tool_allowlist_enabled = true;
-        let restricted =
-            SpawnInput::for_session("s", Path::new("/tmp/s"), &config, PathBuf::from("/w"));
+        let restricted = {
+            let lifecycle = test_lifecycle();
+            SpawnInput::for_session("s", Path::new("/tmp/s"), &config, PathBuf::from("/w"), lifecycle)
+        };
         assert_eq!(
             restricted.allowed_tools,
             vec!["read".to_string(), "exec".to_string()]
@@ -385,7 +387,18 @@ mod tests {
 
         // Disabled allowlist = 空名单 = 不限制（不是「一个工具都不给」）。
         config.tool_allowlist_enabled = false;
-        let open = SpawnInput::for_session("s", Path::new("/tmp/s"), &config, PathBuf::from("/w"));
+        let open = {
+            let lifecycle = test_lifecycle();
+            SpawnInput::for_session("s", Path::new("/tmp/s"), &config, PathBuf::from("/w"), lifecycle)
+        };
         assert!(open.allowed_tools.is_empty());
+    }
+
+    fn test_lifecycle() -> qaqh_session::owner::ToolLifecycle {
+        let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+        let db = std::sync::Arc::new(
+            qaqh_session::db::Db::open(dir.path().join("qaqh.db")).expect("open db"),
+        );
+        qaqh_session::owner::SessionOwner::new("s", db).lifecycle()
     }
 }

@@ -16,7 +16,7 @@ use qaqh_session::{
     canonical::sha256_content_hash,
     owner::{ToolLifecycle, ToolRun, ToolTerminal},
     session_commit::{CommittedExecution, FenceReason},
-    session_fact_v2::{FactPayload, SideEffectClass, ToolReplayCapability, ToolTerminalStatus},
+    session_fact_v2::{FactPayload, SideEffectClass, ToolTerminalStatus},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -30,15 +30,15 @@ use std::{
 
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaReservation, ReleaseReason};
 
-/// Everything the authorized effect pinned before it was committed.
+/// Everything the authorized effect pinned before dispatch.
 #[derive(Debug, Clone)]
 pub struct ToolRequest {
     pub execution_id: String,
     pub call_id: String,
     pub tool_name: String,
-    pub side_effect_class: SideEffectClass,
-    pub replay: ToolReplayCapability,
-    /// Effective arguments, verified against the intent's content reference.
+    /// 只读工具被取消时无需不确定性上报(直接 Cancelled)。
+    pub read_only: bool,
+    /// Effective arguments (JSON bytes).
     pub args: Vec<u8>,
 }
 
@@ -787,7 +787,7 @@ impl ToolPort for WorkspaceToolPort {
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::AfterStart(exec_result.content))
             }
-            "cancelled" if request.side_effect_class != SideEffectClass::ReadOnly => {
+            "cancelled" if !request.read_only => {
                 self.retain_owner(
                     request,
                     Self::uncertain_process_id(request),
@@ -954,8 +954,7 @@ pub async fn run<P: ToolPort>(
         execution_id: intent.execution_id.as_str().to_owned(),
         call_id: intent.call_id.as_str().to_owned(),
         tool_name,
-        side_effect_class: intent.side_effect_class,
-        replay: intent.replay_capability.clone(),
+        read_only: intent.side_effect_class == SideEffectClass::ReadOnly,
         args,
     };
     let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));

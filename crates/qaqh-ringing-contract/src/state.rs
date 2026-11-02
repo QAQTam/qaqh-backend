@@ -85,10 +85,20 @@ pub enum TimelineEntry {
         content: ContentValue,
         model: String,
         usage: Option<UsageInfo>,
+        /// Provider 专属续传状态(Responses API encrypted reasoning 等),
+        /// 下一轮原样回传;客户端不解读。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        opaque: Vec<serde_json::Value>,
     },
     ToolCall {
         call_id: ToolCallId,
         turn_id: Option<TurnId>,
+    },
+    /// 工具结果进入对话流(回传模型的 tool 消息与前端 transcript 同源)。
+    ToolResult {
+        call_id: ToolCallId,
+        turn_id: Option<TurnId>,
+        content: ContentValue,
     },
     Compaction {
         summary: ContentValue,

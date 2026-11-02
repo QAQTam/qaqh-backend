@@ -1042,8 +1042,7 @@ impl SessionAgent {
             execution_id: format!("exec_{}", generate_ulid()),
             call_id: call_id.as_str().to_string(),
             tool_name: name.to_string(),
-            side_effect_class: SideEffectClass::WorkspaceWrite,
-            replay: ToolReplayCapability::NoReplay,
+            read_only: false,
             args: args.to_vec(),
         }
     }
@@ -1875,7 +1874,7 @@ impl SessionAgent {
         }
         self.active_provider_identity = None;
 
-        if outcome.evidence == DispatchEvidence::NotStarted {
+        if outcome.evidence == crate::provider_job::Evidence::NotStarted {
             // Nothing reached the wire; the round never produced a response.
             let cancelled = outcome
                 .error
