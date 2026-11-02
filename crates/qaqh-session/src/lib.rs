@@ -12,6 +12,9 @@ pub mod context_projection;
 pub mod grouping;
 pub mod manager;
 pub mod meta;
+pub mod owner;
+#[cfg(test)]
+mod owner_tests;
 pub mod projection;
 pub mod session_commit;
 pub mod session_fact_v2;

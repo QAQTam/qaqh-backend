@@ -109,7 +109,7 @@ async fn materialized_batch_session_spawns_and_reopens_without_reset() {
         .expect("materialize");
     let journal_before =
         std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("baseline journal");
-    let mut registry = AgentRegistry::new(sessions);
+    let mut registry = AgentRegistry::new(sessions, test_owner_dir());
     // session.new/session.create both materialize before calling spawn_new.
     for _ in 0..2 {
         registry
@@ -158,7 +158,7 @@ fn v2_residency_overlay_tracks_worker_lifecycle() {
     .expect("materialize canonical session");
 
     let hub = Arc::new(V2ProjectionHub::new("registry-residency-test"));
-    let mut registry = AgentRegistry::new(sessions.clone());
+    let mut registry = AgentRegistry::new(sessions.clone(), test_owner_dir());
     registry
         .register_root_agent(&session_id, unix_ms())
         .expect("register root");
@@ -228,7 +228,7 @@ fn list_agents_uses_explicit_residency_and_parent_terminal_status() {
     let child_path = AgentPath::parse_absolute("/root/review").expect("child path");
     let now = unix_ms();
 
-    let mut registry = AgentRegistry::new(sessions.clone());
+    let mut registry = AgentRegistry::new(sessions.clone(), test_owner_dir());
     registry
         .register_root_agent(&root, now)
         .expect("register root metadata");
@@ -397,6 +397,7 @@ fn registry_subscription_ingress_is_connection_scoped_and_shutdown_is_terminal()
         instances: HashMap::from([("seed-registry".into(), instance)]),
         activity: SessionActivityTracker::default(),
         sessions,
+        owners: test_owner_dir(),
         hub: None,
         shutting_down: false,
         last_spawn: HashMap::new(),
@@ -470,6 +471,7 @@ fn parent_cancel_uses_token_tree_and_still_delivers_child_terminal_command() {
         instances: HashMap::from([("parent-seed".into(), parent), ("child-seed".into(), child)]),
         activity: SessionActivityTracker::default(),
         sessions,
+        owners: test_owner_dir(),
         hub: None,
         shutting_down: false,
         last_spawn: HashMap::new(),
@@ -518,6 +520,7 @@ fn targeted_cancel_does_not_preset_the_cancel_token() {
         instances: HashMap::from([("seed-a".into(), instance)]),
         activity: SessionActivityTracker::default(),
         sessions,
+        owners: test_owner_dir(),
         hub: None,
         shutting_down: false,
         last_spawn: HashMap::new(),
@@ -562,7 +565,7 @@ fn message_quota_rejects_in_flight_and_outbound_over_limit() {
         temp.path().join("sessions"),
         temp.path().join("active.json"),
     ));
-    let mut registry = AgentRegistry::new(sessions);
+    let mut registry = AgentRegistry::new(sessions, test_owner_dir());
     registry.set_message_quota_limits(2, 3);
 
     assert!(
@@ -588,4 +591,13 @@ fn message_quota_rejects_in_flight_and_outbound_over_limit() {
             .is_ok(),
         "each root tree has its own outbound budget"
     );
+}
+
+/// 测试 owner 目录:tempdir 业务库(dir 泄漏至进程结束,测试进程可接受)。
+fn test_owner_dir() -> std::sync::Arc<qaqh_session::owner::OwnerDirectory> {
+    let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+    std::sync::Arc::new(
+        qaqh_session::owner::OwnerDirectory::open(dir.path().join("qaqh.db"))
+            .expect("open owners db"),
+    )
 }

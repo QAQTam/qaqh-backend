@@ -223,6 +223,8 @@ pub struct SpawnInput<'a> {
     pub permission_level: u8,
     pub sandbox: qaqh_workspace::tool_api::SandboxMode,
     pub workspace_root: PathBuf,
+    /// 会话 owner 的生命周期句柄:工具运行状态/实时输出/结构化结果的业务落点。
+    pub lifecycle: qaqh_session::owner::ToolLifecycle,
 }
 
 impl<'a> SpawnInput<'a> {
@@ -232,6 +234,7 @@ impl<'a> SpawnInput<'a> {
         session_dir: &'a Path,
         config: &'a qaqh_config::Config,
         workspace_root: PathBuf,
+        lifecycle: qaqh_session::owner::ToolLifecycle,
     ) -> Self {
         let allowed_tools = if config.tool_allowlist_enabled {
             config.tool_allowlist.clone()
@@ -246,6 +249,7 @@ impl<'a> SpawnInput<'a> {
             permission_level: config.permission_level,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             workspace_root,
+            lifecycle,
         }
     }
 }
@@ -265,6 +269,7 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<PreparedSession, String> {
         permission_level,
         sandbox,
         workspace_root,
+        lifecycle,
     } = input;
 
     let identity = CanonicalSessionIdentity::open_or_create(session_dir)
@@ -305,6 +310,7 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<PreparedSession, String> {
         Arc::clone(&tool_manager),
         policy,
         None,
+        lifecycle,
     ));
     Ok(PreparedSession {
         commit,

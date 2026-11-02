@@ -83,7 +83,7 @@ fn spawn_subagent_runs_inprocess_loops_and_shutdown_signals_all() {
 
     let session_id = format!("sub-inproc-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-inprocess-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     registry
@@ -216,7 +216,7 @@ fn parent_cancel_propagates_to_children() {
     let parent = format!("sub-parent-{}", std::process::id());
     let child = format!("sub-child-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-parent-cancel-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(Arc::clone(&hub));
 
     // 父：无运行时上下文 → 无父链（顶层会话语义）。
@@ -281,7 +281,7 @@ fn parent_close_cancels_and_joins_child_tree() {
     let child = format!("sub-close-child-{}", std::process::id());
     let grandchild = format!("sub-close-grandchild-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-parent-close-tree-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
     // This test intentionally builds a grandchild tree; opt into depth 2.
     registry.set_max_depth(2);
@@ -331,7 +331,7 @@ fn parent_unload_waits_child_terminal_join() {
     let parent = format!("sub-unload-parent-{}", std::process::id());
     let child = format!("sub-unload-child-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-parent-unload-order-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     qaqh_workspace::runtime::clear_context();
@@ -381,7 +381,7 @@ fn shutdown_all_waits_child_terminal_join() {
     let parent = format!("sub-shutdown-parent-{}", std::process::id());
     let child = format!("sub-shutdown-child-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-shutdown-order-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     qaqh_workspace::runtime::clear_context();
@@ -432,7 +432,7 @@ fn dead_parent_closes_child_tree_before_respawn() {
     let parent = format!("sub-dead-parent-{}", std::process::id());
     let child = format!("sub-dead-child-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-dead-parent-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     qaqh_workspace::runtime::clear_context();
@@ -496,7 +496,7 @@ fn parent_idle_unload_cancels_and_joins_child_tree() {
     let parent = format!("session-idle-parent-{}", std::process::id());
     let child = format!("sub-idle-child-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-parent-idle-unload-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     qaqh_workspace::runtime::clear_context();
@@ -530,7 +530,7 @@ fn childless_close_remains_working_and_idempotent() {
     let _root = init_env("subagent-childless-close-test");
     let session_id = format!("sub-childless-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-childless-close-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
 
     qaqh_workspace::runtime::clear_context();
@@ -553,7 +553,7 @@ fn spawn_commits_quota_reservation() {
     let parent = format!("quota-parent-{}", std::process::id());
     let child = format!("quota-child-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-quota-commit-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
     registry.set_quota_limits(QuotaLimits::new(10, 10).expect("limits"));
 
@@ -577,7 +577,7 @@ fn spawn_rejected_before_side_effect_when_quota_exhausted() {
     let parent = format!("quota-reject-parent-{}", std::process::id());
     let child = format!("quota-reject-child-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-quota-reject-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
     registry.set_quota_limits(QuotaLimits::new(0, 0).expect("limits"));
 
@@ -608,7 +608,7 @@ fn spawn_rejects_grandchild_at_default_max_depth() {
     let child = format!("depth-child-{}", std::process::id());
     let grandchild = format!("depth-grandchild-{}", std::process::id());
     let hub = Arc::new(RingingHub::new("subagent-depth-test"));
-    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global());
+    let mut registry = AgentRegistry::new(qaqh_session::SessionManager::global(), test_owner_dir());
     registry.attach_ringing(hub);
     registry.set_max_depth(1);
 
@@ -627,4 +627,13 @@ fn spawn_rejects_grandchild_at_default_max_depth() {
     );
 
     registry.shutdown_all();
+}
+
+/// 测试 owner 目录:tempdir 业务库(dir 泄漏至进程结束,测试进程可接受)。
+fn test_owner_dir() -> std::sync::Arc<qaqh_session::owner::OwnerDirectory> {
+    let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+    std::sync::Arc::new(
+        qaqh_session::owner::OwnerDirectory::open(dir.path().join("qaqh.db"))
+            .expect("open owners db"),
+    )
 }

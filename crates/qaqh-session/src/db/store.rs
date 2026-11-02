@@ -207,6 +207,17 @@ pub fn start_turn(
     Ok(())
 }
 
+/// 当前活跃回合:工具落库时的回合归属来源(owner 决定业务顺序,数据库是事实)。
+pub fn active_turn_id(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT turn_id FROM turns WHERE session_id = ?1 AND status = 'active'
+         ORDER BY seq DESC LIMIT 1",
+        [session_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 /// `outcome_json` 保存 serde 形式的契约 `TurnOutcome`;视图层反序列化,坏数据报错。
 pub fn finish_turn(
     conn: &mut Connection,
@@ -234,7 +245,8 @@ pub fn next_block_ord(conn: &Connection, session_id: &str) -> rusqlite::Result<i
 pub struct NewBlock {
     pub block_id: String,
     pub session_id: String,
-    pub turn_id: String,
+    /// 回合内块的归属;会话级块(如压缩摘要)为 None。
+    pub turn_id: Option<String>,
     pub kind: &'static str,
     pub text: Option<String>,
     pub call_id: Option<String>,
@@ -314,7 +326,8 @@ pub struct BlockRow {
 pub struct ToolCallUpsert {
     pub call_id: String,
     pub session_id: String,
-    pub turn_id: String,
+    /// 工具一律在回合内调度;旧链未写回合表时为 None(P3 接线后总有值)。
+    pub turn_id: Option<String>,
     pub tool_name: String,
     pub args_json: Option<String>,
     pub status: &'static str,
@@ -340,41 +353,74 @@ pub fn upsert_tool_call(conn: &mut Connection, call: &ToolCallUpsert) -> rusqlit
     Ok(())
 }
 
-pub fn finish_tool_call(
-    conn: &mut Connection,
-    call_id: &str,
-    status: &str,
-    output_text: Option<&str>,
-    output_ref: Option<&str>,
-    output_truncated: bool,
-    error_json: Option<&str>,
-    meta_json: Option<&str>,
-) -> rusqlite::Result<()> {
+/// 工具调用终态落库。upsert:调度前被拒的工具没有 started 行,终态直落。
+#[derive(Debug, Clone)]
+pub struct ToolCallFinish {
+    pub call_id: String,
+    pub session_id: String,
+    pub turn_id: Option<String>,
+    pub tool_name: String,
+    pub status: &'static str,
+    pub output_text: Option<String>,
+    pub output_ref: Option<String>,
+    pub output_truncated: bool,
+    /// 契约 `ToolError` 的 serde 形式。
+    pub error_json: Option<String>,
+    /// 契约 `ToolMetrics` 的 serde 形式。
+    pub meta_json: Option<String>,
+    /// 契约 `ToolEffectInfo[]` 的 serde 形式(owner 消费的结构化效果)。
+    pub effects_json: Option<String>,
+    /// 契约 `CodeDelta` 的 serde 形式。
+    pub code_delta_json: Option<String>,
+}
+
+pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE tool_calls
-         SET status = ?2, output_text = ?3, output_ref = ?4, output_truncated = ?5,
-             error_json = ?6, meta_json = ?7, finished_at_ms = ?8
-         WHERE call_id = ?1",
+        "INSERT INTO tool_calls
+            (call_id, session_id, turn_id, tool_name, status, output_text, output_ref,
+             output_truncated, error_json, meta_json, effects_json, code_delta_json,
+             started_at_ms, finished_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT(call_id) DO UPDATE SET
+            status = excluded.status,
+            output_text = excluded.output_text,
+            output_ref = excluded.output_ref,
+            output_truncated = excluded.output_truncated,
+            error_json = excluded.error_json,
+            meta_json = excluded.meta_json,
+            effects_json = excluded.effects_json,
+            code_delta_json = excluded.code_delta_json,
+            finished_at_ms = excluded.finished_at_ms",
         params![
-            call_id,
-            status,
-            output_text,
-            output_ref,
-            i64::from(output_truncated),
-            error_json,
-            meta_json,
+            finish.call_id,
+            finish.session_id,
+            finish.turn_id,
+            finish.tool_name,
+            finish.status,
+            finish.output_text,
+            finish.output_ref,
+            i64::from(finish.output_truncated),
+            finish.error_json,
+            finish.meta_json,
+            finish.effects_json,
+            finish.code_delta_json,
+            now_ms(),
             now_ms(),
         ],
     )?;
     Ok(())
 }
 
-/// 运行中/待授权工具:快照必须包含未完成卡片。
+/// 运行中/待授权/后台工具:快照必须包含未完成卡片。
 pub fn unfinished_tool_calls(
     conn: &Connection,
     session_id: &str,
 ) -> rusqlite::Result<Vec<ToolCallRow>> {
-    read_tool_calls_where(conn, session_id, "AND status IN ('declared','awaiting_permission','running')")
+    read_tool_calls_where(
+        conn,
+        session_id,
+        "AND status IN ('declared','awaiting_permission','running','backgrounded')",
+    )
 }
 
 pub fn recent_tool_calls(
@@ -392,7 +438,8 @@ fn read_tool_calls_where(
 ) -> rusqlite::Result<Vec<ToolCallRow>> {
     let sql = format!(
         "SELECT call_id, turn_id, tool_name, args_json, status, output_text, output_ref,
-                output_truncated, error_json, meta_json, started_at_ms, finished_at_ms
+                output_truncated, error_json, meta_json, effects_json, code_delta_json,
+                started_at_ms, finished_at_ms
          FROM tool_calls WHERE session_id = ?1 {suffix}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -408,8 +455,10 @@ fn read_tool_calls_where(
             output_truncated: row.get::<_, i64>(7)? != 0,
             error_json: row.get(8)?,
             meta_json: row.get(9)?,
-            started_at_ms: row.get(10)?,
-            finished_at_ms: row.get(11)?,
+            effects_json: row.get(10)?,
+            code_delta_json: row.get(11)?,
+            started_at_ms: row.get(12)?,
+            finished_at_ms: row.get(13)?,
         })
     })?;
     rows.collect()
@@ -418,7 +467,7 @@ fn read_tool_calls_where(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallRow {
     pub call_id: String,
-    pub turn_id: String,
+    pub turn_id: Option<String>,
     pub tool_name: String,
     pub args_json: Option<String>,
     pub status: String,
@@ -427,6 +476,8 @@ pub struct ToolCallRow {
     pub output_truncated: bool,
     pub error_json: Option<String>,
     pub meta_json: Option<String>,
+    pub effects_json: Option<String>,
+    pub code_delta_json: Option<String>,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
 }
@@ -441,7 +492,8 @@ pub struct NewInteraction {
     pub session_id: String,
     pub turn_id: Option<String>,
     pub call_id: Option<String>,
-    pub kind: &'static str,
+    /// 契约 `InteractionKind` 的 serde 形式。
+    pub kind: String,
     pub payload_json: String,
 }
 

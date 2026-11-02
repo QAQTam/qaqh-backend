@@ -121,6 +121,7 @@ async fn session_agent_tool_loop_and_multi_round() {
         manager,
         policy,
         Some(ledger),
+        test_lifecycle("0198f1a0-0000-7000-8000-000000000003"),
     ));
 
     let (handle, task) = AgentHost::spawn(
@@ -238,6 +239,7 @@ async fn session_agent_ask_interaction_and_resolution() {
         manager,
         policy,
         Some(ledger),
+        test_lifecycle("0198f1a0-0000-7000-8000-000000000005"),
     ));
 
     let (handle, task) = AgentHost::spawn(
@@ -391,6 +393,7 @@ async fn session_agent_turn_lifecycle_and_shutdown() {
         manager,
         policy,
         Some(ledger),
+        test_lifecycle(identity.session_id.as_str()),
     ));
 
     let (handle, task) = AgentHost::spawn(
@@ -568,6 +571,7 @@ async fn session_agent_cancel_turn_and_recover() {
         manager,
         policy,
         Some(ledger),
+        test_lifecycle("0198f1a0-0000-7000-8000-000000000007"),
     ));
 
     let (handle, task) = AgentHost::spawn(
@@ -672,6 +676,7 @@ async fn session_agent_recovers_an_open_turn_after_crash() {
             Arc::new(Mutex::new(qaqh_workspace::registration::build_tool_manager(&[]))),
             policy(),
             None,
+            test_lifecycle(session_id.as_str()),
         ))
     };
 
@@ -740,4 +745,13 @@ async fn session_agent_recovers_an_open_turn_after_crash() {
         .expect("reopen settled");
     let obligations = settled.obligations().expect("obligations after recovery");
     assert!(!obligations.has_open_work(), "recovery must settle every obligation");
+}
+
+/// 测试 owner 句柄:tempdir 业务库(dir 泄漏至进程结束,测试进程可接受)。
+fn test_lifecycle(session_id: &str) -> qaqh_session::owner::ToolLifecycle {
+    let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
+    let db = std::sync::Arc::new(
+        qaqh_session::db::Db::open(dir.path().join("qaqh.db")).expect("open test db"),
+    );
+    qaqh_session::owner::SessionOwner::new(session_id, db).lifecycle()
 }
