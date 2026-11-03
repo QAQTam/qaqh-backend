@@ -5,8 +5,8 @@
 //! 回连自己——直接调用宿主（daemon 进程内 AgentRegistry + RingingHub +
 //! SessionManager）提供的 actor 句柄即可。
 //!
-//! 本 trait 只依赖 domain/ringing 规范 wire 类型（`RingingCommand`、
-//! `ContentRef`、`CollectorBatch` 等，PR-4-2 起直接取自 qaqh-domain /
+//! 本 trait 只依赖 Ringing 契约类型（`RingingCommand`、`ContentRef`、
+//! `CollectorBatch` 等，PR-4-2 起直接取自 qaqh-ringing-contract /
 //! qaqh-ringing），不引用 qaqh-runtime 任何类型，保证依赖方向
 //! `runtime → subagent` 不回环。
 //!
@@ -18,12 +18,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use qaqh_ringing::RingingCommand;
+use qaqh_ringing_contract::commands::InterAgentEnvelope;
+use qaqh_ringing_contract::fact::InterAgentDelivery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// 大内容引用（宿主实现 `download_content` 需要；与 trait 签名同类型），
 /// re-export 供 qaqh-runtime 消费。
-pub use qaqh_domain::ContentRef;
+pub use qaqh_ringing_contract::fact::ContentRef;
 
 /// 收集器消费的精简事件（hub-fact-bus spec 阶段 2.2）。
 ///
@@ -60,16 +62,26 @@ pub struct CollectorSubscription {
 }
 
 impl CollectorSubscription {
-    pub fn new(receiver: std::sync::mpsc::Receiver<CollectorBatch>, stop: impl FnOnce() + Send + 'static) -> Self {
-        Self { receiver, stop: Some(Box::new(stop)) }
+    pub fn new(
+        receiver: std::sync::mpsc::Receiver<CollectorBatch>,
+        stop: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            receiver,
+            stop: Some(Box::new(stop)),
+        }
     }
 
-    pub fn receiver(&self) -> &std::sync::mpsc::Receiver<CollectorBatch> { &self.receiver }
+    pub fn receiver(&self) -> &std::sync::mpsc::Receiver<CollectorBatch> {
+        &self.receiver
+    }
 }
 
 impl Drop for CollectorSubscription {
     fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() { stop(); }
+        if let Some(stop) = self.stop.take() {
+            stop();
+        }
     }
 }
 
@@ -176,7 +188,7 @@ pub struct StartSubagentRequest<'a> {
     pub timeout_secs: u64,
     pub parent_session_id: &'a str,
     pub parent_call_id: &'a str,
-    pub inter_agent: Option<qaqh_domain::InterAgentEnvelope>,
+    pub inter_agent: Option<InterAgentEnvelope>,
 }
 
 #[derive(Debug, Clone)]
@@ -184,14 +196,14 @@ pub struct SendAgentMessageRequest<'a> {
     pub caller_session_id: &'a str,
     pub target: &'a str,
     pub text: &'a str,
-    pub delivery: qaqh_domain::InterAgentDelivery,
+    pub delivery: InterAgentDelivery,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SentAgentMessage {
     pub message_id: String,
     pub recipient: String,
-    pub delivery: qaqh_domain::InterAgentDelivery,
+    pub delivery: InterAgentDelivery,
 }
 
 #[derive(Clone)]

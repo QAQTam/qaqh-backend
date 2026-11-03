@@ -186,18 +186,12 @@ impl AgentRegistry {
         // 未加载:业务库直读。
         match self.owners.session_run_state(agent.agent_id.as_str()) {
             Ok(qaqh_session::owner::SessionRunState::Running) => Ok(ListedAgentStatus::Running),
-            Ok(qaqh_session::owner::SessionRunState::Waiting) => {
-                Ok(ListedAgentStatus::WaitingUser)
-            }
+            Ok(qaqh_session::owner::SessionRunState::Waiting) => Ok(ListedAgentStatus::WaitingUser),
             Ok(qaqh_session::owner::SessionRunState::Idle) => Ok(ListedAgentStatus::Running),
             Ok(qaqh_session::owner::SessionRunState::NeverStarted) => {
                 Ok(ListedAgentStatus::PendingInit)
             }
-            Err(error) => Err(format!(
-                "business status for {}: {error}",
-                agent.agent_id
-            )
-            .into()),
+            Err(error) => Err(format!("business status for {}: {error}", agent.agent_id).into()),
         }
     }
 
@@ -252,7 +246,7 @@ impl AgentRegistry {
         Ok(())
     }
 
-    pub fn activities(&self) -> Vec<qaqh_domain::SessionActivity> {
+    pub fn activities(&self) -> Vec<qaqh_ringing_contract::SessionActivity> {
         let now = unix_ms().max(0) as u64;
         self.instances
             .values()
@@ -260,7 +254,7 @@ impl AgentRegistry {
             .collect()
     }
 
-    pub fn activity(&self, session_id: &str) -> Option<qaqh_domain::SessionActivity> {
+    pub fn activity(&self, session_id: &str) -> Option<qaqh_ringing_contract::SessionActivity> {
         let instance = self.instances.get(session_id)?;
         Some(self.activity_of(instance, unix_ms().max(0) as u64))
     }
@@ -269,19 +263,19 @@ impl AgentRegistry {
         &self,
         instance: &AgentInstance,
         now: u64,
-    ) -> qaqh_domain::SessionActivity {
+    ) -> qaqh_ringing_contract::SessionActivity {
         let AgentTransport::Loop { loop_ } = &instance.transport;
         let state = if loop_.waiting_user() {
-            qaqh_domain::ActivityState::WaitingUser
+            qaqh_ringing_contract::SessionActivityState::WaitingUser
         } else {
             match loop_.activity_state() {
                 qaqh_ringing_contract::fact::ActivityState::Running => {
-                    qaqh_domain::ActivityState::Working
+                    qaqh_ringing_contract::SessionActivityState::Working
                 }
-                _ => qaqh_domain::ActivityState::Idle,
+                _ => qaqh_ringing_contract::SessionActivityState::Idle,
             }
         };
-        qaqh_domain::SessionActivity {
+        qaqh_ringing_contract::SessionActivity {
             session_id: instance.session_id.clone(),
             state,
             turn_id: loop_.active_turn(),

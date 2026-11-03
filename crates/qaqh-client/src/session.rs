@@ -333,7 +333,6 @@ impl RingingSession {
             capabilities: qaqh_ringing::RingingV2Capabilities {
                 subscribe: true,
                 interact: true,
-                drive: true,
                 service: true,
                 content: true,
                 single_stream: true,

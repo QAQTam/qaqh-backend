@@ -16,7 +16,7 @@ pub struct ToolExecResult {
     pub success: bool,
     pub result: crate::ToolResult,
     pub meta: crate::ToolExecMeta,
-    pub code_delta: Option<qaqh_domain::CodeDeltaRecord>,
+    pub code_delta: Option<qaqh_types::CodeDeltaRecord>,
     pub skill_effects: Vec<crate::ToolEffect>,
 }
 

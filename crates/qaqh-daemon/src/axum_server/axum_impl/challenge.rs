@@ -11,11 +11,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::AskAnswer;
 use qaqh_ringing::{
     RingingCommand, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
     RingingV2PendingApprovals,
 };
+use qaqh_ringing_contract::commands::AskAnswer;
 use qaqh_ringing_contract::fact::InteractionKind;
 use serde_json::{Value, json};
 

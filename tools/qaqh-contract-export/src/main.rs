@@ -10,7 +10,7 @@ use qaqh_ringing::{
     RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DriverClaimResponse,
     RingingV2DriverReleaseResponse, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
     RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
-    RingingV2PendingInteractionView, RingingV2PendingPermissionView,
+    RingingV2PendingInteractionView, RingingV2PendingPermissionView, RingingV2ResyncRequired,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -276,7 +276,6 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let capabilities = RingingV2Capabilities {
         subscribe: true,
         interact: true,
-        drive: true,
         service: true,
         content: true,
         single_stream: true,
@@ -376,9 +375,9 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     write_fixture(
         stage,
         "service-session-activity-result.json",
-        &vec![qaqh_domain::SessionActivity {
+        &vec![qaqh_ringing_contract::SessionActivity {
             session_id: "session-fixture".to_owned(),
-            state: qaqh_domain::ActivityState::Working,
+            state: qaqh_ringing_contract::SessionActivityState::Working,
             turn_id: Some("turn-fixture-1".to_owned()),
             seq: 3,
             updated_at: 1_759_000_060_000,
@@ -539,6 +538,7 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         RingingV2PendingApprovals,
         RingingV2PendingInteractionView,
         RingingV2PendingPermissionView,
+        RingingV2ResyncRequired,
         RingingV2ApprovalRespondRequest,
         RingingV2DeviceApprovalKind,
         RingingV2DeviceChallenge,
@@ -556,7 +556,7 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_ringing_contract::SessionEvent,
         qaqh_ringing_contract::SessionEventFrame,
         qaqh_ringing_contract::TeamResponse,
-        qaqh_runtime::ringing::pending_store::ReceiptPolicy,
+        qaqh_ringing_runtime::pending_store::ReceiptPolicy,
         qaqh_runtime::ringing::service_methods::DaemonVersionParams,
         qaqh_runtime::ringing::service_methods::FsEntry,
         qaqh_runtime::ringing::service_methods::FsListParams,
@@ -571,7 +571,8 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::SkillsCatalogResult,
         qaqh_runtime::ringing::service_methods::WorkspaceGetParams,
         qaqh_runtime::ringing::service_methods::WorkspaceListParams,
-        qaqh_domain::SessionActivity,
+        qaqh_ringing_contract::SessionActivity,
+        qaqh_ringing_contract::SessionActivityState,
         qaqh_ringing_contract::WorkspaceEntry,
         qaqh_ringing_contract::WorkspaceMeta,
         qaqh_types::SessionListEntry,

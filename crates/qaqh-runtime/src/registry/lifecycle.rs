@@ -65,7 +65,11 @@ impl AgentRegistry {
             )
             .into());
         }
-        let parent_call_id = self.armed_collectors.get(child_id).cloned().unwrap_or_default();
+        let parent_call_id = self
+            .armed_collectors
+            .get(child_id)
+            .cloned()
+            .unwrap_or_default();
         self.armed_collectors
             .insert(child_id.to_string(), parent_call_id.clone());
         Ok(Some(CollectorArmSpec {

@@ -3,7 +3,7 @@ use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use qaqh_session::session_fact_v2::{AgentMetadata, AgentPath, SessionId};
+use qaqh_ringing_contract::fact::{AgentMetadata, AgentPath, SessionId};
 use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
 #[derive(Clone, Debug)]
@@ -15,9 +15,11 @@ pub struct SubagentSpawnSpec {
     pub permission_level: u8,
 }
 use crate::agent_catalog::AgentCatalog;
-use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
 use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
-use crate::RingingHub;
+use qaqh_agent_runtime::quota_ledger::{
+    QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason,
+};
+use qaqh_ringing_runtime::RingingHub;
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
 
@@ -79,7 +81,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 整份工具快照（6 次探测）的总预算；超出即停止探测、用已有结果降级。
 ///
-/// 探测结果只喂给提示词里的工具快照（`crate::agent::prompt::TOOLS_INFO`），
+/// 探测结果只喂给提示词里的工具快照（`qaqh_agent_runtime::agent::prompt::TOOLS_INFO`），
 /// **不值得为它拖慢启动**——何况它跑在 daemon 开始服务之前。
 const PROBE_BUDGET: Duration = Duration::from_secs(6);
 
@@ -105,7 +107,7 @@ pub fn detect_os_info() {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| format!("{} {}", std::env::consts::OS, std::env::consts::ARCH))
     };
-    let _ = crate::agent::prompt::OS_INFO.set(info);
+    let _ = qaqh_agent_runtime::agent::prompt::OS_INFO.set(info);
     // Toolchain snapshot. Each probe lists candidate program names tried in
     // order (first success wins): e.g. Windows ships `python` while most
     // Linux distros only provide `python3`.
@@ -144,7 +146,7 @@ pub fn detect_os_info() {
             }
         }
     }
-    let _ = crate::agent::prompt::TOOLS_INFO.set(tools.join(", "));
+    let _ = qaqh_agent_runtime::agent::prompt::TOOLS_INFO.set(tools.join(", "));
 }
 
 /// 跑一个探测型命令并取回输出，**带超时**。
@@ -236,7 +238,9 @@ fn background_command(program: &str) -> Command {
 /// How an agent worker is attached to this daemon process.
 enum AgentTransport {
     /// owner 驱动的回合循环(`qaqh_agent_runtime::session_loop`)。
-    Loop { loop_: Arc<qaqh_agent_runtime::session_loop::SessionLoop> },
+    Loop {
+        loop_: Arc<qaqh_agent_runtime::session_loop::SessionLoop>,
+    },
 }
 
 enum AgentKind {

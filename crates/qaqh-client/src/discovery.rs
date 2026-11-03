@@ -13,17 +13,12 @@ pub use qaqh_types::DaemonDiscovery;
 /// 固有 impl 无法跨 crate 附加，故 `base_url` 推导落在本扩展 trait。
 pub trait DiscoveryExt {
     /// HTTP base URL derived from discovery endpoint.
-    /// Supports both legacy `ws://` (→ `http://`) and new `http://`/`https://`.
     fn base_url(&self) -> Result<String>;
 }
 
 impl DiscoveryExt for DaemonDiscovery {
     fn base_url(&self) -> Result<String> {
-        let (rest, scheme) = if let Some(r) = self.endpoint.strip_prefix("ws://") {
-            (r, "http")
-        } else if let Some(r) = self.endpoint.strip_prefix("wss://") {
-            (r, "https")
-        } else if let Some(r) = self.endpoint.strip_prefix("http://") {
+        let (rest, scheme) = if let Some(r) = self.endpoint.strip_prefix("http://") {
             (r, "http")
         } else if let Some(r) = self.endpoint.strip_prefix("https://") {
             (r, "https")
@@ -304,14 +299,10 @@ pub fn process_is_running(pid: u32) -> bool {
 mod tests {
     use super::*;
 
-    // 前端契约冻结面锚点：
-    // （原注释指向的 `frontend-contract.md` 从不存在，已改指该文件）。discovery endpoint 的兼容解析。
-    // 旧形态 ws://host:port/control/v1 必须无损转 http://，新形态原样通过；
-    // 破坏任一分支即破坏已发布客户端的 discovery 兼容。
     #[test]
-    fn base_url_accepts_legacy_ws_and_new_http_forms() {
-        let legacy = DaemonDiscovery {
-            endpoint: "ws://127.0.0.1:9101/control/v1".into(),
+    fn base_url_accepts_current_http_forms_only() {
+        let discovery = DaemonDiscovery {
+            endpoint: "http://127.0.0.1:9101".into(),
             token: String::new(),
             pid: 0,
             server_epoch: String::new(),
@@ -323,43 +314,19 @@ mod tests {
             lan_endpoint: None,
             tls_fingerprint: None,
         };
-        assert_eq!(legacy.base_url().unwrap(), "http://127.0.0.1:9101");
+        assert_eq!(discovery.base_url().unwrap(), "http://127.0.0.1:9101");
 
-        let modern = DaemonDiscovery {
-            endpoint: "http://127.0.0.1:9101".into(),
-            ..legacy
+        let tls = DaemonDiscovery {
+            endpoint: "https://example.test:64413/path".into(),
+            ..discovery.clone()
         };
-        assert_eq!(modern.base_url().unwrap(), "http://127.0.0.1:9101");
-    }
+        assert_eq!(tls.base_url().unwrap(), "https://example.test:64413");
 
-    // PR-3-1 兼容红线：旧格式 daemon.json（无 build_id/channel/executable 三字段）
-    // 必须可解析，且解析 → 序列化 → 再解析字段逐字段保全。
-    #[test]
-    fn legacy_discovery_json_roundtrip_preserves_fields() {
-        let legacy = r#"{
-            "endpoint": "http://127.0.0.1:41831",
-            "token": "tok-123",
-            "pid": 4242,
-            "server_epoch": "epoch-1",
-            "protocol_version": 1,
-            "daemon_version": "0.8.9"
-        }"#;
-        let parsed: DaemonDiscovery =
-            serde_json::from_str(legacy).expect("legacy 6-field sample must parse");
-        assert_eq!(parsed.endpoint, "http://127.0.0.1:41831");
-        assert_eq!(parsed.token, "tok-123");
-        assert_eq!(parsed.pid, 4242);
-        assert_eq!(parsed.server_epoch, "epoch-1");
-        assert_eq!(parsed.protocol_version, 1);
-        assert_eq!(parsed.daemon_version, "0.8.9");
-        // 新增字段缺省（pre-0.9 兼容语义）
-        assert_eq!(parsed.build_id, "");
-        assert_eq!(parsed.channel, "");
-        assert_eq!(parsed.executable, "");
-
-        let json = serde_json::to_string(&parsed).expect("serialize");
-        let reparsed: DaemonDiscovery = serde_json::from_str(&json).expect("reparse");
-        assert_eq!(reparsed, parsed);
+        let old_transport = DaemonDiscovery {
+            endpoint: "ws://127.0.0.1:9101/control/v1".into(),
+            ..discovery
+        };
+        assert!(old_transport.base_url().is_err());
     }
 
     // ── 陈旧 discovery 判活（真机事故回归）────────────────────────────────

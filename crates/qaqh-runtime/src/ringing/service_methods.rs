@@ -91,7 +91,7 @@ pub struct SessionMetaParams {
 }
 
 /// `session.activity` 无参数；params 恒为 `{}`。结果条目是
-/// `qaqh_domain::SessionActivity`（daemon `/activity` 观测端点同款形状）。
+/// `qaqh_ringing_contract::SessionActivity`（daemon `/activity` 观测端点同款形状）。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionActivityParams {}
@@ -228,7 +228,7 @@ validators! {
         validate_fs_read_result => FsReadResult,
         validate_session_list_result => Vec<qaqh_types::SessionListEntry>,
         validate_session_meta_result => Option<qaqh_types::SessionListEntry>,
-        validate_session_activity_result => Vec<qaqh_domain::SessionActivity>,
+        validate_session_activity_result => Vec<qaqh_ringing_contract::SessionActivity>,
         validate_session_get_activity_result => Vec<SessionToolActivity>,
         validate_skills_catalog_result => SkillsCatalogResult,
         validate_workspace_list_result => Vec<qaqh_ringing_contract::WorkspaceEntry>,
@@ -313,7 +313,7 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
     TypedMethodInfo {
         method: "session.activity",
         params_type: "SessionActivityParams",
-        // 条目为 qaqh_domain::SessionActivity：与 daemon /activity 观测端点
+        // 条目为 qaqh_ringing_contract::SessionActivity：与 daemon /activity 观测端点
         // 同一个序列化载体，无 per-method 镜像。
         result_type: "SessionActivity[]",
         info: MethodInfo {

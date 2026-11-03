@@ -14,7 +14,7 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     super::write_fixture(
         stage,
         "receipt-policy.json",
-        &qaqh_runtime::ringing::pending_store::RECEIPT_POLICY,
+        &qaqh_ringing_runtime::pending_store::RECEIPT_POLICY,
     )?;
     super::write_fixture(
         stage,

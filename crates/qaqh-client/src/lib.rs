@@ -4,7 +4,7 @@
 //! negotiation/renewal, the v2 single-stream event feed, plus commands,
 //! queries, bootstrap and graceful stop.
 //!
-//! The public API uses the canonical `qaqh-domain` and `qaqh-ringing`
+//! The public API uses the `qaqh-ringing-contract` and `qaqh-ringing`
 //! contracts. HTTP/SSE JSON is decoded at this boundary and never becomes a
 //! renderer-facing compatibility protocol.
 
@@ -30,6 +30,7 @@ pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_d
 pub use endpoint::QueryRequest;
 pub use error::{ClientError, Result};
 pub use projection::sanitize_session_list;
+pub use qaqh_ringing::RingingV2ResyncRequired;
 /// 设备配对 / 设备管理的 wire 类型（`Client::issue_pairing_token` 等方法的返回值）。
 ///
 /// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
@@ -66,20 +67,15 @@ pub use service_types::{
 };
 pub use session::RingingSession;
 pub use types::{
-    AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, CommandOptions,
-    CompactStatus, ContentRef, ConversationSendMessage, DashboardDocument, DashboardTask,
-    DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot, DomainError,
-    DomainSessionState, ErrorScope, ImageBlock, InputPurpose, MAX_SAFE_INTEGER, NoticeLevel,
-    PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState, RINGING_SCHEMA,
-    ReconnectReason, RingingCommand, RingingCommandAckStatus, RingingCommandState, RoundDeltaKind,
-    SessionActivity, SessionListEntry, SessionMeta, SessionRunStatus, SkillInfo, SkillRuntimeInfo,
-    SkillsStatus, ToolContinuation, ToolError, ToolImage, ToolModelPayload, ToolResult, ToolStatus,
-    UsageInfo, is_safe_integer,
+    AskAnswer, CLIENT_SESSION_HEADER, CommandOptions, CompactStatus, ContentRef,
+    ConversationSendMessage, ImageBlock, InputPurpose, MAX_SAFE_INTEGER, RINGING_SCHEMA,
+    ReconnectReason, RingingCommand, RingingCommandAckStatus, RingingCommandState, SessionActivity,
+    SessionActivityState, SessionListEntry, SessionMeta, SessionRunStatus, ToolContinuation,
+    ToolError, ToolImage, ToolModelPayload, ToolResult, ToolStatus, UsageInfo, is_safe_integer,
 };
 pub use v2::{
-    ClientV2Bootstrap, ClientV2Event, ClientV2ResyncRequired, ClientV2SessionState,
-    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2TeamResponse, RINGING_V2_BASE_PATH,
-    RINGING_V2_VERSION,
+    ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent, RINGING_V2_BASE_PATH,
+    RINGING_V2_VERSION, SessionBootstrap, SessionEventFrame, SessionState, TeamResponse,
 };
 /// The v2 contract exposes the session fact model under its real module
 /// names; there is no `ClientV2*` renaming layer.

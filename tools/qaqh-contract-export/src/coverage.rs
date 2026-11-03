@@ -126,7 +126,7 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             "view",
             true,
             vec![
-                "ClientV2TeamResponse",
+                "TeamResponse",
                 "TeamSnapshot",
                 "TaskBoardSnapshot",
                 "TeamBoardSnapshot",
@@ -232,7 +232,7 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // B04：命令幂等作用域的机器可读结论（pending_store boundary tests 的裁决
     // 汇总；F04 的重试语义以本节为准，不以猜测为准）。
     let command_idempotency = json!({
-        "receipt_policy": qaqh_runtime::ringing::pending_store::RECEIPT_POLICY,
+        "receipt_policy": qaqh_ringing_runtime::pending_store::RECEIPT_POLICY,
         "semantics": {
             "replay_window": "receipts are retained for receipt_policy.ttl_secs and at most receipt_policy.max_entries; expiry or eviction means the outcome is unknown, not failed",
             "owner_scope": "status/replay/existing queries and receipts are scoped to the stable identity key (device_id for paired devices, the admin self-reported instance id); a re-opened connection keeps reconciling its identity's receipts, while a foreign identity is rejected by the fingerprint guard",

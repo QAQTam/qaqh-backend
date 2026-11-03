@@ -19,9 +19,11 @@ use crate::types::{CommandOptions, ContentRef, RingingCommand, RingingCommandAck
 use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
 use qaqh_ringing::v2::{
-    RingingV2CommandAck, RingingV2CommandStatus, RingingV2DeviceWire, RingingV2DevicesResponse,
-    RingingV2PairTokenRequest, RingingV2PairTokenResponse,
+    RingingV2CommandAck, RingingV2CommandStatus, RingingV2ContentUploadResponse,
+    RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2PairTokenRequest,
+    RingingV2PairTokenResponse,
 };
+use qaqh_ringing_contract::fact::ContentHash;
 
 /// `reqwest` 以 `rustls-no-provider` 特征编译（换掉 `rustls` 是为绕开 OHOS 上
 /// 构建不了的 aws-lc-rs，见 `qaqh-client/Cargo.toml`），该特征的硬契约是：建
@@ -45,10 +47,11 @@ pub struct ClientHandlers {
     ///
     /// 2026-09-24 硬切：v1 的三条 `events/{channel}` 全局流已删除，投影事件只从
     /// 这条单流来；`(seed, event)` 由调用方按 seed 分派。
-    pub on_v2_event: std::sync::Arc<dyn Fn(String, crate::v2::ClientV2Event) + Send + Sync>,
+    pub on_v2_event:
+        std::sync::Arc<dyn Fn(String, qaqh_ringing_contract::SessionEventFrame) + Send + Sync>,
     /// v2 `resync_required`:服务端发完即断流,调用方应重新 bootstrap 再订阅。
     pub on_v2_reset:
-        std::sync::Arc<dyn Fn(String, crate::v2::ClientV2ResyncRequired) + Send + Sync>,
+        std::sync::Arc<dyn Fn(String, qaqh_ringing::RingingV2ResyncRequired) + Send + Sync>,
     /// v2 单流状态迁移（每 seed 一条）。
     pub on_v2_status:
         std::sync::Arc<dyn Fn(String, crate::v2_stream::V2StreamStatus) + Send + Sync>,
@@ -392,7 +395,10 @@ impl Client {
     ///
     /// The response is the shared `SessionBootstrap` contract with one
     /// `SessionState` snapshot.
-    pub async fn bootstrap(&self, session_id: &str) -> Result<crate::ClientV2Bootstrap> {
+    pub async fn bootstrap(
+        &self,
+        session_id: &str,
+    ) -> Result<qaqh_ringing_contract::SessionBootstrap> {
         self.bootstrap_v2(session_id).await
     }
 
@@ -531,7 +537,8 @@ impl Client {
     /// v2 端点**不带 seed**：服务端按 content_id 取到条目后，用条目自己的
     /// `seed` 校验调用方归属（调用方可能同时 attach 多个 seed）。
     pub async fn download_content(&self, reference: &ContentRef) -> Result<Vec<u8>> {
-        let bytes = self.download_content_by_id(&reference.content_id).await?;
+        let content_id = reference.hash().as_str();
+        let bytes = self.download_content_by_id(content_id).await?;
         let digest = {
             use sha2::Digest;
             let hash = sha2::Sha256::digest(&bytes);
@@ -539,10 +546,11 @@ impl Client {
                 .map(|byte| format!("{byte:02x}"))
                 .collect::<String>()
         };
-        if !digest.eq_ignore_ascii_case(&reference.sha256) {
+        let expected_digest = content_id.strip_prefix("sha256:").unwrap_or(content_id);
+        if !digest.eq_ignore_ascii_case(expected_digest) {
             return Err(ClientError::Protocol(format!(
                 "content digest mismatch for {}: expected {}, received {digest}",
-                reference.content_id, reference.sha256
+                content_id, expected_digest
             )));
         }
         Ok(bytes)
@@ -551,9 +559,6 @@ impl Client {
     /// `GET /ringing/v2/content/{content_id}` by raw canonical id
     /// (`sha256:<hex>` 或裸 hex)，**不做** digest 校验。
     ///
-    /// v2 投影里的 `ContentValue::Ref` 携带的是 session crate 的
-    /// `ContentRef(ContentHash)`，与 `qaqh-types` 的 [`ContentRef`] 不是同一个
-    /// 类型；壳层拿到投影 ref 时用本入口直取。
     pub async fn download_content_by_id(&self, content_id: &str) -> Result<Vec<u8>> {
         let path = format!("/ringing/v2/content/{content_id}");
         let session_id = self.session_id_header().await?;
@@ -625,7 +630,11 @@ impl Client {
                 path: "/ringing/v2/content".into(),
             });
         }
-        Ok(response.json().await?)
+        let uploaded: RingingV2ContentUploadResponse = response.json().await?;
+        Ok(ContentRef::new(ContentHash::new(format!(
+            "sha256:{}",
+            uploaded.content_id
+        ))))
     }
 
     /// 设备配对：申请一次性配对令牌（`POST /ringing/v2/pairing/tokens`，Admin）。
