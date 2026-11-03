@@ -96,10 +96,17 @@ fn wire_decoders_reject_invalid_discriminants_and_unsafe_cursors() {
     let mut open = RingingV2OpenRequest::new("synthetic");
     open.version = 99;
     assert!(open.validate().is_err());
-    let invalid = serde_json::json!({"schema":"qaqh.Ringing","version":2,
-        "channel":"tool","command_id":"synthetic","client_instance_id":"synthetic",
-        "client_session_id":"synthetic","session_id":"session-fixture",
-        "command":{"channel":"control","type":"session_attach","session_id":"session-fixture"}});
+    let invalid = serde_json::json!({
+        "schema":"qaqh.Ringing",
+        "version":2,
+        "contract_revision": qaqh_ringing::COMMAND_CONTRACT_REVISION,
+        "command_id":"synthetic",
+        "client_instance_id":"synthetic",
+        "client_session_id":"synthetic",
+        "target":{"kind":"global"},
+        "preconditions":[],
+        "command":{"type":"session.attach"}
+    });
     let command: RingingV2CommandEnvelope = serde_json::from_value(invalid).unwrap();
     assert!(command.validate().is_err());
 }

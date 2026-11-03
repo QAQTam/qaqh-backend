@@ -11,10 +11,8 @@ use std::sync::Arc;
 use serde_json::Value;
 use tokio::sync::{Mutex, watch};
 
-use qaqh_domain::ControlCommand;
-
 use crate::discovery::{DaemonDiscovery, DiscoveryExt, read_discovery};
-use crate::endpoint::{ActionRequest, QueryRequest};
+use crate::endpoint::QueryRequest;
 use crate::error::{ClientError, Result};
 use crate::session::RingingSession;
 use crate::types::{CommandOptions, ContentRef, RingingCommand, RingingCommandAckStatus};
@@ -352,18 +350,14 @@ impl Client {
         self.inner.session.session_ctx_rx()
     }
 
-    /// Submit a canonical Ringing command with the shared lease identity.
-    ///
-    /// The command determines its own channel. `seed` may be `None` only for
-    /// `ControlCommand::SessionCreate`; callers never assemble wire JSON or
-    /// duplicate the channel tag.
+    /// Submit a RingingV2 command with one explicit target and its preconditions.
     pub async fn send_command(
         &self,
-        session_id: Option<&str>,
+        target: qaqh_ringing::CommandTarget,
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingV2CommandAck> {
-        self.send_command_v2_typed(session_id, command, options)
+        self.send_command_v2_typed(target, command, options)
             .await
     }
 
@@ -402,54 +396,6 @@ impl Client {
     /// v1 的 `RingingSessionBootstrap` 换成 [`crate::ClientV2Bootstrap`]。
     pub async fn bootstrap(&self, session_id: &str) -> Result<crate::ClientV2Bootstrap> {
         self.bootstrap_v2(session_id).await
-    }
-
-    /// Execute a closed, typed auxiliary action (Write 类服务方法)。Method
-    /// names and wire params are centralized in `ActionRequest`; native shells
-    /// cannot route a mutation through the read-only query surface.
-    pub async fn action(&self, request: ActionRequest) -> Result<Value> {
-        let (name, mut params) = request.into_parts();
-        let session_id = self.session_id_header().await?;
-        let action_id = uuid::Uuid::new_v4().to_string();
-        let fingerprint = {
-            let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
-            use sha2::Digest;
-            hasher.update(serde_json::to_string(&serde_json::json!({
-                "method": name,
-                "params": params,
-            }))?);
-            let digest = hasher.finalize();
-            digest
-                .iter()
-                .map(|b| format!("{b:02x}"))
-                .collect::<String>()
-        };
-        if let Some(obj) = params.as_object_mut() {
-            obj.insert("action_id".into(), serde_json::json!(action_id));
-            obj.insert("fingerprint".into(), serde_json::json!(fingerprint));
-        } else {
-            params = serde_json::json!({
-                "action_id": action_id,
-                "fingerprint": fingerprint,
-            });
-        }
-        let path = format!("/ringing/v2/service/{name}");
-        let response = self
-            .inner
-            .http
-            .post(format!("{}{path}", self.credentials().base_url))
-            .bearer_auth(&self.credentials().token)
-            .header("X-QAQH-Client-Session-Id", session_id)
-            .json(&params)
-            .send()
-            .await?;
-        if !response.status().is_success() {
-            return Err(ClientError::Http {
-                status: response.status().as_u16(),
-                path,
-            });
-        }
-        Ok(response.json().await?)
     }
 
     /// `POST /ringing/v2/service/{method}` — 白名单式服务面直调。
@@ -504,10 +450,10 @@ impl Client {
     pub async fn attach(&self, session_id: &str) -> Result<RingingV2CommandAck> {
         let ack = self
             .send_command(
-                Some(session_id),
-                RingingCommand::Control(ControlCommand::SessionResume {
+                qaqh_ringing::CommandTarget::Session {
                     session_id: session_id.to_string(),
-                }),
+                },
+                RingingCommand::SessionResume {},
                 CommandOptions::default(),
             )
             .await?;

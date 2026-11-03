@@ -99,13 +99,14 @@ try {
 
     $cmdId = [guid]::NewGuid().ToString()
     $body = @{
-        schema = "qaqh.Ringing"; version = 2; channel = "control"
+        schema = "qaqh.Ringing"; version = 2; contract_revision = "ringing-commands-6"
         command_id = $cmdId; client_instance_id = "smoke-tui"; client_session_id = $clientSessionId
-        command = @{ channel = "control"; type = "session_create"; close_current = $false; cwd = $repo }
+        target = @{ kind = "global" }; preconditions = @()
+        command = @{ type = "session.create"; cwd = $repo }
     } | ConvertTo-Json -Depth 8 -Compress
     $ackFile = "$data\ack.json"
     $body | Out-File "$data\cmd.json" -Encoding ascii
-    $code = & curl.exe -s -o $ackFile -w "%{http_code}" -X POST "$daemonBase/ringing/v2/commands/control" `
+    $code = & curl.exe -s -o $ackFile -w "%{http_code}" -X POST "$daemonBase/ringing/v2/commands" `
         -H "Content-Type: application/json" -H $auth -H "x-qaqh-client-session-id: $clientSessionId" --data "@$data\cmd.json"
     $ack = Get-Content $ackFile -Raw
     Write-Host "[..] SessionCreate ack (HTTP $code): $ack"
@@ -168,13 +169,13 @@ try {
     if ($seed) {
         $delId = [guid]::NewGuid().ToString()
         $delBody = @{
-            schema = "qaqh.Ringing"; version = 2; channel = "control"
+            schema = "qaqh.Ringing"; version = 2; contract_revision = "ringing-commands-6"
             command_id = $delId; client_instance_id = "smoke-tui"; client_session_id = $clientSessionId
-            session_id = $seed
-            command = @{ channel = "control"; type = "session_delete"; session_id = $seed }
+            target = @{ kind = "session"; session_id = $seed }; preconditions = @()
+            command = @{ type = "session.delete" }
         } | ConvertTo-Json -Depth 8 -Compress
         $delBody | Out-File "$data\delcmd.json" -Encoding ascii
-        $code = & curl.exe -s -o "$data\delete.json" -w "%{http_code}" -X POST "$daemonBase/ringing/v2/commands/control" `
+        $code = & curl.exe -s -o "$data\delete.json" -w "%{http_code}" -X POST "$daemonBase/ringing/v2/commands" `
             -H "Content-Type: application/json" -H $auth -H "x-qaqh-client-session-id: $clientSessionId" --data "@$data\delcmd.json"
         Write-Host "[ok] SessionDelete HTTP $code : $(Get-Content "$data\delete.json" -Raw)"
     }

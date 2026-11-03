@@ -76,9 +76,9 @@ open_client() {
         | json_get "['client_session_id']"
 }
 command() {
-    curl -sS -X POST "$ENDPOINT/ringing/v2/commands/$2" \
+    curl -sS -X POST "$ENDPOINT/ringing/v2/commands" \
         -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $1" \
-        -H 'content-type: application/json' -d "$3"
+        -H 'content-type: application/json' -d "$2"
 }
 driver() {
     curl -sS -X POST "$ENDPOINT/ringing/v2/sessions/$SEED/driver/$2" \
@@ -133,8 +133,8 @@ OPEN_RAW="$(curl -sS -X POST "$ENDPOINT/ringing/v2/clients/open" \
 
 say "== creating session through the daemon =="
 BEFORE="$(ls -1 "$DATA/sessions" 2>/dev/null | grep -v '^index.jsonl$' | sort || true)"
-command "$A" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-new-$$\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"command\":{\"channel\":\"control\",\"type\":\"session_create\",\"close_current\":false,\"cwd\":\"/tmp\"}}" \
+command "$A" \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"contract_revision\":\"ringing-commands-6\",\"command_id\":\"smoke-new-$$\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"target\":{\"kind\":\"global\"},\"preconditions\":[],\"command\":{\"type\":\"session.create\",\"cwd\":\"/tmp\"}}" \
     > /dev/null
 AFTER="$(ls -1 "$DATA/sessions" 2>/dev/null | grep -v '^index.jsonl$' | sort || true)"
 SEED="$(comm -13 <(printf '%s\n' "$BEFORE") <(printf '%s\n' "$AFTER") | head -1)"
@@ -225,32 +225,23 @@ renew "$A"
 # lease_expired), so this only works because the claim-b phase renewed B while
 # it was still alive; here it just refreshes the TTL before the gate probes.
 renew "$B"
-GATED="$(command "$B" conversation \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"conversation\",\"command_id\":\"smoke-b-cancel-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"conversation\",\"type\":\"conversation_cancel\"}}")"
+GATED="$(command "$B" \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"contract_revision\":\"ringing-commands-6\",\"command_id\":\"smoke-b-cancel-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"target\":{\"kind\":\"session\",\"session_id\":\"$SEED\"},\"preconditions\":[],\"command\":{\"type\":\"conversation.cancel\"}}")"
 [ "$(printf '%s' "$GATED" | json_get "['code']")" = "not_driver" ] || fail "not_driver gate"
 
-say "== workspace service driver gate =="
-# Service RPCs are outside the command envelope; seeded workspace writes must
-# enforce the same live-holder rule after lease ownership is established.
-command "$B" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-b-attach-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"session_id\":\"$SEED\"}}" \
-    > /dev/null
-B_SERVICE_STATUS="$(curl -sS -o "$DATA/../workspace-b.json" -w '%{http_code}' \
-    -X POST "$ENDPOINT/ringing/v2/service/workspace.set" \
-    -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $B" \
-    -H 'content-type: application/json' -d "{\"session_id\":\"$SEED\",\"path\":\"/tmp\"}")"
-[ "$B_SERVICE_STATUS" = "403" ] || fail "non-driver workspace.set must be 403 (got $B_SERVICE_STATUS)"
-[ "$(json_get "['code']" < "$DATA/../workspace-b.json")" = "not_driver" ] \
-    || fail "non-driver workspace.set code"
-A_SERVICE_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
+say "== workspace mutation uses the common command surface =="
+OLD_SERVICE_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' \
     -X POST "$ENDPOINT/ringing/v2/service/workspace.set" \
     -H "authorization: Bearer $TOKEN" -H "x-qaqh-client-session-id: $A" \
     -H 'content-type: application/json' -d "{\"session_id\":\"$SEED\",\"path\":\"/tmp\"}")"
-[ "$A_SERVICE_STATUS" = "200" ] || fail "driver workspace.set must pass (got $A_SERVICE_STATUS)"
+[ "$OLD_SERVICE_STATUS" = "404" ] || fail "workspace.set service route must be absent (got $OLD_SERVICE_STATUS)"
+WORKSPACE_ACK="$(command "$A" \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"contract_revision\":\"ringing-commands-6\",\"command_id\":\"smoke-workspace-$$\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"target\":{\"kind\":\"session\",\"session_id\":\"$SEED\"},\"preconditions\":[],\"command\":{\"type\":\"workspace.set\",\"path\":\"/tmp\"}}")"
+[ "$(printf '%s' "$WORKSPACE_ACK" | json_get "['status']")" = "accepted" ] || fail "workspace.set RingingV2 command rejected: $WORKSPACE_ACK"
 
 say "== first-answer-wins typed verdict =="
-LOSER="$(command "$B" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-answer-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"interaction_ask_respond\",\"interaction_id\":\"$ASK_ID\",\"answers\":[]}}")"
+LOSER="$(command "$B" \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"contract_revision\":\"ringing-commands-6\",\"command_id\":\"smoke-second-answer-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"target\":{\"kind\":\"session\",\"session_id\":\"$SEED\"},\"preconditions\":[],\"command\":{\"type\":\"interaction.ask.respond\",\"interaction_id\":\"$ASK_ID\",\"answers\":[]}}")"
 [ "$(printf '%s' "$LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
     || fail "second answer code"
 [ "$(printf '%s' "$LOSER" | json_get "['existing']['source']")" = "interaction_resolved" ] \
@@ -259,8 +250,8 @@ LOSER="$(command "$B" control \
     || fail "second answer typed kind"
 
 say "== permission first-answer-wins typed verdict =="
-PERMISSION_LOSER="$(command "$B" tool \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"tool\",\"command_id\":\"smoke-second-permission-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"tool\",\"type\":\"tool_permission_respond\",\"tool_call_id\":\"$PERMISSION_CALL\",\"approved\":false,\"trust_folder\":false}}")"
+PERMISSION_LOSER="$(command "$B" \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"contract_revision\":\"ringing-commands-6\",\"command_id\":\"smoke-second-permission-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"target\":{\"kind\":\"session\",\"session_id\":\"$SEED\"},\"preconditions\":[],\"command\":{\"type\":\"tool.permission.respond\",\"tool_call_id\":\"$PERMISSION_CALL\",\"approved\":false,\"trust_folder\":false}}")"
 [ "$(printf '%s' "$PERMISSION_LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
     || fail "second permission answer code"
 [ "$(printf '%s' "$PERMISSION_LOSER" | json_get "['existing']['result']['kind']")" = "permission_resolved" ] \
@@ -269,8 +260,8 @@ PERMISSION_LOSER="$(command "$B" tool \
     || fail "second permission answer winning verdict"
 
 say "== plan first-answer-wins typed verdict =="
-PLAN_LOSER="$(command "$B" control \
-    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"smoke-second-plan-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"plan_review_respond\",\"interaction_id\":\"$PLAN_ID\",\"approved\":true,\"autonomous\":false}}")"
+PLAN_LOSER="$(command "$B" \
+    "{\"schema\":\"qaqh.Ringing\",\"version\":2,\"contract_revision\":\"ringing-commands-6\",\"command_id\":\"smoke-second-plan-$$\",\"client_instance_id\":\"smoke-b\",\"client_session_id\":\"$B\",\"target\":{\"kind\":\"session\",\"session_id\":\"$SEED\"},\"preconditions\":[],\"command\":{\"type\":\"plan.review.respond\",\"interaction_id\":\"$PLAN_ID\",\"approved\":true,\"autonomous\":false}}")"
 [ "$(printf '%s' "$PLAN_LOSER" | json_get "['code']")" = "interaction_already_resolved" ] \
     || fail "second plan answer code"
 [ "$(printf '%s' "$PLAN_LOSER" | json_get "['existing']['result']['kind']")" = "plan_review_resolved" ] \
@@ -281,9 +272,9 @@ PLAN_LOSER="$(command "$B" control \
 say "== command replay + status =="
 renew "$A"
 REPLAY_ID="smoke-replay-$$"
-ATTACH="{\"schema\":\"qaqh.Ringing\",\"version\":2,\"channel\":\"control\",\"command_id\":\"$REPLAY_ID\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"session_id\":\"$SEED\",\"command\":{\"channel\":\"control\",\"type\":\"session_attach\",\"session_id\":\"$SEED\"}}"
-command "$A" control "$ATTACH" > /dev/null
-REPLAY="$(command "$A" control "$ATTACH")"
+ATTACH="{\"schema\":\"qaqh.Ringing\",\"version\":2,\"contract_revision\":\"ringing-commands-6\",\"command_id\":\"$REPLAY_ID\",\"client_instance_id\":\"smoke-a\",\"client_session_id\":\"$A\",\"target\":{\"kind\":\"session\",\"session_id\":\"$SEED\"},\"preconditions\":[],\"command\":{\"type\":\"session.attach\"}}"
+command "$A" "$ATTACH" > /dev/null
+REPLAY="$(command "$A" "$ATTACH")"
 [ "$(printf '%s' "$REPLAY" | json_get "['existing']['source']")" = "command_receipt" ] \
     || fail "replay typed source"
 STATUS="$(curl -sS "$ENDPOINT/ringing/v2/commands/$REPLAY_ID" \

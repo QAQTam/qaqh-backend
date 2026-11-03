@@ -40,16 +40,13 @@ pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> Ringing
 
 /// 命令幂等指纹。进程内入口与 HTTP 面必须共用，否则重放判定会漂移。
 pub(crate) fn command_fingerprint(
-    channel: qaqh_domain::RingingChannel,
-    session_id: Option<&str>,
-    expected_revision: Option<u64>,
-    command: &qaqh_ringing::RingingCommand,
+    envelope: &RingingV2CommandEnvelope,
 ) -> String {
     let payload = serde_json::to_string(&serde_json::json!({
-        "channel": channel,
-        "seed": session_id,
-        "expected_revision": expected_revision,
-        "command": command,
+        "contract_revision": envelope.contract_revision,
+        "target": envelope.target,
+        "preconditions": envelope.preconditions,
+        "command": envelope.command,
     }))
     .unwrap_or_default();
     qaqh_types::sha256_hex(payload.as_bytes())
@@ -59,9 +56,13 @@ pub(crate) fn command_fingerprint(
 /// 其余一律 `Interact`。admin 由 `Identity::scope()` 返回 `Admin` 恒通过。
 fn required_scope_for_command(envelope: &RingingV2CommandEnvelope) -> Scope {
     match &envelope.command {
-        qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::SessionAttach {
-            ..
-        }) => Scope::View,
+        qaqh_ringing::RingingCommand::SessionAttach {} => Scope::View,
+        qaqh_ringing::RingingCommand::ProviderList { .. }
+        | qaqh_ringing::RingingCommand::ProviderUpsert { .. }
+        | qaqh_ringing::RingingCommand::ProviderDelete { .. }
+        | qaqh_ringing::RingingCommand::ProviderModelUpsert { .. }
+        | qaqh_ringing::RingingCommand::ProviderModelDelete { .. }
+        | qaqh_ringing::RingingCommand::ModelSelectionSetDefault { .. } => Scope::Admin,
         _ => Scope::Interact,
     }
 }
@@ -73,23 +74,13 @@ fn required_scope_for_command(envelope: &RingingV2CommandEnvelope) -> Scope {
 /// ——它们是「先 attach 再操作」的入口，必须豁免 owns 检查，否则移动端永远
 /// 无法取得任何会话的归属。
 fn command_ownership_target(envelope: &RingingV2CommandEnvelope) -> Option<&str> {
-    use qaqh_domain::ControlCommand as C;
-    use qaqh_ringing::RingingCommand as R;
     match &envelope.command {
-        R::Control(C::SessionCreate { .. })
-        | R::Control(C::SessionResume { .. })
-        | R::Control(C::SessionAttach { .. }) => return None,
-        R::Control(C::SessionClose { session_id })
-        | R::Control(C::SessionArchive { session_id })
-        | R::Control(C::SessionUnarchive { session_id })
-        | R::Control(C::SessionDelete { session_id }) => {
-            if !session_id.is_empty() {
-                return Some(session_id.as_str());
-            }
-        }
+        qaqh_ringing::RingingCommand::SessionCreate { .. }
+        | qaqh_ringing::RingingCommand::SessionResume {}
+        | qaqh_ringing::RingingCommand::SessionAttach {} => return None,
         _ => {}
     }
-    envelope.session_id.as_deref().filter(|s| !s.is_empty())
+    envelope.session_id().filter(|s| !s.is_empty())
 }
 
 /// daemon 鉴权身份 → 内部信封 actor（S6 归因）。
@@ -196,35 +187,10 @@ pub(crate) async fn execute_command(
     }
     state
         .test_hooks
-        .apply_command_ack_fault(envelope.channel, &envelope.command)
+        .apply_command_ack_fault(&envelope.command)
         .await;
-    // `ConversationLoadMore` 是 v1 分页残留：v2 的 bootstrap/快照已返回完整
-    // 历史，没有「再加载更多」的语义。拒绝发生在幂等指纹之前——被拒的命令
-    // 不占用 command_id，客户端可以改正后复用。
-    if matches!(
-        &envelope.command,
-        qaqh_ringing::RingingCommand::Conversation(
-            qaqh_domain::ConversationCommand::ConversationLoadMore { .. }
-        )
-    ) {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            reject_ack(
-                envelope.command_id,
-                "unsupported_command",
-                "conversation.load_more is not part of Ringing v2: bootstrap already returns the \
-                 complete persisted history"
-                    .into(),
-            ),
-        );
-    }
     // idempotency
-    let fingerprint = command_fingerprint(
-        envelope.channel,
-        envelope.session_id.as_deref(),
-        envelope.expected_revision,
-        &envelope.command,
-    );
+    let fingerprint = command_fingerprint(&envelope);
     // §5：回执 owner 是稳定身份键（device_id / admin 自报 instance id），
     // 不是临时 client_session_id——换连接后同一 command_id 仍可对账、重复
     // 提交返回原回执；不同设备冒用同一 command_id 仍被指纹守卫拒绝。
@@ -265,13 +231,11 @@ pub(crate) async fn execute_command(
     if let Some(fault) = state.test_hooks.take_interaction_fault(&envelope.command) {
         match fault {
             InteractionFault::PermissionDeny => {
-                if let qaqh_ringing::RingingCommand::Tool(
-                    qaqh_domain::ToolCommand::ToolPermissionRespond {
-                        approved,
-                        trust_folder,
-                        ..
-                    },
-                ) = &mut envelope.command
+                if let qaqh_ringing::RingingCommand::ToolPermissionRespond {
+                    approved,
+                    trust_folder,
+                    ..
+                } = &mut envelope.command
                 {
                     *approved = false;
                     *trust_folder = false;
@@ -280,31 +244,26 @@ pub(crate) async fn execute_command(
             InteractionFault::PermissionHang => {
                 if matches!(
                     &envelope.command,
-                    qaqh_ringing::RingingCommand::Tool(
-                        qaqh_domain::ToolCommand::ToolPermissionRespond { .. }
-                    )
+                    qaqh_ringing::RingingCommand::ToolPermissionRespond { .. }
                 ) {
                     std::future::pending::<()>().await;
                 }
             }
             InteractionFault::AskDismiss => {
-                if let qaqh_ringing::RingingCommand::Control(
-                    qaqh_domain::ControlCommand::InteractionAskRespond { interaction_id, .. },
-                ) = &envelope.command
+                if let qaqh_ringing::RingingCommand::InteractionAskRespond {
+                    interaction_id,
+                    ..
+                } = &envelope.command
                 {
-                    envelope.command = qaqh_ringing::RingingCommand::Control(
-                        qaqh_domain::ControlCommand::InteractionAskDismiss {
-                            interaction_id: interaction_id.clone(),
-                        },
-                    );
+                    envelope.command = qaqh_ringing::RingingCommand::InteractionAskDismiss {
+                        interaction_id: interaction_id.clone(),
+                    };
                 }
             }
             InteractionFault::AskHang => {
                 if matches!(
                     &envelope.command,
-                    qaqh_ringing::RingingCommand::Control(
-                        qaqh_domain::ControlCommand::InteractionAskRespond { .. }
-                    )
+                    qaqh_ringing::RingingCommand::InteractionAskRespond { .. }
                 ) {
                     std::future::pending::<()>().await;
                 }
@@ -312,7 +271,7 @@ pub(crate) async fn execute_command(
         }
     }
     // ── 路由：生命周期命令在 daemon 侧就地处理，其余进 worker 命令通道 ──
-    match route(&envelope.command, &envelope.session_id) {
+    match route(&envelope.command, envelope.session_id()) {
         Route::Close {
             session: close_session,
         } => {
@@ -352,6 +311,18 @@ pub(crate) async fn execute_command(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .detach_session(&session_id, &close_session);
+            complete(state, envelope.command_id)
+        }
+        Route::Rename { session: target, title } => {
+            if let Err(error) = state.service.rename_session(&target, &title) {
+                return fail(
+                    state,
+                    envelope.command_id,
+                    StatusCode::BAD_GATEWAY,
+                    "dispatch_failed",
+                    error,
+                );
+            }
             complete(state, envelope.command_id)
         }
         Route::Lifecycle { op, target } => {
@@ -407,47 +378,6 @@ pub(crate) async fn execute_command(
             }
             complete(state, envelope.command_id)
         }
-        Route::Create => {
-            let params = serde_json::to_value(&envelope.command).unwrap_or_default();
-            // session.new 走的是强类型服务面（`service.handle`），不是 worker 通道：
-            // 它只物化会话目录与首条事实，没有 actor 可投递。
-            let created = match state.service.handle("session.new", &params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return fail(
-                        state,
-                        envelope.command_id,
-                        StatusCode::BAD_GATEWAY,
-                        "dispatch_failed",
-                        e.to_string(),
-                    );
-                }
-            };
-            let created_session = created.as_str().map(str::to_string);
-            // BUG-2026-09-29-01：这里此前写作 `if let Some(session_id)`，把外层
-            // `session_id`（header 的 client_session_id）遮蔽成新 seed，导致
-            // `attach_session(&seed, &seed)` 恒 false——commands 通道上的
-            // SessionCreate 永远 401。attach 的宿主必须是发起命令的 lease。
-            if let Some(created) = created_session {
-                // BUG-2026-09-12-10：attach 失败（lease 已死）必须显式 401，
-                // 而不是静默 ack 200 让前端进入「无归属」状态。
-                let attached = state
-                    .leases
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .attach_session(&session_id, &created);
-                if !attached {
-                    return fail(
-                        state,
-                        envelope.command_id,
-                        StatusCode::UNAUTHORIZED,
-                        "lease_required",
-                        "lease is not active".to_string(),
-                    );
-                }
-            }
-            complete(state, envelope.command_id)
-        }
         Route::Resume { session: target } => {
             // BUG-2026-09-12-10：attach 必须先于（较慢的）worker 拉起副作用。
             // 前端切会话后会并行 fetch bootstrap/timeline，若 attach 晚于
@@ -473,16 +403,13 @@ pub(crate) async fn execute_command(
             // actor resume 加载失败后 lifecycle 兜底又静默分配一个幽灵会话
             // 目录（worker 只写一条 system prompt 后永久闲置）。TUI 每次重启
             // 换 client_session_id 就再产生一对。必须恢复**命令声明的目标会话**。
-            if let Err(e) = state.service.handle(
-                "session.resume",
-                &serde_json::json!({ "session_id": target }),
-            ) {
+            if let Err(e) = state.service.resume_session(&target) {
                 return fail(
                     state,
                     envelope.command_id,
                     StatusCode::BAD_GATEWAY,
                     "dispatch_failed",
-                    e.to_string(),
+                    e,
                 );
             }
             complete(state, envelope.command_id)
@@ -516,7 +443,7 @@ pub(crate) async fn execute_command(
             complete(state, envelope.command_id)
         }
         Route::Engine => {
-            let session_id = envelope.session_id.clone().unwrap_or_default();
+            let session_id = envelope.session_id().unwrap_or_default().to_string();
             let mut worker_command = envelope.command.clone();
             if let Err(code) =
                 hydrate_attachment_previews(&state.hub, &session_id, &mut worker_command)
@@ -534,7 +461,6 @@ pub(crate) async fn execute_command(
                 envelope.command_id.clone(),
                 worker_command,
             )
-            .with_expected_revision(envelope.expected_revision)
             .with_actor(identity_worker_actor(state, identity));
             if let Err(e) = state.service.send_ringing_command(&session_id, &worker_env) {
                 return fail(
@@ -566,10 +492,10 @@ pub(crate) async fn execute_command(
 enum Route {
     /// `SessionClose`：关闭并释放 actor。
     Close { session: String },
+    /// `SessionRename` writes the business title and returns synchronously.
+    Rename { session: String, title: String },
     /// `SessionArchive` / `SessionUnarchive` / `SessionDelete`。
     Lifecycle { op: &'static str, target: String },
-    /// `SessionCreate`（`session.new` 服务面）。
-    Create,
     /// `SessionResume`：先 attach，再拉起 worker。
     Resume { session: String },
     /// `SessionAttach`：只建立归属。
@@ -578,32 +504,29 @@ enum Route {
     Engine,
 }
 
-fn route(command: &qaqh_ringing::RingingCommand, envelope_session: &Option<String>) -> Route {
-    use qaqh_domain::ControlCommand as C;
+fn route(command: &qaqh_ringing::RingingCommand, envelope_session: Option<&str>) -> Route {
     use qaqh_ringing::RingingCommand as R;
+    let session = || envelope_session.unwrap_or_default().to_string();
     match command {
-        R::Control(C::SessionClose { session_id }) => Route::Close {
-            session: session_close_session(session_id, envelope_session),
+        R::SessionClose {} => Route::Close { session: session() },
+        R::SessionRename { title } => Route::Rename {
+            session: session(),
+            title: title.clone(),
         },
-        R::Control(C::SessionArchive { session_id }) => Route::Lifecycle {
+        R::SessionArchive {} => Route::Lifecycle {
             op: "archive",
-            target: session_close_session(session_id, envelope_session),
+            target: session(),
         },
-        R::Control(C::SessionUnarchive { session_id }) => Route::Lifecycle {
+        R::SessionUnarchive {} => Route::Lifecycle {
             op: "unarchive",
-            target: session_close_session(session_id, envelope_session),
+            target: session(),
         },
-        R::Control(C::SessionDelete { session_id }) => Route::Lifecycle {
+        R::SessionDelete {} => Route::Lifecycle {
             op: "delete",
-            target: session_close_session(session_id, envelope_session),
+            target: session(),
         },
-        R::Control(C::SessionCreate { .. }) => Route::Create,
-        R::Control(C::SessionResume { session_id }) => Route::Resume {
-            session: session_id.clone(),
-        },
-        R::Control(C::SessionAttach { session_id }) => Route::Attach {
-            session: session_id.clone(),
-        },
+        R::SessionResume {} => Route::Resume { session: session() },
+        R::SessionAttach {} => Route::Attach { session: session() },
         _ => Route::Engine,
     }
 }

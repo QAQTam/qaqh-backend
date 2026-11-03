@@ -40,26 +40,23 @@ pub mod auth;
 pub mod authz;
 pub mod challenge;
 pub mod command;
+pub mod commands;
 pub mod content;
 pub mod control;
 pub mod pairing;
 pub mod service_api;
 pub(crate) mod test_hooks;
-pub mod unified;
 pub mod v2;
 
-pub(crate) use auth::{
-    get_session_id, is_authorized, lease_required_json, session_close_session, unauthorized,
-};
+pub(crate) use auth::{get_session_id, is_authorized, lease_required_json, unauthorized};
 pub(crate) use authz::{Identity, require_scope};
-pub(crate) use command::{command_fingerprint, execute_command};
+pub(crate) use command::execute_command;
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;
 pub(crate) use v2::{
-    handle_approval_respond_v2, handle_bootstrap_v2, handle_command_status_v2, handle_command_v2,
-    handle_events_v2, handle_open_v2, handle_pending_approvals_v2, handle_renew_v2,
-    handle_team_snapshot_v2,
+    handle_approval_respond_v2, handle_bootstrap_v2, handle_command_status_v2, handle_events_v2,
+    handle_open_v2, handle_pending_approvals_v2, handle_renew_v2, handle_team_snapshot_v2,
 };
 
 const RENEW_TTL_MS: u64 = 30_000;
@@ -129,14 +126,8 @@ pub fn build_router(state: AppState) -> Router {
             "/ringing/v2/sessions/{session_id}/events",
             get(handle_events_v2),
         )
-        .route(
-            "/ringing/v2/commands/{id}",
-            post(handle_command_v2).get(handle_command_status_v2),
-        )
-        .route(
-            "/ringing/v2/commands",
-            post(unified::handle_unified_command),
-        )
+        .route("/ringing/v2/commands/{id}", get(handle_command_status_v2))
+        .route("/ringing/v2/commands", post(commands::handle_command))
         .route(
             "/ringing/v2/sessions/{session_id}/approvals",
             get(handle_pending_approvals_v2),
@@ -180,25 +171,4 @@ pub fn build_router(state: AppState) -> Router {
         // 最外层：观察所有出口状态（含各 guard 的 401/403 与限流拒绝）。
         .layer(axum::middleware::from_fn(log_http_errors))
         .with_state(state)
-}
-
-#[cfg(test)]
-pub(crate) mod pure_tests {
-    use super::*;
-    #[test]
-    fn session_close_session_resolution_prefers_command_session() {
-        assert_eq!(
-            session_close_session("s-command", &Some("s-envelope".into())),
-            "s-command"
-        );
-        assert_eq!(session_close_session("s-command", &None), "s-command");
-        assert_eq!(
-            session_close_session("", &Some("s-envelope".into())),
-            "s-envelope"
-        );
-        assert_eq!(session_close_session("", &None), "");
-    }
-    // `session_create_event_carries_command_causation` 已随 v1 广播删除退役
-    // （hub-fact-bus spec 阶段 3b：A1 确认 wire 零消费方；fact 侧由
-    // ControlDelta::SessionCreated 承载）。
 }

@@ -7,7 +7,6 @@
 //! 凭据纪律：API key 明文只进 `secrets.toml` 加密槽（`providers.<id>`），
 //! `providers.toml` 只落 `"set"` 标记；任何路径不得把明文写进目录、日志或回执。
 
-use qaqh_domain::ControlCommand;
 use qaqh_profile::{ModelDef, ModelSelection, ProfilesStore, ProviderDef};
 use qaqh_ringing::{
     ProviderUpsertDto, RingingCommand, SecretWrite, SessionSettingsPatch, SettingValue,
@@ -66,9 +65,13 @@ impl QaqhService {
             .map_err(|error| QaqhError::invalid(format!("serialize catalog: {error}")))
     }
 
-    /// 新增或整体替换一个 Provider。`expected_revision = 0` 表示跳过并发校验
-    /// （首次创建）；非 0 走 `check_revision` 乐观锁。
-    pub fn provider_upsert(&self, id: &str, dto: &ProviderUpsertDto) -> QaqhResult<Value> {
+    /// 新增或整体替换一个 Provider，目录 revision 由公共命令信封携带。
+    pub fn provider_upsert(
+        &self,
+        id: &str,
+        dto: &ProviderUpsertDto,
+        expected_revision: Option<u64>,
+    ) -> QaqhResult<Value> {
         validate_provider_id(id)?;
         if dto.name.trim().is_empty() {
             return Err(QaqhError::invalid("provider name must be non-empty"));
@@ -77,7 +80,7 @@ impl QaqhService {
             return Err(QaqhError::invalid("provider base_url must be non-empty"));
         }
         let mut store = load_catalog()?;
-        check_revision(&store, (dto.expected_revision != 0).then_some(dto.expected_revision))?;
+        check_revision(&store, expected_revision)?;
 
         let existing = store.document().providers.get(id).cloned();
         // api_key 三态：Keep 保留现有标记；Set 写加密槽 + "set"；Clear 删槽 + 无标记。
@@ -197,15 +200,23 @@ impl QaqhService {
         &self,
         session_id: &str,
         patch: SessionSettingsPatch,
-    ) -> QaqhResult<Value> {
+        expected_revision: u64,
+    ) -> QaqhResult<u64> {
         let SessionSettingsPatch {
             model_selection,
+            profile,
+            effort,
             mode,
             tools,
         } = &patch;
-        if model_selection.is_none() && mode.is_none() && tools.is_none() {
+        if model_selection.is_none()
+            && profile.is_none()
+            && effort.is_none()
+            && mode.is_none()
+            && tools.is_none()
+        {
             return Err(QaqhError::invalid(
-                "session.settings.patch: at least one of model_selection/mode/tools is required",
+                "session.settings.patch: at least one setting is required",
             ));
         }
 
@@ -222,6 +233,20 @@ impl QaqhService {
             meta.model_selection = Some(selection.clone());
             meta.requested_model_selection = Some(selection.clone());
         }
+        if let Some(profile) = profile {
+            if !profile.is_empty()
+                && !qaqh_config::watch::authoritative()
+                    .is_some_and(|cfg| cfg.profiles.contains_key(profile))
+            {
+                return Err(QaqhError::not_found(format!(
+                    "profile '{profile}' not found"
+                )));
+            }
+            meta.profile = Some(profile.clone());
+        }
+        if let Some(effort) = effort {
+            meta.effort = Some(effort.clone());
+        }
         if let Some(mode) = mode {
             meta.mode = Some(match mode.as_str() {
                 "code" => 0,
@@ -237,22 +262,36 @@ impl QaqhService {
             apply_tools_patch(&mut meta, tools)?;
         }
 
-        self.write_meta(session_id, meta)?;
+        let revision = crate::session_meta::patch_with_settings_revision(
+            &self.owners,
+            session_id,
+            meta,
+            expected_revision,
+        )
+        .map_err(|error| match error {
+            crate::session_meta::MetadataPatchError::NotFound { session_id } => {
+                QaqhError::not_found(format!("session {session_id} not found"))
+            }
+            crate::session_meta::MetadataPatchError::RevisionConflict { expected, actual } => {
+                QaqhError::Conflict {
+                    message: format!(
+                        "settings revision conflict: expected {expected}, current {actual}"
+                    ),
+                }
+            }
+            crate::session_meta::MetadataPatchError::Storage(error) => {
+                QaqhError::context("session.settings.patch write failed", error)
+            }
+        })?;
         // 定向重载（只影响目标会话）；worker 下一轮按 meta 的新选择装配请求。
-        self.send_ringing_cmd(
-            session_id.to_string(),
-            RingingCommand::Control(ControlCommand::AgentReloadConfig),
-        )?;
-        Ok(json!({ "patched": true }))
+        self.send_ringing_cmd(session_id.to_string(), RingingCommand::AgentReloadConfig)?;
+        Ok(revision)
     }
 }
 
 /// tools patch → tool_mode/custom_tools 映射。词表真源是
 /// `qaqh_types::tool_mode`（standard/minimal|minimal:b|minimal:c/custom）。
-fn apply_tools_patch(
-    meta: &mut SessionMetadataPatch,
-    tools: &ToolsSettingPatch,
-) -> QaqhResult<()> {
+fn apply_tools_patch(meta: &mut SessionMetadataPatch, tools: &ToolsSettingPatch) -> QaqhResult<()> {
     match tools {
         ToolsSettingPatch::Default | ToolsSettingPatch::All => {
             meta.tool_mode = Some(qaqh_types::tool_mode::STANDARD.to_string());

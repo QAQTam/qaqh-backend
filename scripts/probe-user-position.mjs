@@ -207,18 +207,19 @@ const openClient = async (instance) => {
   return body.client_session_id;
 };
 
-const command = (session, channel, commandBody, seed = undefined) =>
-  request("POST", `/ringing/v2/commands/${channel}`, {
+const command = (session, target, commandBody) =>
+  request("POST", "/ringing/v2/commands", {
     session,
     body: {
       schema: "qaqh.Ringing",
       version: 2,
-      channel,
+      contract_revision: "ringing-commands-6",
       command_id: crypto.randomUUID(),
       client_instance_id: "probe-userpos",
       client_session_id: session,
+      target,
+      preconditions: [],
       command: commandBody,
-      ...(seed ? { session_id: seed } : {}),
     },
   });
 
@@ -229,10 +230,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // ── 会话与 driver 席位 ──────────────────────────────────────────────────────
 const client = await openClient("probe-userpos");
 const before = new Set(fs.readdirSync(path.join(DATA, "sessions")));
-const ack = await command(client, "control", {
-  channel: "control",
-  type: "session_create",
-  close_current: false,
+const ack = await command(client, { kind: "global" }, {
+  type: "session.create",
   cwd: WORK,
 });
 if (ack.status !== 200 || ack.body.status !== "accepted") {
@@ -269,15 +268,13 @@ console.log("driver seat acquired");
 // ── 发送 "ok"，等 5 个流式请求（lap 0-4）落地 ───────────────────────────────
 const send = await command(
   client,
-  "conversation",
+  { kind: "session", session_id: seed },
   {
-    channel: "conversation",
-    type: "conversation_send_message",
+    type: "conversation.send_message",
     text: MARK,
     images: [],
     as_system: false,
   },
-  seed,
 );
 if (send.status !== 200) {
   console.error(`FAIL: send message ${send.status} ${JSON.stringify(send.body)}`);

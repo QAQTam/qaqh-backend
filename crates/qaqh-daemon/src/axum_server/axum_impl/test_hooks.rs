@@ -7,7 +7,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use qaqh_domain::{RingingChannel, ToolCommand};
 use qaqh_ringing::RingingCommand;
 
 /// Injected delay/hang for command acknowledgement.
@@ -38,7 +37,6 @@ pub(crate) enum InteractionFault {
 #[derive(Debug)]
 pub(crate) struct TestHooks {
     command_ack: Option<CommandAckFault>,
-    command_ack_channel: Option<RingingChannel>,
     command_ack_target: CommandAckTarget,
     interaction_fault: Option<InteractionFault>,
     interaction_fault_used: AtomicBool,
@@ -48,7 +46,6 @@ impl TestHooks {
     pub(crate) fn disabled() -> Self {
         Self {
             command_ack: None,
-            command_ack_channel: None,
             command_ack_target: CommandAckTarget::InteractionResponses,
             interaction_fault: None,
             interaction_fault_used: AtomicBool::new(false),
@@ -66,8 +63,6 @@ impl TestHooks {
                     .map(|ms| CommandAckFault::Delay(Duration::from_millis(ms)))
             }
         });
-        let command_ack_channel = env_string("QAQH_TEST_COMMAND_ACK_CHANNEL")
-            .and_then(|value| parse_channel_name(&value));
         let command_ack_target = match env_string("QAQH_TEST_COMMAND_ACK_COMMAND")
             .as_deref()
             .unwrap_or("interaction")
@@ -82,7 +77,6 @@ impl TestHooks {
 
         Self {
             command_ack,
-            command_ack_channel,
             command_ack_target,
             interaction_fault,
             interaction_fault_used: AtomicBool::new(false),
@@ -97,11 +91,11 @@ impl TestHooks {
         let matches = match fault {
             InteractionFault::PermissionDeny | InteractionFault::PermissionHang => matches!(
                 command,
-                RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
+                RingingCommand::ToolPermissionRespond { .. }
             ),
             InteractionFault::AskDismiss | InteractionFault::AskHang => matches!(
                 command,
-                RingingCommand::Control(qaqh_domain::ControlCommand::InteractionAskRespond { .. })
+                RingingCommand::InteractionAskRespond { .. }
             ),
         };
         if !matches {
@@ -117,21 +111,15 @@ impl TestHooks {
         Some(fault)
     }
 
-    /// Apply command-ack delay/hang after routing has selected the channel and
-    /// parsed the command payload.
+    /// Apply command-ack delay/hang after parsing the command payload.
     pub(crate) async fn apply_command_ack_fault(
         &self,
-        channel: RingingChannel,
         command: &RingingCommand,
     ) {
         let Some(fault) = self.command_ack else {
             return;
         };
-        if self
-            .command_ack_channel
-            .is_some_and(|expected| expected != channel)
-            || !self.command_ack_target.matches(command)
-        {
+        if !self.command_ack_target.matches(command) {
             return;
         }
         match fault {
@@ -146,18 +134,16 @@ impl CommandAckTarget {
         match self {
             Self::InteractionResponses => matches!(
                 command,
-                RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
-                    | RingingCommand::Control(
-                        qaqh_domain::ControlCommand::InteractionAskRespond { .. }
-                    )
+                RingingCommand::ToolPermissionRespond { .. }
+                    | RingingCommand::InteractionAskRespond { .. }
             ),
             Self::PermissionResponse => matches!(
                 command,
-                RingingCommand::Tool(ToolCommand::ToolPermissionRespond { .. })
+                RingingCommand::ToolPermissionRespond { .. }
             ),
             Self::AskResponse => matches!(
                 command,
-                RingingCommand::Control(qaqh_domain::ControlCommand::InteractionAskRespond { .. })
+                RingingCommand::InteractionAskRespond { .. }
             ),
             Self::All => true,
         }
@@ -177,15 +163,6 @@ fn env_string(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn parse_channel_name(value: &str) -> Option<RingingChannel> {
-    match value {
-        "control" => Some(RingingChannel::Control),
-        "conversation" => Some(RingingChannel::Conversation),
-        "tool" => Some(RingingChannel::Tool),
-        _ => None,
-    }
-}
-
 fn parse_interaction_fault(value: &str) -> Option<InteractionFault> {
     match value {
         "permission-deny" => Some(InteractionFault::PermissionDeny),
@@ -201,36 +178,24 @@ mod tests {
     use super::*;
 
     fn permission_command() -> RingingCommand {
-        RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+        RingingCommand::ToolPermissionRespond {
             tool_call_id: "call-1".into(),
             approved: true,
             trust_folder: false,
-        })
+        }
     }
 
     fn ask_command() -> RingingCommand {
-        RingingCommand::Control(qaqh_domain::ControlCommand::InteractionAskRespond {
+        RingingCommand::InteractionAskRespond {
             interaction_id: "ask-1".into(),
             answers: vec![],
-        })
+        }
     }
 
     fn conversation_command() -> RingingCommand {
-        RingingCommand::Conversation(qaqh_domain::ConversationCommand::ConversationCancel {
+        RingingCommand::ConversationCancel {
             turn_id: None,
-        })
-    }
-
-    #[test]
-    fn channel_name_parser_is_closed() {
-        assert_eq!(parse_channel_name("control"), Some(RingingChannel::Control));
-        assert_eq!(
-            parse_channel_name("conversation"),
-            Some(RingingChannel::Conversation)
-        );
-        assert_eq!(parse_channel_name("tool"), Some(RingingChannel::Tool));
-        assert_eq!(parse_channel_name("timeline"), None);
-        assert_eq!(parse_channel_name("*"), None);
+        }
     }
 
     #[test]

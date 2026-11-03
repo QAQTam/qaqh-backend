@@ -27,7 +27,7 @@ pub use client::{
     Client, ClientHandlers, ClientOptions, PairScope, RemoteEndpoint, StopStatus, runtime_handle,
 };
 pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_discovery};
-pub use endpoint::{ActionRequest, QueryRequest};
+pub use endpoint::QueryRequest;
 pub use error::{ClientError, Result};
 pub use projection::sanitize_session_list;
 /// 领域状态类型（`qaqh_domain::state`）。
@@ -44,6 +44,10 @@ pub use qaqh_domain::state::{
 /// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
 /// 否则壳层就只能手解 JSON——那正是本客户端存在的理由要反对的事。
 pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
+pub use qaqh_ringing::{
+    CommandPrecondition, CommandTarget, ProviderUpsertDto, SecretWrite, SessionCreateResult,
+    SessionSettingsPatch, ToolsSettingPatch, RingingV2CommandEnvelope, COMMAND_CONTRACT_REVISION,
+};
 /// 公开字段背后的**类型名**：`ConfigDto.credential` 的取值域由
 /// `CredentialSource` 定义，`ConfigDto.wire` 与 `ConfigPatch::wire` 的规范拼写
 /// 由 `Wire` 定义。
@@ -71,14 +75,15 @@ pub use service_types::{
 pub use session::RingingSession;
 pub use types::{
     AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
-    CommandOptions, CompactStatus, ContentRef, ControlCommand, ControlEvent, ConversationCommand,
-    ConversationEvent, ConversationInputPurpose, ConversationMode, DashboardDocument,
+    CommandOptions, CompactStatus, ContentRef, ControlEvent, ConversationSendMessage,
+    ConversationEvent, DashboardDocument,
     DashboardTask, DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot, DomainError,
-    DomainSessionState, ErrorScope, ImageBlock, MAX_SAFE_INTEGER, NoticeLevel, PermissionCategory,
-    PermissionRisk, PlanReviewItem, ProviderToolState, RINGING_SCHEMA, ReconnectReason,
-    RingingCommand, RingingCommandAckStatus, RingingCommandState, RoundDeltaKind, SessionActivity,
+    DomainSessionState, ErrorScope, ImageBlock, InputPurpose, MAX_SAFE_INTEGER, NoticeLevel,
+    PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState, RINGING_SCHEMA,
+    ReconnectReason, RingingCommand, RingingCommandAckStatus, RingingCommandState,
+    RoundDeltaKind, SessionActivity,
     SessionListEntry, SessionMeta, SessionRunStatus, SkillInfo, SkillRuntimeInfo, SkillsStatus,
-    ToolCommand, ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult,
+    ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult,
     ToolStatus, UsageInfo, is_safe_integer,
 };
 pub use v2::{

@@ -88,6 +88,9 @@ mod tests {
                         text: "清理构建目录".into(),
                     },
                     attachments: vec![],
+                    images: vec![],
+                    inter_agent: None,
+                    subagent_terminal: None,
                     actor: ActorRef {
                         kind: ActorKind::User,
                         id: "user".into(),

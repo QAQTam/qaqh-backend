@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
+use crate::commands::{ImageBlock, InterAgentEnvelope, SubagentTerminalNotification};
 use crate::fact::{
     ActivityState, ActorRef, AssistantBlockKind, BlockId, ContentRef, ContentValue, InputId,
     InputPurpose, InteractionChoice, InteractionDecision, InteractionId, InteractionKind,
@@ -88,6 +89,12 @@ pub enum TimelineEntry {
         purpose: InputPurpose,
         content: ContentValue,
         attachments: Vec<ContentRef>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageBlock>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        inter_agent: Option<InterAgentEnvelope>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        subagent_terminal: Option<SubagentTerminalNotification>,
         actor: ActorRef,
     },
     AssistantBlock {

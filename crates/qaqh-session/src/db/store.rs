@@ -125,6 +125,7 @@ pub struct SessionRow {
     pub custom_tools: Vec<String>,
     pub skills: Option<qaqh_types::SkillSessionStateV2>,
     pub frozen_annotation: Option<String>,
+    pub settings_revision: u64,
     pub archived: bool,
     pub ephemeral: bool,
     pub created_at_ms: i64,
@@ -135,7 +136,7 @@ pub fn session_row(conn: &Connection, session_id: &str) -> rusqlite::Result<Opti
     conn.query_row(
         "SELECT session_id, title, cwd, model, effort, profile, mode, tool_mode,
                 model_selection, custom_tools_json, skills_json, frozen_annotation,
-                archived, ephemeral, created_at_ms, updated_at_ms
+                settings_revision, archived, ephemeral, created_at_ms, updated_at_ms
          FROM sessions WHERE session_id = ?1",
         [session_id],
         |row| {
@@ -159,10 +160,11 @@ pub fn session_row(conn: &Connection, session_id: &str) -> rusqlite::Result<Opti
                     .get::<_, Option<String>>(10)?
                     .and_then(|json| serde_json::from_str(&json).ok()),
                 frozen_annotation: row.get(11)?,
-                archived: row.get::<_, i64>(12)? != 0,
-                ephemeral: row.get::<_, i64>(13)? != 0,
-                created_at_ms: row.get(14)?,
-                updated_at_ms: row.get(15)?,
+                settings_revision: row.get::<_, i64>(12)?.max(0) as u64,
+                archived: row.get::<_, i64>(13)? != 0,
+                ephemeral: row.get::<_, i64>(14)? != 0,
+                created_at_ms: row.get(15)?,
+                updated_at_ms: row.get(16)?,
             })
         },
     )
@@ -226,6 +228,7 @@ pub struct SessionListRow {
     pub mode: Option<String>,
     pub tool_mode: Option<String>,
     pub model_selection: Option<qaqh_types::ModelSelection>,
+    pub settings_revision: u64,
     pub turn_count: i64,
     pub archived: bool,
     pub ephemeral: bool,
@@ -240,7 +243,7 @@ pub fn list_sessions(
 ) -> rusqlite::Result<Vec<SessionListRow>> {
     let mut stmt = conn.prepare(
         "SELECT session_id, parent_session_id, title, cwd, model, effort, profile,
-                mode, tool_mode, model_selection,
+                mode, tool_mode, model_selection, settings_revision,
                 (SELECT COUNT(*) FROM turns WHERE turns.session_id = sessions.session_id)
                     AS turn_count,
                 archived, ephemeral, created_at_ms, updated_at_ms
@@ -263,11 +266,12 @@ pub fn list_sessions(
             model_selection: row
                 .get::<_, Option<String>>(9)?
                 .and_then(|json| serde_json::from_str(&json).ok()),
-            turn_count: row.get(10)?,
-            archived: row.get::<_, i64>(11)? != 0,
-            ephemeral: row.get::<_, i64>(12)? != 0,
-            created_at_ms: row.get(13)?,
-            updated_at_ms: row.get(14)?,
+            settings_revision: row.get::<_, i64>(10)?.max(0) as u64,
+            turn_count: row.get(11)?,
+            archived: row.get::<_, i64>(12)? != 0,
+            ephemeral: row.get::<_, i64>(13)? != 0,
+            created_at_ms: row.get(14)?,
+            updated_at_ms: row.get(15)?,
         })
     })?;
     rows.collect()
@@ -290,6 +294,8 @@ pub struct SessionColumnPatch {
     pub frozen_annotation: Option<String>,
     pub archived: Option<bool>,
     pub ephemeral: Option<bool>,
+    pub expected_settings_revision: Option<u64>,
+    pub increment_settings_revision: bool,
 }
 
 pub fn update_session_columns(
@@ -303,7 +309,7 @@ pub fn update_session_columns(
     let mut push_column = |column: &str, value: Option<String>| {
         if let Some(value) = value {
             values.push(Box::new(value) as Box<dyn rusqlite::ToSql>);
-            sets.push(format!("{column} = ?{}", values.len() + 1));
+            sets.push(format!("{column} = ?{}", values.len()));
         }
     };
     push_column("title", patch.title.clone());
@@ -341,20 +347,40 @@ pub fn update_session_columns(
     push_column("frozen_annotation", patch.frozen_annotation.clone());
     if let Some(flag) = patch.archived {
         values.push(Box::new(i64::from(flag)) as Box<dyn rusqlite::ToSql>);
-        sets.push(format!("archived = ?{}", values.len() + 1));
+        sets.push(format!("archived = ?{}", values.len()));
     }
     if let Some(flag) = patch.ephemeral {
         values.push(Box::new(i64::from(flag)) as Box<dyn rusqlite::ToSql>);
-        sets.push(format!("ephemeral = ?{}", values.len() + 1));
+        sets.push(format!("ephemeral = ?{}", values.len()));
+    }
+    if patch.increment_settings_revision {
+        sets.push("settings_revision = settings_revision + 1".to_string());
     }
     values.push(Box::new(session_id.to_string()) as Box<dyn rusqlite::ToSql>);
     let placeholders: Vec<String> = (1..=values.len()).map(|index| format!("?{index}")).collect();
+    let session_id_placeholder = placeholders.last().expect("session id placeholder");
+    let mut predicate = format!("session_id = {session_id_placeholder}");
+    if let Some(expected_revision) = patch.expected_settings_revision {
+        values.push(Box::new(expected_revision as i64) as Box<dyn rusqlite::ToSql>);
+        predicate.push_str(&format!(" AND settings_revision = ?{}", values.len()));
+    }
     let sql = format!(
-        "UPDATE sessions SET {} WHERE session_id = {}",
+        "UPDATE sessions SET {} WHERE {predicate}",
         sets.join(", "),
-        placeholders.last().expect("session id placeholder"),
     );
     conn.execute(&sql, rusqlite::params_from_iter(values))
+}
+
+pub fn session_settings_revision(
+    conn: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Option<u64>> {
+    conn.query_row(
+        "SELECT settings_revision FROM sessions WHERE session_id = ?1",
+        [session_id],
+        |row| row.get::<_, i64>(0).map(|revision| revision.max(0) as u64),
+    )
+    .optional()
 }
 
 pub fn session_exists(conn: &Connection, session_id: &str) -> rusqlite::Result<bool> {

@@ -30,17 +30,22 @@ fn daemon_config_actions_share_one_write_port() {
     // spec §0b 删除，故载荷随之改正。本测试真正要钉的东西（「权限写入不得
     // 丢掉其它字段」）与键风格无关。
     service
-        .handle(
-            "config.save",
-            &json!({
+        .execute_ringing_command(
+            &qaqh_ringing::CommandTarget::Global,
+            &qaqh_ringing::RingingCommand::ConfigSave {
+                patch: json!({
                 "baseUrl": "https://custom.example/v1",
                 "maxTokens": 123456,
-            }),
+                }),
+            },
         )
         .expect("config.save");
 
     service
-        .handle("config.set_permission_level", &json!({ "level": 2 }))
+        .execute_ringing_command(
+            &qaqh_ringing::CommandTarget::Global,
+            &qaqh_ringing::RingingCommand::ConfigSetPermissionLevel { level: 2 },
+        )
         .expect("permission update");
 
     let cfg = qaqh_config::Config::load().expect("reload config");

@@ -15,15 +15,11 @@ pub fn hydrate_attachment_previews(
     session_id: &str,
     command: &mut qaqh_ringing::RingingCommand,
 ) -> Result<(), String> {
-    let qaqh_ringing::RingingCommand::Conversation(
-        qaqh_domain::ConversationCommand::ConversationSendMessage {
-            text, attachments, ..
-        },
-    ) = command
+    let qaqh_ringing::RingingCommand::ConversationSendMessage(input) = command
     else {
         return Ok(());
     };
-    let Some(references) = attachments.take() else {
+    let Some(references) = input.attachments.take() else {
         return Ok(());
     };
     if references.is_empty() {
@@ -50,7 +46,7 @@ pub fn hydrate_attachment_previews(
             reference.content_id, reference.media_type, preview
         ));
     }
-    parts.push(format!("\n\n[Message]\n{text}"));
-    *text = parts.join("");
+    parts.push(format!("\n\n[Message]\n{}", input.text));
+    input.text = parts.join("");
     Ok(())
 }

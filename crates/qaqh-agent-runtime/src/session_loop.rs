@@ -13,13 +13,14 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
+use qaqh_ringing::ConversationSendMessage;
 use qaqh_ringing_contract::events::InteractionEndStatus;
+use qaqh_ringing_contract::fact::AssistantBlockKind;
 use qaqh_ringing_contract::fact::{
-    ActorKind, ActorRef, BlockId, ContentValue, ContentRef, InputPurpose,
+    ActorKind, ActorRef, BlockId, ContentHash, ContentRef, ContentValue, InputPurpose,
     InteractionChoice, InteractionDecision, InteractionId, InteractionKind, InterruptReason,
     ToolCallId, TurnId,
 };
-use qaqh_ringing_contract::fact::AssistantBlockKind;
 use qaqh_ringing_contract::state::{InteractionView, TimelineEntry, ToolCallStatus, TurnOutcome};
 use qaqh_ringing_contract::ulid::generate_ulid;
 use qaqh_session::owner::{SessionOwner, ToolTerminal};
@@ -28,22 +29,12 @@ use tokio::sync::{oneshot, watch};
 
 use crate::progress::{AttemptBlocks, ProgressSink, ProgressStream};
 use crate::provider_job::{self, Evidence, ProviderOutcome, ProviderRequestSpec};
-use qaqh_session::session_fact_v2::ProviderFinish;
 use crate::session_agent::prompt;
 use crate::tool_job::{
     ToolAdmission, ToolApprovalGrant, ToolFailure, ToolOutput, ToolPort, ToolRequest,
     WorkspaceToolPort,
 };
-
-/// 单条待处理输入(命令目录 SendInput 的循环侧形状)。
-#[derive(Debug, Clone)]
-pub struct LoopInput {
-    pub input_id: Option<String>,
-    pub text: String,
-    pub purpose: InputPurpose,
-    pub as_system: bool,
-    pub attachments: Vec<ContentRef>,
-}
+use qaqh_session::session_fact_v2::ProviderFinish;
 
 /// 权限交互的应答。
 #[derive(Debug, Clone, Copy)]
@@ -59,14 +50,14 @@ pub struct SessionLoop {
     port: Arc<WorkspaceToolPort>,
     lifecycle: qaqh_session::owner::ToolLifecycle,
     spec: RwLock<ProviderRequestSpec>,
-    cwd: PathBuf,
+    cwd: RwLock<PathBuf>,
     inner: Mutex<LoopInner>,
     /// 最近一次回合活动的毫秒时钟(idle 卸载的判据)。
     last_activity_ms: AtomicU64,
 }
 
 struct LoopInner {
-    queue: VecDeque<LoopInput>,
+    queue: VecDeque<ConversationSendMessage>,
     active: Option<ActiveTurn>,
     permissions: HashMap<String, oneshot::Sender<PermissionAnswer>>,
     asks: HashMap<String, oneshot::Sender<Vec<(String, String)>>>,
@@ -135,7 +126,7 @@ impl SessionLoop {
             port,
             lifecycle,
             spec: RwLock::new(spec),
-            cwd,
+            cwd: RwLock::new(cwd),
             inner: Mutex::new(LoopInner {
                 queue: VecDeque::new(),
                 active: None,
@@ -208,9 +199,9 @@ impl SessionLoop {
 
     /// 输入入口:空闲开回合;活动中 Transcript 立即落块,Steer/Interject
     /// 合并进下一轮,其余入队(下一回合)。
-    pub fn send_input(self: &Arc<Self>, input: LoopInput) -> Result<(), LoopError> {
+    pub fn send_input(self: &Arc<Self>, input: ConversationSendMessage) -> Result<(), LoopError> {
         let merges_into_round = matches!(
-            input.purpose,
+            input.input_purpose,
             InputPurpose::Steer | InputPurpose::Interject
         );
         let mut inner = self.lock();
@@ -235,7 +226,7 @@ impl SessionLoop {
         drop(inner);
         // QueueOnly 语义(契约):投递但不触发回合——入队,等下一个回合
         // 开始时作为输入块落盘。
-        if matches!(input.purpose, InputPurpose::QueueOnly) {
+        if matches!(input.input_purpose, InputPurpose::QueueOnly) {
             self.lock().queue.push_back(input);
             return Ok(());
         }
@@ -278,9 +269,27 @@ impl SessionLoop {
             .unwrap_or(false)
     }
 
-    /// 配置重载后换 provider 参数(下一轮生效)。
-    pub fn reload_provider(&self, spec: ProviderRequestSpec) {
-        *self.spec.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = spec;
+    /// 配置重载后同步 provider、工具目录与执行策略(下一轮生效)。
+    pub fn reload_runtime(
+        &self,
+        mut spec: ProviderRequestSpec,
+        policy: crate::tool_job::ToolPolicySnapshot,
+        allowed_tools: Vec<String>,
+        global_allowed_tools: Option<Vec<String>>,
+    ) {
+        let tools = self
+            .port
+            .update_tool_allowlists(allowed_tools, global_allowed_tools);
+        spec.tools = (!tools.is_empty()).then_some(tools);
+        *self
+            .cwd
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy.workspace_root.clone();
+        self.port.update_policy(policy);
+        *self
+            .spec
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = spec;
     }
 
     /// 关停:取消活动回合并等待任务退出。
@@ -302,7 +311,7 @@ impl SessionLoop {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn spawn_turn(self: &Arc<Self>, input: LoopInput) {
+    fn spawn_turn(self: &Arc<Self>, input: ConversationSendMessage) {
         let loop_ = Arc::clone(self);
         let task = spawn_task(async move {
             loop_.run_turn(input).await;
@@ -321,28 +330,37 @@ impl SessionLoop {
         });
     }
 
-    fn owner_input_block(&self, turn_id: &str, input: &LoopInput) -> TimelineEntry {
+    fn owner_input_block(&self, turn_id: &str, input: &ConversationSendMessage) -> TimelineEntry {
         TimelineEntry::Input {
             block_id: BlockId::new(format!("block_{}", generate_ulid())),
             turn_id: Some(TurnId::new(turn_id.to_string())),
-            purpose: input.purpose,
+            purpose: input.input_purpose,
             content: ContentValue::Inline {
                 text: input.text.clone(),
             },
-            attachments: input.attachments.clone(),
+            attachments: input
+                .attachments
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .map(|reference| ContentRef::new(ContentHash::new(reference.content_id.clone())))
+                .collect(),
+            images: input.images.clone(),
+            inter_agent: input.inter_agent.clone(),
+            subagent_terminal: input.subagent_terminal.clone(),
             actor: ActorRef {
                 kind: if input.as_system {
                     ActorKind::System
                 } else {
                     ActorKind::User
                 },
-                id: "user".into(),
+                id: if input.as_system { "system" } else { "user" }.into(),
                 display_name: None,
             },
         }
     }
 
-    async fn run_turn(self: Arc<Self>, input: LoopInput) {
+    async fn run_turn(self: Arc<Self>, input: ConversationSendMessage) {
         let (turn_id, cancel_rx) = {
             let inner = self.lock();
             let Some(active) = inner.active.as_ref() else {
@@ -352,7 +370,7 @@ impl SessionLoop {
         };
         let turn = TurnId::new(turn_id.clone());
         let input_id = input
-            .input_id
+            .message_id
             .clone()
             .unwrap_or_else(|| format!("input_{}", generate_ulid()));
         if let Err(error) = self.owner.start_turn(&turn_id, Some(input_id), None).await {
@@ -375,13 +393,21 @@ impl SessionLoop {
         let mut messages = match self.assemble_context().await {
             Ok(messages) => messages,
             Err(error) => {
-                log::error!("[loop] {} context assembly failed: {error}", self.session_id);
+                log::error!(
+                    "[loop] {} context assembly failed: {error}",
+                    self.session_id
+                );
                 self.interrupt(&turn, InterruptReason::Crash).await;
                 self.finish_active(&turn_id).await;
                 return;
             }
         };
-        let system = prompt::system_prompt(&self.current_spec(), &self.cwd);
+        let cwd = self
+            .cwd
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let system = prompt::system_prompt(&self.current_spec(), &cwd);
         messages.insert(
             0,
             Message {
@@ -440,7 +466,8 @@ impl SessionLoop {
                 // 已出发但无终态:保留已流出文本,按取消结算。
                 Evidence::StartedUnknown => {
                     self.seal_partial(&turn, &blocks, &outcome).await;
-                    self.interrupt(&turn, InterruptReason::CancelBeforeSeal).await;
+                    self.interrupt(&turn, InterruptReason::CancelBeforeSeal)
+                        .await;
                     break;
                 }
                 Evidence::Terminal => {
@@ -486,8 +513,7 @@ impl SessionLoop {
                                             })
                                             .await
                                             .ok();
-                                        tool_messages
-                                            .push(tool_result_message(call_id, &text, ok));
+                                        tool_messages.push(tool_result_message(call_id, &text, ok));
                                     }
                                     Err(error) => {
                                         log::error!(
@@ -517,7 +543,13 @@ impl SessionLoop {
         self.finish_active(&turn_id).await;
     }
 
-    async fn declare(&self, turn: &TurnId, call_id: &str, tool_name: &str, input: &serde_json::Value) {
+    async fn declare(
+        &self,
+        turn: &TurnId,
+        call_id: &str,
+        tool_name: &str,
+        input: &serde_json::Value,
+    ) {
         let call = ToolCallId::new(call_id);
         if let Err(error) = self
             .owner
@@ -580,7 +612,12 @@ impl SessionLoop {
                     return Ok((false, "permission interaction failed".into()));
                 };
                 if answer.trust_folder {
-                    self.port.trust_dir(self.cwd.clone());
+                    let cwd = self
+                        .cwd
+                        .read()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone();
+                    self.port.trust_dir(cwd);
                 }
                 if !answer.approved {
                     self.settle_failed(
@@ -709,9 +746,7 @@ impl SessionLoop {
         let (tx, rx) = oneshot::channel();
         {
             let mut inner = self.lock();
-            inner
-                .asks
-                .insert(interaction_id.as_ref().to_string(), tx);
+            inner.asks.insert(interaction_id.as_ref().to_string(), tx);
             if let Some(active) = inner.active.as_mut() {
                 active.pending_interactions.push(interaction_id.clone());
             }
@@ -734,11 +769,7 @@ impl SessionLoop {
             Err(_) => {
                 // 回合被中断:取消交互并按取消结算。
                 self.owner
-                    .interaction_resolved(
-                        &interaction_id,
-                        None,
-                        InteractionEndStatus::Cancelled,
-                    )
+                    .interaction_resolved(&interaction_id, None, InteractionEndStatus::Cancelled)
                     .await
                     .ok();
                 self.settle_finished_text(call_id, "ask", "cancelled");
@@ -820,7 +851,9 @@ impl SessionLoop {
         let mut answer = String::new();
         for block in &message.content {
             match block {
-                ContentBlock::Reasoning { reasoning: text, .. } => reasoning.push_str(text),
+                ContentBlock::Reasoning {
+                    reasoning: text, ..
+                } => reasoning.push_str(text),
                 ContentBlock::Text { text } => answer.push_str(text),
                 _ => {}
             }
@@ -864,12 +897,7 @@ impl SessionLoop {
     }
 
     /// 中断路径的 seal:只保留已流出文本。
-    async fn seal_partial(
-        &self,
-        turn: &TurnId,
-        blocks: &AttemptBlocks,
-        outcome: &ProviderOutcome,
-    ) {
+    async fn seal_partial(&self, turn: &TurnId, blocks: &AttemptBlocks, outcome: &ProviderOutcome) {
         let reasoning = outcome.partial_reasoning.clone().unwrap_or_default();
         let answer = outcome.partial_text.clone().unwrap_or_default();
         if !reasoning.is_empty() {
@@ -966,7 +994,7 @@ impl SessionLoop {
     ///
     /// 分组规则:相邻 AssistantBlock + ToolCall 归并为一条 assistant 消息,
     /// Input/ToolResult/Compaction 是边界。工具名/参数从 tool_calls 表 join。
-    async fn assemble_context(&self) -> Result<Vec<Message>, LoopError> {
+    pub(crate) async fn assemble_context(&self) -> Result<Vec<Message>, LoopError> {
         let state = self.owner.snapshot().await?;
         let tools_by_id: HashMap<String, &qaqh_ringing_contract::state::ToolCallView> = state
             .tools
@@ -977,16 +1005,34 @@ impl SessionLoop {
         let mut group: Option<Message> = None;
         for entry in state.timeline {
             match entry {
-                TimelineEntry::Input { content, .. } => {
+                TimelineEntry::Input {
+                    content,
+                    images,
+                    actor,
+                    ..
+                } => {
                     flush_assistant(&mut messages, group.take());
+                    let mut content_blocks = Vec::new();
                     if let ContentValue::Inline { text } = content
                         && !text.is_empty()
                     {
+                        content_blocks.push(ContentBlock::Text { text });
+                    }
+                    content_blocks.extend(images.into_iter().map(|image| ContentBlock::Image {
+                        mime_type: image.mime_type,
+                        data: image.data,
+                    }));
+                    if !content_blocks.is_empty() {
                         messages.push(Message {
                             msg_id: None,
-                            role: "user".into(),
+                            role: if actor.kind == ActorKind::System {
+                                "system"
+                            } else {
+                                "user"
+                            }
+                            .into(),
                             name: None,
-                            content: vec![ContentBlock::Text { text }],
+                            content: content_blocks,
                         });
                     }
                 }
@@ -1001,9 +1047,12 @@ impl SessionLoop {
                         && !text.is_empty()
                     {
                         match block_kind {
-                            AssistantBlockKind::Reasoning => message
-                                .content
-                                .push(ContentBlock::Reasoning { reasoning: text, kind: None }),
+                            AssistantBlockKind::Reasoning => {
+                                message.content.push(ContentBlock::Reasoning {
+                                    reasoning: text,
+                                    kind: None,
+                                })
+                            }
                             AssistantBlockKind::Answer => {
                                 message.content.push(ContentBlock::Text { text })
                             }
@@ -1120,10 +1169,7 @@ struct OwnerSink {
 }
 
 impl ProgressSink for OwnerSink {
-    fn assistant_block(
-        &self,
-        update: crate::progress::AssistantProgress<'_>,
-    ) {
+    fn assistant_block(&self, update: crate::progress::AssistantProgress<'_>) {
         self.owner.message_delta(
             &TurnId::new(update.turn_id.to_string()),
             &BlockId::new(update.block_id.to_string()),
