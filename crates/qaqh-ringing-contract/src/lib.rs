@@ -15,7 +15,7 @@ pub mod team;
 pub mod ulid;
 
 pub use events::{SessionEvent, SessionEventFrame};
-pub use state::{CodeDelta, SessionState, ToolEffectInfo};
+pub use state::{CodeDelta, SessionBootstrap, SessionState, ToolEffectInfo};
 pub use team::{TaskBoardSnapshot, TeamBoardSnapshot, TeamSnapshot};
 
 /// `/team` 端点 schema 判别值(契约锁定:客户端按字面量校验)。

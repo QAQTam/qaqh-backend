@@ -21,7 +21,7 @@ use tokio::sync::watch;
 use crate::client::Client;
 use crate::error::{ClientError, Result};
 use crate::types::ReconnectReason;
-use crate::v2::{ClientV2Event, ClientV2SubscriptionEvent, ringing_v2};
+use crate::v2::{ClientV2Event, ClientV2ResyncRequired, ClientV2SubscriptionEvent};
 
 const SSE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
 const RETRY_BASE_MS: u64 = 1_000;
@@ -48,7 +48,7 @@ pub enum V2StreamStatus {
 /// 单条 v2 流的回调。
 pub struct V2StreamHandlers {
     pub on_event: Arc<dyn Fn(String, ClientV2Event) + Send + Sync>,
-    pub on_reset: Arc<dyn Fn(String, ringing_v2::RingingV2ResetRequired) + Send + Sync>,
+    pub on_reset: Arc<dyn Fn(String, ClientV2ResyncRequired) + Send + Sync>,
     pub on_status: Arc<dyn Fn(String, V2StreamStatus) + Send + Sync>,
     pub on_liveness: Arc<dyn Fn() + Send + Sync>,
 }
@@ -59,7 +59,7 @@ pub struct V2Stream {
     client: Client,
     handlers: V2StreamHandlers,
     /// 已接受的 canonical cursor（只有 reliable 事件推进）。
-    cursor: Option<qaqh_ringing::CursorToken>,
+    cursor: Option<String>,
     /// 上一次成功连接的 epoch。daemon 重启换 epoch 后 cursor 语义失效，必须归零。
     last_epoch: Option<String>,
 }
@@ -154,17 +154,17 @@ impl V2Stream {
             self.cursor = None;
             self.last_epoch = Some(server_epoch.clone());
         }
-        // 首次（或 epoch 变化后）没有 cursor：先取 bootstrap 的 canonical
-        // snapshot cursor，再从它订阅。**不能**裸订阅——服务端把「无 cursor」
-        // 解释为「只看 live」，会静默丢掉 snapshot 与订阅之间的所有事实。
+        // 首次(或 epoch 变化后)没有 cursor:先 bootstrap 拿状态水位,再从它
+        // 订阅。**不能**裸订阅——服务端把「无游标」解释为「只看 live」,
+        // bootstrap 与订阅之间的业务变化会被判为缺口要求 resync。
         if self.cursor.is_none() {
             let bootstrap = self.client.bootstrap_v2(&self.session_id).await?;
-            self.cursor = Some(bootstrap.snapshot_cursor.clone());
+            self.cursor = Some(bootstrap.state.seq.to_string());
         }
 
         let mut subscription = self
             .client
-            .subscribe_v2(&self.session_id, self.cursor.as_ref())
+            .subscribe_v2(&self.session_id, self.cursor.as_deref())
             .await?;
         *retry_ms = RETRY_BASE_MS;
         (self.handlers.on_status)(
@@ -200,12 +200,8 @@ impl V2Stream {
                     idle.as_mut().reset(tokio::time::Instant::now() + SSE_IDLE_TIMEOUT);
                     match item? {
                         Some(ClientV2SubscriptionEvent::Event(event)) => {
-                            // 只有 reliable 事件带 canonical cursor，也只有它推进 cursor。
-                            if event.delivery == qaqh_ringing::RingingV2Delivery::Reliable
-                                && let Some(cursor) = event.cursor.clone()
-                            {
-                                self.cursor = Some(cursor);
-                            }
+                            // 每个事件帧都携带 seq;游标 = 最后一帧的 id(epoch:seq)。
+                            self.cursor = Some(event.seq.to_string());
                             (self.handlers.on_event)(self.session_id.clone(), *event);
                             (self.handlers.on_liveness)();
                         }
@@ -217,9 +213,8 @@ impl V2Stream {
                             (self.handlers.on_liveness)();
                         }
                         Some(ClientV2SubscriptionEvent::Reset(reset)) => {
-                            // 服务端发完 reset 即断流；把 cursor 对齐到 reset 携带的
-                            // snapshot（若没有就归零，由上层重新 bootstrap）。
-                            self.cursor = reset.snapshot_cursor.clone();
+                            // 服务端发完 resync 即断流;cursor 归零,由上层重新 bootstrap。
+                            self.cursor = None;
                             (self.handlers.on_reset)(self.session_id.clone(), reset);
                             return Ok(());
                         }

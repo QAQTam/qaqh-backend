@@ -1,40 +1,12 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use qaqh_runtime::QaqhService;
 use qaqh_runtime::RingingHub;
-use qaqh_session::canonical::{
-    CANONICAL_IDENTITY_FILE, CanonicalLog, CanonicalSessionIdentity, EVENTS_FILE, WriterId,
-};
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-
-/// hub-fact-bus spec 阶段 2.3：canonical fact 投影链上的命令回执折叠 sink。
-/// 先折叠回执，再委托 `V2ProjectionHub`——durable-before-publish 语义不变，
-/// 折叠只看见已落盘事实。
-struct FoldingSink {
-    v2: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
-    pending: Arc<Mutex<qaqh_runtime::ringing::PendingCommandStore>>,
-}
-
-impl qaqh_session::projection::ProjectionSink for FoldingSink {
-    fn publish(
-        &self,
-        session_dir: &std::path::Path,
-        fact: &qaqh_session::session_fact_v2::SessionFact,
-        events: &[qaqh_session::session_fact_v2::ProjectionEvent],
-    ) {
-        self.pending
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .observe_projection_events(events);
-        qaqh_session::projection::ProjectionSink::publish(&*self.v2, session_dir, fact, events);
-    }
-}
 
 fn daemon_channel() -> String {
     std::env::var("QAQH_CHANNEL").unwrap_or_else(|_| {
@@ -198,10 +170,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
     let sessions = qaqh_session::SessionManager::global();
     let _lock = acquire_single_instance()?;
-    // Single-instance lock is held: any canonical writer fence still on disk
-    // belongs to a previous daemon process or an ordered-exit gap, never to a
-    // live worker of this process. Rotate it before the registry can spawn.
-    rotate_stale_writer_fences();
     let token = config.token.clone().unwrap_or_else(random_hex);
     if config.token.is_none() && !config.bind_ip.is_loopback() {
         // 临时跨端模式：没显式给 key 时把生成值打出来，方便手动填写。
@@ -263,25 +231,11 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         RingingHub::with_persistence(epoch.clone(), data_root.join("ringing"))
             .with_sessions(sessions.clone()),
     );
-    let v2_hub = Arc::new(qaqh_runtime::ringing::V2ProjectionHub::new(epoch.clone()));
     let pending_commands = Arc::new(Mutex::new(
         qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
     ));
-    // hub-fact-bus spec 阶段 2.3：回执折叠挂在 canonical fact 投影链上
-    // （durable-before-publish），不再订阅 v1 事件总线。
-    if let Err(existing) =
-        qaqh_session::projection::install_projection_sink(Arc::new(FoldingSink {
-            v2: v2_hub.clone(),
-            pending: pending_commands.clone(),
-        }))
-    {
-        log::warn!(
-            "[ringing-v2] projection sink already installed; keeping existing sink ({existing:p})"
-        );
-    }
     let service = QaqhService::init(sessions);
     service.attach_ringing(hub.clone());
-    service.attach_v2_projection(v2_hub.clone());
     // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
@@ -300,7 +254,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     spawn_signal_shutdown(shutdown.clone());
     let app_state = crate::axum_server::AppState {
         hub: hub.clone(),
-        v2_hub: v2_hub.clone(),
         leases: ringing_leases.clone(),
         pending: pending_commands.clone(),
         service: service.clone(),
@@ -478,78 +431,6 @@ fn spawn_signal_shutdown(shutdown: watch::Sender<bool>) {
     });
 }
 
-fn rotate_stale_writer_fences() {
-    rotate_stale_writer_fences_in(&qaqh_types::platform::sessions_dir());
-}
-
-/// Rotate every canonical writer fence under `sessions_dir` and immediately
-/// release the rotated lease with `i64::MIN`.
-/// This is a startup recovery step: the daemon has just acquired the
-/// single-instance lock and no worker exists yet, so a fence on disk cannot be
-/// a live writer of this process. Waiting for its TTL would block the first
-/// tool/intent/interaction write after a crash for up to `tool_ledger_lease_ms`.
-fn rotate_stale_writer_fences_in(sessions_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir()
-            || !dir.join(CANONICAL_IDENTITY_FILE).is_file()
-            || !dir.join(EVENTS_FILE).is_file()
-        {
-            continue;
-        }
-        let session_id = entry.file_name().to_string_lossy().into_owned();
-        let result = (|| -> Result<(), String> {
-            let identity = CanonicalSessionIdentity::open_or_create(&dir)
-                .map_err(|error| error.to_string())?;
-            let mut log = CanonicalLog::open(&dir, identity.session_id, identity.log_id)
-                .map_err(|error| error.to_string())?;
-            let Some(fence) = log.writer_fence().map_err(|error| error.to_string())? else {
-                return Ok(());
-            };
-            let Some(generation_epoch) = fence.generation_epoch.checked_add(1) else {
-                return Err("writer fence generation exhausted".into());
-            };
-            let Some(fencing_token) = fence.fencing_token.checked_add(1) else {
-                return Err("writer fence token exhausted".into());
-            };
-            let now_ms = system_time_ms();
-            let lease = log
-                .rotate_writer_fence(
-                    WriterId::new(format!(
-                        "daemon-startup-{}-{}",
-                        std::process::id(),
-                        session_id
-                    )),
-                    generation_epoch,
-                    fencing_token,
-                    now_ms,
-                    60_000,
-                )
-                .map_err(|error| error.to_string())?;
-            log.release_writer(&lease, i64::MIN)
-                .map_err(|error| error.to_string())?;
-            log::info!(
-                "[ringing-v2] rotated stale writer fence for {session_id}: generation {} -> {generation_epoch}",
-                fence.generation_epoch
-            );
-            Ok(())
-        })();
-        if let Err(error) = result {
-            log::warn!("[ringing-v2] writer fence rotation skipped for {session_id}: {error}");
-        }
-    }
-}
-
-fn system_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
-}
 
 fn stringify(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -624,7 +505,6 @@ fn restrict_discovery_permissions(_path: &std::path::Path) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_session::canonical::CanonicalSessionStore;
 
     #[test]
     fn lan_cert_subject_alt_names_cover_the_address_clients_type_in() {
@@ -688,34 +568,4 @@ mod tests {
         assert!(config.bind_ip.is_loopback());
     }
 
-    #[test]
-    fn startup_rotation_releases_a_crashed_writer_fence() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let dir = root.path().join("seed-crash");
-        std::fs::create_dir_all(&dir).expect("session dir");
-        let identity = CanonicalSessionIdentity::open_or_create(&dir).expect("identity");
-        let mut store =
-            CanonicalSessionStore::open(&dir, identity.session_id.clone(), identity.log_id.clone())
-                .expect("store");
-        let _crashed = store
-            .acquire_writer(WriterId::new("crashed-agent"), 1_000, 600_000)
-            .expect("crashed lease");
-        drop(store);
-
-        rotate_stale_writer_fences_in(root.path());
-
-        let log = CanonicalLog::open(&dir, identity.session_id.clone(), identity.log_id.clone())
-            .expect("log");
-        let fence = log.writer_fence().expect("fence").expect("rotated fence");
-        assert_eq!(fence.lease_expires_at_ms, i64::MIN);
-        assert!(fence.writer_id.as_str().starts_with("daemon-startup-"));
-
-        // Even a reader with an ancient clock can take over after rotation.
-        let mut store = CanonicalSessionStore::open(&dir, identity.session_id, identity.log_id)
-            .expect("reopen");
-        let lease = store
-            .acquire_writer(WriterId::new("new-agent"), 0, 600_000)
-            .expect("new writer");
-        store.release_writer(&lease, i64::MIN).expect("release");
-    }
 }

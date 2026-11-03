@@ -15,16 +15,6 @@ impl AgentRegistry {
         let mut session_id_bytes = 0usize;
         let mut session_workers = 0_u64;
         let mut subagent_workers = 0_u64;
-        let mut live_threads = 0_u64;
-        let mut context_messages = 0_u64;
-        let mut context_payload_bytes = 0_u64;
-        let mut context_heap_estimate_bytes = 0_u64;
-        let mut async_actors = 0_u64;
-        let mut active_tasks = 0_u64;
-        let mut mailbox_items = 0_u64;
-        let mut mailbox_bytes = 0_u64;
-        let mut journal_index_entries = 0_u64;
-        let mut journal_index_heap_bytes = 0_u64;
         for (session_id, instance) in &self.instances {
             session_id_bytes = session_id_bytes.saturating_add(session_id.capacity());
             worker_heap = worker_heap.saturating_add(std::mem::size_of::<AgentInstance>());
@@ -32,39 +22,10 @@ impl AgentRegistry {
                 AgentKind::Session => session_workers += 1,
                 AgentKind::Subagent(_) => subagent_workers += 1,
             }
-            if instance
-                .thread
-                .as_ref()
-                .is_some_and(|thread| !thread.is_finished())
-            {
-                live_threads += 1;
-            }
-            let AgentTransport::ThinAgent { handle, task } = &instance.transport;
-            async_actors = async_actors.saturating_add(1);
-            if !task.is_finished() {
-                active_tasks = active_tasks.saturating_add(1);
-                let memory = handle.memory_snapshot();
-                context_messages = context_messages.saturating_add(memory.context_messages);
-                context_payload_bytes =
-                    context_payload_bytes.saturating_add(memory.context_payload_bytes);
-                context_heap_estimate_bytes = context_heap_estimate_bytes
-                    .saturating_add(memory.context_heap_estimate_bytes);
-                mailbox_items = mailbox_items.saturating_add(memory.mailbox_items);
-                mailbox_bytes = mailbox_bytes.saturating_add(memory.mailbox_bytes);
-                journal_index_entries =
-                    journal_index_entries.saturating_add(memory.journal_index_entries);
-                journal_index_heap_bytes = journal_index_heap_bytes
-                    .saturating_add(memory.journal_index_heap_estimate_bytes);
-            }
-            if instance
-                .reader
-                .as_ref()
-                .is_some_and(|thread| !thread.is_finished())
-            {
-                live_threads += 1;
-            }
         }
-        let components = vec![
+        // 回合循环不缓存上下文:消息流每回合从 SQLite 组装,无 mailbox/索引
+        // 常驻(旧 actor 的 context/mailbox gauges 随旧框架移除)。
+        vec![
             qaqh_memwatch::ComponentMemory {
                 name: "agent_registry.workers".into(),
                 item_count: self.instances.len() as u64,
@@ -80,7 +41,8 @@ impl AgentRegistry {
                     .saturating_add(self.residency.len())
                     .saturating_add(self.quota_ledgers.len())
                     .saturating_add(self.outbound_attempts.len())
-                    .saturating_add(self.armed_collectors.len()) as u64,
+                    .saturating_add(self.armed_collectors.len())
+                    .saturating_add(self.spawn_configs.len()) as u64,
                 payload_bytes: None,
                 heap_estimate_bytes: None,
                 ..Default::default()
@@ -99,55 +61,23 @@ impl AgentRegistry {
                 heap_estimate_bytes: None,
                 ..Default::default()
             },
-            qaqh_memwatch::ComponentMemory {
-                name: "agent_registry.live_threads".into(),
-                item_count: live_threads,
-                payload_bytes: None,
-                heap_estimate_bytes: None,
-                ..Default::default()
-            },
-            qaqh_memwatch::ComponentMemory {
-                name: "agent_registry.async_actors".into(),
-                item_count: async_actors,
-                payload_bytes: None,
-                heap_estimate_bytes: None,
-                ..Default::default()
-            },
-            qaqh_memwatch::ComponentMemory {
-                name: "agent_registry.active_tasks".into(),
-                item_count: active_tasks,
-                payload_bytes: None,
-                heap_estimate_bytes: None,
-                ..Default::default()
-            },
-            qaqh_memwatch::ComponentMemory {
-                name: "agent_registry.context".into(),
-                item_count: context_messages,
-                payload_bytes: Some(context_payload_bytes),
-                heap_estimate_bytes: Some(context_heap_estimate_bytes),
-                ..Default::default()
-            },
-            qaqh_memwatch::ComponentMemory {
-                name: "agent_registry.mailbox".into(),
-                item_count: mailbox_items,
-                payload_bytes: Some(mailbox_bytes),
-                heap_estimate_bytes: None,
-                ..Default::default()
-            },
-            qaqh_memwatch::ComponentMemory {
-                name: "agent_registry.journal_indexes".into(),
-                item_count: journal_index_entries,
-                payload_bytes: None,
-                heap_estimate_bytes: Some(journal_index_heap_bytes),
-                ..Default::default()
-            },
-        ];
-        components
+        ]
     }
 
     /// Read logical metadata by stable `AgentId = session_id`.
     pub fn agent_metadata(&self, agent_id: &str) -> Option<AgentMetadata> {
         self.agent_catalog.get_by_id(agent_id).cloned()
+    }
+
+    /// 运行中会话的回合循环句柄(宿主 wait_agent/诊断用)。
+    pub fn loop_for(
+        &self,
+        session_id: &str,
+    ) -> Option<Arc<qaqh_agent_runtime::session_loop::SessionLoop>> {
+        self.instances.get(session_id).map(|instance| {
+            let AgentTransport::Loop { loop_ } = &instance.transport;
+            Arc::clone(loop_)
+        })
     }
 
     /// List logical agents for a caller, resolving relative prefixes below the
@@ -181,9 +111,10 @@ impl AgentRegistry {
 
     /// List logical agents with their explicit status and residency snapshot.
     ///
-    /// Status is rebuilt from canonical facts and overlaid with the current
-    /// activity tracker while loaded. Residency comes from the registry's
-    /// explicit lifecycle map; it is never inferred from the worker table.
+    /// Status is derived from the loop's live activity state while loaded and
+    /// from the business database once unloaded. Residency comes from the
+    /// registry's explicit lifecycle map; it is never inferred from the worker
+    /// table.
     pub fn list_agents_with_state_for_caller(
         &mut self,
         caller_session_id: &str,
@@ -222,34 +153,6 @@ impl AgentRegistry {
 
     pub(super) fn set_agent_residency(&mut self, agent_id: &str, residency: ListedAgentResidency) {
         self.residency.insert(agent_id.to_string(), residency);
-        self.publish_agent_residency(agent_id);
-    }
-
-    pub(super) fn publish_agent_residency(&self, agent_id: &str) {
-        let Some(hub) = self.v2_hub.as_ref() else {
-            return;
-        };
-        let Some(metadata) = self.agent_catalog.get_by_id(agent_id).cloned() else {
-            return;
-        };
-        let residency = match self.agent_residency(agent_id) {
-            ListedAgentResidency::Loaded => TeamAgentResidency::Loaded,
-            ListedAgentResidency::Unloaded => TeamAgentResidency::Unloaded,
-        };
-        let session_dir = self
-            .sessions
-            .session_path_dir(metadata.root_session_id.as_str());
-        if let Err(error) = hub.set_team_residency(
-            &session_dir,
-            metadata.root_session_id.as_str(),
-            &metadata.agent_id,
-            residency,
-        ) {
-            log::debug!(
-                "[registry] residency overlay unavailable for agent {}: {error}",
-                metadata.agent_path
-            );
-        }
     }
 
     pub(super) fn listed_agent_status(
@@ -257,121 +160,45 @@ impl AgentRegistry {
         agent: &AgentMetadata,
         residency: ListedAgentResidency,
     ) -> QaqhResult<ListedAgentStatus> {
-        if residency == ListedAgentResidency::Loaded
-            && let Some(activity) = self.activity.get(agent.agent_id.as_str())
-        {
-            match activity.state {
-                qaqh_domain::ActivityState::Starting => {
-                    return Ok(ListedAgentStatus::PendingInit);
-                }
-                qaqh_domain::ActivityState::Working => {
-                    return Ok(ListedAgentStatus::Running);
-                }
-                qaqh_domain::ActivityState::WaitingUser => {
-                    return Ok(ListedAgentStatus::WaitingUser);
-                }
-                qaqh_domain::ActivityState::Disconnected => {
-                    return Ok(ListedAgentStatus::Shutdown);
-                }
-                // Failed 与 Idle 同权：回合错误不改变 agent 生命周期，
-                // listed 状态继续走下方按事实推导的路径。
-                qaqh_domain::ActivityState::Idle | qaqh_domain::ActivityState::Failed => {}
-            }
-        }
-
-        // A terminal child fact lives in the parent log. For an unloaded child
-        // it is the authoritative final lifecycle state, even if a later
-        // shutdown attempt emitted a generic turn interruption in the child log.
+        // 结果面优先:登记过终态摘要的子代理,状态就是终态(与 residency 无关)。
         if !agent.agent_path.is_root()
-            && residency == ListedAgentResidency::Unloaded
-            && let Some(status) = self.parent_terminal_status(agent)?
+            && let Some(outcome) = self.subagent_outcomes.get(agent.agent_id.as_str())
         {
-            return Ok(status);
-        }
-
-        self.session_canonical_status(agent.agent_id.as_str())
-    }
-
-    pub(super) fn session_canonical_status(&self, agent_id: &str) -> QaqhResult<ListedAgentStatus> {
-        let mut status = ListedAgentStatus::PendingInit;
-        for fact in self.read_session_facts(agent_id)? {
-            match &fact.payload {
-                FactPayload::TurnStarted(_) => status = ListedAgentStatus::Running,
-                FactPayload::TurnInterrupted(_) => status = ListedAgentStatus::Interrupted,
-                FactPayload::InteractionRequested(_) => status = ListedAgentStatus::WaitingUser,
-                FactPayload::InteractionResolved(_) | FactPayload::InteractionExpired(_)
-                    if status == ListedAgentStatus::WaitingUser =>
-                {
-                    status = ListedAgentStatus::Running;
-                }
-                FactPayload::TurnFinished(_) if status == ListedAgentStatus::WaitingUser => {
-                    status = ListedAgentStatus::Running;
-                }
-                FactPayload::SubagentFinished(payload) => {
-                    status = listed_terminal_status(payload.status);
-                }
-                FactPayload::SessionDeleted(_) => status = ListedAgentStatus::Shutdown,
-                _ => {}
-            }
-        }
-        Ok(status)
-    }
-
-    pub(super) fn parent_terminal_status(
-        &self,
-        agent: &AgentMetadata,
-    ) -> QaqhResult<Option<ListedAgentStatus>> {
-        let parent_path = agent
-            .parent_agent_path
-            .as_ref()
-            .ok_or_else(|| format!("child agent {} has no parent path", agent.agent_id))?;
-        let parent = self
-            .agent_catalog
-            .get_by_path(agent.root_session_id.as_str(), parent_path)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "child agent {} parent metadata missing at {parent_path}",
-                    agent.agent_id
-                )
-            })?;
-        let child_id = SessionId::new(agent.agent_id.as_str());
-        let status = self
-            .read_session_facts(parent.agent_id.as_str())?
-            .into_iter()
-            .rev()
-            .find_map(|fact| match fact.payload {
-                FactPayload::SubagentFinished(payload) if payload.child_session_id == child_id => {
-                    Some(listed_terminal_status(payload.status))
-                }
-                _ => None,
+            return Ok(if outcome.exit_code == 0 {
+                ListedAgentStatus::Completed
+            } else {
+                ListedAgentStatus::Errored
             });
-        Ok(status)
-    }
+        }
 
-    pub(super) fn read_session_facts(&self, session_id: &str) -> QaqhResult<Vec<SessionFact>> {
-        let session_dir = self.sessions.session_path_dir(session_id);
-        if !session_dir.join(EVENTS_COMMIT_FILE).exists() {
-            return Ok(Vec::new());
+        if residency == ListedAgentResidency::Loaded
+            && let Some(instance) = self.instances.get(agent.agent_id.as_str())
+        {
+            let AgentTransport::Loop { loop_ } = &instance.transport;
+            return Ok(if loop_.waiting_user() {
+                ListedAgentStatus::WaitingUser
+            } else {
+                // 回合结束不改变 agent 生命周期,loaded 会话保持 Running。
+                ListedAgentStatus::Running
+            });
         }
-        let identity = CanonicalSessionIdentity::open(&session_dir)
-            .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
-        if identity.session_id.as_str() != session_id {
-            return Err(format!(
-                "canonical identity for {session_id} is {}",
-                identity.session_id
+
+        // 未加载:业务库直读。
+        match self.owners.session_run_state(agent.agent_id.as_str()) {
+            Ok(qaqh_session::owner::SessionRunState::Running) => Ok(ListedAgentStatus::Running),
+            Ok(qaqh_session::owner::SessionRunState::Waiting) => {
+                Ok(ListedAgentStatus::WaitingUser)
+            }
+            Ok(qaqh_session::owner::SessionRunState::Idle) => Ok(ListedAgentStatus::Running),
+            Ok(qaqh_session::owner::SessionRunState::NeverStarted) => {
+                Ok(ListedAgentStatus::PendingInit)
+            }
+            Err(error) => Err(format!(
+                "business status for {}: {error}",
+                agent.agent_id
             )
-            .into());
+            .into()),
         }
-        let reader = CommittedFactReader::open(
-            &session_dir,
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-        )
-        .map_err(|error| format!("open canonical facts for {session_id}: {error}"))?;
-        reader
-            .read_all()
-            .map_err(|error| format!("read canonical facts for {session_id}: {error}").into())
     }
 
     /// Resolve a caller-relative or absolute target path within the caller's
@@ -411,67 +238,59 @@ impl AgentRegistry {
         {
             return Ok(());
         }
-        if self.canonical_parent_session_id(session_id)?.is_none() {
-            self.register_root_agent(session_id, unix_ms())?;
+        // 血缘以业务库为准:sessions.parent_session_id 有值即子代理,
+        // 否则登记为根。
+        match self.owners.session_parent(session_id) {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                self.register_root_agent(session_id, unix_ms())?;
+            }
+            Err(error) => {
+                return Err(format!("business parent lookup for {session_id}: {error}").into());
+            }
         }
         Ok(())
     }
 
-    /// Read the `SessionCreated.parent_session_id` recovery hint from the
-    /// canonical log. This is deliberately a hint only: graph ownership is
-    /// established by parent-log `SubagentSpawned` facts in SUBV2-03/04.
-    pub(super) fn canonical_parent_session_id(
-        &self,
-        session_id: &str,
-    ) -> QaqhResult<Option<String>> {
-        let session_dir = self.sessions.session_path_dir(session_id);
-        if !session_dir.exists() {
-            return Ok(None);
-        }
-        // This is a read-only recovery hint. Do not create the identity
-        // sidecar here: a session directory can legitimately exist before the
-        // canonical baseline has been materialized.
-        if !session_dir.join(CANONICAL_IDENTITY_FILE).exists() {
-            return Ok(None);
-        }
-        let has_events = session_dir.join(EVENTS_FILE).exists();
-        let has_commit = session_dir.join(EVENTS_COMMIT_FILE).exists();
-        let batch_root = qaqh_session::canonical::is_batch_root(&session_dir);
-        if !has_events && !has_commit && !batch_root {
-            // `persist_new_session` creates a metadata-only directory before
-            // the first canonical fact. That is still a root session.
-
-            return Ok(None);
-        }
-        let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
-            .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
-        let facts = crate::agent_graph::read_session_facts(
-            &session_dir,
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-        )
-        .map_err(|error| format!("read committed facts for {session_id}: {error}"))?;
-        for fact in facts {
-            if let FactPayload::SessionCreated(created) = fact.payload {
-                return Ok(created
-                    .parent_session_id
-                    .map(|parent| parent.as_str().to_string()));
-            }
-        }
-        Ok(None)
-    }
-
     pub fn activities(&self) -> Vec<qaqh_domain::SessionActivity> {
-        self.activity.snapshot()
+        let now = unix_ms().max(0) as u64;
+        self.instances
+            .values()
+            .map(|instance| self.activity_of(instance, now))
+            .collect()
     }
 
     pub fn activity(&self, session_id: &str) -> Option<qaqh_domain::SessionActivity> {
-        self.activity.get(session_id)
+        let instance = self.instances.get(session_id)?;
+        Some(self.activity_of(instance, unix_ms().max(0) as u64))
+    }
+
+    fn activity_of(
+        &self,
+        instance: &AgentInstance,
+        now: u64,
+    ) -> qaqh_domain::SessionActivity {
+        let AgentTransport::Loop { loop_ } = &instance.transport;
+        let state = if loop_.waiting_user() {
+            qaqh_domain::ActivityState::WaitingUser
+        } else {
+            match loop_.activity_state() {
+                qaqh_ringing_contract::fact::ActivityState::Running => {
+                    qaqh_domain::ActivityState::Working
+                }
+                _ => qaqh_domain::ActivityState::Idle,
+            }
+        };
+        qaqh_domain::SessionActivity {
+            session_id: instance.session_id.clone(),
+            state,
+            turn_id: loop_.active_turn(),
+            seq: 0,
+            updated_at: now,
+        }
     }
 
     pub fn is_running(&self, session_id: &str) -> bool {
-        self.instances
-            .get(session_id)
-            .is_some_and(|instance| !instance.is_dead())
+        self.instances.contains_key(session_id)
     }
 }

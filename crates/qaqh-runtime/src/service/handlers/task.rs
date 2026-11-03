@@ -15,22 +15,15 @@ pub(crate) fn handle(service: &QaqhService, command: TaskCommand) -> QaqhResult<
         TaskCommand::TodoStatus(args) => {
             qaqh_workspace::todo::todo_status_value(&args.session_id).map_err(QaqhError::message)
         }
+        // PublishResourceChanged 已退出 UI 命令目录(报告三 §6.3):todo 变化
+        // 由客户端在下一次读取时可见,不再有 fact 通知。
         TaskCommand::TodoCancel(args) => {
-            let result = qaqh_workspace::todo::todo_cancel_value(&args.session_id, &args.id)
-                .map_err(QaqhError::message);
-            if result.is_ok() {
-                service.publish_resource_changed_best_effort(&args.session_id, "todo");
-            }
-            result
+            qaqh_workspace::todo::todo_cancel_value(&args.session_id, &args.id)
+                .map_err(QaqhError::message)
         }
         TaskCommand::TodoSet(args) => {
-            let result =
-                qaqh_workspace::todo::todo_set_value_for(&args.session_id, &args.tool_args())
-                    .map_err(QaqhError::message);
-            if result.is_ok() {
-                service.publish_resource_changed_best_effort(&args.session_id, "todo");
-            }
-            result
+            qaqh_workspace::todo::todo_set_value_for(&args.session_id, &args.tool_args())
+                .map_err(QaqhError::message)
         }
         TaskCommand::TodoList(args) => {
             qaqh_workspace::todo::todo_list_value_for(&args.session_id, &args.tool_args())

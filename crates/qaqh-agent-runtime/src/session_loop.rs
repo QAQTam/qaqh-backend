@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use qaqh_ringing_contract::events::InteractionEndStatus;
@@ -61,6 +61,8 @@ pub struct SessionLoop {
     spec: RwLock<ProviderRequestSpec>,
     cwd: PathBuf,
     inner: Mutex<LoopInner>,
+    /// 最近一次回合活动的毫秒时钟(idle 卸载的判据)。
+    last_activity_ms: AtomicU64,
 }
 
 struct LoopInner {
@@ -68,6 +70,38 @@ struct LoopInner {
     active: Option<ActiveTurn>,
     permissions: HashMap<String, oneshot::Sender<PermissionAnswer>>,
     asks: HashMap<String, oneshot::Sender<Vec<(String, String)>>>,
+}
+
+/// 回合任务统一 spawn 口:daemon 在 tokio 上下文里直接 spawn;CLI/测试等
+/// 同步调用方回落进程级共享运行时(旧 host.rs 的 driver_runtime 同款兜底)。
+pub(crate) fn spawn_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.spawn(future),
+        Err(_) => shared_runtime().spawn(future),
+    }
+}
+
+fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("qaqh-loop-runtime")
+            .build()
+            .expect("build shared loop runtime")
+    })
+}
+
+fn unix_now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or_default()
 }
 
 struct ActiveTurn {
@@ -108,6 +142,7 @@ impl SessionLoop {
                 permissions: HashMap::new(),
                 asks: HashMap::new(),
             }),
+            last_activity_ms: AtomicU64::new(unix_now_ms().max(0) as u64),
         })
     }
 
@@ -118,6 +153,57 @@ impl SessionLoop {
     /// 当前活动回合(无则 None)。
     pub fn active_turn(&self) -> Option<String> {
         self.lock().active.as_ref().map(|turn| turn.turn_id.clone())
+    }
+
+    /// 循环侧活动状态(契约三态):活动回合 = Running,空闲 = Idle。
+    /// 等待用户由 [`Self::waiting_user`] 单独表达。
+    pub fn activity_state(&self) -> qaqh_ringing_contract::fact::ActivityState {
+        use qaqh_ringing_contract::fact::ActivityState;
+        if self.lock().active.is_some() {
+            ActivityState::Running
+        } else {
+            ActivityState::Idle
+        }
+    }
+
+    /// 回合内挂起交互(权限/ask 应答槽非空)。
+    pub fn waiting_user(&self) -> bool {
+        let inner = self.lock();
+        !inner.permissions.is_empty() || !inner.asks.is_empty()
+    }
+
+    /// 距最近一次回合活动(开回合/收尾)的秒数,idle 卸载判据。
+    pub fn idle_secs(&self) -> u64 {
+        let last = self.last_activity_ms.load(Ordering::Acquire) as i64;
+        let delta = unix_now_ms() - last;
+        u64::try_from(delta).unwrap_or(0) / 1000
+    }
+
+    /// 待处理输入数:排队输入 + 活动回合未合并的 steer。
+    /// wait_agent 的输入到达检测只看这个,不依赖任何持久化游标。
+    pub fn pending_inputs(&self) -> usize {
+        let inner = self.lock();
+        inner.queue.len()
+            + inner
+                .active
+                .as_ref()
+                .map(|active| active.steers.len())
+                .unwrap_or(0)
+    }
+
+    /// 关停(abandon 语义):取消活动回合、丢弃排队输入、释放交互应答槽。
+    /// 不等待回合任务退出——owner 泵线程持有全部落库职责,任务收尾与
+    /// 实例生命周期解耦;回合任务感知取消后自行把挂起交互按 Cancelled 结算。
+    pub fn abandon(&self) {
+        let mut inner = self.lock();
+        if let Some(active) = inner.active.as_ref() {
+            let _ = active.cancel.send(true);
+        }
+        inner.queue.clear();
+        inner.permissions.clear();
+        inner.asks.clear();
+        self.last_activity_ms
+            .store(unix_now_ms().max(0) as u64, Ordering::Release);
     }
 
     /// 输入入口:空闲开回合;活动中 Transcript 立即落块,Steer/Interject
@@ -134,7 +220,7 @@ impl SessionLoop {
                 drop(inner);
                 // 落块异步;合并清单同步登记,下一轮 provider 调用前消费。
                 let owner = Arc::clone(&self.owner);
-                tokio::spawn(async move {
+                spawn_task(async move {
                     owner.append_block(turn).await.ok();
                 });
                 let mut inner = self.lock();
@@ -147,6 +233,12 @@ impl SessionLoop {
             return Ok(());
         }
         drop(inner);
+        // QueueOnly 语义(契约):投递但不触发回合——入队,等下一个回合
+        // 开始时作为输入块落盘。
+        if matches!(input.purpose, InputPurpose::QueueOnly) {
+            self.lock().queue.push_back(input);
+            return Ok(());
+        }
         self.spawn_turn(input);
         Ok(())
     }
@@ -212,9 +304,11 @@ impl SessionLoop {
 
     fn spawn_turn(self: &Arc<Self>, input: LoopInput) {
         let loop_ = Arc::clone(self);
-        let task = tokio::spawn(async move {
+        let task = spawn_task(async move {
             loop_.run_turn(input).await;
         });
+        self.last_activity_ms
+            .store(unix_now_ms().max(0) as u64, Ordering::Release);
         let mut inner = self.lock();
         let turn_id = format!("turn_{}", generate_ulid());
         let (cancel, _) = watch::channel(false);
@@ -513,7 +607,7 @@ impl SessionLoop {
         {
             let mut rx = cancel_rx.clone();
             let flag = Arc::clone(&flag);
-            tokio::spawn(async move {
+            spawn_task(async move {
                 loop {
                     if rx.changed().await.is_err() {
                         break;
@@ -849,6 +943,8 @@ impl SessionLoop {
 
     /// 回合收尾:清活动槽并续接队首输入。
     async fn finish_active(self: &Arc<Self>, turn_id: &str) {
+        self.last_activity_ms
+            .store(unix_now_ms().max(0) as u64, Ordering::Release);
         let next = {
             let mut inner = self.lock();
             match &inner.active {
@@ -860,7 +956,9 @@ impl SessionLoop {
             inner.queue.pop_front()
         };
         if let Some(input) = next {
-            self.send_input(input).ok();
+            // 队首输入直接开新回合(不经 send_input:QueueOnly 项已在队内,
+            // 续接即处理)。
+            self.spawn_turn(input);
         }
     }
 
