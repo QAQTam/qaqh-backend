@@ -12,12 +12,14 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use qaqh_ringing::RingingWorkerCommandEnvelope;
-use qaqh_ringing_contract::team::{
-    ChannelId, PostId, TaskId, ThreadId, TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot,
-    TeamBoardSubscription, TeamBoardSubscriptionTarget, TeamBoardThread,
-};
-use qaqh_session::session_fact_v2::{
+use qaqh_ringing_contract::commands::InterAgentEnvelope;
+use qaqh_ringing_contract::fact::InterAgentDelivery;
+use qaqh_ringing_contract::fact::{
     AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
+};
+use qaqh_ringing_contract::team::{
+    ChannelId, PostId, TaskId, TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot,
+    TeamBoardSubscription, TeamBoardSubscriptionTarget, TeamBoardThread, ThreadId,
 };
 use qaqh_subagent::{
     ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
@@ -149,7 +151,7 @@ impl SubagentHost for QaqhService {
                 "broadcast target {target_ref:?} is not supported; send to one agent at a time"
             ));
         }
-        if request.delivery == qaqh_domain::InterAgentDelivery::Interrupt {
+        if request.delivery == InterAgentDelivery::Interrupt {
             return Err("interrupt delivery is not implemented yet".to_string());
         }
         let (caller, target) = {
@@ -169,7 +171,7 @@ impl SubagentHost for QaqhService {
         if caller.agent_id == target.agent_id {
             return Err("cannot send an agent message to self".to_string());
         }
-        if request.delivery == qaqh_domain::InterAgentDelivery::Trigger
+        if request.delivery == InterAgentDelivery::Trigger
             && target.agent_path.is_root()
             && !caller.agent_path.is_root()
         {
@@ -177,7 +179,7 @@ impl SubagentHost for QaqhService {
         }
         if matches!(
             request.delivery,
-            qaqh_domain::InterAgentDelivery::Steer | qaqh_domain::InterAgentDelivery::Interject
+            InterAgentDelivery::Steer | InterAgentDelivery::Interject
         ) && target.agent_path.is_root()
             && !caller.agent_path.is_root()
         {
@@ -201,7 +203,7 @@ impl SubagentHost for QaqhService {
         }
 
         let message_id = format!("msg_{}", qaqh_ringing_contract::ulid::generate_ulid());
-        let envelope = qaqh_domain::InterAgentEnvelope {
+        let envelope = InterAgentEnvelope {
             message_id: message_id.clone(),
             root_session_id: target.root_session_id.as_str().to_string(),
             author: caller.agent_path.as_str().to_string(),
@@ -214,26 +216,19 @@ impl SubagentHost for QaqhService {
             created_at_ms: (nanos() / 1_000_000) as i64,
         };
         let input_purpose = match request.delivery {
-            qaqh_domain::InterAgentDelivery::Queue => {
-                qaqh_ringing_contract::fact::InputPurpose::QueueOnly
-            }
-            qaqh_domain::InterAgentDelivery::Trigger => {
-                qaqh_ringing_contract::fact::InputPurpose::TriggerTurn
-            }
-            qaqh_domain::InterAgentDelivery::Steer => qaqh_ringing_contract::fact::InputPurpose::Steer,
-            qaqh_domain::InterAgentDelivery::Interject => {
-                qaqh_ringing_contract::fact::InputPurpose::Interject
-            }
-            qaqh_domain::InterAgentDelivery::Interrupt => unreachable!(),
+            InterAgentDelivery::Queue => qaqh_ringing_contract::fact::InputPurpose::QueueOnly,
+            InterAgentDelivery::Trigger => qaqh_ringing_contract::fact::InputPurpose::TriggerTurn,
+            InterAgentDelivery::Steer => qaqh_ringing_contract::fact::InputPurpose::Steer,
+            InterAgentDelivery::Interject => qaqh_ringing_contract::fact::InputPurpose::Interject,
+            InterAgentDelivery::Interrupt => unreachable!(),
         };
-        let arm_spec = if request.delivery == qaqh_domain::InterAgentDelivery::Trigger
-            && !target.agent_path.is_root()
-        {
-            self.registry()?
-                .prepare_collector_arm(target.agent_id.as_str())?
-        } else {
-            None
-        };
+        let arm_spec =
+            if request.delivery == InterAgentDelivery::Trigger && !target.agent_path.is_root() {
+                self.registry()?
+                    .prepare_collector_arm(target.agent_id.as_str())?
+            } else {
+                None
+            };
         if let Some(spec) = arm_spec {
             let collector_host: Arc<dyn SubagentHost> = Arc::new(self.clone());
             if let Err(error) = qaqh_subagent::arm_subagent_collector(
@@ -258,16 +253,16 @@ impl SubagentHost for QaqhService {
         self.send_ringing(
             target.agent_id.as_str(),
             qaqh_ringing::RingingCommand::ConversationSendMessage(
-                    qaqh_ringing::ConversationSendMessage {
-                        text: request.text.to_string(),
-                        images: vec![],
-                        attachments: None,
-                        message_id: Some(message_id.clone()),
-                        input_purpose,
-                        as_system: false,
-                        inter_agent: Some(envelope),
-                        subagent_terminal: None,
-                    },
+                qaqh_ringing::ConversationSendMessage {
+                    text: request.text.to_string(),
+                    images: vec![],
+                    attachments: None,
+                    message_id: Some(message_id.clone()),
+                    input_purpose,
+                    as_system: false,
+                    inter_agent: Some(envelope),
+                    subagent_terminal: None,
+                },
             ),
         )?;
         Ok(SentAgentMessage {
@@ -352,12 +347,12 @@ impl SubagentHost for QaqhService {
         let previous_status = registry
             .activity(target_id)
             .map(|activity| match activity.state {
-                qaqh_domain::ActivityState::Starting => "starting",
-                qaqh_domain::ActivityState::Idle => "idle",
-                qaqh_domain::ActivityState::Working => "working",
-                qaqh_domain::ActivityState::WaitingUser => "waiting_user",
-                qaqh_domain::ActivityState::Disconnected => "disconnected",
-                qaqh_domain::ActivityState::Failed => "failed",
+                qaqh_ringing_contract::SessionActivityState::Starting => "starting",
+                qaqh_ringing_contract::SessionActivityState::Idle => "idle",
+                qaqh_ringing_contract::SessionActivityState::Working => "working",
+                qaqh_ringing_contract::SessionActivityState::WaitingUser => "waiting_user",
+                qaqh_ringing_contract::SessionActivityState::Disconnected => "disconnected",
+                qaqh_ringing_contract::SessionActivityState::Failed => "failed",
             })
             .unwrap_or("running")
             .to_string();
@@ -391,7 +386,7 @@ impl SubagentHost for QaqhService {
             .as_ref()
             .map(|path| path.as_str().to_string())
             .unwrap_or_else(|| "/root".to_string());
-        let envelope = qaqh_domain::InterAgentEnvelope {
+        let envelope = InterAgentEnvelope {
             message_id: format!("msg_{}", qaqh_ringing_contract::ulid::generate_ulid()),
             root_session_id: metadata.root_session_id.as_str().to_string(),
             author,
@@ -400,7 +395,7 @@ impl SubagentHost for QaqhService {
             task_id: None,
             reply_to: None,
             causation_id: None,
-            delivery: qaqh_domain::InterAgentDelivery::Trigger,
+            delivery: InterAgentDelivery::Trigger,
             created_at_ms: (nanos() / 1_000_000) as i64,
         };
         let child_session_id = request.child_session_id.to_string();
@@ -411,7 +406,8 @@ impl SubagentHost for QaqhService {
                 ..request
             },
         )?;
-        self.registry()?.mark_collector_armed(&child_session_id, request.parent_call_id);
+        self.registry()?
+            .mark_collector_armed(&child_session_id, request.parent_call_id);
         Ok(())
     }
 
@@ -477,9 +473,7 @@ impl SubagentHost for QaqhService {
                     }
                     match event_rx.blocking_recv() {
                         Ok(frame) => {
-                            if let Some(event) =
-                                collector_event_from_session_event(&frame.event)
-                            {
+                            if let Some(event) = collector_event_from_session_event(&frame.event) {
                                 let batch = CollectorBatch {
                                     session_id: bridge_session.clone(),
                                     events: vec![event],
@@ -510,38 +504,19 @@ impl SubagentHost for QaqhService {
         session_id: &str,
         reference: &ContentRef,
     ) -> Result<Vec<u8>, String> {
-        let canonical_ref = canonical_content_ref(&reference.content_id)?;
-        let expected = reference
-            .sha256
-            .strip_prefix("sha256:")
-            .unwrap_or(&reference.sha256);
-        let bytes = if let Some(entry) = self.hub.get().and_then(|hub| {
-            let id = reference
-                .content_id
-                .strip_prefix("sha256:")
-                .unwrap_or(&reference.content_id);
-            hub.get_content(session_id, id)
-        }) {
-            entry.bytes
-        } else {
-            return Err(format!(
-                "content {} not found",
-                reference.content_id
-            ));
-        };
-        let digest = {
-            use sha2::Digest;
-            let hash = sha2::Sha256::digest(&bytes);
-            hash.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        };
+        let raw_ref = reference.hash().as_str();
+        let canonical_ref = canonical_content_ref(raw_ref)?;
         let content_hash = canonical_ref.hash().as_str().trim_start_matches("sha256:");
-        if !digest.eq_ignore_ascii_case(expected) || !digest.eq_ignore_ascii_case(content_hash) {
-            return Err(format!(
-                "content digest mismatch for {}: expected {}, received {digest}",
-                reference.content_id, reference.sha256
-            ));
-        }
-        Ok(bytes)
+        let store_id = content_hash.to_string();
+        let hub = self
+            .hub
+            .get()
+            .ok_or_else(|| "Ringing database is not attached".to_string())?;
+        let entry = hub
+            .get_content(session_id, &store_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("content {raw_ref} not found"))?;
+        Ok(entry.bytes)
     }
 
     fn close(&self, session_id: &str) -> Result<(), String> {
@@ -564,6 +539,12 @@ impl TaskBoardHost for QaqhService {
             .map(canonical_content_ref)
             .transpose()?
             .map(|content_ref| content_ref.hash().as_str().to_string());
+        let description_content_id = description_ref.as_deref().map(|content_ref| {
+            content_ref
+                .strip_prefix("sha256:")
+                .unwrap_or(content_ref)
+                .to_string()
+        });
         let task_id = TaskId::generate();
         let closure_task_id = task_id.clone();
         let now = unix_ms();
@@ -572,14 +553,27 @@ impl TaskBoardHost for QaqhService {
         self.owners
             .db()
             .write_blocking(move |conn| {
-                if dbteam::task_count(conn, &caller.root_session_id)? >= MAX_TASKS_PER_ROOT as i64
-                {
+                let tx = conn.transaction()?;
+                if dbteam::task_count(&tx, &caller.root_session_id)? >= MAX_TASKS_PER_ROOT as i64 {
                     return Err(qaqh_session::db::DbError::Corrupt(format!(
                         "task board limit {MAX_TASKS_PER_ROOT} reached for this root tree"
                     )));
                 }
+                if let Some(content_id) = description_content_id.as_deref()
+                    && !qaqh_session::db::store::copy_session_content(
+                        &tx,
+                        &caller.actor_session_id,
+                        &caller.root_session_id,
+                        content_id,
+                    )?
+                {
+                    return Err(qaqh_session::db::DbError::Corrupt(format!(
+                        "task description content {content_id} not found for session {}",
+                        caller.actor_session_id
+                    )));
+                }
                 dbteam::task_insert(
-                    conn,
+                    &tx,
                     &dbteam::NewTeamTask {
                         task_id: closure_task_id.as_str(),
                         root_session_id: &caller.root_session_id,
@@ -589,6 +583,7 @@ impl TaskBoardHost for QaqhService {
                         created_at_ms: now,
                     },
                 )?;
+                tx.commit()?;
                 Ok(())
             })
             .map_err(|error| format!("task_create failed: {error}"))?;
@@ -674,15 +669,29 @@ impl TaskBoardHost for QaqhService {
                         .as_str()
                         .trim_start_matches("sha256:")
                         .to_string();
+                    let tx = conn.transaction()?;
                     dbteam::task_attach_artifact(
-                        conn,
+                        &tx,
                         &caller.root_session_id,
                         &closure_task_id,
                         &content_id,
                         &media_type,
                         now,
                     )
-                    .map_err(qaqh_session::db::DbError::Corrupt)
+                    .map_err(qaqh_session::db::DbError::Corrupt)?;
+                    if !qaqh_session::db::store::copy_session_content(
+                        &tx,
+                        &caller.actor_session_id,
+                        &caller.root_session_id,
+                        &content_id,
+                    )? {
+                        return Err(qaqh_session::db::DbError::Corrupt(format!(
+                            "task artifact content {artifact_ref} not found for session {}",
+                            caller.actor_session_id
+                        )));
+                    }
+                    tx.commit()?;
+                    Ok(())
                 }
                 TaskUpdateAction::SetAcceptance => {
                     let acceptance = acceptance.ok_or_else(|| {
@@ -690,10 +699,9 @@ impl TaskBoardHost for QaqhService {
                             "task_update set_acceptance requires acceptance".into(),
                         )
                     })?;
-                    let items_json = serde_json::to_string(&acceptance)
-                        .map_err(|error| {
-                            qaqh_session::db::DbError::Corrupt(format!("acceptance json: {error}"))
-                        })?;
+                    let items_json = serde_json::to_string(&acceptance).map_err(|error| {
+                        qaqh_session::db::DbError::Corrupt(format!("acceptance json: {error}"))
+                    })?;
                     dbteam::task_set_acceptance(
                         conn,
                         &caller.root_session_id,
@@ -725,27 +733,45 @@ impl TaskBoardHost for QaqhService {
             .db()
             .write_blocking(move |conn| match action {
                 TaskCloseAction::Complete => {
+                    let tx = conn.transaction()?;
                     dbteam::task_complete(
-                        conn,
+                        &tx,
                         &caller.root_session_id,
                         &closure_task_id,
                         &caller.actor_path,
                         result_ref.as_deref(),
                         now,
                     )
-                    .map_err(qaqh_session::db::DbError::Corrupt)
+                    .map_err(qaqh_session::db::DbError::Corrupt)?;
+                    if let Some(result_ref) = result_ref.as_deref() {
+                        let content_id = result_ref.strip_prefix("sha256:").unwrap_or(result_ref);
+                        if !qaqh_session::db::store::copy_session_content(
+                            &tx,
+                            &caller.actor_session_id,
+                            &caller.root_session_id,
+                            content_id,
+                        )? {
+                            return Err(qaqh_session::db::DbError::Corrupt(format!(
+                                "task result content {result_ref} not found for session {}",
+                                caller.actor_session_id
+                            )));
+                        }
+                    }
+                    tx.commit()?;
+                    Ok(())
                 }
-                TaskCloseAction::Close => dbteam::task_close(
+                TaskCloseAction::Close => {
+                    dbteam::task_close(conn, &caller.root_session_id, &closure_task_id, now)
+                        .map_err(qaqh_session::db::DbError::Corrupt)
+                }
+                TaskCloseAction::Cancel => dbteam::task_cancel(
                     conn,
                     &caller.root_session_id,
                     &closure_task_id,
+                    &reason,
                     now,
                 )
                 .map_err(qaqh_session::db::DbError::Corrupt),
-                TaskCloseAction::Cancel => {
-                    dbteam::task_cancel(conn, &caller.root_session_id, &closure_task_id, &reason, now)
-                        .map_err(qaqh_session::db::DbError::Corrupt)
-                }
             })
             .map_err(|error| format!("task_close failed: {error}"))?;
         self.task_get(&caller_session, &task_id)
@@ -892,12 +918,13 @@ impl BoardHost for QaqhService {
                         (None, post_task) => post_task,
                     };
                     if let Some(task_id) = &task_id {
-                        dbteam::task_get(conn, &caller.root_session_id, task_id)?
-                            .ok_or_else(|| {
+                        dbteam::task_get(conn, &caller.root_session_id, task_id)?.ok_or_else(
+                            || {
                                 qaqh_session::db::DbError::Corrupt(format!(
                                     "task not found: {task_id}"
                                 ))
-                            })?;
+                            },
+                        )?;
                     }
                     let post = dbteam::BoardPostRow {
                         post_id: post_id.as_str().to_string(),
@@ -911,8 +938,7 @@ impl BoardHost for QaqhService {
                         created_at_ms: now,
                     };
                     dbteam::board_post_insert(conn, &post)?;
-                    let subscriptions =
-                        dbteam::board_subscriptions(conn, &caller.root_session_id)?;
+                    let subscriptions = dbteam::board_subscriptions(conn, &caller.root_session_id)?;
                     let mut targets = std::collections::BTreeSet::new();
                     for subscription in subscriptions {
                         if !subscription.subscribed
@@ -938,8 +964,7 @@ impl BoardHost for QaqhService {
         };
         let (post, targets) = outcome;
         let post_dto = board_post_to_dto(&post);
-        let (notified, skipped) =
-            self.notify_board_post(&caller_session, &post_dto, targets);
+        let (notified, skipped) = self.notify_board_post(&caller_session, &post_dto, targets);
         Ok(BoardPostOutcome {
             post: post_dto,
             notified,
@@ -1194,7 +1219,7 @@ impl QaqhService {
                 caller_session_id,
                 target: &target,
                 text: &text,
-                delivery: qaqh_domain::InterAgentDelivery::Queue,
+                delivery: InterAgentDelivery::Queue,
             }) {
                 Ok(_) => notified.push(target),
                 Err(error) => skipped.push(BoardNotificationSkip {
@@ -1235,12 +1260,11 @@ fn task_view_of_row(task: &dbteam::TeamTaskRow) -> qaqh_ringing_contract::team::
     qaqh_ringing_contract::team::TaskView {
         task_id: qaqh_ringing_contract::team::TaskId::new(task.task_id.clone()),
         title: task.title.clone(),
-        description_ref: task
-            .description_ref
-            .as_deref()
-            .map(|raw| qaqh_ringing_contract::fact::ContentRef::new(
+        description_ref: task.description_ref.as_deref().map(|raw| {
+            qaqh_ringing_contract::fact::ContentRef::new(
                 qaqh_ringing_contract::fact::ContentHash::new(raw),
-            )),
+            )
+        }),
         state: parse_task_state(&task.state)
             .unwrap_or(qaqh_ringing_contract::team::TaskState::Open),
         created_by: {
@@ -1267,17 +1291,23 @@ fn task_view_of_row(task: &dbteam::TeamTaskRow) -> qaqh_ringing_contract::team::
         artifacts: task
             .artifacts
             .iter()
-            .map(|(content_id, media_type, added_at_ms)| qaqh_ringing_contract::team::TaskArtifact {
-                artifact_ref: qaqh_ringing_contract::fact::ContentRef::new(
-                    qaqh_ringing_contract::fact::ContentHash::new(format!("sha256:{content_id}")),
-                ),
-                media_type: media_type.clone(),
-                added_at_ms: *added_at_ms,
+            .map(|(content_id, media_type, added_at_ms)| {
+                qaqh_ringing_contract::team::TaskArtifact {
+                    artifact_ref: qaqh_ringing_contract::fact::ContentRef::new(
+                        qaqh_ringing_contract::fact::ContentHash::new(format!(
+                            "sha256:{content_id}"
+                        )),
+                    ),
+                    media_type: media_type.clone(),
+                    added_at_ms: *added_at_ms,
+                }
             })
             .collect(),
         acceptance: task.acceptance.clone(),
         result_ref: task.result_ref.as_deref().map(|raw| {
-            qaqh_ringing_contract::fact::ContentRef::new(qaqh_ringing_contract::fact::ContentHash::new(raw))
+            qaqh_ringing_contract::fact::ContentRef::new(
+                qaqh_ringing_contract::fact::ContentHash::new(raw),
+            )
         }),
         created_at_ms: task.created_at_ms,
         updated_at_ms: task.updated_at_ms,
@@ -1310,9 +1340,11 @@ fn board_snapshot_view(
             thread.thread_id, channel_id
         ));
     }
-    let selected_channel = requested_channel
-        .clone()
-        .or_else(|| selected_thread.as_ref().map(|thread| thread.channel_id.clone()));
+    let selected_channel = requested_channel.clone().or_else(|| {
+        selected_thread
+            .as_ref()
+            .map(|thread| thread.channel_id.clone())
+    });
     if let Some(channel_id) = &selected_channel
         && !snapshot
             .channels
@@ -1384,13 +1416,10 @@ fn board_snapshot_view(
                     .map(|selected| subscription.target_id == selected)
                     .unwrap_or(true)
                     && selected_channel.as_ref().is_none_or(|selected| {
-                        snapshot
-                            .threads
-                            .iter()
-                            .any(|thread| {
-                                &thread.thread_id == &subscription.target_id
-                                    && &thread.channel_id == selected
-                            })
+                        snapshot.threads.iter().any(|thread| {
+                            &thread.thread_id == &subscription.target_id
+                                && &thread.channel_id == selected
+                        })
                     })
             }
             _ => false,
@@ -1446,9 +1475,7 @@ fn board_post_to_dto(post: &dbteam::BoardPostRow) -> BoardPost {
     }
 }
 
-fn board_subscription_to_dto(
-    subscription: &dbteam::BoardSubscriptionRow,
-) -> BoardSubscription {
+fn board_subscription_to_dto(subscription: &dbteam::BoardSubscriptionRow) -> BoardSubscription {
     let target = match subscription.target_kind.as_str() {
         "channel" => qaqh_subagent::BoardSubscriptionTarget::Channel {
             channel_id: subscription.target_id.clone(),
@@ -1475,12 +1502,9 @@ fn board_notification_text(post: &BoardPost) -> String {
 
 fn board_rows_to_wire(snapshot: &BoardRows) -> TeamBoardSnapshot {
     TeamBoardSnapshot {
-        board_id: snapshot
-            .channels
-            .first()
-            .map(|channel| {
-                qaqh_ringing_contract::fact::SessionId::new(channel.root_session_id.clone())
-            }),
+        board_id: snapshot.channels.first().map(|channel| {
+            qaqh_ringing_contract::fact::SessionId::new(channel.root_session_id.clone())
+        }),
         revision: 0,
         last_fact_seq: 0,
         channels: snapshot

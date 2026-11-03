@@ -99,7 +99,11 @@ pub fn session_effective_config(
         .as_deref()
         .and_then(|name| resolve_profile_key(&global, name));
     let mut cfg = qaqh_config::Config::for_session(&global, profile.as_deref(), own_key);
-    if let Some(effort) = row.as_ref().and_then(|row| row.effort.clone()).filter(|e| !e.is_empty()) {
+    if let Some(effort) = row
+        .as_ref()
+        .and_then(|row| row.effort.clone())
+        .filter(|e| !e.is_empty())
+    {
         cfg.reasoning_effort = effort;
     }
     let selection = row

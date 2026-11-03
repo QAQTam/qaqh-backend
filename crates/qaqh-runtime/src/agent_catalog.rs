@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use qaqh_session::session_fact_v2::{AgentMetadata, AgentNamespace, AgentPath};
+use qaqh_ringing_contract::fact::{AgentMetadata, AgentNamespace, AgentPath, SessionId};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct AgentKey {
@@ -125,16 +125,12 @@ impl AgentCatalog {
         root_session_id: &str,
         created_at_ms: i64,
     ) -> Result<AgentMetadata, AgentCatalogError> {
-        self.register_root_with_alias(
-            qaqh_session::session_fact_v2::SessionId::new(root_session_id),
-            None,
-            created_at_ms,
-        )
+        self.register_root_with_alias(SessionId::new(root_session_id), None, created_at_ms)
     }
 
     pub(crate) fn register_root_with_alias(
         &mut self,
-        agent_id: qaqh_session::session_fact_v2::SessionId,
+        agent_id: SessionId,
         alias: Option<&str>,
         created_at_ms: i64,
     ) -> Result<AgentMetadata, AgentCatalogError> {
@@ -315,7 +311,7 @@ impl AgentCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_session::session_fact_v2::{AgentMetadata, SessionId};
+    use qaqh_ringing_contract::fact::{AgentMetadata, SessionId};
 
     fn path(raw: &str) -> AgentPath {
         AgentPath::parse_absolute(raw).expect("valid path")

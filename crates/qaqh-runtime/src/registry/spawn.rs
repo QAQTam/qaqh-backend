@@ -426,8 +426,11 @@ impl AgentRegistry {
             .insert(session_id.to_string(), std::time::Instant::now());
 
         let (mut agent_config, _session_profile) =
-            crate::agent::session_config::session_effective_config(Some(&self.owners), session_id)
-                .unwrap_or_default();
+            qaqh_agent_runtime::agent::session_config::session_effective_config(
+                Some(&self.owners),
+                session_id,
+            )
+            .unwrap_or_default();
         if let Some(model) = &spec.model {
             agent_config.model = model.clone();
         }
@@ -440,17 +443,18 @@ impl AgentRegistry {
 
         let ws_dir = ensure_session_workspace(&self.owners, session_id)?;
         let owner = self.owners.get_or_create(session_id);
-        let loop_ =
-            crate::session_agent::assembly::assemble(crate::session_agent::assembly::SpawnInput {
+        let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(
+            qaqh_agent_runtime::session_agent::assembly::SpawnInput {
                 session_id,
                 owner,
                 config: &agent_config,
                 allowed_tools: spec.tools.clone(),
                 global_allowed_tools: None,
                 permission_level: spec.permission_level,
-                sandbox: crate::session_agent::assembly::subagent_sandbox(),
+                sandbox: qaqh_agent_runtime::session_agent::assembly::subagent_sandbox(),
                 workspace_root: ws_dir,
-            })?;
+            },
+        )?;
 
         self.instances.insert(
             session_id.to_string(),
@@ -499,15 +503,18 @@ impl AgentRegistry {
             .map_err(|error| format!("ensure business session row for {session_id}: {error}"))?;
 
         let (agent_config, _session_profile) =
-            crate::agent::session_config::session_effective_config(Some(&self.owners), session_id)
-                .unwrap_or_default();
+            qaqh_agent_runtime::agent::session_config::session_effective_config(
+                Some(&self.owners),
+                session_id,
+            )
+            .unwrap_or_default();
 
         let ws_dir = ensure_session_workspace(&self.owners, session_id)?;
         let session = crate::session_meta::read(&self.owners, session_id)
             .ok_or_else(|| format!("session metadata unavailable for {session_id}"))?;
         let owner = self.owners.get_or_create(session_id);
-        let loop_ = crate::session_agent::assembly::assemble(
-            crate::session_agent::assembly::SpawnInput::for_session(
+        let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(
+            qaqh_agent_runtime::session_agent::assembly::SpawnInput::for_session(
                 session_id,
                 &agent_config,
                 &session.tool_mode,

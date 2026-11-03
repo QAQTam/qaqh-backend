@@ -1,7 +1,6 @@
 //! Ringing v2 typed client surface.
-//! The transport methods are additive to the v1 client. They use the same
-//! discovery credentials, but negotiate and carry a separate v2 lease so v1
-//! and v2 identities never alias during the compatibility window.
+//! The client exposes the RingingV2 protocol types directly and handles its
+//! transport lease, command requests, bootstrap, and session event stream.
 
 use std::fmt;
 
@@ -10,9 +9,8 @@ use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_ringing::{
     CommandTarget, RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope,
     RingingV2CommandStatus, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
-    RingingV2OpenResponse,
+    RingingV2OpenResponse, RingingV2ResyncRequired,
 };
-use qaqh_ringing_contract::events::SessionEventFrame;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::client::Client;
@@ -28,14 +26,9 @@ pub use qaqh_ringing_contract::events as contract_events;
 pub use qaqh_ringing_contract::fact;
 pub use qaqh_ringing_contract::state as contract_state;
 
-/// Typed v2 SSE 帧:类型化 `SessionEventFrame`(seq + 业务事件)。
-pub type ClientV2Event = SessionEventFrame;
-
-/// 单份会话状态(报告二 §5):bootstrap 直接返回契约 `SessionState`。
-pub use qaqh_ringing_contract::SessionBootstrap as ClientV2Bootstrap;
-pub use qaqh_ringing_contract::SessionState;
-pub use qaqh_ringing_contract::TeamResponse as ClientV2TeamResponse;
+pub use qaqh_ringing_contract::events::SessionEventFrame;
 pub use qaqh_ringing_contract::team as contract_team;
+pub use qaqh_ringing_contract::{SessionBootstrap, SessionState, TeamResponse};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientV2SessionState {
@@ -71,18 +64,10 @@ impl ClientV2SessionState {
     }
 }
 
-/// 服务端要求重新同步:`ringing.resync_required` 帧载荷。
-/// owner 广播无回放尾,游标出现缺口时唯一正确的动作是重新 bootstrap。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-pub struct ClientV2ResyncRequired {
-    pub session_id: String,
-    pub reason: String,
-}
-
 #[derive(Debug, Clone)]
 pub enum ClientV2SubscriptionEvent {
-    Event(Box<ClientV2Event>),
-    Reset(ClientV2ResyncRequired),
+    Event(Box<SessionEventFrame>),
+    Reset(RingingV2ResyncRequired),
     /// 字节到达但凑不出完整帧（daemon 的 keepalive 注释行 / 跨 chunk 半帧）。
     /// 把「到达」本身呈现给调用方，v2 流的空闲计时器才能在**字节层**复位：
     /// 会话安静期里 daemon 的 15s keepalive 是唯一字节来源，只按事件复位
@@ -134,10 +119,10 @@ impl ClientV2Subscription {
         let frame =
             frame.map_err(|()| ClientError::Protocol("invalid UTF-8 in v2 SSE frame".into()))?;
         if frame.event_type == "ringing.resync_required" {
-            let reset: ClientV2ResyncRequired = serde_json::from_str(&frame.data)?;
+            let reset: RingingV2ResyncRequired = serde_json::from_str(&frame.data)?;
             return Ok(ClientV2SubscriptionEvent::Reset(reset));
         }
-        let event: ClientV2Event = serde_json::from_str(&frame.data)?;
+        let event: SessionEventFrame = serde_json::from_str(&frame.data)?;
         Ok(ClientV2SubscriptionEvent::Event(Box::new(event)))
     }
 }
@@ -196,7 +181,7 @@ impl Client {
     }
 
     /// `GET /ringing/v2/sessions/{seed}/bootstrap`.
-    pub async fn bootstrap_v2(&self, session_id: &str) -> Result<ClientV2Bootstrap> {
+    pub async fn bootstrap_v2(&self, session_id: &str) -> Result<SessionBootstrap> {
         let state = self.require_v2_session().await?;
         let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/bootstrap");
         let response = self
@@ -210,7 +195,7 @@ impl Client {
         if !response.status().is_success() {
             return Err(api_error(response, &path).await);
         }
-        let bootstrap: ClientV2Bootstrap = response.json().await?;
+        let bootstrap: SessionBootstrap = response.json().await?;
         Ok(bootstrap)
     }
 
@@ -335,7 +320,7 @@ impl Client {
     /// message board。deltas 在 per-seed 单流上以
     /// [`fact::ProjectionPayload::TeamDelta`] 到达；壳层应当 **先拉一次快照、再应用
     /// delta**，不要只靠 delta 增量拼状态。
-    pub async fn team_v2(&self, session_id: &str) -> Result<ClientV2TeamResponse> {
+    pub async fn team_v2(&self, session_id: &str) -> Result<TeamResponse> {
         let state = self.require_v2_session().await?;
         let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/team");
         let response = self
@@ -497,7 +482,7 @@ mod tests {
             }
         });
 
-        let response: ClientV2TeamResponse =
+        let response: TeamResponse =
             serde_json::from_value(payload).expect("daemon /team 形状必须能反序列化");
         assert_eq!(response.schema, "qaqh.ringing.team/v1");
         assert_eq!(response.session_id, "0199a0f0-0000-7000-8000-000000000001");

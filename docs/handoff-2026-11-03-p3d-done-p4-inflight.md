@@ -31,7 +31,7 @@ P3-D 具体内容(78b77876):
 - 集成测试:remote_fs_allowlist 种子改走业务行(service.owners().db().write_blocking + store::create_session);v2_public_api 匹配 SessionEvent 变体;删 tool_crash_recovery/v2_acceptance_matrix/e2e_seed。
 - **验证状态:全仓 `cargo check --workspace --tests` 0 错误 0 警告;定向测试全绿**:qaqh-session 12+36(db)、agent-runtime 36、ringing-runtime 9、runtime lib 49 + 集成 13、client 68、contract-export 6、daemon 31、types/ringing/domain/workspace ~240。
 
-## 2. 当前状态(P4/P5 主体已提交；本次补齐完结审计发现)
+## 2. 当前状态(P4/P5 完结；最新收尾状态见 §9)
 
 P4 按 report-03 完成三入口统一与四项决策。当前命令契约 revision 为 `ringing-commands-6`。
 
@@ -46,7 +46,7 @@ P4 按 report-03 完成三入口统一与四项决策。当前命令契约 revis
 1. **P4-a/c/d 已完成**:DomainCommand/重复领域类型退出；业务事件字段完整进入 SessionLoop 与 timeline；会话创建实现归并。
 2. **P4-b 已完成**:唯一命令目录、统一 envelope、SDK 写入口和直接 handler 分派已完成；全局 ops 不进入 session actor。
 3. **P4-e 已完成**:活跃 settings 写入只有 revision CAS 命令入口；元数据 patch 中 title/archive/workspace 不属于设置字段。
-4. **P5 原计划已提交**；续作审计发现下列残留后补齐，再更新本 handoff 并提交。
+4. **P5 收尾与完结审计已完成**；最终改动和验证见 §9。
 5. 只跑受影响 crate 的检查与定向测试；**不跑全仓测试**。
 
 ## 4. 关键 API 速查(本会话固化的事实)
@@ -71,7 +71,7 @@ P4 按 report-03 完成三入口统一与四项决策。当前命令契约 revis
 ## 6. 环境注意
 
 - 工作目录 /home/qaqtamsy/Projects/qaqh-backend-v3,分支 v3,remote 无(本地提交)。
-- 继续续作时以 §2、§3、§7 的最新状态为准；工作树尚有本轮 P4/P5 未提交改动。
+- 本文记录了 P4/P5 分阶段执行过程；继续续作时以 §9 的最终审计状态为准。
 
 ## 7. 2026-11-03 continuation progress
 
@@ -143,3 +143,22 @@ P4/P5 已提交到当前分支。继续工作前先检查最新 `git log` 与工
 - `cargo test -p qaqh-client --test v2_public_api` 通过（3/3）。
 - `cargo test -p qaqh-runtime --lib workspace_list_entries_are_typed_at_the_boundary` 通过（1/1）。
 - 未运行 `cargo test --workspace`。本次执行时可用内存约 1.2 GiB、swap 接近满载，所有构建串行执行。
+
+## 9. P4/P5 最终收尾审计
+
+### 完成项
+
+- 删除 `qaqh-domain` 与 `session_fact_v2` 投影层，旧事件、三频道 envelope、客户端别名和 qruntime facade 改为直接使用 Ringing 契约类型。
+- `RingingHub` 不再维护 JSON/BIN 内容 sidecar、TTL、pin/refcount/GC；二进制内容进入 session SQLite 的 `session_contents`，`SCHEMA_VERSION=5`，会话行删除时由 FK 清理内容。旧 schema 按既定决策直接删库重建。
+- 上传响应解析为 `RingingV2ContentUploadResponse`，SDK 返回规范 `ContentRef("sha256:<hex>")`；附件预览、SDK 下载和 subagent 下载均按该 hash 读取。
+- 任务描述、产物和完成结果可能由子 session 产生；写入 team task 时，在同一个 SQLite transaction 内将内容复制到 root session，确保任务引用随 root 的生命周期可读。
+- RingingV2 reset response 由 wire crate 直接导出；移除旧 discovery fallback、旧 v2 capability `drive` 和旧 ACK 兼容用例。TypeScript 导出中将事实层 `ActivityState` 与服务查询的 `SessionActivityState` 恢复为不同名称。
+- 删除缺少源码且指向已删除 crate 的 memory hotspot probe Cargo manifest/lockfile；保留 `results-2026-10-22.txt` 作为历史记录。
+- 同步本 handoff 的 schema 版本与最终验证状态。
+
+### 最终验证
+
+- 串行 `CARGO_BUILD_JOBS=1 cargo check --tests -p qaqh-session -p qaqh-runtime -p qaqh-daemon -p qaqh-ringing-runtime -p qaqh-client -p qaqh-agent-runtime -p qaqh-contract-export` 通过，无 warning；只编译测试目标，没有执行这些测试。
+- `python3 scripts/check-sdk-contract.py --typescript` 通过；contract-export 自检 6/6，导出/manifest 与严格 TypeScript consumer 检查通过。该脚本固定会执行 contract-export 的 6 个自检。
+- 本轮 touched Rust 文件 `rustfmt --check --edition 2024` 与 `git diff --check` 通过；源码、Cargo manifest 和锁文件中没有 `qaqh-domain`、`qaqh-message` 或旧内容存储实现的引用。
+- 未运行 `cargo test --workspace`，没有新增测试。

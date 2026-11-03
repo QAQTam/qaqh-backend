@@ -1,34 +1,29 @@
 //! # qaqh-ringing — Ringing 线协议层（Wire）
 //!
-//! 四层架构（Domain / Projection / Wire / Transport）的 Wire 层：
+//! Ringing wire command and transport-independent DTO definitions:
 //!
 //! - `envelope`：`RingingCommandAck` 与业务命令状态
-//! - `content`：`RingingContentRef`（大内容外置引用）
-//! - `worker`：daemon ↔ agent worker 边界的 framed envelope
+//! - `worker`：daemon → agent command envelope
 //! - `protocol`：线协议标识（`schema: "qaqh.Ringing"`）与安全整数常量
 //! - `v2`：Ringing v2 命令信封、能力协商、配对与设备授权 DTO
 //!
 //! ## 架构硬规则
 //!
-//! - 本 crate 依赖 `qaqh-domain`（wire → domain）；legacy proto crate 已删除（PR-3-5），依赖关系由编译图天然禁止。
+//! - Public command payloads come from `qaqh-ringing-contract`.
 //! - Wire 不决定业务可靠性。
 //! - 本 crate 不含任何传输实现（HTTP/SSE/WebSocket/pipe 在 transport 层）。
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod command;
-pub mod content;
 pub mod envelope;
-pub mod event;
 pub mod protocol;
 pub mod v2;
 pub mod worker;
 
 pub use command::{ConversationSendMessage, RingingCommand};
-pub use content::RingingContentRef;
 pub use envelope::{
     RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
 };
-pub use event::{RingingControlEvent, RingingConversationEvent, RingingEvent, RingingToolEvent};
 pub use protocol::{CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, is_safe_integer};
 pub use v2::*;
-pub use worker::{RingingWorkerCommandEnvelope, RingingWorkerEventEnvelope, WorkerActor};
+pub use worker::{RingingWorkerCommandEnvelope, WorkerActor};

@@ -1,6 +1,6 @@
 //! Code-delta calculation for successful file mutations.
 //!
-//! R-4 豁免点：本文件与 `execution.rs` 使用的 `qaqh_domain::CodeDeltaRecord`
+//! R-4 豁免点：本文件与 `execution.rs` 使用的 `qaqh_types::CodeDeltaRecord`
 //! 是编辑效果的被动纯数据记录，属 R-4 允许的「被动投影记录」（口径与完整例外
 //! 清单见 `dashboard.rs:7`）——除此以外禁止引入 domain 事件/行为类型。
 
@@ -9,7 +9,7 @@ pub fn compute(
     args: &serde_json::Value,
     workspace_root: &std::path::Path,
     session_id: &str,
-) -> Option<qaqh_domain::CodeDeltaRecord> {
+) -> Option<qaqh_types::CodeDeltaRecord> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -29,7 +29,7 @@ pub fn compute(
                 .get("content")
                 .and_then(|value| value.as_str())
                 .unwrap_or("");
-            Some(qaqh_domain::CodeDeltaRecord {
+            Some(qaqh_types::CodeDeltaRecord {
                 timestamp: now,
                 lines_added: content.lines().count(),
                 lines_removed: 0,
@@ -44,7 +44,7 @@ pub fn compute(
             // `_ => None`，CodeChanged 与 code_stats.jsonl 对 apply_patch 整体缺席。
             let patch = args.get("patch").and_then(|value| value.as_str())?;
             let stats = crate::apply_patch_engine::patch_stats(patch).ok()?;
-            Some(qaqh_domain::CodeDeltaRecord {
+            Some(qaqh_types::CodeDeltaRecord {
                 timestamp: now,
                 lines_added: stats.lines_added,
                 lines_removed: stats.lines_removed,
@@ -55,7 +55,7 @@ pub fn compute(
                     .map(|path| path.to_string_lossy().into_owned()),
             })
         }
-        ("delete", _) => Some(qaqh_domain::CodeDeltaRecord {
+        ("delete", _) => Some(qaqh_types::CodeDeltaRecord {
             timestamp: now,
             lines_added: 0,
             lines_removed: 0,
@@ -77,7 +77,7 @@ pub fn compute(
                 .and_then(|x| x.as_str())
                 .map(|s| s.lines().count())
                 .unwrap_or(0);
-            Some(qaqh_domain::CodeDeltaRecord {
+            Some(qaqh_types::CodeDeltaRecord {
                 timestamp: now,
                 lines_added: added,
                 lines_removed: removed,

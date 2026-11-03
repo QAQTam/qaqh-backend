@@ -7,7 +7,6 @@ description = "QAQ-Harness subagent tool — spawn isolated Ringing sub-sessions
 
 [dependencies]
 qaqh-config = { path = "../qaqh-config" }
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-workspace = { path = "../qaqh-workspace" }

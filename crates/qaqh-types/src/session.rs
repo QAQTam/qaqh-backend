@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use crate::provider::ModelSelection;
+use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 

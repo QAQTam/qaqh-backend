@@ -1,19 +1,20 @@
 //! Public v2 API compile checks for TUI/Windows shells.
 //! Shells must be able to name the v2 control surface through `qaqh-client`
-//! without importing `qaqh-ringing`, `qaqh-domain` or `qaqh-session`.
+//! without importing `qaqh-ringing`, `qaqh-ringing-contract` or `qaqh-session`.
 
 use qaqh_client::{
-    ClientError, ClientV2Bootstrap, ClientV2Event, ClientV2ResyncRequired, ClientV2SessionState,
-    ClientV2Subscription, ClientV2SubscriptionEvent, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+    ClientError, ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent,
+    RINGING_V2_BASE_PATH, RINGING_V2_VERSION, RingingV2ResyncRequired, SessionBootstrap,
+    SessionEventFrame,
 };
 
 use qaqh_client::{contract_state, fact, ringing_v2};
 
 #[test]
 fn v2_surface_is_nameable_from_the_client_root() {
-    let _: Option<ClientV2Bootstrap> = None;
-    let _: Option<ClientV2Event> = None;
-    let _: Option<ClientV2ResyncRequired> = None;
+    let _: Option<SessionBootstrap> = None;
+    let _: Option<SessionEventFrame> = None;
+    let _: Option<RingingV2ResyncRequired> = None;
     let _: Option<ClientV2SessionState> = None;
     let _: Option<ClientV2Subscription> = None;
     let _: Option<ClientV2SubscriptionEvent> = None;
@@ -35,13 +36,13 @@ fn v2_surface_is_nameable_from_the_client_root() {
 }
 
 /// 壳层必须能只靠 `qaqh-client` **命名并 match** 会话事件流的 interaction /
-/// tool 分支(`ClientV2Event` = 契约 `SessionEventFrame`,事件内部 tagged
+/// tool 分支(`SessionEventFrame`,事件内部 tagged
 /// `type`)。match 枚举变体必须写出枚举名,别名导出不够。
 #[test]
 fn session_event_interaction_branches_are_matchable_from_the_client_root() {
     use qaqh_client::contract_events::SessionEvent;
 
-    fn classify(frame: &ClientV2Event) -> &'static str {
+    fn classify(frame: &SessionEventFrame) -> &'static str {
         match &frame.event {
             SessionEvent::InteractionRequested { interaction } => {
                 // 字段必须能用 client 导出的契约类型命名。
@@ -70,7 +71,7 @@ fn session_event_interaction_branches_are_matchable_from_the_client_root() {
         }
     }
 
-    let requested: ClientV2Event = serde_json::from_value(serde_json::json!({
+    let requested: SessionEventFrame = serde_json::from_value(serde_json::json!({
         "seq": 3,
         "type": "interaction_requested",
         "interaction": {
@@ -85,7 +86,7 @@ fn session_event_interaction_branches_are_matchable_from_the_client_root() {
     assert_eq!(requested.seq, 3);
     assert_eq!(classify(&requested), "requested");
 
-    let finished: ClientV2Event = serde_json::from_value(serde_json::json!({
+    let finished: SessionEventFrame = serde_json::from_value(serde_json::json!({
         "seq": 4,
         "type": "tool_finished",
         "call_id": "call_1",

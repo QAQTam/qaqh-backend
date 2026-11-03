@@ -1,8 +1,7 @@
 //! 工具侧折叠（tool-side folding）——策略接口化。
 //!
 //! 折叠/截断在工具执行层完成：`execution.rs::execute_authorized` 在结果回传
-//! LLM 之前统一调用 [`apply`]；`qaqh-message` 的 message 层不再改写工具结果
-//! （原 message 侧折叠已取消）。
+//! LLM 之前统一调用 [`apply`]，工具结果只经过这一处明确策略。
 //!
 //! 折叠策略通过 [`ToolResultFoldPolicy`] 接口注入，按 actor 线程切换（工具
 //! 模式是会话级概念，策略因此不能是进程级状态）：

@@ -339,11 +339,7 @@ pub struct ToolResult {
     summary: String,
     /// 模型可见投影（文本、截断标记、token 估算、续调参数）。
     model: ToolModelPayload,
-    /// 大输出外置引用。**仅在 NoFold 极限模式且模型文本超过
-    /// `CONTENT_STORE_THRESHOLD_BYTES`（10 MiB）时才会产生**——标准模式下
-    /// 模型文本已被 [`TOOL_MODEL_MAX_CHARS`] 封顶（≤ 约 96 KiB），永远到不了
-    /// 该阈值。因此它是传输保护阀，而非常规路径：前端应视为可选字段，
-    /// 不要指望靠它拿"完整输出"。
+    /// Reference to separately stored output when a producer supplies one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     output_ref: Option<ContentRef>,
 }

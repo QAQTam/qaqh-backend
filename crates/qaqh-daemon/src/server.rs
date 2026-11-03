@@ -2,8 +2,8 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
+use qaqh_ringing_runtime::RingingHub;
 use qaqh_runtime::QaqhService;
-use qaqh_runtime::RingingHub;
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -227,21 +227,21 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             lan_address.map(|a| a.port()).unwrap_or_default()
         );
     }
-    let hub = Arc::new(
-        RingingHub::with_persistence(epoch.clone(), data_root.join("ringing"))
-            .with_sessions(sessions.clone()),
-    );
     let pending_commands = Arc::new(Mutex::new(
-        qaqh_runtime::ringing::PendingCommandStore::new_persistent(),
+        qaqh_ringing_runtime::PendingCommandStore::new_persistent(),
     ));
     let service = QaqhService::init(sessions);
+    let hub = Arc::new(RingingHub::with_database(
+        epoch.clone(),
+        Arc::clone(service.owners().db()),
+    ));
     service.attach_ringing(hub.clone());
     // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
     qaqh_subagent::install_task_host(Arc::new(service.clone()));
     qaqh_subagent::install_board_host(Arc::new(service.clone()));
-    let ringing_leases = Arc::new(Mutex::new(qaqh_runtime::ringing::RingingLeaseStore::new()));
+    let ringing_leases = Arc::new(Mutex::new(qaqh_ringing_runtime::RingingLeaseStore::new()));
     let (shutdown, _) = watch::channel(false);
     // L1 durability: the daemon previously had NO OS signal handling — Ctrl+C
     // or a terminal close killed the process without running the graceful
@@ -259,7 +259,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         service: service.clone(),
         admin_token: token.clone(),
         devices: Arc::new(Mutex::new(
-            qaqh_runtime::ringing::DeviceRegistry::new_persistent(),
+            qaqh_ringing_runtime::DeviceRegistry::new_persistent(),
         )),
         pairings: Arc::new(Mutex::new(crate::axum_server::PairingTable::new())),
         tls_fingerprint: tls.as_ref().map(|material| material.fingerprint.clone()),
@@ -431,7 +431,6 @@ fn spawn_signal_shutdown(shutdown: watch::Sender<bool>) {
     });
 }
 
-
 fn stringify(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
@@ -567,5 +566,4 @@ mod tests {
             ServerNetworkConfig::parse(&["--bind".into(), "127.0.0.1".into()]).expect("loopback");
         assert!(config.bind_ip.is_loopback());
     }
-
 }

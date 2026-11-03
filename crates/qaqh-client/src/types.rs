@@ -1,35 +1,21 @@
 //! Native Ringing client contracts.
 //!
-//! The daemon, transport client, and native shells share the canonical domain
+//! The daemon, transport client, and native shells share the Ringing contract
 //! and wire types. JSON is a serialization detail at the HTTP/SSE boundary;
 //! it is not an application-facing event model.
 
-// `RINGING_SCHEMA` 由下面的 `pub use` 一并带入本模块作用域。
 use serde::{Deserialize, Serialize};
 
-// 再导出的完整性是**有意的**：壳层只认 `qaqh-client` 一个入口，不该越过它去直接
-// 依赖 `qaqh-domain`/`qaqh-ringing`/`qaqh-types`。缺一个名字，壳层就只能再抄一份
-// 镜像——而抄镜像正是漂移的来源（TUI 曾照抄 2419 行协议镜像，实测已漂移出
-// config 的两处字段缺失）。
-//
-// 少数类型带 `Domain` 前缀：它们与 `qaqh-client` 自身的类型**同名而语义不同**。
-// 最典型的是 `SessionState`——`qaqh-client::SessionState` 是协商出来的租约状态，
-// `qaqh_domain::SessionState` 是会话生命周期状态，两者毫无关系。
-pub use qaqh_domain::{
-    ActivityState as DomainActivityState, AgentLifecycleState, AskAnswer, AskMode,
-    AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef, DashboardDocument,
-    DashboardSnapshot as DomainDashboardSnapshot, DashboardTask, DomainError, ErrorScope,
-    NoticeLevel, PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState,
-    RoundDeltaKind, SessionActivity, SessionState as DomainSessionState, SkillInfo,
-    SkillRuntimeInfo, SkillsStatus,
-};
+// The shell depends on this facade and the generated contract, never on a storage crate.
 pub use qaqh_ringing::{
     CLIENT_SESSION_HEADER, CommandPrecondition, CommandTarget, ConversationSendMessage,
     MAX_SAFE_INTEGER, RINGING_SCHEMA, RingingCommand, RingingCommandAckStatus, RingingCommandState,
     RingingV2CommandEnvelope, is_safe_integer,
 };
-pub use qaqh_ringing_contract::commands::ImageBlock;
+pub use qaqh_ringing_contract::commands::{AskAnswer, ImageBlock};
 pub use qaqh_ringing_contract::fact::InputPurpose;
+pub use qaqh_ringing_contract::fact::{CompactStatus, ContentRef};
+pub use qaqh_ringing_contract::{SessionActivity, SessionActivityState};
 pub use qaqh_types::{
     SessionListEntry, SessionMeta, SessionRunStatus, ToolContinuation, ToolError, ToolImage,
     ToolModelPayload, ToolResult, ToolStatus, UsageInfo,

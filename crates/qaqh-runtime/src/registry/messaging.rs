@@ -37,11 +37,12 @@ impl AgentRegistry {
             qaqh_ringing::RingingCommand::AgentReloadConfig
         )
         .then(|| {
-            let (mut config, _) = crate::agent::session_config::session_effective_config(
-                Some(&self.owners),
-                session_id,
-            )
-            .ok_or_else(|| format!("effective config unavailable for {session_id}"))?;
+            let (mut config, _) =
+                qaqh_agent_runtime::agent::session_config::session_effective_config(
+                    Some(&self.owners),
+                    session_id,
+                )
+                .ok_or_else(|| format!("effective config unavailable for {session_id}"))?;
             let kind = self
                 .instances
                 .get(session_id)
@@ -51,10 +52,11 @@ impl AgentRegistry {
                 AgentKind::Session => {
                     let session = crate::session_meta::read(&self.owners, session_id)
                         .ok_or_else(|| format!("session metadata unavailable for {session_id}"))?;
-                    let allowed = crate::session_agent::assembly::session_tool_allowlist(
-                        &session.tool_mode,
-                        &session.custom_tools,
-                    )?;
+                    let allowed =
+                        qaqh_agent_runtime::session_agent::assembly::session_tool_allowlist(
+                            &session.tool_mode,
+                            &session.custom_tools,
+                        )?;
                     (
                         allowed,
                         config
@@ -77,13 +79,14 @@ impl AgentRegistry {
                     (
                         spec.tools.clone(),
                         None,
-                        crate::session_agent::assembly::subagent_sandbox(),
+                        qaqh_agent_runtime::session_agent::assembly::subagent_sandbox(),
                     )
                 }
             };
-            let provider = crate::session_agent::assembly::provider_spec(&config, Vec::new());
+            let provider =
+                qaqh_agent_runtime::session_agent::assembly::provider_spec(&config, Vec::new());
             let workspace_root = super::spawn::ensure_session_workspace(&self.owners, session_id)?;
-            let policy = crate::session_agent::assembly::tool_policy(
+            let policy = qaqh_agent_runtime::session_agent::assembly::tool_policy(
                 workspace_root,
                 config.permission_level,
                 role,
@@ -257,7 +260,10 @@ impl AgentRegistry {
 
     /// P2-7 test/ops view for one root ledger.
     #[doc(hidden)]
-    pub fn quota_snapshot(&mut self, root: &str) -> QaqhResult<crate::quota_ledger::QuotaSnapshot> {
+    pub fn quota_snapshot(
+        &mut self,
+        root: &str,
+    ) -> QaqhResult<qaqh_agent_runtime::quota_ledger::QuotaSnapshot> {
         self.quota_ledger_mut(root)?
             .snapshot()
             .map_err(QaqhError::from)

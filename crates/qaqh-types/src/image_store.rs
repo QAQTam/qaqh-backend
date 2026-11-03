@@ -55,8 +55,7 @@ pub fn ext_for_mime(mime_type: &str) -> &'static str {
     }
 }
 
-/// sha256 hex（与 runtime content_store 的实现同形；types 层自持一份，
-/// 避免 types → runtime 反向依赖）。
+/// Return the SHA-256 hex form used by content references.
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();

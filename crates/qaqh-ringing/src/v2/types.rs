@@ -1,8 +1,7 @@
 //! Ringing v2 wire contract.
 //!
-//! v2 is additive: v1 constants and types remain untouched. Payloads are
-//! generic so the wire crate stays independent from session projection types;
-//! `qaqh-client` binds the payload to its typed projection model.
+//! RingingV2 command and transport wire types. Session state and business events
+//! are defined in `qaqh-ringing-contract`.
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
@@ -328,7 +327,6 @@ impl RingingV2OpenRequest {
 pub struct RingingV2Capabilities {
     pub subscribe: bool,
     pub interact: bool,
-    pub drive: bool,
     pub service: bool,
     pub content: bool,
     /// 单会话 SSE 流能力。
@@ -336,13 +334,8 @@ pub struct RingingV2Capabilities {
     /// `true` = `GET /ringing/v2/sessions/{seed}/events` 返回一条按序号递增的
     /// `SessionEventFrame` 流，业务类型由帧自身携带。
     ///
-    /// `#[serde(default)]`：旧 client 反序列化新响应时该字段为 `false`，
-    /// 新 client 必须显式断言 `true` 才能假定单流语义。
-    #[serde(default)]
     pub single_stream: bool,
-    /// 扫码配对能力（移动端 M0）。`#[serde(default)]`：旧 client 反序列化新响应
-    /// 该字段为 `false`，据此判定 daemon 是否支持 `/pairing/tokens` + `/pair`。
-    #[serde(default)]
+    /// QR pairing endpoints are available.
     pub pairing: bool,
 }
 
@@ -541,7 +534,8 @@ pub struct RingingV2ApprovalRespondRequest {
     pub payload: serde_json::Value,
 }
 
-/// `POST /ringing/v2/content` 响应。`content_id` 即内容摘要（`sha256:<hex>`）。
+/// `POST /ringing/v2/content` 响应。`content_id` 与 `sha256` 都是裸 hex；
+/// SDK 组装规范 `ContentRef` 时会加上 `sha256:` 前缀。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2ContentUploadResponse {
@@ -550,6 +544,14 @@ pub struct RingingV2ContentUploadResponse {
     pub sha256: String,
     pub size: u64,
     pub truncated: bool,
+}
+
+/// Server notification that the client must fetch a fresh session bootstrap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2ResyncRequired {
+    pub session_id: String,
+    pub reason: String,
 }
 
 /// v2 command acknowledgement.
@@ -825,21 +827,6 @@ mod tests {
     }
 
     #[test]
-    fn v1_ack_body_deserializes_as_v2_ack_without_existing() {
-        let v1 = crate::RingingCommandAck {
-            command_id: "cmd-1".into(),
-            status: RingingCommandAckStatus::Accepted,
-            code: None,
-            message: None,
-            retry_after_ms: None,
-        };
-        let json = serde_json::to_value(&v1).expect("serialize");
-        let v2: RingingV2CommandAck = serde_json::from_value(json).expect("v2 superset");
-        assert_eq!(v2.command_id, "cmd-1");
-        assert!(v2.existing.is_none());
-    }
-
-    #[test]
     fn v2_command_status_round_trips_typed_result() {
         let status = RingingV2CommandStatus {
             command_id: "cmd-2".into(),
@@ -874,36 +861,6 @@ mod tests {
             !events_path("s1").contains("/events/"),
             "不得再出现 per-channel 的 events/{{channel}} 形态"
         );
-    }
-
-    /// `single_stream` 是增量 capability：旧 client 反序列化缺该字段 → false。
-    #[test]
-    fn single_stream_capability_is_additive_and_defaults_false() {
-        let legacy = serde_json::json!({
-            "subscribe": true,
-            "interact": true,
-            "drive": true,
-            "service": true,
-            "content": true
-        });
-        let decoded: RingingV2Capabilities =
-            serde_json::from_value(legacy).expect("legacy capability body");
-        assert!(
-            !decoded.single_stream,
-            "缺字段必须是 false（不得被推测为单流）"
-        );
-
-        let current = serde_json::json!({
-            "subscribe": true,
-            "interact": true,
-            "drive": true,
-            "service": true,
-            "content": true,
-            "single_stream": true
-        });
-        let decoded: RingingV2Capabilities =
-            serde_json::from_value(current).expect("current capability body");
-        assert!(decoded.single_stream);
     }
 
     #[test]

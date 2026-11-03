@@ -51,9 +51,8 @@ pub struct NewTeamTask<'a> {
     pub created_at_ms: i64,
 }
 
-pub fn task_insert(conn: &mut Connection, task: &NewTeamTask<'_>) -> rusqlite::Result<()> {
-    let tx = conn.transaction()?;
-    tx.execute(
+pub fn task_insert(conn: &Connection, task: &NewTeamTask<'_>) -> rusqlite::Result<()> {
+    conn.execute(
         "INSERT INTO team_tasks
             (task_id, root_session_id, title, description_ref, state, claim_epoch,
              created_by, created_at_ms, updated_at_ms)
@@ -68,7 +67,7 @@ pub fn task_insert(conn: &mut Connection, task: &NewTeamTask<'_>) -> rusqlite::R
             task.created_at_ms,
         ],
     )?;
-    tx.commit()
+    Ok(())
 }
 
 const TASK_COLUMNS: &str = "task_id, root_session_id, title, description_ref, state,

@@ -10,7 +10,6 @@ qaqh-agent-runtime = { path = "../qaqh-agent-runtime" }
 qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-config-api = { path = "../qaqh-config-api" }
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-lsp = { path = "../qaqh-lsp" }
 qaqh-ringing = { path = "../qaqh-ringing" }
@@ -34,10 +33,7 @@ qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 
 [features]
-default = ["memory"]
-ts = ["dep:ts-rs", "qaqh-types/ts", "qaqh-domain/ts", "qaqh-ringing-runtime/ts", "qaqh-siwc/ts", "qaqh-dsaccount/ts"]
-# Kept as a compatibility no-op after removing the experimental vector backend.
-memory = []
+ts = ["dep:ts-rs", "qaqh-types/ts", "qaqh-siwc/ts", "qaqh-dsaccount/ts"]
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Registry", "Win32_System_WinRT", "Win32_Security", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "UI_Notifications", "Data_Xml_Dom", "Foundation_Collections"] }

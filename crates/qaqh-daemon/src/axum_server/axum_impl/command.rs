@@ -39,9 +39,7 @@ pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> Ringing
 }
 
 /// 命令幂等指纹。进程内入口与 HTTP 面必须共用，否则重放判定会漂移。
-pub(crate) fn command_fingerprint(
-    envelope: &RingingV2CommandEnvelope,
-) -> String {
+pub(crate) fn command_fingerprint(envelope: &RingingV2CommandEnvelope) -> String {
     let payload = serde_json::to_string(&serde_json::json!({
         "contract_revision": envelope.contract_revision,
         "target": envelope.target,
@@ -251,8 +249,7 @@ pub(crate) async fn execute_command(
             }
             InteractionFault::AskDismiss => {
                 if let qaqh_ringing::RingingCommand::InteractionAskRespond {
-                    interaction_id,
-                    ..
+                    interaction_id, ..
                 } = &envelope.command
                 {
                     envelope.command = qaqh_ringing::RingingCommand::InteractionAskDismiss {
@@ -313,7 +310,10 @@ pub(crate) async fn execute_command(
                 .detach_session(&session_id, &close_session);
             complete(state, envelope.command_id)
         }
-        Route::Rename { session: target, title } => {
+        Route::Rename {
+            session: target,
+            title,
+        } => {
             if let Err(error) = state.service.rename_session(&target, &title) {
                 return fail(
                     state,
@@ -478,7 +478,12 @@ pub(crate) async fn execute_command(
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
+                .mark_terminal(
+                    &envelope.command_id,
+                    RingingCommandState::Succeeded,
+                    None,
+                    None,
+                );
             (StatusCode::OK, accept_ack(envelope.command_id, None))
         }
     }

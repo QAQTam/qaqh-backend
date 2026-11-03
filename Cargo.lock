@@ -2205,7 +2205,6 @@ version = "2.1.20261031-1"
 dependencies = [
  "log",
  "qaqh-config",
- "qaqh-domain",
  "qaqh-dsaccount",
  "qaqh-gate",
  "qaqh-mcp",
@@ -2235,7 +2234,6 @@ dependencies = [
  "bytes",
  "futures-util",
  "log",
- "qaqh-domain",
  "qaqh-ringing",
  "qaqh-ringing-contract",
  "qaqh-types",
@@ -2284,13 +2282,12 @@ version = "2.1.20261031-1"
 dependencies = [
  "hex",
  "qaqh-config-api",
- "qaqh-domain",
  "qaqh-dsaccount",
  "qaqh-profile",
  "qaqh-ringing",
  "qaqh-ringing-contract",
+ "qaqh-ringing-runtime",
  "qaqh-runtime",
- "qaqh-session",
  "qaqh-siwc",
  "qaqh-types",
  "serde",
@@ -2308,11 +2305,11 @@ dependencies = [
  "futures-util",
  "log",
  "qaqh-config",
- "qaqh-domain",
  "qaqh-mcp",
  "qaqh-process-tools",
  "qaqh-ringing",
  "qaqh-ringing-contract",
+ "qaqh-ringing-runtime",
  "qaqh-runtime",
  "qaqh-sandbox",
  "qaqh-session",
@@ -2335,17 +2332,6 @@ dependencies = [
  "tower",
  "tower-http",
  "winresource",
-]
-
-[[package]]
-name = "qaqh-domain"
-version = "2.1.20261031-1"
-dependencies = [
- "qaqh-ringing-contract",
- "qaqh-types",
- "serde",
- "serde_json",
- "ts-rs",
 ]
 
 [[package]]
@@ -2378,7 +2364,6 @@ dependencies = [
  "ignore",
  "image",
  "log",
- "qaqh-domain",
  "qaqh-permission",
  "qaqh-skills",
  "qaqh-tool-core",
@@ -2571,7 +2556,6 @@ dependencies = [
 name = "qaqh-ringing"
 version = "2.1.20261031-1"
 dependencies = [
- "qaqh-domain",
  "qaqh-profile",
  "qaqh-ringing-contract",
  "qaqh-types",
@@ -2598,7 +2582,6 @@ name = "qaqh-ringing-runtime"
 version = "2.1.20261031-1"
 dependencies = [
  "log",
- "qaqh-domain",
  "qaqh-memwatch",
  "qaqh-ringing",
  "qaqh-ringing-contract",
@@ -2622,7 +2605,6 @@ dependencies = [
  "qaqh-client",
  "qaqh-config",
  "qaqh-config-api",
- "qaqh-domain",
  "qaqh-dsaccount",
  "qaqh-gate",
  "qaqh-lsp",
@@ -2673,7 +2655,6 @@ version = "2.1.20261031-1"
 dependencies = [
  "hex",
  "log",
- "qaqh-domain",
  "qaqh-profile",
  "qaqh-ringing",
  "qaqh-ringing-contract",
@@ -2687,7 +2668,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "toml",
- "ts-rs",
  "uuid",
 ]
 
@@ -2725,7 +2705,6 @@ version = "2.1.20261031-1"
 dependencies = [
  "log",
  "qaqh-config",
- "qaqh-domain",
  "qaqh-ringing",
  "qaqh-ringing-contract",
  "qaqh-tool-core",
@@ -2778,7 +2757,6 @@ dependencies = [
  "image",
  "libc",
  "log",
- "qaqh-domain",
  "qaqh-dsaccount",
  "qaqh-file-tools",
  "qaqh-permission",

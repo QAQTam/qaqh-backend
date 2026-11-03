@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::QaqhService;
-use qaqh_session::session_fact_v2::SessionMetadataPatch;
+use qaqh_ringing_contract::fact::SessionMetadataPatch;
 
 fn load_catalog() -> QaqhResult<ProfilesStore> {
     ProfilesStore::load_or_create(&qaqh_profile::default_providers_path())
