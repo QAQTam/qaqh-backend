@@ -195,6 +195,8 @@ pub(crate) async fn handle_command(
             | RingingCommand::PlanAction { .. }
             | RingingCommand::DiagnosticsMemoryStart {}
             | RingingCommand::DiagnosticsMemoryStop {}
+            | RingingCommand::DriverClaim { .. }
+            | RingingCommand::DriverRelease { .. }
     ) {
         let (status, ack) = super::execute_command(&state, &headers, &identity, envelope).await;
         return json_response(status, &ack);
@@ -233,7 +235,7 @@ pub(crate) async fn handle_command(
         }
     }
 
-    dispatch(state, &client_session, &identity, envelope).await
+    dispatch(state, &client_session, &identity, &headers, envelope).await
 }
 
 fn required_scope(command: &RingingCommand) -> Scope {
@@ -265,7 +267,8 @@ fn expected_revision_from(envelope: &RingingV2CommandEnvelope) -> Option<u64> {
 async fn dispatch(
     state: AppState,
     client_session: &str,
-    _identity: &Identity,
+    identity: &Identity,
+    headers: &HeaderMap,
     envelope: RingingV2CommandEnvelope,
 ) -> Response {
     let service = &state.service;
@@ -400,6 +403,54 @@ async fn dispatch(
                 (value, revision)
             })
             .map_err(|error| error.to_string()),
+        RingingCommand::DriverClaim {
+            client_session_id,
+            stale_holder,
+        } => {
+            let CommandTarget::Session { session_id } = &envelope.target else {
+                return fail_response(
+                    &state,
+                    command_id,
+                    StatusCode::BAD_REQUEST,
+                    "target_mismatch",
+                    "driver.claim requires a session target",
+                );
+            };
+            let caller = caller_lease_bound_to_identity(&state, &headers, identity)
+                .unwrap_or_else(|| client_session_id.clone());
+            let verdict =
+                state
+                    .drivers
+                    .claim(session_id, &caller, stale_holder.as_deref());
+            if verdict.accepted {
+                publish_driver_changed(&state, session_id);
+            }
+            driver_result(&verdict)
+        }
+        RingingCommand::DriverRelease {
+            client_session_id,
+            expected_epoch,
+        } => {
+            let CommandTarget::Session { session_id } = &envelope.target else {
+                return fail_response(
+                    &state,
+                    command_id,
+                    StatusCode::BAD_REQUEST,
+                    "target_mismatch",
+                    "driver.release requires a session target",
+                );
+            };
+            let caller = caller_lease_bound_to_identity(&state, &headers, identity)
+                .unwrap_or_else(|| client_session_id.clone());
+            let verdict =
+                state
+                    .drivers
+                    .release(session_id, &caller, *expected_epoch);
+            if verdict.accepted {
+                publish_driver_changed(&state, session_id);
+            }
+            driver_result(&verdict)
+        }
         RingingCommand::ConfigSave { .. }
         | RingingCommand::ConfigSetPermissionLevel { .. }
         | RingingCommand::ProfileCreate { .. }
@@ -427,19 +478,23 @@ async fn dispatch(
 
     match outcome {
         Ok((result, revision)) => {
-            let mut ack = super::command::accept_ack(command_id, None);
-            ack.result = Some(result);
+            let mut ack = super::command::accept_ack(command_id.clone(), None);
+            ack.result = Some(result.clone());
             ack.operation = Some(operation.to_string());
             ack.revision = revision;
+            // B05:同步结果原样落 receipt——ACK 丢失后重放原 command_id 或
+            // 轮询 status 都能恢复首次执行承诺的 result/operation/revision。
             state
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(
-                    &ack.command_id,
-                    qaqh_ringing::RingingCommandState::Succeeded,
-                    None,
-                    None,
+                .mark_terminal_sync(
+                    &command_id,
+                    qaqh_ringing::RingingV2SyncResult {
+                        operation: operation.to_string(),
+                        result,
+                        revision,
+                    },
                 );
             json_response(StatusCode::OK, &ack)
         }
@@ -451,6 +506,28 @@ async fn dispatch(
             error,
         ),
     }
+}
+
+/// driver 裁定 → 命令 result JSON(`RingingV2DriverClaim/ReleaseResponse`
+/// 同形状)。拒绝是带内业务裁定(`accepted=false` + reason),不是命令失败。
+fn driver_result(verdict: &super::driver::DriverVerdict) -> Result<(serde_json::Value, Option<u64>), String> {
+    Ok((
+        json!({
+            "accepted": verdict.accepted,
+            "holder": verdict.holder,
+            "driver_epoch": verdict.driver_epoch,
+            "reason": verdict.reason,
+        }),
+        None,
+    ))
+}
+
+/// claim/release 生效后经 owner 发 `DriverChanged`,与业务事件同流定序。
+fn publish_driver_changed(state: &AppState, session_id: &str) {
+    let owner = state.service.owners().get_or_create(session_id);
+    owner.publish(qaqh_ringing_contract::events::SessionEvent::DriverChanged {
+        driver: state.drivers.get(session_id),
+    });
 }
 
 fn catalog_revision(result: &serde_json::Value) -> Option<u64> {

@@ -168,6 +168,12 @@ impl TodoListOutput {
         envelope_value(self, "todo.list")
     }
 
+    /// service 查询面(`todo.list`)的纯快照:不加工具信封的 timeis/status
+    /// 键——那是工具输出的遗留,不属于查询结果契约(B08 权威 DTO)。
+    pub fn to_snapshot_value(&self) -> Result<Value, String> {
+        serde_json::to_value(self).map_err(|error| format!("todo.list: {error}"))
+    }
+
     pub fn to_envelope_string(&self) -> Result<String, String> {
         serde_json::to_string(&self.to_envelope_value()?)
             .map_err(|error| format!("todo.list: {error}"))
@@ -395,6 +401,16 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
         message: format!("Todo `{title}` is now {status_name}."),
         items: store.items.iter().map(TodoItemView::from).collect(),
     })
+}
+
+/// service 查询面(`todo.list`)的纯快照入口:typed 解析后不经工具信封。
+/// `status` 与 todo 工具同词表(pending|in_progress|completed|cancelled)。
+pub fn todo_list_snapshot_value(session_id: &str, status: Option<&str>) -> Result<Value, String> {
+    let args = match status {
+        None => Value::Null,
+        Some(status) => serde_json::json!({ "status": status }),
+    };
+    todo_list_for_typed(session_id, &args)?.to_snapshot_value()
 }
 
 /// service 面直接返回 canonical Value，避免 `parse_json_string`。

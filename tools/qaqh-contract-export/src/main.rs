@@ -11,6 +11,7 @@ use qaqh_ringing::{
     RingingV2DriverReleaseResponse, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
     RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
     RingingV2PendingInteractionView, RingingV2PendingPermissionView, RingingV2ResyncRequired,
+    RingingV2SyncResult,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -229,10 +230,14 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
-        DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult,
-        SessionActivityParams, SessionGetActivityParams, SessionListParams, SessionMetaParams,
-        SessionToolActivity, SkillCatalogDiagnostic, SkillCatalogEntry, SkillsCatalogParams,
-        SkillsCatalogResult, WorkspaceGetParams, WorkspaceListParams,
+        ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams, FsEntry,
+        FsListParams, FsReadParams, FsReadResult, PlanReadItem, PlanReadParams, PlanItemStatusView,
+        ProfileListParams, ProfileListSnapshot, SessionActivityParams, SessionDashboard,
+        SessionDashboardParams, SessionDashboardTask, SessionGetActivityParams, SessionListParams,
+        SessionMetaParams, SessionToolActivity, SkillCatalogDiagnostic, SkillCatalogEntry,
+        SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoCountsSnapshot,
+        TodoItemSnapshot, TodoListParams, TodoListSnapshot, TodoStatusParams, TodoStatusSnapshot,
+        WorkspaceGetParams, WorkspaceListParams,
     };
     let open_request = RingingV2OpenRequest::new("fixture-client");
     write_fixture(stage, "open-request.json", &open_request)?;
@@ -270,6 +275,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         terminal_event_id: None,
         error_code: None,
         result: None,
+        sync_result: None,
     };
     write_fixture(stage, "command-status-accepted.json", &status)?;
 
@@ -290,6 +296,8 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         lease_ttl_ms: 30_000,
         renew_interval_ms: 10_000,
         capabilities,
+        // B07:握手即携带命令目录代际。
+        command_contract_revision: qaqh_ringing::COMMAND_CONTRACT_REVISION.to_owned(),
     };
     open_response
         .validate()
@@ -456,6 +464,187 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "service-workspace-list-result.json",
         &vec![workspace_entry_fixture()],
     )?;
+    // ── B08:此前 untyped 的 8 个方法的代表性 fixtures ──
+    write_fixture(stage, "service-config-load-params.json", &ConfigLoadParams {})?;
+    write_fixture(
+        stage,
+        "service-config-load-result.json",
+        &qaqh_config_api::ConfigDto::default(),
+    )?;
+    write_fixture(
+        stage,
+        "service-profile-list-params.json",
+        &ProfileListParams {},
+    )?;
+    write_fixture(
+        stage,
+        "service-profile-list-result.json",
+        &ProfileListSnapshot {
+            profiles: [(
+                "synthetic-profile".to_owned(),
+                qaqh_config_api::ProfileSummaryDto {
+                    name: "synthetic-profile".to_owned(),
+                    model: "synthetic-model".to_owned(),
+                    base_url: "https://provider.invalid/v1".to_owned(),
+                    wire: "chat".to_owned(),
+                    effort: Some("high".to_owned()),
+                    context_length: 128_000,
+                    max_tokens: 8_192,
+                    api_key_set: false,
+                    credential: "api_key".to_owned(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-dashboard-params.json",
+        &SessionDashboardParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-dashboard-result.json",
+        &SessionDashboard {
+            tasks: vec![SessionDashboardTask {
+                id: "todo-fixture-1".to_owned(),
+                subject: "synthetic task".to_owned(),
+                description: String::new(),
+                status: "in_progress".to_owned(),
+                evidence: None,
+            }],
+            recent_edits: vec!["/synthetic/workspace/src/main.rs".to_owned()],
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-skills-list_tools-params.json",
+        &SkillsListToolsParams {},
+    )?;
+    write_fixture(
+        stage,
+        "service-skills-list_tools-result.json",
+        &vec!["fs_read".to_owned(), "todo_list".to_owned()],
+    )?;
+    write_fixture(
+        stage,
+        "service-todo-list-params.json",
+        &TodoListParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            status: None,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-todo-list-result.json",
+        &TodoListSnapshot {
+            items: vec![TodoItemSnapshot {
+                id: "todo-fixture-1".to_owned(),
+                title: "synthetic task".to_owned(),
+                description: String::new(),
+                status: "in_progress".to_owned(),
+                evidence: None,
+            }],
+            current_id: Some("todo-fixture-1".to_owned()),
+            counts: TodoCountsSnapshot {
+                pending: 0,
+                in_progress: 1,
+                completed: 0,
+                cancelled: 0,
+                total: 1,
+            },
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-todo-status-params.json",
+        &TodoStatusParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    // 单条形状与 todo.list 同源;null 结果(无 todo 文件)由
+    // `TodoStatusSnapshot | null` 类型表达,不设独立 fixture。
+    write_fixture(
+        stage,
+        "service-todo-status-result.json",
+        &TodoStatusSnapshot {
+            mode: "manual".to_owned(),
+            current_id: Some("todo-fixture-1".to_owned()),
+            current_title: Some("synthetic task".to_owned()),
+            pending: 0,
+            in_progress: 1,
+            completed: 0,
+            cancelled: 0,
+            total: 1,
+            items: vec![TodoItemSnapshot {
+                id: "todo-fixture-1".to_owned(),
+                title: "synthetic task".to_owned(),
+                description: String::new(),
+                status: "in_progress".to_owned(),
+                evidence: None,
+            }],
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-plan-read-params.json",
+        &PlanReadParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-plan-read-result.json",
+        &vec![PlanReadItem {
+            id: "item-fixture-1".to_owned(),
+            title: "synthetic plan step".to_owned(),
+            status: PlanItemStatusView::Pending,
+            comment: String::new(),
+            actions: Vec::new(),
+        }],
+    )?;
+    write_fixture(
+        stage,
+        "service-diagnostics-memory-snapshot-params.json",
+        &DiagnosticsMemorySnapshotParams {
+            after_sequence: None,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-diagnostics-memory-snapshot-result.json",
+        &qaqh_memwatch::MemorySnapshot {
+            schema_version: 1,
+            enabled: true,
+            started_at_ms: 1_759_000_000_000,
+            sampled_at_ms: 1_759_000_060_000,
+            components_sampled_at_ms: Some(1_759_000_060_000),
+            components_stale: false,
+            process: qaqh_memwatch::ProcessMemory {
+                resident_bytes: Some(524_288),
+                private_bytes: Some(262_144),
+                virtual_bytes: Some(1_048_576),
+                peak_resident_bytes: Some(524_288),
+                source: "synthetic".to_owned(),
+                error: None,
+            },
+            peak_sampled_private_bytes: Some(262_144),
+            peak_sampled_resident_bytes: Some(524_288),
+            tracked_session_count: 1,
+            resident_session_count: 1,
+            dropped_session_gauges: 0,
+            dropped_phase_samples: 0,
+            oldest_phase_sequence: Some(1),
+            latest_phase_sequence: 1,
+            phase_gap: false,
+            components: Vec::new(),
+            sessions: Vec::new(),
+            phases: Vec::new(),
+        },
+    )?;
     account_fixtures::write(stage)?;
     client_fixtures::write(stage)?;
     Ok(())
@@ -551,6 +740,7 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_ringing::RingingV2DevicesResponse,
         // 会话面即契约类型（qaqh-ringing-contract）：bootstrap/state/事件帧
         // 一手导出,无投影/泛型容器中间层。
+        RingingV2SyncResult,
         qaqh_ringing_contract::SessionBootstrap,
         qaqh_ringing_contract::SessionState,
         qaqh_ringing_contract::SessionEvent,
@@ -571,6 +761,29 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::SkillsCatalogResult,
         qaqh_runtime::ringing::service_methods::WorkspaceGetParams,
         qaqh_runtime::ringing::service_methods::WorkspaceListParams,
+        qaqh_runtime::ringing::service_methods::ConfigLoadParams,
+        qaqh_runtime::ringing::service_methods::DiagnosticsMemorySnapshotParams,
+        qaqh_runtime::ringing::service_methods::ProfileListParams,
+        qaqh_runtime::ringing::service_methods::SessionDashboardParams,
+        qaqh_runtime::ringing::service_methods::SessionDashboard,
+        qaqh_runtime::ringing::service_methods::SessionDashboardTask,
+        qaqh_runtime::ringing::service_methods::SkillsListToolsParams,
+        qaqh_runtime::ringing::service_methods::PlanReadParams,
+        qaqh_runtime::ringing::service_methods::PlanReadItem,
+        qaqh_runtime::ringing::service_methods::PlanItemStatusView,
+        qaqh_runtime::ringing::service_methods::TodoListParams,
+        qaqh_runtime::ringing::service_methods::TodoListSnapshot,
+        qaqh_runtime::ringing::service_methods::TodoItemSnapshot,
+        qaqh_runtime::ringing::service_methods::TodoCountsSnapshot,
+        qaqh_runtime::ringing::service_methods::TodoStatusParams,
+        qaqh_runtime::ringing::service_methods::TodoStatusSnapshot,
+        qaqh_memwatch::MemorySnapshot,
+        qaqh_memwatch::ProcessMemory,
+        qaqh_memwatch::SessionMemory,
+        qaqh_memwatch::ComponentMemory,
+        qaqh_memwatch::PhaseSample,
+        qaqh_memwatch::PhaseKind,
+        qaqh_runtime::ringing::service_methods::ProfileListSnapshot,
         qaqh_ringing_contract::SessionActivity,
         qaqh_ringing_contract::SessionActivityState,
         qaqh_ringing_contract::WorkspaceEntry,
@@ -627,6 +840,8 @@ fn write_service_map(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let result = match descriptor.result_type {
             "null" => "null".to_owned(),
             "string" => "string".to_owned(),
+            // 基础数组(如 skills.list_tools 的 string[])不经 DTO 导入。
+            "string[]" => "string[]".to_owned(),
             other => dto_reference(other, &mut imports)?,
         };
         entries.push_str(&format!(

@@ -8,10 +8,12 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::fact::{
-    ActivityState, BlockId, ContentValue, InputId, InteractionDecision, InteractionId, ToolCallId,
-    ToolError, ToolMetrics, TurnId, TurnMode,
+    ActivityState, AssistantBlockKind, BlockId, ContentValue, InputId, InteractionDecision,
+    InteractionId, ToolCallId, ToolError, ToolMetrics, TurnId, TurnMode,
 };
-use crate::state::{InteractionView, SubagentView, TimelineEntry, ToolCallStatus, TurnOutcome};
+use crate::state::{
+    DriverState, InteractionView, SubagentView, TimelineEntry, ToolCallStatus, TurnOutcome,
+};
 
 /// 工具实时输出流标识;无输出的工具不产生 output.delta 事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,14 +54,26 @@ pub enum SessionEvent {
         outcome: TurnOutcome,
     },
     /// 参数生成进度,仅用于展示;不代表工具已执行或参数已合法。
+    /// `tool_name` 是模型侧声明的工具名;`text` 是累计参数前缀(替换语义)。
     ToolArgumentsDelta {
         call_id: ToolCallId,
         turn_id: TurnId,
+        tool_name: String,
         text: String,
+    },
+    /// 模型声明工具调用:declared 行已落库;`args` 是最终参数(裸 JSON 对象
+    /// 或 null)。实时订阅者据此建立与 bootstrap `tools` 视图一致的工具身份。
+    ToolDeclared {
+        call_id: ToolCallId,
+        turn_id: TurnId,
+        tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        args: Option<serde_json::Value>,
     },
     /// 后端进入工具实际执行阶段;不代表执行成功。
     ToolStarted {
         call_id: ToolCallId,
+        tool_name: String,
     },
     /// 工具执行输出尾窗片段;按需区分 stdout/stderr。
     ToolOutputDelta {
@@ -85,9 +99,11 @@ pub enum SessionEvent {
         entry: TimelineEntry,
     },
     /// 模型文本流式片段;同一 block_id 的后续事件替换已展示内容。
+    /// `block_kind` 区分 reasoning 与 answer,与 sealed AssistantBlock 同词表。
     MessageDelta {
         turn_id: TurnId,
         block_id: BlockId,
+        block_kind: AssistantBlockKind,
         text: String,
     },
     InteractionRequested {
@@ -104,6 +120,11 @@ pub enum SessionEvent {
     SessionMetaChanged {
         title: Option<String>,
     },
+    /// driver 席位变化(claim/release 生效);`None` = 席位空。与 bootstrap
+    /// `state.driver` 同形状。
+    DriverChanged {
+        driver: Option<DriverState>,
+    },
 }
 
 impl SessionEvent {
@@ -115,14 +136,18 @@ impl SessionEvent {
             } => current_turn_id.as_ref(),
             SessionEvent::TurnStarted { turn_id, .. }
             | SessionEvent::TurnEnded { turn_id, .. }
-            | SessionEvent::MessageDelta { turn_id, .. } => Some(turn_id),
+            | SessionEvent::MessageDelta { turn_id, .. }
+            | SessionEvent::ToolDeclared { turn_id, .. } => Some(turn_id),
             SessionEvent::ToolArgumentsDelta { turn_id, .. } => Some(turn_id),
             _ => None,
         }
     }
 }
 
-/// SSE 帧载荷:`seq` 是 epoch 内单调序号,同时是状态快照水位。
+/// SSE 帧载荷:`seq` 是 epoch 内 0 基单调序号(第 s 个事件帧的 seq = s)。
+/// bootstrap `SessionState.seq` 是"下一个将分配的 seq"——快照已覆盖全部
+/// `seq < state.seq` 的帧;客户端跳过 `seq < state.seq`,处理 `seq >= state.seq`
+/// (相等边界必须处理)。与 `SessionState::seq` 的文档同源,不得单方改动。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionEventFrame {

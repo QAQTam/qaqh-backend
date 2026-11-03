@@ -18,7 +18,7 @@ pub use store::{
     load_todo, load_todo_for, save_todo, todo_cancel_json, todo_cancel_value, todo_meta_snapshot,
     todo_status_json, todo_status_value,
 };
-pub use typed::todo_list_value_for;
+pub use typed::{todo_list_snapshot_value, todo_list_value_for};
 
 #[cfg(test)]
 mod tests;

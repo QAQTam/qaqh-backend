@@ -276,4 +276,247 @@ mod tests {
             );
         });
     }
+
+    /// B01 边界:首帧 seq = 0;快照水位 = "下一个将分配的 seq";水位读取后的
+    /// 下一帧 seq **等于**水位(相等边界必须被客户端处理,不是跳过)。
+    #[test]
+    fn watermark_is_exclusive_and_first_frame_seq_is_zero() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-WM".into(),
+                    parent_session_id: None,
+                    title: String::new(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    effort: None,
+                    profile: None,
+                    mode: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            let input = |id: &str| TimelineEntry::Input {
+                block_id: BlockId::new(id),
+                turn_id: None,
+                purpose: InputPurpose::TriggerTurn,
+                content: ContentValue::Inline { text: id.into() },
+                attachments: vec![],
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                actor: ActorRef {
+                    kind: ActorKind::User,
+                    id: "user".into(),
+                    display_name: None,
+                },
+            };
+
+            // 首帧 seq = 0(0 基)。
+            owner
+                .append_block(input("B1"))
+                .await
+                .expect("append B1");
+            let first = rx.try_recv().expect("first frame");
+            assert_eq!(first.seq, 0, "首帧 seq 必须 = 0(exclusive 水位语义)");
+            assert_eq!(owner.current_seq(), 1);
+
+            // 快照:水位 = 已发出事件数,且 DB 状态包含全部已提交效果。
+            for id in ["B2", "B3"] {
+                owner.append_block(input(id)).await.expect("append");
+            }
+            // 排空订阅缓冲(B2/B3 的帧),再取快照。
+            assert_eq!(rx.try_recv().expect("B2 frame").seq, 1);
+            assert_eq!(rx.try_recv().expect("B3 frame").seq, 2);
+            let state = owner.snapshot().await.expect("snapshot");
+            assert_eq!(state.seq, 3);
+            assert_eq!(state.timeline.len(), 3, "快照覆盖全部已提交事件");
+            // 空闲读水位不变:事件不因快照而分配 seq。
+            assert_eq!(owner.current_seq(), 3);
+
+            // 相等边界:快照后发出的下一帧 seq == 快照水位。
+            owner
+                .append_block(input("B4"))
+                .await
+                .expect("append B4");
+            let boundary = rx.try_recv().expect("boundary frame");
+            assert_eq!(
+                boundary.seq, state.seq,
+                "水位后的首帧 seq 必须等于水位(客户端按 >= 处理)"
+            );
+        });
+    }
+
+    /// B03:declare 落库 + ToolDeclared 事件(工具身份与最终参数),与
+    /// bootstrap `tools` 视图同形状。
+    #[test]
+    fn declare_tool_call_emits_identity_and_lands_in_snapshot() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-DECLARE".into(),
+                    parent_session_id: None,
+                    title: String::new(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    effort: None,
+                    profile: None,
+                    mode: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            owner.start_turn("T1", None, None).await.expect("start turn");
+            owner
+                .declare_tool_call(
+                    &ToolCallId::new("C1"),
+                    &TurnId::new("T1"),
+                    "shell",
+                    Some(serde_json::json!({ "command": "ls" })),
+                )
+                .await
+                .expect("declare");
+            match recv_event(&mut rx) {
+                SessionEvent::TurnStarted { .. } => {}
+                other => panic!("expected turn started, got {other:?}"),
+            }
+            match recv_event(&mut rx) {
+                SessionEvent::ActivityChanged { .. } => {}
+                other => panic!("expected activity changed, got {other:?}"),
+            }
+            match recv_event(&mut rx) {
+                SessionEvent::ToolDeclared {
+                    call_id,
+                    tool_name,
+                    args,
+                    ..
+                } => {
+                    assert_eq!(call_id.as_ref(), "C1");
+                    assert_eq!(tool_name, "shell");
+                    assert_eq!(args, Some(serde_json::json!({ "command": "ls" })));
+                }
+                other => panic!("expected tool declared, got {other:?}"),
+            }
+            let state = owner.snapshot().await.expect("snapshot");
+            let tool = state.tools.iter().find(|t| t.call_id.as_ref() == "C1");
+            let tool = tool.expect("declared call in snapshot");
+            assert_eq!(tool.tool_name.as_deref(), Some("shell"));
+            assert_eq!(tool.status, ToolCallStatus::Declared);
+            assert_eq!(tool.args, Some(serde_json::json!({ "command": "ls" })));
+        });
+    }
+
+    /// B04:rename 的唯一写口 = owner.set_title → 业务行 + SessionMetaChanged。
+    #[test]
+    fn set_title_updates_row_and_emits_meta_changed() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-TITLE".into(),
+                    parent_session_id: None,
+                    title: "old".into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    effort: None,
+                    profile: None,
+                    mode: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            owner.set_title("renamed").await.expect("set title");
+            match recv_event(&mut rx) {
+                SessionEvent::SessionMetaChanged { title } => {
+                    assert_eq!(title.as_deref(), Some("renamed"));
+                }
+                other => panic!("expected session meta changed, got {other:?}"),
+            }
+            let state = owner.snapshot().await.expect("snapshot");
+            assert_eq!(state.title.as_deref(), Some("renamed"));
+        });
+    }
+
+    /// D7:外部生产者经 owner.publish 进入同一单流定序(driver 席位事件)。
+    #[test]
+    fn published_events_share_the_single_stream_sequence() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-DRIVER".into(),
+                    parent_session_id: None,
+                    title: String::new(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    effort: None,
+                    profile: None,
+                    mode: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            owner
+                .publish(SessionEvent::DriverChanged {
+                    driver: Some(qaqh_ringing_contract::state::DriverState {
+                        holder: Some("lease-a".into()),
+                        epoch: 1,
+                    }),
+                });
+            let frame = rx.try_recv().expect("published frame");
+            assert_eq!(frame.seq, 0);
+            match frame.event {
+                SessionEvent::DriverChanged { driver } => {
+                    assert_eq!(driver.map(|d| d.epoch), Some(1));
+                }
+                other => panic!("expected driver changed, got {other:?}"),
+            }
+        });
+    }
 }
