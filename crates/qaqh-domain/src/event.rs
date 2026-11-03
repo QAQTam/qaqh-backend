@@ -365,7 +365,7 @@ pub enum ConversationEvent {
     },
     /// compact 流式摘要（replaceable，按 compact_id 合并）。
     CompactProgress { compact_id: String, delta: String },
-    /// compact 终态。`ConversationCompact` accepted 不代表成功，本事件才是终态。
+    /// compact 终态；异步操作以本事件表达最终状态。
     CompactFinished {
         compact_id: String,
         status: CompactStatus,

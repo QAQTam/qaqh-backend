@@ -18,74 +18,226 @@ use crate::v2::{RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
 
 pub use qaqh_types::SettingValue;
 
-/// 显式目标分类（统一命令面唯一指定目标的位置，统一切换设计 §8.2）。
+/// 命令信封中的唯一目标位置。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum UnifiedTarget {
+pub enum CommandTarget {
     Global,
     Session { session_id: String },
     Workspace { workspace_id: String },
     ExecSession { id: String },
 }
 
-/// 统一命令前置条件（统一切换设计 §8.1/§8.8）：写操作可携带目标资源版本，
-/// owner 在同一串行边界比较，冲突拒绝。
+/// 资源 revision 与 driver epoch 由命令信封携带。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum UnifiedPrecondition {
+pub enum CommandPrecondition {
     SettingsRevision { revision: u64 },
-    ExpectedRevision { revision: u64 },
     ConfigRevision { revision: u64 },
-    DriverEpoch { epoch: u64 },
 }
 
-/// 统一命令信封（统一切换设计 §8.1）。业务提交端点
-/// `POST /ringing/v2/commands` 的新格式：目标只在信封出现一次，命令是封闭
-/// tagged union；`contract_revision` 钉死命令目录代际（`unified-commands-1`）。
+/// 命令目录代际。字段和语义变更需显式升级。
+pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-6";
+
+/// RingingV2 唯一公共命令信封。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct UnifiedCommandEnvelope {
+pub struct RingingV2CommandEnvelope {
     pub schema: String,
     pub version: u32,
     pub contract_revision: String,
     pub command_id: String,
-    pub target: UnifiedTarget,
-    pub command: UnifiedCommand,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub precondition: Option<UnifiedPrecondition>,
+    pub client_instance_id: String,
+    pub client_session_id: String,
+    pub target: CommandTarget,
+    pub command: RingingCommand,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<CommandPrecondition>,
 }
 
-/// 统一命令目录的契约代际。目录变更（新增/删除操作、字段语义变化）必须
-/// 递增此代际，旧客户端按 unknown revision 显式失败而不是误判成功。
-pub const UNIFIED_CONTRACT_REVISION: &str = "unified-commands-1";
+impl RingingV2CommandEnvelope {
+    pub fn new(
+        command_id: impl Into<String>,
+        target: CommandTarget,
+        command: RingingCommand,
+    ) -> Self {
+        Self {
+            schema: RINGING_SCHEMA.to_string(),
+            version: RINGING_V2_VERSION,
+            contract_revision: COMMAND_CONTRACT_REVISION.to_string(),
+            command_id: command_id.into(),
+            client_instance_id: String::new(),
+            client_session_id: String::new(),
+            target,
+            command,
+            preconditions: Vec::new(),
+        }
+    }
 
-impl UnifiedCommandEnvelope {
+    pub fn with_client_identity(
+        mut self,
+        client_instance_id: impl Into<String>,
+        client_session_id: impl Into<String>,
+    ) -> Self {
+        self.client_instance_id = client_instance_id.into();
+        self.client_session_id = client_session_id.into();
+        self
+    }
+
+    pub fn with_precondition(mut self, precondition: CommandPrecondition) -> Self {
+        self.preconditions.push(precondition);
+        self
+    }
+
+    pub fn session_id(&self) -> Option<&str> {
+        match &self.target {
+            CommandTarget::Session { session_id } => Some(session_id),
+            _ => None,
+        }
+    }
+
+    pub fn precondition(&self, kind: &str) -> Option<u64> {
+        self.preconditions
+            .iter()
+            .find_map(|item| match (kind, item) {
+                ("settings_revision", CommandPrecondition::SettingsRevision { revision })
+                | ("config_revision", CommandPrecondition::ConfigRevision { revision }) => {
+                    Some(*revision)
+                }
+                _ => None,
+            })
+    }
+
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.schema != RINGING_SCHEMA || self.version != RINGING_V2_VERSION {
-            return Err("invalid_unified_envelope");
+            return Err("invalid_command_envelope");
         }
-        if self.contract_revision != UNIFIED_CONTRACT_REVISION {
+        if self.contract_revision != COMMAND_CONTRACT_REVISION {
             return Err("unsupported_contract_revision");
         }
-        if self.command_id.trim().is_empty() {
-            return Err("invalid_unified_envelope");
+        if self.command_id.trim().is_empty()
+            || self.client_instance_id.trim().is_empty()
+            || self.client_session_id.trim().is_empty()
+        {
+            return Err("invalid_command_envelope");
         }
-        // 命令与目标的作用域错配在类型层拒绝（§8.2）：目录逐项校验在
-        // dispatch 侧完成，这里只挡「session 命令没有 session 目标」。
-        if self.command.requires_session_target() && !matches!(self.target, UnifiedTarget::Session { .. }) {
+        if self.command.requires_session_target()
+            && !matches!(self.target, CommandTarget::Session { .. })
+        {
             return Err("target_mismatch");
+        }
+        if self.command.is_global_operation() && !matches!(self.target, CommandTarget::Global) {
+            return Err("target_mismatch");
+        }
+        if matches!(
+            self.command,
+            RingingCommand::WorkspaceRename { .. } | RingingCommand::WorkspaceDelete {}
+        ) && !matches!(self.target, CommandTarget::Workspace { .. })
+        {
+            return Err("target_mismatch");
+        }
+        if matches!(&self.command, RingingCommand::SessionRename { title } if title.trim().is_empty())
+        {
+            return Err("invalid_title");
+        }
+        let mut kinds = std::collections::HashSet::new();
+        for precondition in &self.preconditions {
+            let (kind, revision) = match precondition {
+                CommandPrecondition::SettingsRevision { revision } => {
+                    ("settings_revision", *revision)
+                }
+                CommandPrecondition::ConfigRevision { revision } => ("config_revision", *revision),
+            };
+            if !is_safe_integer(revision) {
+                return Err("invalid_precondition_revision");
+            }
+            if !kinds.insert(kind) {
+                return Err("duplicate_precondition");
+            }
+        }
+        if self.command.requires_settings_revision()
+            && self.precondition("settings_revision").is_none()
+        {
+            return Err("missing_settings_revision");
+        }
+        if self.command.requires_config_revision() && self.precondition("config_revision").is_none()
+        {
+            return Err("missing_config_revision");
         }
         Ok(())
     }
 }
 
-impl UnifiedCommand {
-    /// 该操作是否必须携带 Session 目标（§8.2 的 target_policy 静态面）。
-    /// `session.create` 是建立归属的入口，不借用虚假 Session（G08），走 Global。
+impl RingingCommand {
     pub fn requires_session_target(&self) -> bool {
-        matches!(self, UnifiedCommand::SessionSettingsPatch { .. })
+        matches!(
+            self,
+            Self::SessionSettingsPatch { .. }
+                | Self::SessionResume {}
+                | Self::SessionAttach {}
+                | Self::SessionClose {}
+                | Self::SessionRename { .. }
+                | Self::SessionArchive {}
+                | Self::SessionUnarchive {}
+                | Self::SessionDelete {}
+                | Self::SessionShutdown
+                | Self::AgentReloadConfig
+                | Self::ConversationSendMessage(_)
+                | Self::ConversationCancel { .. }
+                | Self::InteractionAskRespond { .. }
+                | Self::InteractionAskDismiss { .. }
+                | Self::DriverClaim { .. }
+                | Self::DriverRelease { .. }
+                | Self::PlanReviewRespond { .. }
+                | Self::ToolPermissionRespond { .. }
+                | Self::WorkspaceSet { .. }
+                | Self::WorkspaceMoveSession { .. }
+                | Self::WorkspaceDetach { .. }
+                | Self::TodoSet { .. }
+                | Self::TodoCancel { .. }
+                | Self::PlanAction { .. }
+        )
+    }
+
+    pub fn requires_settings_revision(&self) -> bool {
+        matches!(self, Self::SessionSettingsPatch { .. })
+    }
+
+    pub fn requires_config_revision(&self) -> bool {
+        matches!(
+            self,
+            Self::ProviderUpsert { .. }
+                | Self::ProviderDelete { .. }
+                | Self::ProviderModelUpsert { .. }
+                | Self::ProviderModelDelete { .. }
+                | Self::ModelSelectionSetDefault { .. }
+        )
+    }
+
+    pub fn is_global_operation(&self) -> bool {
+        matches!(
+            self,
+            Self::SessionCreate { .. }
+                | Self::ProviderList { .. }
+                | Self::ProviderUpsert { .. }
+                | Self::ProviderDelete { .. }
+                | Self::ProviderModelUpsert { .. }
+                | Self::ProviderModelDelete { .. }
+                | Self::ModelSelectionSetDefault { .. }
+                | Self::ConfigSave { .. }
+                | Self::ConfigSetPermissionLevel { .. }
+                | Self::ProfileCreate { .. }
+                | Self::ProfileSetDefault { .. }
+                | Self::ProfileApply { .. }
+                | Self::ProfileSaveCurrent { .. }
+                | Self::ProfileDelete { .. }
+                | Self::WorkspaceCreate { .. }
+                | Self::DiagnosticsMemoryStart { .. }
+                | Self::DiagnosticsMemoryStop { .. }
+                | Self::SubagentSpawn { .. }
+        )
     }
 }
 
@@ -95,15 +247,31 @@ pub struct SessionSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_selection: Option<SettingValue<qaqh_types::ModelSelection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsSettingPatch>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionCreateResult {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum ToolsSettingPatch { Default, All, None, Custom { names: Vec<String> }, Preset { name: String } }
+pub enum ToolsSettingPatch {
+    Default,
+    All,
+    None,
+    Custom { names: Vec<String> },
+    Preset { name: String },
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -114,14 +282,18 @@ pub struct ProviderUpsertDto {
     pub credential: qaqh_types::CredentialSource,
     pub headers: std::collections::BTreeMap<String, String>,
     pub compat: Option<qaqh_types::EndpointCompat>,
-    pub expected_revision: u64,
     pub api_key: SecretWrite,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "operation", content = "value", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum SecretWrite { #[default] Keep, Set(String), Clear }
+pub enum SecretWrite {
+    #[default]
+    Keep,
+    Set(String),
+    Clear,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -605,7 +777,6 @@ pub struct RingingV2ApprovalRespondRequest {
     pub payload: serde_json::Value,
 }
 
-
 /// `POST /ringing/v2/content` 响应。`content_id` 即内容摘要（`sha256:<hex>`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -690,132 +861,6 @@ impl<C, V, T> RingingV2Bootstrap<C, V, T> {
             .decode_snapshot()
             .map(|cursor| cursor.log_id)
             .map_err(|_| "invalid_snapshot_cursor")
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum UnifiedCommand {
-    #[serde(rename = "session.create")]
-    SessionCreate {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        cwd: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        title: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model_selection: Option<qaqh_profile::ModelSelection>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        tool_mode: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        custom_tools: Option<Vec<String>>,
-    },
-    #[serde(rename = "session.settings.patch")]
-    SessionSettingsPatch { patch: SessionSettingsPatch },
-    #[serde(rename = "provider.list")]
-    ProviderList {},
-    #[serde(rename = "provider.upsert")]
-    ProviderUpsert { id: String, provider: ProviderUpsertDto },
-    #[serde(rename = "provider.delete")]
-    ProviderDelete { id: String },
-    #[serde(rename = "provider.model.upsert")]
-    ProviderModelUpsert { provider_id: String, model_id: String, expected_revision: u64, model: qaqh_profile::ModelDef },
-    #[serde(rename = "provider.model.delete")]
-    ProviderModelDelete { provider_id: String, model_id: String },
-    #[serde(rename = "provider.models.discover")]
-    ProviderModelsDiscover { provider_id: String },
-    #[serde(rename = "model.selection.set_default")]
-    ModelSelectionSetDefault { expected_revision: u64, selection: qaqh_profile::ModelSelection },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2CommandEnvelope {
-    pub schema: String,
-    pub version: u32,
-    pub channel: RingingChannel,
-    pub command_id: String,
-    pub client_instance_id: String,
-    pub client_session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(rename = "session_id")]
-    pub session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<u64>,
-    /// Driver seat epoch the caller believes it holds. A mismatch is rejected
-    /// with `stale_driver_epoch`; `None` opts out of the epoch guard (used by
-    /// interaction answers, which are not driver-gated).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub driver_epoch: Option<u64>,
-    pub command: RingingCommand,
-}
-
-impl RingingV2CommandEnvelope {
-    pub fn new(
-        command_id: impl Into<String>,
-        client_instance_id: impl Into<String>,
-        command: RingingCommand,
-    ) -> Self {
-        Self {
-            schema: RINGING_SCHEMA.to_string(),
-            version: RINGING_V2_VERSION,
-            channel: command.channel(),
-            command_id: command_id.into(),
-            client_instance_id: client_instance_id.into(),
-            client_session_id: String::new(),
-            session_id: None,
-            expected_revision: None,
-            driver_epoch: None,
-            command,
-        }
-    }
-
-    pub fn with_client_session_id(mut self, client_session_id: impl Into<String>) -> Self {
-        self.client_session_id = client_session_id.into();
-        self
-    }
-
-    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = Some(session_id.into());
-        self
-    }
-
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema != RINGING_SCHEMA
-            || self.version != RINGING_V2_VERSION
-            || self.command_id.trim().is_empty()
-            || self.client_instance_id.trim().is_empty()
-            || self.client_session_id.trim().is_empty()
-        {
-            return Err("invalid_v2_command_envelope");
-        }
-        if self.channel != self.command.channel() {
-            return Err("channel_mismatch");
-        }
-        if self.session_id.as_deref().is_some_and(str::is_empty) {
-            return Err("invalid_seed");
-        }
-        if self
-            .expected_revision
-            .is_some_and(|value| !is_safe_integer(value))
-        {
-            return Err("invalid_expected_revision");
-        }
-        if self
-            .driver_epoch
-            .is_some_and(|value| !is_safe_integer(value))
-        {
-            return Err("invalid_driver_epoch");
-        }
-        if self.session_id.is_none()
-            && !matches!(
-                self.command,
-                RingingCommand::Control(qaqh_domain::ControlCommand::SessionCreate { .. })
-            )
-        {
-            return Err("missing_session_id");
-        }
-        Ok(())
     }
 }
 
@@ -958,7 +1003,6 @@ pub fn events_path(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_domain::ControlCommand;
     use qaqh_domain::state::{ConversationState, ToolState};
 
     fn reliable_envelope() -> RingingV2EventEnvelope<serde_json::Value> {
@@ -991,6 +1035,84 @@ mod tests {
         let decoded: RingingV2EventEnvelope<serde_json::Value> =
             serde_json::from_str(&json).expect("deserialize");
         decoded.validate().expect("valid decoded envelope");
+    }
+
+    #[test]
+    fn session_create_round_trips_profile_and_effort() {
+        let command = RingingCommand::SessionCreate {
+            cwd: Some("/workspace".into()),
+            title: Some("Session".into()),
+            profile: Some("default".into()),
+            effort: Some("high".into()),
+            model_selection: None,
+            tool_mode: None,
+            custom_tools: None,
+        };
+        let value = serde_json::to_value(command).expect("serialize command");
+        assert_eq!(value["profile"], "default");
+        assert_eq!(value["effort"], "high");
+
+        let decoded: RingingCommand = serde_json::from_value(value).expect("deserialize command");
+        match decoded {
+            RingingCommand::SessionCreate {
+                profile, effort, ..
+            } => {
+                assert_eq!(profile.as_deref(), Some("default"));
+                assert_eq!(effort.as_deref(), Some("high"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn session_settings_patch_requires_settings_revision() {
+        let envelope = RingingV2CommandEnvelope {
+            schema: RINGING_SCHEMA.into(),
+            version: RINGING_V2_VERSION,
+            contract_revision: COMMAND_CONTRACT_REVISION.into(),
+            command_id: "cmd-settings".into(),
+            client_instance_id: "instance-1".into(),
+            client_session_id: "lease-1".into(),
+            target: CommandTarget::Session {
+                session_id: "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
+            },
+            command: RingingCommand::SessionSettingsPatch {
+                patch: SessionSettingsPatch {
+                    mode: Some("plan".into()),
+                    ..Default::default()
+                },
+            },
+            preconditions: vec![],
+        };
+        assert_eq!(envelope.validate(), Err("missing_settings_revision"));
+
+        let current = RingingV2CommandEnvelope {
+            preconditions: vec![CommandPrecondition::SettingsRevision { revision: 0 }],
+            ..envelope
+        };
+        current.validate().expect("settings revision precondition");
+    }
+
+    #[test]
+    fn session_settings_patch_round_trips_profile_and_effort() {
+        let command = RingingCommand::SessionSettingsPatch {
+            patch: SessionSettingsPatch {
+                profile: Some("reviewer".into()),
+                effort: Some("high".into()),
+                ..Default::default()
+            },
+        };
+        let value = serde_json::to_value(&command).expect("serialize settings patch");
+        assert_eq!(value["patch"]["profile"], "reviewer");
+        assert_eq!(value["patch"]["effort"], "high");
+        let decoded: RingingCommand = serde_json::from_value(value).expect("decode patch");
+        match decoded {
+            RingingCommand::SessionSettingsPatch { patch } => {
+                assert_eq!(patch.profile.as_deref(), Some("reviewer"));
+                assert_eq!(patch.effort.as_deref(), Some("high"));
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -1255,13 +1377,16 @@ mod tests {
 
     #[test]
     fn command_envelope_requires_v2_identity() {
-        let command = RingingCommand::Control(ControlCommand::SessionResume {
-            session_id: "seed-1".into(),
-        });
-        let mut envelope = RingingV2CommandEnvelope::new("cmd-1", "instance-1", command);
-        envelope = envelope.with_session_id("seed-1");
-        assert_eq!(envelope.validate(), Err("invalid_v2_command_envelope"));
-        envelope = envelope.with_client_session_id("session-1");
+        let command = RingingCommand::SessionResume {};
+        let mut envelope = RingingV2CommandEnvelope::new(
+            "cmd-1",
+            CommandTarget::Session {
+                session_id: "seed-1".into(),
+            },
+            command,
+        );
+        assert_eq!(envelope.validate(), Err("invalid_command_envelope"));
+        envelope = envelope.with_client_identity("instance-1", "session-1");
         envelope.validate().expect("valid v2 command envelope");
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
-use qaqh_domain::{ActivityState, ControlCommand};
-use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
+use qaqh_domain::ActivityState;
+use qaqh_ringing::{CommandTarget, RingingCommand, RingingWorkerCommandEnvelope};
 use qaqh_types::SessionMeta;
 use serde_json::Value;
 
@@ -359,6 +359,27 @@ impl QaqhService {
         Ok(())
     }
 
+    /// 恢复会话并把它设为当前 active seed。
+    pub fn resume_session(&self, session_id: &str) -> Result<(), String> {
+        self.sessions.set_active_session(session_id);
+        self.registry()?
+            .get_or_spawn(session_id)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Rename a session through its authoritative metadata writer.
+    pub fn rename_session(&self, session_id: &str, title: &str) -> Result<(), String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("title must be a non-empty string".into());
+        }
+        self.write_title(
+            session_id,
+            title,
+            qaqh_session::session_fact_v2::TitleSource::User,
+        )
+    }
+
     /// 恢复归档会话：meta `archived=false` + 重新拉起实例（resume 语义，
     /// 对齐 `session.resume` 查询——get_or_spawn + active seed 更新）。
     pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {
@@ -396,6 +417,46 @@ impl QaqhService {
             Command::Workspace(command) => handlers::workspace::handle(self, command),
             Command::Session(command) => handlers::session::handle(self, command),
             Command::Task(command) => handlers::task::handle(self, command),
+        }
+    }
+
+    /// Execute a synchronous RingingV2 mutation with its public command and
+    /// target intact. Read-only service queries continue through `handle`.
+    pub fn execute_ringing_command(
+        &self,
+        target: &CommandTarget,
+        command: &RingingCommand,
+    ) -> QaqhResult<Value> {
+        match command {
+            RingingCommand::ConfigSave { .. }
+            | RingingCommand::ConfigSetPermissionLevel { .. }
+            | RingingCommand::ProfileCreate { .. }
+            | RingingCommand::ProfileSetDefault { .. }
+            | RingingCommand::ProfileApply { .. }
+            | RingingCommand::ProfileSaveCurrent { .. }
+            | RingingCommand::ProfileDelete { .. }
+            | RingingCommand::DiagnosticsMemoryStart { .. }
+            | RingingCommand::DiagnosticsMemoryStop { .. } => {
+                handlers::system::handle_ringing(self, command)
+            }
+            RingingCommand::WorkspaceSet { .. }
+            | RingingCommand::WorkspaceCreate { .. }
+            | RingingCommand::WorkspaceRename { .. }
+            | RingingCommand::WorkspaceDelete { .. }
+            | RingingCommand::WorkspaceMoveSession { .. }
+            | RingingCommand::WorkspaceDetach { .. } => {
+                handlers::workspace::handle_ringing(self, target, command)
+            }
+            RingingCommand::SubagentSpawn { .. } => handlers::session::handle_ringing(self, command),
+            RingingCommand::TodoSet { .. }
+            | RingingCommand::TodoCancel { .. }
+            | RingingCommand::PlanAction { .. } => {
+                handlers::task::handle_ringing(self, target, command)
+            }
+            _ => Err(QaqhError::invalid(format!(
+                "{} is not a synchronous service mutation",
+                command.name()
+            ))),
         }
     }
 
@@ -548,6 +609,7 @@ impl QaqhService {
                         .unwrap_or(0),
                     tool_mode: row.tool_mode.unwrap_or_default(),
                     model_selection: row.model_selection,
+                    settings_revision: row.settings_revision,
                     turn_count: row.turn_count.max(0) as usize,
                     archived: row.archived,
                     ephemeral: row.ephemeral,
@@ -578,7 +640,7 @@ impl QaqhService {
         // 走 AgentReloadConfig 广播(改配置要作用到活跃 worker,含子代理)。
         let failed = match self.registry() {
             Ok(mut registry) => registry
-                .broadcast_ringing(&RingingCommand::Control(ControlCommand::AgentReloadConfig)),
+                .broadcast_ringing(&RingingCommand::AgentReloadConfig),
             Err(error) => {
                 log::warn!("[config] registry unavailable for reload broadcast: {error}");
                 return;
@@ -732,7 +794,7 @@ fn spawn_config_file_poller() {
     });
 }
 
-/// `session.new` / `session.create` 共用的 canonical 基线：`(cwd, model)`。
+/// `session.create` 的 canonical 基线：`(cwd, model)`。
 ///
 /// cwd 的优先级：**创建请求里显式给出的路径** > 已绑定的 meta.cwd > 默认
 /// 会话工作根。显式路径必须已经存在且是目录，非法值直接拒绝，不降级——

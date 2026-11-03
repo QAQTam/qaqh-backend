@@ -208,11 +208,11 @@ fn read_discovery() -> Result<qaqh_types::DaemonDiscovery, String> {
     serde_json::from_str(&content).map_err(|e| e.to_string())
 }
 
-// ───────────────────────── todo CLI（薄壳直访 service 面） ─────────────────────────
+// ───────────────────────── todo CLI（查询走 service，写入走 RingingV2） ─────────────────────────
 //
 // 路线：daemon.json discovery → /ringing/v2/clients/open（唯一握手）→
-// control `session_attach` 建立 seed 归属 → POST /ringing/v2/service/todo.{list,set}（WRITE_SEEDED/
-// READ_SEEDED 白名单）。执行核心与 LLM 工具分发表共用（exec 系列 seed
+// `session.attach` 建立 seed 归属 → todo.list 查询或 `/ringing/v2/commands` 写入。
+// 执行核心与 LLM 工具分发表共用（exec 系列 seed
 // 参数化变体），禁止直改 todo.json（进程内互斥/Dashboard 推送断链）。
 
 fn todo_cli(args: &[String]) -> i32 {
@@ -274,9 +274,9 @@ fn todo_cli(args: &[String]) -> i32 {
             run_service_call(&discovery, &session_id, "todo.list", &params)
         }
         "set" => {
-            let params = match opt("json") {
+            let mut args = match opt("json") {
                 Some(raw) => {
-                    let mut value: serde_json::Value = match serde_json::from_str(&raw) {
+                    let value: serde_json::Value = match serde_json::from_str(&raw) {
                         Ok(value @ serde_json::Value::Object(_)) => value,
                         Ok(_) => {
                             eprintln!("todo: --json must be a JSON object");
@@ -287,11 +287,10 @@ fn todo_cli(args: &[String]) -> i32 {
                             return 2;
                         }
                     };
-                    value["session_id"] = serde_json::Value::String(session_id.clone());
                     value
                 }
                 None => {
-                    let mut params = serde_json::json!({ "session_id": session_id });
+                    let mut params = serde_json::json!({});
                     if let Some(id) = opt("id") {
                         params["id"] = serde_json::Value::String(id);
                     }
@@ -323,7 +322,14 @@ fn todo_cli(args: &[String]) -> i32 {
                     params
                 }
             };
-            run_service_call(&discovery, &session_id, "todo.set", &params)
+            args.as_object_mut()
+                .expect("todo set arguments were validated as an object")
+                .remove("session_id");
+            run_command_call(
+                &discovery,
+                &session_id,
+                qaqh_ringing::RingingCommand::TodoSet { args },
+            )
         }
         other => {
             eprintln!("todo: unknown action {other}; expected list or set");
@@ -398,26 +404,27 @@ fn open_lease(
         .ok_or_else(|| "lease open response missing client_session_id".to_string())
 }
 
-/// v2 open 没有 attach_seed：用 control 命令建立 seed 归属。
+/// v2 open 没有 attach_seed：用 RingingV2 命令建立 seed 归属。
 fn attach_session(
     discovery: &qaqh_types::DaemonDiscovery,
     instance_id: &str,
     client_session_id: &str,
     session_id: &str,
 ) -> Result<(), String> {
-    let body = serde_json::json!({
-        "schema": qaqh_ringing::protocol::RINGING_SCHEMA,
-        "version": qaqh_ringing::RINGING_V2_VERSION,
-        "channel": "control",
-        "command_id": format!("cli-attach-{}-{session_id}", cli_instance_id()),
-        "client_instance_id": instance_id,
-        "client_session_id": client_session_id,
-        "session_id": session_id,
-        "command": {"channel": "control", "type": "session_attach", "session_id": session_id},
-    });
+    let body = serde_json::to_value(
+        qaqh_ringing::RingingV2CommandEnvelope::new(
+            format!("cli-attach-{}-{session_id}", cli_instance_id()),
+            qaqh_ringing::CommandTarget::Session {
+                session_id: session_id.to_string(),
+            },
+            qaqh_ringing::RingingCommand::SessionAttach {},
+        )
+        .with_client_identity(instance_id, client_session_id),
+    )
+    .map_err(|error| format!("serialize RingingV2 attach command: {error}"))?;
     let (status, response) = http_post_json(
         discovery,
-        "/ringing/v2/commands/control",
+        "/ringing/v2/commands",
         &body,
         Some(client_session_id),
     )?;
@@ -429,7 +436,7 @@ fn attach_session(
     Ok(())
 }
 
-/// v2 open lease → attach seed → 调 service 方法 → 打印结果。
+/// v2 open lease → attach seed → 调 service 查询 → 打印结果。
 fn run_service_call(
     discovery: &qaqh_types::DaemonDiscovery,
     session_id: &str,
@@ -464,6 +471,61 @@ fn run_service_call(
         }
         Err(error) => {
             eprintln!("todo: {method} call failed: {error}");
+            1
+        }
+    }
+}
+
+/// v2 open lease → attach seed → 提交一个 RingingV2 命令 → 打印结果。
+fn run_command_call(
+    discovery: &qaqh_types::DaemonDiscovery,
+    session_id: &str,
+    command: qaqh_ringing::RingingCommand,
+) -> i32 {
+    let instance_id = cli_instance_id();
+    let client_session_id = match open_lease(discovery, &instance_id) {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            eprintln!("command: lease open failed: {error}");
+            return 1;
+        }
+    };
+    if let Err(error) = attach_session(discovery, &instance_id, &client_session_id, session_id) {
+        eprintln!("command: {error}");
+        return 1;
+    }
+    let envelope = qaqh_ringing::RingingV2CommandEnvelope::new(
+        qaqh_ringing_contract::ulid::generate_ulid(),
+        qaqh_ringing::CommandTarget::Session {
+            session_id: session_id.to_string(),
+        },
+        command,
+    )
+    .with_client_identity(&instance_id, &client_session_id);
+    let body = match serde_json::to_value(envelope) {
+        Ok(body) => body,
+        Err(error) => {
+            eprintln!("command: serialize RingingV2 command: {error}");
+            return 1;
+        }
+    };
+    match http_post_json(
+        discovery,
+        "/ringing/v2/commands",
+        &body,
+        Some(&client_session_id),
+    ) {
+        Ok((status, body)) if (200..300).contains(&status) => {
+            let result = body.get("result").unwrap_or(&body);
+            println!("{}", serde_json::to_string_pretty(result).unwrap_or_default());
+            0
+        }
+        Ok((status, body)) => {
+            eprintln!("command failed (HTTP {status}): {body}");
+            1
+        }
+        Err(error) => {
+            eprintln!("command call failed: {error}");
             1
         }
     }

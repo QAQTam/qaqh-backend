@@ -15,8 +15,6 @@ use crate::event::RingingEvent;
 pub struct RingingWorkerCommandEnvelope {
     pub session_id: String,
     pub command_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expected_revision: Option<u64>,
     /// 发起该命令的主体（daemon 依鉴权身份填写，供 canonical 归因穿线）。
     /// `None` = 未知（回退现状：记为本地 user）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -46,7 +44,6 @@ impl RingingWorkerCommandEnvelope {
         Self {
             session_id: session_id.into(),
             command_id: command_id.into(),
-            expected_revision: None,
             actor: None,
             command,
         }
@@ -57,10 +54,6 @@ impl RingingWorkerCommandEnvelope {
         self
     }
 
-    pub fn with_expected_revision(mut self, revision: Option<u64>) -> Self {
-        self.expected_revision = revision;
-        self
-    }
 }
 
 /// agent → daemon 事件消息。
@@ -93,19 +86,18 @@ impl RingingWorkerEventEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_domain::ToolCommand;
 
     #[test]
     fn agent_messages_round_trip() {
-        let cmd = RingingCommand::Tool(ToolCommand::ToolInvoke {
+        let cmd = RingingCommand::ToolPermissionRespond {
             tool_call_id: "c".into(),
-            name: "exec".into(),
-            args: serde_json::json!({ "cmd": "echo hi" }),
-        });
+            approved: true,
+            trust_folder: false,
+        };
         let frame = RingingWorkerCommandEnvelope::new("s1", "cmd-1", cmd);
         let json = serde_json::to_string(&frame).expect("serialize");
         let back: RingingWorkerCommandEnvelope = serde_json::from_str(&json).expect("deserialize");
-        assert_eq!(back.command.channel(), qaqh_domain::RingingChannel::Tool);
+        assert!(matches!(back.command, RingingCommand::ToolPermissionRespond { .. }));
         assert_eq!(back.command_id, "cmd-1");
     }
 }

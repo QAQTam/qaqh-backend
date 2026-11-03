@@ -131,12 +131,13 @@ const open = await request("POST", "/ringing/v2/clients/open", {
 });
 const client = open.body.client_session_id;
 const before = new Set(fs.readdirSync(path.join(DATA, "sessions")));
-await request("POST", "/ringing/v2/commands/control", {
+await request("POST", "/ringing/v2/commands", {
   session: client,
   body: {
-    schema: "qaqh.Ringing", version: 2, channel: "control",
+    schema: "qaqh.Ringing", version: 2, contract_revision: "ringing-commands-6",
     command_id: `c-${Date.now()}-sc`, client_instance_id: "bisect", client_session_id: client,
-    command: { channel: "control", type: "session_create", close_current: false, cwd: SESSION_CWD },
+    target: { kind: "global" }, preconditions: [],
+    command: { type: "session.create", cwd: SESSION_CWD },
   },
 });
 await sleep(1200);
@@ -146,13 +147,13 @@ await request("POST", `/ringing/v2/sessions/${seed}/driver/claim`, { session: cl
 console.log(`[${label}] seed=${seed} driver claimed`);
 
 const sendMsg = (text) =>
-  request("POST", "/ringing/v2/commands/conversation", {
+  request("POST", "/ringing/v2/commands", {
     session: client,
     body: {
-      schema: "qaqh.Ringing", version: 2, channel: "conversation",
+      schema: "qaqh.Ringing", version: 2, contract_revision: "ringing-commands-6",
       command_id: `c-${Date.now()}-msg`, client_instance_id: "bisect", client_session_id: client,
-      session_id: seed,
-      command: { channel: "conversation", type: "conversation_send_message", text, images: [], as_system: false },
+      target: { kind: "session", session_id: seed }, preconditions: [],
+      command: { type: "conversation.send_message", text, images: [], as_system: false },
     },
   });
 

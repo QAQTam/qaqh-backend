@@ -1,4 +1,4 @@
-//! Schema v1:按实际业务访问组织(架构报告一 §7.2),不按现有 Rust 结构体建表。
+//! 当前业务 schema:按实际业务访问组织(架构报告一 §7.2),不按现有 Rust 结构体建表。
 //!
 //! 版本策略:最小 schema 版本 + 明确的向前升级步骤;数据库比代码新直接报错,
 //! 不做运行时兼容适配。
@@ -7,9 +7,9 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::DbError;
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
-const DDL_V1: &str = r#"
+const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
     session_id        TEXT PRIMARY KEY,
     parent_session_id TEXT,
@@ -25,6 +25,7 @@ CREATE TABLE sessions (
     skills_json       TEXT,
     custom_tools_json TEXT,
     frozen_annotation TEXT,
+    settings_revision INTEGER NOT NULL DEFAULT 0,
     archived          INTEGER NOT NULL DEFAULT 0,
     ephemeral         INTEGER NOT NULL DEFAULT 0,
     created_at_ms     INTEGER NOT NULL,
@@ -101,7 +102,7 @@ CREATE TABLE blobs (
 );
 "#;
 
-const DDL_V2: &str = r#"
+const DDL_TEAM: &str = r#"
 DROP TABLE IF EXISTS team_tasks;
 DROP TABLE IF EXISTS board_channels;
 DROP TABLE IF EXISTS board_posts;
@@ -196,19 +197,18 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
     let existing: Option<u32> = tx
         .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
         .optional()?;
-    let found = match existing {
+    match existing {
         Some(found) if found > SCHEMA_VERSION => {
             return Err(DbError::SchemaTooNew { found, supported: SCHEMA_VERSION });
         }
-        Some(found) => found,
-        None => {
-            tx.execute_batch(DDL_V1)?;
-            0
+        Some(found) if found < SCHEMA_VERSION => {
+            return Err(DbError::SchemaTooOld { found, supported: SCHEMA_VERSION });
         }
-    };
-    if found < 2 {
-        // v2:team/board 草稿表换成正式业务表(旧数据不迁移,旧库直接重建这些表)。
-        tx.execute_batch(DDL_V2)?;
+        Some(_) => {}
+        None => {
+            tx.execute_batch(DDL_BASE)?;
+            tx.execute_batch(DDL_TEAM)?;
+        }
     }
     tx.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)", [SCHEMA_VERSION])?;
     tx.commit()?;

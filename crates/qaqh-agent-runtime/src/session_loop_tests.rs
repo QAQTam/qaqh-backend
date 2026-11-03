@@ -13,7 +13,8 @@ mod tests {
     use qaqh_session::owner::OwnerDirectory;
 
     use crate::provider_job::ProviderRequestSpec;
-    use crate::session_loop::{LoopInput, SessionLoop};
+    use crate::session_loop::SessionLoop;
+    use qaqh_ringing::ConversationSendMessage;
     use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
 
     const CHAT_SSE: &str = concat!(
@@ -113,12 +114,15 @@ mod tests {
         let (loop_, owners, mut rx) = test_loop(dir.path()).await;
 
         loop_
-            .send_input(LoopInput {
-                input_id: Some("IN1".into()),
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN1".into()),
                 text: "打个招呼".into(),
-                purpose: InputPurpose::TriggerTurn,
+                input_purpose: InputPurpose::TriggerTurn,
                 as_system: false,
-                attachments: vec![],
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
             })
             .expect("send input");
 
@@ -186,12 +190,15 @@ mod tests {
         assert!(!loop_.cancel_turn(Some("turn_stale")));
 
         loop_
-            .send_input(LoopInput {
-                input_id: Some("IN-CANCEL".into()),
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-CANCEL".into()),
                 text: "长回合".into(),
-                purpose: InputPurpose::TriggerTurn,
+                input_purpose: InputPurpose::TriggerTurn,
                 as_system: false,
-                attachments: vec![],
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
             })
             .expect("send input");
         // 等回合出现(sse mock 立即完成,给 spawn 一点时间)。
@@ -204,5 +211,88 @@ mod tests {
         let turn = loop_.active_turn().expect("active turn");
         assert!(!loop_.cancel_turn(Some("turn_stale")), "错目标不生效");
         assert!(loop_.cancel_turn(Some(&turn)), "匹配目标生效");
+    }
+
+    #[tokio::test]
+    async fn input_metadata_and_images_reach_timeline_and_model_context() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (loop_, owners, _rx) = test_loop(dir.path()).await;
+        let inter_agent = qaqh_ringing_contract::commands::InterAgentEnvelope {
+            message_id: "msg-1".into(),
+            root_session_id: "SES-ROOT".into(),
+            author: "/root".into(),
+            recipient: "/root/child".into(),
+            other_recipients: vec![],
+            task_id: Some("task-1".into()),
+            reply_to: None,
+            causation_id: None,
+            delivery: qaqh_ringing_contract::fact::InterAgentDelivery::Queue,
+            created_at_ms: 1,
+        };
+        let terminal = qaqh_ringing_contract::commands::SubagentTerminalNotification {
+            child_session_id: "SES-CHILD".into(),
+            parent_call_id: "call-1".into(),
+            terminal: qaqh_ringing_contract::commands::SubagentTerminalKind::Completed,
+        };
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("msg-1".into()),
+                text: "result from child".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: true,
+                attachments: None,
+                images: vec![qaqh_ringing_contract::commands::ImageBlock {
+                    mime_type: "image/png".into(),
+                    data: "aW1hZ2U=".into(),
+                }],
+                inter_agent: Some(inter_agent.clone()),
+                subagent_terminal: Some(terminal.clone()),
+            })
+            .expect("send input");
+
+        let owner = owners.get_or_create("SES-LOOP");
+        for _ in 0..100 {
+            if !owner.snapshot().await.expect("snapshot").timeline.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let state = owner.snapshot().await.expect("snapshot");
+        assert!(!state.timeline.is_empty(), "input must be persisted");
+        let TimelineEntry::Input {
+            content,
+            images,
+            inter_agent: stored_inter_agent,
+            subagent_terminal: stored_terminal,
+            actor,
+            ..
+        } = &state.timeline[0]
+        else {
+            panic!("first timeline entry must be input");
+        };
+        assert_eq!(
+            content,
+            &qaqh_ringing_contract::fact::ContentValue::Inline {
+                text: "result from child".into(),
+            }
+        );
+        assert_eq!(images.len(), 1);
+        assert_eq!(stored_inter_agent.as_ref(), Some(&inter_agent));
+        assert_eq!(stored_terminal.as_ref(), Some(&terminal));
+        assert_eq!(actor.kind, qaqh_ringing_contract::fact::ActorKind::System);
+        assert_eq!(actor.id, "system");
+
+        let messages = loop_.assemble_context().await.expect("assemble context");
+        let system_input = messages
+            .iter()
+            .find(|message| message.role == "system")
+            .expect("system input must reach provider context");
+        assert!(matches!(
+            system_input.content.as_slice(),
+            [
+                qaqh_types::ContentBlock::Text { text },
+                qaqh_types::ContentBlock::Image { mime_type, data }
+            ] if text == "result from child" && mime_type == "image/png" && data == "aW1hZ2U="
+        ));
     }
 }

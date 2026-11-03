@@ -24,7 +24,7 @@ pub const MINIMAL_C: &str = "minimal:c";
 /// User-selected allowlist supplied through `custom_tools`.
 pub const CUSTOM: &str = "custom";
 
-/// Every mode accepted by `session.new` and `session.set_tool_mode`.
+/// Every mode accepted by session creation and `session.settings.patch`.
 pub const KNOWN_MODES: &[&str] = &[STANDARD, MINIMAL, MINIMAL_B, MINIMAL_C, CUSTOM];
 
 /// Minimal-family modes share no-fold policy; the former minimal system prompt

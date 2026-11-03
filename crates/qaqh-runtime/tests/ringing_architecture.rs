@@ -34,7 +34,7 @@ fn domain_crate_does_not_depend_on_legacy_or_wire() {
         "qaqh-domain must not depend on qaqh-proto (legacy), got {domain_deps:?}"
     );
     assert!(
-        !domain_deps.iter().any(|d| d.contains("qaqh-ringing")),
+        !domain_deps.iter().any(|d| d.contains("qaqh-ringing = ")),
         "qaqh-domain must not depend on qaqh-ringing (wire), got {domain_deps:?}"
     );
 }

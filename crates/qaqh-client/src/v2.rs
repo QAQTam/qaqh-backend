@@ -8,7 +8,8 @@ use std::fmt;
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_ringing::{
-    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandStatus,
+    CommandTarget, RingingV2Capabilities, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandStatus,
     RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
 };
 use qaqh_ringing_contract::events::SessionEventFrame;
@@ -277,7 +278,7 @@ impl Client {
     /// for an idempotent `command_id` replay.
     pub async fn send_command_v2_typed(
         &self,
-        session_id: Option<&str>,
+        target: CommandTarget,
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingV2CommandAck> {
@@ -286,21 +287,13 @@ impl Client {
             .command_id
             .unwrap_or_else(qaqh_ringing_contract::ulid::generate_ulid);
         let client_session_id = state.client_session_id.clone();
-        let mut payload =
-            RingingV2CommandEnvelope::new(command_id.clone(), state.client_instance_id, command)
-                .with_client_session_id(client_session_id.clone());
-        if let Some(session_id) = session_id {
-            payload = payload.with_session_id(session_id);
-        }
-        payload.expected_revision = options.expected_revision;
-        payload.driver_epoch = options.driver_epoch;
+        let mut payload = RingingV2CommandEnvelope::new(command_id.clone(), target, command)
+            .with_client_identity(state.client_instance_id, client_session_id.clone());
+        payload.preconditions.extend(options.preconditions);
         payload
             .validate()
-            .map_err(|code| ClientError::Protocol(format!("invalid v2 command: {code}")))?;
-        let path = format!(
-            "{RINGING_V2_BASE_PATH}/commands/{}",
-            payload.channel.as_str()
-        );
+            .map_err(|code| ClientError::Protocol(format!("invalid RingingV2 command: {code}")))?;
+        let path = format!("{RINGING_V2_BASE_PATH}/commands");
         let response = self
             .inner
             .http
@@ -318,7 +311,7 @@ impl Client {
         let ack: RingingV2CommandAck = response.json().await?;
         if ack.command_id != command_id {
             return Err(ClientError::Protocol(
-                "v2 command ack id does not match submission".into(),
+                "RingingV2 command ack id does not match submission".into(),
             ));
         }
         Ok(ack)

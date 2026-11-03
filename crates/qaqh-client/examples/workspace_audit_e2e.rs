@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qaqh_client::{
-    Client, ClientHandlers, ClientOptions, CommandOptions, ControlCommand, ConversationCommand,
-    QueryRequest, RingingCommand,
+    Client, ClientHandlers, ClientOptions, CommandOptions, CommandTarget,
+    ConversationSendMessage, QueryRequest, RingingCommand,
 };
 
 const PROMPT: &str = concat!(
@@ -57,13 +57,16 @@ fn main() {
 
         let ack = client
             .send_command(
-                None,
-                RingingCommand::Control(ControlCommand::SessionCreate {
-                    close_current: false,
+                CommandTarget::Global,
+                RingingCommand::SessionCreate {
                     cwd: Some(workspace.clone()),
+                    title: None,
+                    profile: None,
+                    effort: None,
+                    model_selection: None,
                     tool_mode: None,
-                    custom_tools: Vec::new(),
-                }),
+                    custom_tools: None,
+                },
                 CommandOptions::default(),
             )
             .await
@@ -98,13 +101,13 @@ fn main() {
         let command_id = uuid::Uuid::new_v4().to_string();
         let ack = client
             .send_command(
-                Some(&session_id),
-                RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+                CommandTarget::Session { session_id: session_id.clone() },
+                RingingCommand::ConversationSendMessage(ConversationSendMessage {
                     text: PROMPT.to_string(),
                     images: vec![],
                     attachments: None,
                     message_id: None,
-                    input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
+                    input_purpose: qaqh_ringing_contract::fact::InputPurpose::TriggerTurn,
                     as_system: false,
                     inter_agent: None,
                     subagent_terminal: None,

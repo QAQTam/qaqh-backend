@@ -111,4 +111,30 @@ mod tests {
         let reparsed: SessionState = serde_json::from_value(value).expect("reparse");
         assert_eq!(reparsed, state);
     }
+
+    #[test]
+    fn timeline_input_reads_payloads_without_new_metadata_fields() {
+        let payload = serde_json::json!({
+            "kind": "input",
+            "data": {
+                "block_id": "B1",
+                "turn_id": null,
+                "purpose": "trigger_turn",
+                "content": {"kind": "inline", "data": {"text": "hello"}},
+                "attachments": [],
+                "actor": {"kind": "user", "id": "user", "display_name": null}
+            }
+        });
+        let entry: state::TimelineEntry =
+            serde_json::from_value(payload).expect("old timeline input must still deserialize");
+        assert!(matches!(
+            entry,
+            state::TimelineEntry::Input {
+                images,
+                inter_agent: None,
+                subagent_terminal: None,
+                ..
+            } if images.is_empty()
+        ));
+    }
 }

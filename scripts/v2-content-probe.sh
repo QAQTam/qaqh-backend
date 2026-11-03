@@ -243,19 +243,19 @@ def open_client(instance):
     return body["client_session_id"]
 
 
-def command(session, channel, command_body, seed=None, instance="content-probe"):
+def command(session, target, command_body, instance="content-probe"):
     envelope = {
         "schema": "qaqh.Ringing",
         "version": 2,
-        "channel": channel,
+        "contract_revision": "ringing-commands-6",
         "command_id": str(uuid.uuid4()),
         "client_instance_id": instance,
         "client_session_id": session,
+        "target": target,
+        "preconditions": [],
         "command": command_body,
     }
-    if seed:
-        envelope["seed"] = seed
-    return request("POST", f"/ringing/v2/commands/{channel}", session=session, body=envelope)
+    return request("POST", "/ringing/v2/commands", session=session, body=envelope)
 
 
 def bootstrap(session, seed):
@@ -288,8 +288,8 @@ try:
     before = {entry.name for entry in (DATA / "sessions").iterdir()}
     status, ack = command(
         client_a,
-        "control",
-        {"channel": "control", "type": "session_create", "close_current": False, "cwd": str(WORK)},
+        {"kind": "global"},
+        {"type": "session.create", "cwd": str(WORK)},
         instance="content-probe-a",
     )
     assert status == 200 and ack.get("status") == "accepted", f"session_create: {status} {ack}"
@@ -318,13 +318,11 @@ try:
 
     status, ack = command(
         client_a,
-        "conversation",
+        {"kind": "session", "session_id": seed},
         {
-            "channel": "conversation",
-            "type": "conversation_send_message",
+            "type": "conversation.send_message",
             "text": "ask me something",
         },
-        seed=seed,
         instance="content-probe-a",
     )
     assert status == 200, f"send_message: {status} {ack}"
@@ -373,9 +371,8 @@ try:
     client_b = open_client("content-probe-b")
     status, ack = command(
         client_b,
-        "control",
-        {"channel": "control", "type": "session_resume", "seed": seed},
-        seed=seed,
+        {"kind": "session", "session_id": seed},
+        {"type": "session.resume"},
         instance="content-probe-b",
     )
     assert status == 200, f"session_resume: {status} {ack}"
@@ -398,15 +395,13 @@ try:
         request("POST", "/ringing/v2/leases/renew", session=client_a)
         status, ack = command(
             client_a,
-            "tool",
+            {"kind": "session", "session_id": seed},
             {
-                "channel": "tool",
-                "type": "tool_permission_respond",
+                "type": "tool.permission.respond",
                 "tool_call_id": interaction["call_id"],
                 "approved": True,
                 "trust_folder": False,
             },
-            seed=seed,
             instance="content-probe-a",
         )
         assert status == 200, f"permission respond: {status} {ack}"

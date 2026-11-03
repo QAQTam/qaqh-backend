@@ -21,10 +21,9 @@ pub use types::{
     RingingV2PairResponse, RingingV2PairTokenRequest, RingingV2PairTokenResponse,
     RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
     RingingV2PendingPermissionView, RingingV2PendingSet, RingingV2ResetReason,
-    RingingV2ResetRequired, RingingV2StreamKey, UnifiedCommand, UnifiedCommandEnvelope,
-    UnifiedPrecondition, UnifiedTarget, SessionSettingsPatch, SettingValue,
-    ProviderUpsertDto, SecretWrite, ToolsSettingPatch, UNIFIED_CONTRACT_REVISION, events_path,
-    open_path,
+    RingingV2ResetRequired, RingingV2StreamKey, CommandPrecondition, CommandTarget,
+    SessionCreateResult, SessionSettingsPatch, SettingValue, ProviderUpsertDto, SecretWrite,
+    ToolsSettingPatch, COMMAND_CONTRACT_REVISION, events_path, open_path,
 };
 
 /// Ringing v2 wire version.

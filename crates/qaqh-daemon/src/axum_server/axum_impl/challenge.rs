@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::{AskAnswer, ControlCommand, ToolCommand};
+use qaqh_domain::AskAnswer;
 use qaqh_ringing::{
     RingingCommand, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
     RingingV2InteractionKind, RingingV2PendingApprovals,
@@ -215,29 +215,25 @@ pub fn command_for(
                 "trust" => (true, true),
                 _ => return Err("invalid_decision"),
             };
-            Ok(RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+            Ok(RingingCommand::ToolPermissionRespond {
                 tool_call_id: challenge.source_id.clone(),
                 approved,
                 trust_folder,
-            }))
+            })
         }
         ApprovalKind::Ask => match decision {
             "submit" => {
                 let answers = payload.get("answers").cloned().ok_or("missing_answers")?;
                 let answers: Vec<AskAnswer> =
                     serde_json::from_value(answers).map_err(|_| "invalid_answers")?;
-                Ok(RingingCommand::Control(
-                    ControlCommand::InteractionAskRespond {
-                        interaction_id: challenge.source_id.clone(),
-                        answers,
-                    },
-                ))
-            }
-            "dismiss" => Ok(RingingCommand::Control(
-                ControlCommand::InteractionAskDismiss {
+                Ok(RingingCommand::InteractionAskRespond {
                     interaction_id: challenge.source_id.clone(),
-                },
-            )),
+                    answers,
+                })
+            }
+            "dismiss" => Ok(RingingCommand::InteractionAskDismiss {
+                interaction_id: challenge.source_id.clone(),
+            }),
             _ => Err("invalid_decision"),
         },
         ApprovalKind::Plan => {
@@ -254,12 +250,12 @@ pub fn command_for(
                 .get("autonomous")
                 .and_then(Value::as_bool)
                 .unwrap_or(false);
-            Ok(RingingCommand::Control(ControlCommand::PlanReviewRespond {
+            Ok(RingingCommand::PlanReviewRespond {
                 interaction_id: challenge.source_id.clone(),
                 approved,
                 message,
                 autonomous,
-            }))
+            })
         }
     }
 }
@@ -313,11 +309,11 @@ mod tests {
         .unwrap();
         assert!(matches!(
             command,
-            RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+            RingingCommand::ToolPermissionRespond {
                 tool_call_id,
                 approved: true,
                 trust_folder: true,
-            }) if tool_call_id == "canonical-id"
+            } if tool_call_id == "canonical-id"
         ));
     }
 
@@ -331,10 +327,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             command,
-            RingingCommand::Control(ControlCommand::InteractionAskRespond {
+            RingingCommand::InteractionAskRespond {
                 interaction_id,
                 answers,
-            }) if interaction_id == "canonical-id"
+            } if interaction_id == "canonical-id"
                 && answers == vec![AskAnswer {
                     question_id: "q1".into(),
                     answer: "yes".into(),
@@ -343,7 +339,7 @@ mod tests {
 
         assert!(matches!(
             command_for(&challenge(ApprovalKind::Ask), "dismiss", &json!({})).unwrap(),
-            RingingCommand::Control(ControlCommand::InteractionAskDismiss { interaction_id })
+            RingingCommand::InteractionAskDismiss { interaction_id }
                 if interaction_id == "canonical-id"
         ));
     }
