@@ -180,18 +180,9 @@ pub struct TodoStatusArgs {
     pub session_id: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct TodoListArgs {
-    pub session_id: String,
-    #[serde(flatten)]
-    pub args: Map<String, Value>,
-}
-
-impl TodoListArgs {
-    pub fn tool_args(&self) -> Value {
-        Value::Object(self.args.clone())
-    }
-}
+/// `todo.list` 参数与 `ringing::service_methods::TodoListParams` 同形
+/// (session_id + 可选 status);DTO 边界在方法表,不再透传任意键。
+pub type TodoListArgs = crate::ringing::service_methods::TodoListParams;
 
 #[derive(Debug, Deserialize)]
 pub struct PlanReadArgs {

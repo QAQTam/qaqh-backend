@@ -552,7 +552,7 @@ impl SessionLoop {
         let call = ToolCallId::new(call_id);
         if let Err(error) = self
             .owner
-            .declare_tool_call(&call, turn, tool_name, Some(input.to_string()))
+            .declare_tool_call(&call, turn, tool_name, Some(input.clone()))
             .await
         {
             log::error!("[loop] declare {call_id} failed: {error}");
@@ -1169,9 +1169,14 @@ struct OwnerSink {
 
 impl ProgressSink for OwnerSink {
     fn assistant_block(&self, update: crate::progress::AssistantProgress<'_>) {
+        let block_kind = match update.kind {
+            crate::progress::ProgressBlockKind::Reasoning => AssistantBlockKind::Reasoning,
+            crate::progress::ProgressBlockKind::Answer => AssistantBlockKind::Answer,
+        };
         self.owner.message_delta(
             &TurnId::new(update.turn_id.to_string()),
             &BlockId::new(update.block_id.to_string()),
+            block_kind,
             update.text,
         );
     }
@@ -1180,6 +1185,7 @@ impl ProgressSink for OwnerSink {
         self.owner.tool_arguments_delta(
             &TurnId::new(update.turn_id.to_string()),
             &ToolCallId::new(update.call_id.to_string()),
+            update.tool_name,
             update.args,
         );
     }

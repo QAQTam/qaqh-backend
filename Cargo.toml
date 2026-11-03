@@ -50,7 +50,7 @@ async-lsp = { version = "0.2", default-features = false, features = ["tokio", "o
 lsp-types = "0.95"
 
 [workspace.package]
-version = "3.0.20261103-1"
+version = "3.0.20261104-1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

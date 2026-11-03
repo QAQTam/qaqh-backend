@@ -264,6 +264,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         pairings: Arc::new(Mutex::new(crate::axum_server::PairingTable::new())),
         tls_fingerprint: tls.as_ref().map(|material| material.fingerprint.clone()),
         challenges: Arc::new(crate::axum_server::ChallengeStore::default()),
+        drivers: Arc::new(crate::axum_server::DriverSeats::new()),
         epoch: epoch.clone(),
         shutdown: shutdown.clone(),
         test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),

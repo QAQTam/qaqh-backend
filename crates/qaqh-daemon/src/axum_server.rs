@@ -6,6 +6,7 @@ mod authz_matrix_tests;
 mod axum_impl;
 
 pub(crate) use axum_impl::challenge::ChallengeStore;
+pub(crate) use axum_impl::driver::DriverSeats;
 pub(crate) use axum_impl::pairing::PairingTable;
 pub(crate) use axum_impl::test_hooks::TestHooks;
 pub use axum_impl::{AppState, build_router};
@@ -77,6 +78,7 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
         )),
         tls_fingerprint: None,
         challenges: std::sync::Arc::new(crate::axum_server::ChallengeStore::default()),
+        drivers: std::sync::Arc::new(DriverSeats::new()),
         epoch: String::from("test-epoch"),
         shutdown,
         test_hooks: std::sync::Arc::new(crate::axum_server::TestHooks::disabled()),

@@ -51,23 +51,25 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             vec!["RingingV2CommandStatus"],
             vec!["command-status-accepted.json"],
         ),
+        // B02:driver 席位走统一命令面(POST /commands + target),旧专用
+        // /sessions/{id}/driver/* URL 从未存在于 router——coverage 不得虚报。
         (
             "driver.claim",
             "POST",
-            "/ringing/v2/sessions/{session_id}/driver/claim",
+            "/ringing/v2/commands",
             "interact",
             true,
-            vec!["RingingV2DriverClaimResponse"],
-            vec!["driver-claim-busy.json"],
+            vec!["RingingV2DriverClaimResponse", "RingingV2CommandAck"],
+            vec!["driver-claim-busy.json", "command-ack-accepted.json"],
         ),
         (
             "driver.release",
             "POST",
-            "/ringing/v2/sessions/{session_id}/driver/release",
+            "/ringing/v2/commands",
             "interact",
             true,
-            vec!["RingingV2DriverReleaseResponse"],
-            vec!["driver-release.json"],
+            vec!["RingingV2DriverReleaseResponse", "RingingV2CommandAck"],
+            vec!["driver-release.json", "command-ack-accepted.json"],
         ),
         (
             "pairing.issue",
@@ -236,12 +238,13 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "semantics": {
             "replay_window": "receipts are retained for receipt_policy.ttl_secs and at most receipt_policy.max_entries; expiry or eviction means the outcome is unknown, not failed",
             "owner_scope": "status/replay/existing queries and receipts are scoped to the stable identity key (device_id for paired devices, the admin self-reported instance id); a re-opened connection keeps reconciling its identity's receipts, while a foreign identity is rejected by the fingerprint guard",
-            "fingerprint_guard": "reserving the same command_id with a different payload fingerprint or owner is rejected instead of treated as a replay; the daemon fingerprint covers channel, session, expected_revision and command",
+            "fingerprint_guard": "reserving the same command_id with a different payload fingerprint or owner is rejected instead of treated as a replay; the daemon fingerprint covers contract revision, target, preconditions and command",
             "concurrency": "exactly one concurrent reservation wins per command_id; duplicate concurrent submissions replay the stored receipt",
             "outcome_unknown": "a missing receipt, TTL expiry, eviction or foreign lease yields no receipt — SDK must report outcome unknown and must not auto-resend side-effecting commands",
-            "persistence": "best_effort: the receipt store is reloaded at startup; an unreadable or undecodable store is a loud load error, never silently treated as empty"
+            "persistence": "best_effort: the receipt store is reloaded at startup; an unreadable or undecodable store is a loud load error, never silently treated as empty",
+            "sync_result_replay": "synchronous commands persist the full result/operation/revision (RingingV2SyncResult); replaying the original command_id (accepted ACK with existing.sync_result) or polling command status restores the original outcome; succeeded without sync_result means an engine-forwarded command that never carries a synchronous result and must not be fabricated"
         },
-        "sdk_rule": "retry with the original command_id, original payload and original guards (expected_revision/driver_epoch); before the B04 evidence below is extended, never claim a replay across a new lease is safe — query by original id and surface outcome unknown",
+        "sdk_rule": "retry with the original command_id, original payload and original guards (settings_revision/config_revision preconditions); never claim a replay across a new lease is safe by assumption — query by original id and surface outcome unknown",
         "evidence": [
             "receipt_policy_is_machine_readable_and_matches_store_defaults",
             "concurrent_same_id_has_one_reservation_and_replays_the_rest",
