@@ -4,12 +4,11 @@
 //! 状态与事件都出自会话 owner(SQLite 业务表 + 单流 seq 广播)。
 
 use qaqh_ringing::{
-    RINGING_SCHEMA, RINGING_V2_VERSION, RingingV2ApprovalRespondRequest,
-    RingingV2AskOutcome, RingingV2Capabilities, RingingV2CommandEnvelope,
-    RingingV2CommandResult, RingingV2DeviceChallenges, RingingV2ExistingResult,
-    RingingV2InteractionKind, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
-    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteractionView,
-    RingingV2PendingPermissionView,
+    RINGING_SCHEMA, RINGING_V2_VERSION, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
+    RingingV2Capabilities, RingingV2CommandEnvelope, RingingV2CommandResult,
+    RingingV2DeviceChallenges, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
+    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
+    RingingV2PendingInteractionView, RingingV2PendingPermissionView,
 };
 use qaqh_ringing_contract::fact::{ContentValue, InteractionDecision, InteractionKind};
 use qaqh_ringing_contract::state::{InteractionView, SessionBootstrap};
@@ -19,8 +18,7 @@ use super::*;
 
 // bootstrap 的 state 是 qaqh_ringing_contract 的 SessionState(与 qaqh-client、
 // TS 契约导出共用同一份定义);本文件只做业务库→wire 的装配。
-use qaqh_ringing_contract::{TeamResponse as ClientV2TeamResponse, TEAM_SCHEMA};
-
+use qaqh_ringing_contract::{TEAM_SCHEMA, TeamResponse as ClientV2TeamResponse};
 
 #[derive(Deserialize)]
 pub struct V2EventsQuery {
@@ -113,7 +111,6 @@ pub(crate) async fn handle_renew_v2(State(state): State<AppState>, headers: Head
         },
     )
 }
-
 
 /// 业务会话存在性:不建 owner(避免为不存在的会话泄漏泵线程)。
 async fn require_business_session(
@@ -258,7 +255,9 @@ pub(crate) async fn handle_team_snapshot_v2(
         });
     }
     let team = qaqh_ringing_contract::team::TeamSnapshot {
-        root_session_id: Some(qaqh_ringing_contract::fact::SessionId::new(session_id.clone())),
+        root_session_id: Some(qaqh_ringing_contract::fact::SessionId::new(
+            session_id.clone(),
+        )),
         agents,
         unread_messages: Vec::new(),
         revision: 0,
@@ -357,11 +356,7 @@ pub(crate) async fn handle_pending_approvals_v2(
         })
         .map(|interaction| RingingV2PendingInteractionView {
             id: interaction.interaction_id.as_str().to_string(),
-            kind: match interaction.kind {
-                InteractionKind::Ask => RingingV2InteractionKind::Ask,
-                InteractionKind::Plan => RingingV2InteractionKind::PlanReview,
-                InteractionKind::Permission => RingingV2InteractionKind::Permission,
-            },
+            kind: interaction.kind,
             // 与 permission 的 `details_unavailable` 同语义：正文取不到时
             // 仍保留可答复的 id/kind，details 降级为 null。
             details: interaction_body_value(&state, &interaction.request),
@@ -438,10 +433,8 @@ pub(crate) async fn handle_approval_respond_v2(
     };
     // §9.5 远程 `trust_folder` 默认拒：非 admin 提交的永久扩界降级为单次放行。
     if !identity.is_admin()
-        && let qaqh_ringing::RingingCommand::ToolPermissionRespond {
-            trust_folder,
-            ..
-        } = &mut command
+        && let qaqh_ringing::RingingCommand::ToolPermissionRespond { trust_folder, .. } =
+            &mut command
     {
         *trust_folder = false;
     }
@@ -636,8 +629,7 @@ pub(crate) async fn handle_events_v2(
                         let _ = tx.send(Ok(frame)).await;
                         break;
                     }
-                    let data =
-                        serde_json::to_string(&frame_event).unwrap_or_else(|_| "{}".into());
+                    let data = serde_json::to_string(&frame_event).unwrap_or_else(|_| "{}".into());
                     let frame = Event::default()
                         .id(format!("{}:{}", stream_epoch, frame_event.seq))
                         .event("ringing.event")
@@ -678,10 +670,9 @@ enum InteractionTarget<'a> {
 
 fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<InteractionTarget<'_>> {
     match command {
-        qaqh_ringing::RingingCommand::ToolPermissionRespond {
-            tool_call_id,
-            ..
-        } => Some(InteractionTarget::CallId(tool_call_id)),
+        qaqh_ringing::RingingCommand::ToolPermissionRespond { tool_call_id, .. } => {
+            Some(InteractionTarget::CallId(tool_call_id))
+        }
         qaqh_ringing::RingingCommand::InteractionAskRespond { interaction_id, .. }
         | qaqh_ringing::RingingCommand::InteractionAskDismiss { interaction_id }
         | qaqh_ringing::RingingCommand::PlanReviewRespond { interaction_id, .. } => {

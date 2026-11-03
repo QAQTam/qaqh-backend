@@ -126,7 +126,7 @@ mod tests {
         assert!(is_allowed(qaqh_dsaccount_verify()));
         // 表里存在、但**刻意**没进白名单的方法（进程级诊断只给 daemon 自己用）。
         assert!(!is_allowed("diagnostics.memory.snapshot"));
-        // 会话生命周期命令走三频道 envelope，不属服务面。
+        // 会话写操作走唯一 RingingCommand 入口，不属服务面。
         assert!(!is_allowed("session.resume"));
         assert!(!is_allowed(""));
     }

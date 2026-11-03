@@ -15,10 +15,13 @@ use crate::service::fs_git::{list_remote_directory, read_remote_file, workspace}
 
 pub(crate) fn handle(service: &QaqhService, command: WorkspaceCommand) -> QaqhResult<Value> {
     match command {
-        // UI 工作区注册表（组织语义，与运行环境 workspace 解耦）。
-        // 一手 DTO：条目形状由 WorkspaceStore::list_entries 唯一定义。
+        // UI 工作区注册表保存在会话 SQLite 业务库中。
         WorkspaceCommand::WorkspaceList(_) => {
-            let entries = qaqh_session::WorkspaceStore::global().list_entries();
+            let entries = service
+                .owners
+                .db()
+                .read_blocking(qaqh_session::db::workspace::list_entries)
+                .map_err(QaqhError::message)?;
             QaqhError::to_value("workspace entries", entries)
         }
         WorkspaceCommand::WorkspaceGet(args) => {
@@ -63,48 +66,72 @@ pub(crate) fn handle_ringing(
                     },
                 )
                 .map_err(QaqhError::message)?;
-            qaqh_session::WorkspaceStore::global().attach_by_cwd(session_id, path);
-            service.send_ringing_cmd(
-                session_id.to_string(),
-                RingingCommand::AgentReloadConfig,
-            )?;
+            let session = session_id.to_string();
+            let path = path.to_string();
+            service
+                .owners
+                .db()
+                .write_blocking(move |conn| {
+                    qaqh_session::db::workspace::attach_by_cwd(conn, &session, &path)
+                })
+                .map_err(QaqhError::message)?;
+            service.send_ringing_cmd(session_id.to_string(), RingingCommand::AgentReloadConfig)?;
             Ok(Value::Null)
         }
         RingingCommand::WorkspaceCreate { path } => {
-            let existing: Vec<(String, Option<String>)> = service
+            let path = path.clone();
+            let created = service
                 .owners
                 .db()
-                .read_blocking(|conn| qaqh_session::db::store::list_sessions(conn, false, 256))
-                .unwrap_or_default()
-                .into_iter()
-                .map(|row| (row.session_id, row.cwd))
-                .collect();
-            let created = qaqh_session::WorkspaceStore::global()
-                .create(path, &existing)
+                .write_blocking(move |conn| qaqh_session::db::workspace::create(conn, &path))
                 .map_err(QaqhError::message)?;
             QaqhError::to_value("workspace", created)
         }
         RingingCommand::WorkspaceRename { title } => {
             let workspace_id = workspace_target(target)?;
-            let renamed = qaqh_session::WorkspaceStore::global()
-                .rename(workspace_id, title.clone())
+            let workspace_id = workspace_id.to_string();
+            let title = title.clone();
+            let renamed = service
+                .owners
+                .db()
+                .write_blocking(move |conn| {
+                    qaqh_session::db::workspace::rename(conn, &workspace_id, &title)
+                })
                 .map_err(QaqhError::message)?;
             QaqhError::to_value("workspace", renamed)
         }
         RingingCommand::WorkspaceDelete {} => {
-            qaqh_session::WorkspaceStore::global()
-                .delete(workspace_target(target)?)
+            let workspace_id = workspace_target(target)?.to_string();
+            service
+                .owners
+                .db()
+                .write_blocking(move |conn| {
+                    qaqh_session::db::workspace::delete(conn, &workspace_id)
+                })
                 .map_err(QaqhError::message)?;
             Ok(Value::Null)
         }
         RingingCommand::WorkspaceMoveSession { workspace_id } => {
-            qaqh_session::WorkspaceStore::global()
-                .move_session(session_target(target)?, workspace_id)
+            let session_id = session_target(target)?.to_string();
+            let workspace_id = workspace_id.clone();
+            service
+                .owners
+                .db()
+                .write_blocking(move |conn| {
+                    qaqh_session::db::workspace::move_session(conn, &session_id, &workspace_id)
+                })
                 .map_err(QaqhError::message)?;
             Ok(Value::Null)
         }
         RingingCommand::WorkspaceDetach {} => {
-            qaqh_session::WorkspaceStore::global().remove_session(session_target(target)?);
+            let session_id = session_target(target)?.to_string();
+            service
+                .owners
+                .db()
+                .write_blocking(move |conn| {
+                    qaqh_session::db::workspace::remove_session(conn, &session_id)
+                })
+                .map_err(QaqhError::message)?;
             Ok(Value::Null)
         }
         _ => Err(QaqhError::invalid(format!(

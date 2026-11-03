@@ -13,10 +13,12 @@ pub mod fact;
 pub mod state;
 pub mod team;
 pub mod ulid;
+pub mod workspace;
 
 pub use events::{SessionEvent, SessionEventFrame};
 pub use state::{CodeDelta, SessionBootstrap, SessionState, ToolEffectInfo};
 pub use team::{TaskBoardSnapshot, TeamBoardSnapshot, TeamSnapshot};
+pub use workspace::{WorkspaceEntry, WorkspaceMeta};
 
 /// `/team` 端点 schema 判别值(契约锁定:客户端按字面量校验)。
 pub const TEAM_SCHEMA: &str = "qaqh.ringing.team/v1";
@@ -98,8 +100,7 @@ mod tests {
         assert_eq!(response.team.agents.len(), 2);
         let serialized = serde_json::to_value(&response).expect("serialize");
         // 无损往返:反序列化再序列化不得丢键/改值。
-        let reparsed: TeamResponse =
-            serde_json::from_value(serialized.clone()).expect("reparse");
+        let reparsed: TeamResponse = serde_json::from_value(serialized.clone()).expect("reparse");
         assert_eq!(reparsed, response);
     }
 

@@ -31,33 +31,36 @@ use crate::error::{QaqhError, QaqhResult};
 /// 数据根承载会话/配置目录，其下的 daemon 自身管理面（`config.toml`、
 /// `profiles.toml`、`secrets.toml`、`daemon.json`）仍由
 /// [`is_self_administration_path`] 单独拦掉；会话数据不再保护。
-pub(crate) fn allowed_roots(owners: &qaqh_session::owner::OwnerDirectory) -> Vec<PathBuf> {
+pub(crate) fn allowed_roots(
+    owners: &qaqh_session::owner::OwnerDirectory,
+) -> QaqhResult<Vec<PathBuf>> {
+    let (workspaces, sessions) = owners
+        .db()
+        .read_blocking(|conn| -> Result<_, qaqh_session::db::DbError> {
+            Ok((
+                qaqh_session::db::workspace::list(conn)?,
+                qaqh_session::db::store::list_sessions(conn, false, 256)?,
+            ))
+        })
+        .map_err(QaqhError::message)?;
     let mut roots: Vec<PathBuf> = Vec::new();
     // 数据根（会话/配置目录）。
     roots.push(qaqh_types::platform::data_dir());
-    // UI 工作区注册表（组织语义，与运行环境 workspace 解耦）。注册表尚未
-    // 装配时跳过，而不是 panic（远端浏览不应因初始化顺序失败）。
-    if let Some(store) = qaqh_session::WorkspaceStore::try_global() {
-        for ws in store.list() {
-            if !ws.path.is_empty() {
-                roots.push(PathBuf::from(ws.path));
-            }
+    for workspace in workspaces {
+        if !workspace.path.is_empty() {
+            roots.push(PathBuf::from(workspace.path));
         }
     }
     // 会话工作区：业务行 cwd（覆盖未注册为 UI workspace 的会话）。旧版在非
     // Windows 上写坏的 `\` 形态 cwd 读取时归一化，避免合法工作区被漏判。
-    for row in owners
-        .db()
-        .read_blocking(|conn| qaqh_session::db::store::list_sessions(conn, false, 256))
-        .unwrap_or_default()
-    {
+    for row in sessions {
         if let Some(cwd) = row.cwd.as_deref().filter(|c| !c.is_empty() && *c != ".") {
             roots.push(PathBuf::from(
                 qaqh_session::grouping::repair_legacy_backslash_cwd(cwd),
             ));
         }
     }
-    roots
+    Ok(roots)
 }
 
 /// 远端文件接口的路径白名单判定（T-2-1 / 安全审查 P0-1）。
@@ -71,26 +74,26 @@ fn path_allowed(
     owners: &qaqh_session::owner::OwnerDirectory,
     path: &Path,
     scope_session: Option<&str>,
-) -> bool {
+) -> QaqhResult<bool> {
     if is_self_administration_path(path) {
-        return false;
+        return Ok(false);
     }
     let normalized = normalize_lexically(&resolve_target_path(path.to_path_buf()));
     if let Some(session_id) = scope_session {
         let Some(cwd) = crate::registry::spawn::session_cwd(owners, session_id) else {
-            return false;
+            return Ok(false);
         };
         let scoped_root = normalize_lexically(&resolve_target_path(PathBuf::from(
             qaqh_session::grouping::repair_legacy_backslash_cwd(&cwd),
         )));
         if !path_within_dir(&normalized, &scoped_root) {
-            return false;
+            return Ok(false);
         }
     }
-    allowed_roots(owners).iter().any(|root| {
+    Ok(allowed_roots(owners)?.iter().any(|root| {
         let root = normalize_lexically(&resolve_target_path(root.clone()));
         path_within_dir(&normalized, &root)
-    })
+    }))
 }
 
 /// 白名单拒绝。类型化后 daemon 侧直接匹配变体映射 `forbidden` 码，
@@ -113,7 +116,7 @@ pub(crate) fn list_remote_directory(
     if !is_absolute_like(path) {
         return Err(QaqhError::invalid("fs.list requires an absolute path"));
     }
-    if !path_allowed(owners, dir, scope_session) {
+    if !path_allowed(owners, dir, scope_session)? {
         return Err(forbidden("fs.list", path));
     }
     let mut entries: Vec<Value> = Vec::new();
@@ -189,7 +192,7 @@ pub(crate) fn read_remote_file(
     if !is_absolute_like(path) {
         return Err(QaqhError::invalid("fs.read requires an absolute path"));
     }
-    if !path_allowed(owners, file_path, scope_session) {
+    if !path_allowed(owners, file_path, scope_session)? {
         return Err(forbidden("fs.read", path));
     }
     let meta = std::fs::metadata(file_path).map_err(|source| QaqhError::Io {

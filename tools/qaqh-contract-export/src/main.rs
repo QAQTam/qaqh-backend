@@ -6,14 +6,11 @@ use qaqh_ringing::{
     CommandTarget, RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
     RingingCommandStatus, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
     RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
-    RingingV2CommandStatus, RingingV2ContentUploadResponse, RingingV2ContentValue,
-    RingingV2Delivery, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
-    RingingV2DeviceChallenges, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,
-    RingingV2DriverState, RingingV2ExistingResult, RingingV2InteractionKind,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
-    RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
-    RingingV2PendingPermissionView, RingingV2ResetReason, RingingV2ResetRequired,
-    RingingV2StreamKey,
+    RingingV2CommandStatus, RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind,
+    RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DriverClaimResponse,
+    RingingV2DriverReleaseResponse, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
+    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
+    RingingV2PendingInteractionView, RingingV2PendingPermissionView,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -484,14 +481,14 @@ fn session_list_entry_fixture() -> qaqh_types::SessionListEntry {
 }
 
 /// `workspace.list` 条目样本（meta + `missing_dir`）；全合成字段。
-fn workspace_entry_fixture() -> qaqh_session::WorkspaceEntry {
+fn workspace_entry_fixture() -> qaqh_ringing_contract::WorkspaceEntry {
     workspace_meta_fixture().entry(false)
 }
 
 /// `workspace.create`/`workspace.rename` 结果样本（裸 `WorkspaceMeta`，
 /// 无 `missing_dir` 键）。
-fn workspace_meta_fixture() -> qaqh_session::WorkspaceMeta {
-    qaqh_session::WorkspaceMeta {
+fn workspace_meta_fixture() -> qaqh_ringing_contract::WorkspaceMeta {
+    qaqh_ringing_contract::WorkspaceMeta {
         id: "ws-fixture-1".to_owned(),
         path: "/synthetic/workspace".to_owned(),
         title: "synthetic workspace".to_owned(),
@@ -533,23 +530,15 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         RingingV2CommandResult,
         RingingV2CommandStatus,
         RingingV2ContentUploadResponse,
-        RingingV2ContentValue,
-        RingingV2Delivery,
         RingingV2DriverClaimResponse,
         RingingV2DriverReleaseResponse,
-        RingingV2DriverState,
         RingingV2ExistingResult,
-        RingingV2InteractionKind,
         RingingV2LeaseRenewResponse,
         RingingV2OpenRequest,
         RingingV2OpenResponse,
         RingingV2PendingApprovals,
-        RingingV2PendingInteraction,
         RingingV2PendingInteractionView,
         RingingV2PendingPermissionView,
-        RingingV2ResetReason,
-        RingingV2ResetRequired,
-        RingingV2StreamKey,
         RingingV2ApprovalRespondRequest,
         RingingV2DeviceApprovalKind,
         RingingV2DeviceChallenge,
@@ -583,8 +572,8 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::WorkspaceGetParams,
         qaqh_runtime::ringing::service_methods::WorkspaceListParams,
         qaqh_domain::SessionActivity,
-        qaqh_session::WorkspaceEntry,
-        qaqh_session::WorkspaceMeta,
+        qaqh_ringing_contract::WorkspaceEntry,
+        qaqh_ringing_contract::WorkspaceMeta,
         qaqh_types::SessionListEntry,
         qaqh_types::SessionMeta,
         qaqh_types::SessionRunStatus,

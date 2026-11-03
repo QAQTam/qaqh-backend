@@ -94,12 +94,7 @@ pub(crate) fn activity(
                 .error_json
                 .as_deref()
                 .and_then(|json| serde_json::from_str::<Value>(json).ok())
-                .and_then(|error| {
-                    error
-                        .get("message")?
-                        .as_str()
-                        .map(str::to_string)
-                })
+                .and_then(|error| error.get("message")?.as_str().map(str::to_string))
                 .unwrap_or_default();
             SessionToolActivity {
                 tool_name: row.tool_name,

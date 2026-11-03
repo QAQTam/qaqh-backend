@@ -1,4 +1,4 @@
-# Handoff — 2026-11-03:P3-D 已提交(78b77876),P4 刚起步
+# Handoff — 2026-11-03:P3-D/P4/P5 已提交；完结审计补齐
 
 ## 0. 使命与standing directives(不可变)
 
@@ -31,7 +31,7 @@ P3-D 具体内容(78b77876):
 - 集成测试:remote_fs_allowlist 种子改走业务行(service.owners().db().write_blocking + store::create_session);v2_public_api 匹配 SessionEvent 变体;删 tool_crash_recovery/v2_acceptance_matrix/e2e_seed。
 - **验证状态:全仓 `cargo check --workspace --tests` 0 错误 0 警告;定向测试全绿**:qaqh-session 12+36(db)、agent-runtime 36、ringing-runtime 9、runtime lib 49 + 集成 13、client 68、contract-export 6、daemon 31、types/ringing/domain/workspace ~240。
 
-## 2. 当前状态(P4 主体已落地,P5 收尾中)
+## 2. 当前状态(P4/P5 主体已提交；本次补齐完结审计发现)
 
 P4 按 report-03 完成三入口统一与四项决策。当前命令契约 revision 为 `ringing-commands-6`。
 
@@ -46,7 +46,7 @@ P4 按 report-03 完成三入口统一与四项决策。当前命令契约 revis
 1. **P4-a/c/d 已完成**:DomainCommand/重复领域类型退出；业务事件字段完整进入 SessionLoop 与 timeline；会话创建实现归并。
 2. **P4-b 已完成**:唯一命令目录、统一 envelope、SDK 写入口和直接 handler 分派已完成；全局 ops 不进入 session actor。
 3. **P4-e 已完成**:活跃 settings 写入只有 revision CAS 命令入口；元数据 patch 中 title/archive/workspace 不属于设置字段。
-4. **P5 收尾中**:完成陈旧文档/注释和死代码审计、目标 crate 最终检查、更新本 handoff，再提交本轮改动。
+4. **P5 原计划已提交**；续作审计发现下列残留后补齐，再更新本 handoff 并提交。
 5. 只跑受影响 crate 的检查与定向测试；**不跑全仓测试**。
 
 ## 4. 关键 API 速查(本会话固化的事实)
@@ -126,3 +126,20 @@ P4 按 report-03 完成三入口统一与四项决策。当前命令契约 revis
 ### 后续说明
 
 P4/P5 已提交到当前分支。继续工作前先检查最新 `git log` 与工作树；不要运行 `cargo test --workspace`。
+
+## 8. 2026-11-03 完结审计补齐
+
+续作从 `1a0dec23 refactor: unify RingingV2 command surface` 的干净工作树开始。按三份报告和源码逐项核对后，移除了此前未收净的依赖、频道快照和 JSON workspace 注册表：
+
+- `qaqh-client` 不再依赖 `qaqh-session`；事实字段类型从独立 `qaqh-ringing-contract::fact` 导出。
+- 从 `qaqh-ringing` 删除未接运行路径的三频道 `RingingV2Bootstrap`/快照包装、`stream_key` 事件 envelope、canonical cursor 和旧 reset 类型；SDK 不再公开旧 channel 事件类型与别名。当前 bootstrap/event 只使用 `SessionBootstrap`/`SessionState` 和 `SessionEventFrame`。审批响应直接复用契约 `InteractionKind`，不再维护 RingingV2 副本。
+- workspace 注册与 session 归属从 `workspaces.json` 移入同一 SQLite 数据库的 `workspaces`/`workspace_sessions` 表，读写经过现有数据库执行器；DTO 移到 Ringing 公共契约，文件浏览和 session 列表直接查询数据库。`SCHEMA_VERSION` 升至 4；依照既定无迁移决策，旧 schema 数据库需删除重建，旧 `workspaces.json` 不导入且不再读写。
+- `fs.list`/`fs.read` 的允许根查询不再吞掉 SQLite 错误并继续运行。
+
+验证：
+
+- 串行 `cargo check` 通过：`qaqh-session`、`qaqh-ringing-contract`、`qaqh-ringing`、`qaqh-client`、`qaqh-runtime`、`qaqh-daemon`、`qaqh-contract-export`。
+- `python3 scripts/check-sdk-contract.py` 通过；contract-export 定向测试 6/6，导出与 manifest 校验通过。
+- `cargo test -p qaqh-client --test v2_public_api` 通过（3/3）。
+- `cargo test -p qaqh-runtime --lib workspace_list_entries_are_typed_at_the_boundary` 通过（1/1）。
+- 未运行 `cargo test --workspace`。本次执行时可用内存约 1.2 GiB、swap 接近满载，所有构建串行执行。

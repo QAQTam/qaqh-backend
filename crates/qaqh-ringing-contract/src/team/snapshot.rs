@@ -8,7 +8,6 @@ use super::board_types::{BoardId, BoardSubscriptionTarget, ChannelId, PostId, Th
 use super::task_types::{TaskArtifact, TaskCreated, TaskId, TaskState, TeamActor, TeamId};
 use crate::fact::{AgentPath, ContentRef, InterAgentDelivery, MessageId, SessionId};
 
-
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -409,4 +408,3 @@ impl TaskView {
         }
     }
 }
-

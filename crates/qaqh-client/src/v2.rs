@@ -8,9 +8,9 @@ use std::fmt;
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_ringing::{
-    CommandTarget, RingingV2Capabilities, RingingV2CommandAck,
-    RingingV2CommandEnvelope, RingingV2CommandStatus,
-    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    CommandTarget, RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope,
+    RingingV2CommandStatus, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
+    RingingV2OpenResponse,
 };
 use qaqh_ringing_contract::events::SessionEventFrame;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -20,21 +20,16 @@ use crate::error::{ClientError, Result};
 use crate::sse_decoder::SseDecoder;
 use crate::types::{CommandOptions, RingingCommand, SseFrame};
 
-pub use qaqh_ringing::{
-    END_OF_FACT as CLIENT_V2_END_OF_FACT, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
-};
+pub use qaqh_ringing::{RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
 
 pub use qaqh_ringing as ringing;
 pub use qaqh_ringing::v2 as ringing_v2;
-pub use qaqh_session::session_fact_v2 as fact;
 pub use qaqh_ringing_contract::events as contract_events;
+pub use qaqh_ringing_contract::fact;
 pub use qaqh_ringing_contract::state as contract_state;
 
 /// Typed v2 SSE 帧:类型化 `SessionEventFrame`(seq + 业务事件)。
 pub type ClientV2Event = SessionEventFrame;
-
-/// Alias kept explicit for shells that prefer the full contract name.
-pub type ClientV2EventEnvelope = ClientV2Event;
 
 /// 单份会话状态(报告二 §5):bootstrap 直接返回契约 `SessionState`。
 pub use qaqh_ringing_contract::SessionBootstrap as ClientV2Bootstrap;
@@ -242,11 +237,8 @@ impl Client {
         Ok(response.json().await?)
     }
 
-    /// Open the typed v2 per-seed SSE subscription.
-    /// 2026-09-24 冻结修订（硬切）：**每 seed 一条流**，不再按 channel 分订阅。
-    /// 事件带 `stream_key`，调用方自行 demux。旧的三条 `subscribe_v2(seed,
-    /// channel, …)` 形态已删除；调用方必须在 `open` 响应里断言
-    /// `capabilities.single_stream == true`。
+    /// Open the typed v2 per-session SSE subscription. Each frame carries one
+    /// monotonically increasing sequence and a typed session event.
     pub async fn subscribe_v2(
         &self,
         session_id: &str,
@@ -447,7 +439,6 @@ async fn api_error(response: reqwest::Response, path: &str) -> ClientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_ringing::RingingV2Delivery;
 
     /// Team projection 的 wire 形状必须和 daemon `/team` 端点逐字对齐。
     /// 这条测试是 TUI/WinUI Phase 4（roster / inbox）的**契约锁**：壳层不能直接
@@ -538,51 +529,14 @@ mod tests {
         assert_eq!(inbox.task_id.as_deref(), Some("task-1"));
         assert_eq!(
             inbox.delivery,
-            qaqh_session::session_fact_v2::InterAgentDelivery::Queue
+            qaqh_ringing_contract::fact::InterAgentDelivery::Queue
         );
     }
 
     #[test]
     fn public_v2_surface_is_typed() {
-        let cursor =
-            ringing::CursorToken::encode_snapshot(&ringing::CanonicalCursor::snapshot("log-1", 7))
-                .expect("cursor");
-        assert_eq!(cursor.decode_snapshot().expect("decode").fact_seq, 7);
-        assert_eq!(
-            ringing_v2::RingingV2Delivery::Reliable,
-            RingingV2Delivery::Reliable
-        );
-        assert_eq!(CLIENT_V2_END_OF_FACT, u16::MAX);
         assert_eq!(RINGING_V2_VERSION, 2);
         assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
-    }
-
-    #[test]
-    fn v2_reset_reason_is_stable() {
-        let reason = ringing_v2::RingingV2ResetReason::CursorExpired;
-        assert_eq!(
-            serde_json::to_string(&reason).expect("json"),
-            "\"cursor_expired\""
-        );
-    }
-
-    #[test]
-    fn interaction_contracts_are_nameable() {
-        let pending = ringing_v2::RingingV2PendingInteraction {
-            interaction_id: "i1".into(),
-            call_id: "c1".into(),
-            turn_id: "t1".into(),
-            kind: ringing_v2::RingingV2InteractionKind::PlanReview,
-            request: Some(ringing::RingingV2ContentValue::Ref {
-                content_ref: "sha256:abc".into(),
-            }),
-        };
-        let set: ringing_v2::RingingV2PendingSet = vec![pending];
-        assert_eq!(set.len(), 1);
-        assert_eq!(
-            serde_json::to_value(ringing_v2::RingingV2InteractionKind::PlanReview).expect("json"),
-            serde_json::json!("plan")
-        );
     }
 
     // ── 字节层探活（KeepAlive）回归 ─────────────────────────────────────
