@@ -195,9 +195,8 @@ pub async fn run_round(
     let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));
     let flag = cancelled.clone();
     let display = progress.clone();
-    let mut job = tokio::task::spawn_blocking(move || {
-        stream_once(spec, messages, user_id, &flag, display)
-    });
+    let mut job =
+        tokio::task::spawn_blocking(move || stream_once(spec, messages, user_id, &flag, display));
     let mut finished: Option<ProviderOutcome> = None;
     loop {
         tokio::select! {
@@ -402,9 +401,7 @@ fn resolve_provider_credential(
     if spec.provider.kind != qaqh_gate::ProviderKind::Responses {
         return Err("DeepSeek account credential requires the Responses wire".into());
     }
-    if spec.provider.base_url.trim_end_matches('/')
-        != qaqh_dsaccount::protocol::INFERENCE_ORIGIN
-    {
+    if spec.provider.base_url.trim_end_matches('/') != qaqh_dsaccount::protocol::INFERENCE_ORIGIN {
         return Err("DeepSeek account credential requires the official inference endpoint".into());
     }
 
@@ -466,7 +463,6 @@ fn publish_tool_input(display: &ProgressStream, call_id: &str, tool_name: &str, 
         args,
     });
 }
-
 
 /// Terminal classification for the committed response fact.
 ///

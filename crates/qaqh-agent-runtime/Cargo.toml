@@ -8,7 +8,6 @@ description = "Single-session agent runtime: state machine, engines, provider/to
 [dependencies]
 qaqh-config = { path = "../qaqh-config" }
 qaqh-profile = { path = "../qaqh-profile" }
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 qaqh-gate = { path = "../qaqh-gate" }
 qaqh-mcp = { path = "../qaqh-mcp" }

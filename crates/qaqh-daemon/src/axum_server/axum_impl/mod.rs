@@ -27,14 +27,13 @@ use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use qaqh_ringing::{
     RingingCommandAckStatus, RingingCommandState, RingingV2CommandAck, RingingV2CommandEnvelope,
 };
-use qaqh_runtime::ringing::{
-    DeviceRegistry, PendingCommandStore, RingingLeaseStore, Scope, service_methods,
+use qaqh_ringing_runtime::{
+    DeviceRegistry, PendingCommandStore, RingingHub, RingingLeaseStore, Scope,
+    hydrate_attachment_previews,
 };
-use qaqh_runtime::{QaqhService, RingingHub};
+use qaqh_runtime::{QaqhService, ringing::service_methods};
 
 use crate::server::random_hex;
-
-use qaqh_runtime::ringing::hydrate_attachment_previews;
 
 pub mod auth;
 pub mod authz;

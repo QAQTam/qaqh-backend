@@ -57,10 +57,7 @@ impl AttemptBlocks {
         Self {
             turn_id: turn_id.to_string(),
             model: model.to_string(),
-            reasoning_block_id: format!(
-                "block_{}",
-                qaqh_ringing_contract::ulid::generate_ulid()
-            ),
+            reasoning_block_id: format!("block_{}", qaqh_ringing_contract::ulid::generate_ulid()),
             answer_block_id: format!("block_{}", qaqh_ringing_contract::ulid::generate_ulid()),
         }
     }

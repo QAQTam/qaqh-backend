@@ -1,14 +1,13 @@
-//! agent 边界消息类型（进程内 channel 按值传递；测试经 JSON-LP 行往返）。
+//! daemon → agent command message (passed by value through the in-process channel).
 //!
 //! 曾经的 framed OS pipe 线格式（schema/version/`wire` 判别、direction、
-//! 16MB 帧帽）已随 `Loop::new_ipc` 的退役删除：生产路径为
-//! `Loop::from_channels` 的 typed 传递，此处仅保留地址与因果元数据。
-//! 频道不再冗余存储——由载荷 `command`/`event` 自身派生。
+//! 16MB frame cap) retired with `Loop::new_ipc`; the production path uses
+//! typed `Loop::from_channels` messages. This envelope keeps command identity
+//! and trusted actor context at the worker boundary.
 
 use serde::{Deserialize, Serialize};
 
 use crate::command::RingingCommand;
-use crate::event::RingingEvent;
 
 /// daemon → agent 命令消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,32 +51,6 @@ impl RingingWorkerCommandEnvelope {
     pub fn with_actor(mut self, actor: Option<WorkerActor>) -> Self {
         self.actor = actor;
         self
-    }
-}
-
-/// agent → daemon 事件消息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RingingWorkerEventEnvelope {
-    pub session_id: String,
-    pub event_id: String,
-    /// 因果来源 command_id（Ringing 命令执行期间产出的事件携带）。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub causation_id: Option<String>,
-    pub event: RingingEvent,
-}
-
-impl RingingWorkerEventEnvelope {
-    pub fn new(
-        session_id: impl Into<String>,
-        event_id: impl Into<String>,
-        event: RingingEvent,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            event_id: event_id.into(),
-            causation_id: None,
-            event,
-        }
     }
 }
 

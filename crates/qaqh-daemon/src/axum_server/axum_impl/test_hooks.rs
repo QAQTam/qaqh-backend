@@ -89,14 +89,12 @@ impl TestHooks {
     ) -> Option<InteractionFault> {
         let fault = self.interaction_fault?;
         let matches = match fault {
-            InteractionFault::PermissionDeny | InteractionFault::PermissionHang => matches!(
-                command,
-                RingingCommand::ToolPermissionRespond { .. }
-            ),
-            InteractionFault::AskDismiss | InteractionFault::AskHang => matches!(
-                command,
-                RingingCommand::InteractionAskRespond { .. }
-            ),
+            InteractionFault::PermissionDeny | InteractionFault::PermissionHang => {
+                matches!(command, RingingCommand::ToolPermissionRespond { .. })
+            }
+            InteractionFault::AskDismiss | InteractionFault::AskHang => {
+                matches!(command, RingingCommand::InteractionAskRespond { .. })
+            }
         };
         if !matches {
             return None;
@@ -112,10 +110,7 @@ impl TestHooks {
     }
 
     /// Apply command-ack delay/hang after parsing the command payload.
-    pub(crate) async fn apply_command_ack_fault(
-        &self,
-        command: &RingingCommand,
-    ) {
+    pub(crate) async fn apply_command_ack_fault(&self, command: &RingingCommand) {
         let Some(fault) = self.command_ack else {
             return;
         };
@@ -137,14 +132,10 @@ impl CommandAckTarget {
                 RingingCommand::ToolPermissionRespond { .. }
                     | RingingCommand::InteractionAskRespond { .. }
             ),
-            Self::PermissionResponse => matches!(
-                command,
-                RingingCommand::ToolPermissionRespond { .. }
-            ),
-            Self::AskResponse => matches!(
-                command,
-                RingingCommand::InteractionAskRespond { .. }
-            ),
+            Self::PermissionResponse => {
+                matches!(command, RingingCommand::ToolPermissionRespond { .. })
+            }
+            Self::AskResponse => matches!(command, RingingCommand::InteractionAskRespond { .. }),
             Self::All => true,
         }
     }
@@ -193,9 +184,7 @@ mod tests {
     }
 
     fn conversation_command() -> RingingCommand {
-        RingingCommand::ConversationCancel {
-            turn_id: None,
-        }
+        RingingCommand::ConversationCancel { turn_id: None }
     }
 
     #[test]

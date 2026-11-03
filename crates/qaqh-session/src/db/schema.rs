@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::DbError;
 
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -94,11 +94,13 @@ CREATE TABLE interactions (
 );
 CREATE INDEX idx_interactions_pending ON interactions(session_id, status);
 
-CREATE TABLE blobs (
-    hash          TEXT PRIMARY KEY,
-    bytes         BLOB NOT NULL,
-    size          INTEGER NOT NULL,
-    created_at_ms INTEGER NOT NULL
+CREATE TABLE session_contents (
+    session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    content_id  TEXT NOT NULL,
+    media_type  TEXT NOT NULL,
+    bytes       BLOB NOT NULL,
+    truncated   INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, content_id)
 );
 
 CREATE TABLE workspaces (

@@ -18,30 +18,23 @@ pub struct DaemonDiscovery {
     pub pid: u32,
     pub server_epoch: String,
     pub protocol_version: u16,
-    /// Semver of the daemon binary. Defaults keep pre-0.9 discovery files
-    /// readable so clients can replace them gracefully.
-    #[serde(default)]
+    /// Semver of the daemon binary.
     pub daemon_version: String,
     /// Source/build identity used to reject a stale daemon with a compatible
     /// wire protocol.
-    #[serde(default)]
     pub build_id: String,
     /// Runtime lane (for example `stable` or `dev`). Development clients must
     /// never silently adopt the installed stable daemon, or vice versa.
-    #[serde(default)]
     pub channel: String,
     /// Canonical executable path, primarily for diagnostics and ownership
     /// checks during upgrades.
-    #[serde(default)]
     pub executable: String,
     /// LAN-mode HTTPS endpoint (`https://<advertise-ip>:<port>`), present only
     /// when the daemon bound a non-loopback address. Local clients keep using
     /// `endpoint` (plain loopback HTTP); remote pairing clients use this.
-    #[serde(default)]
     pub lan_endpoint: Option<String>,
     /// SHA-256 fingerprint of the self-signed LAN certificate, hex-encoded.
     /// Remote devices pin this during QR pairing.
-    #[serde(default)]
     pub tls_fingerprint: Option<String>,
 }
 
@@ -52,7 +45,7 @@ mod tests {
     #[test]
     fn discovery_round_trip_preserves_protocol_version() {
         let discovery = DaemonDiscovery {
-            endpoint: "ws://127.0.0.1:42/control/v1".into(),
+            endpoint: "http://127.0.0.1:42".into(),
             token: "secret".into(),
             pid: 7,
             server_epoch: "epoch".into(),
@@ -72,9 +65,9 @@ mod tests {
     }
 
     #[test]
-    fn discovery_reads_legacy_file_without_lan_fields() {
+    fn discovery_reads_current_file_without_optional_lan_fields() {
         let discovery: DaemonDiscovery = serde_json::from_str(
-            r#"{"endpoint":"http://127.0.0.1:64413","token":"t","pid":1,"server_epoch":"e","protocol_version":1}"#,
+            r#"{"endpoint":"http://127.0.0.1:64413","token":"t","pid":1,"server_epoch":"e","protocol_version":1,"daemon_version":"1.0.0","build_id":"abc123","channel":"stable","executable":"/opt/qaqh-daemon"}"#,
         )
         .unwrap();
         assert_eq!(discovery.lan_endpoint, None);

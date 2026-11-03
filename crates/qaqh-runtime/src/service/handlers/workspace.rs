@@ -58,7 +58,7 @@ pub(crate) fn handle_ringing(
             service
                 .write_meta(
                     session_id,
-                    qaqh_session::session_fact_v2::SessionMetadataPatch {
+                    qaqh_ringing_contract::fact::SessionMetadataPatch {
                         cwd: Some(qaqh_session::grouping::canonical_cwd(std::path::Path::new(
                             path,
                         ))),

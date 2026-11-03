@@ -51,6 +51,32 @@ pub struct SessionBootstrap {
     pub state: SessionState,
 }
 
+/// Activity reported by registry and service query endpoints.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub enum SessionActivityState {
+    Starting,
+    Idle,
+    Working,
+    WaitingUser,
+    Disconnected,
+    Failed,
+}
+
+/// Typed `session.activity` and `/activity` result entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionActivity {
+    #[serde(rename = "session_id")]
+    pub session_id: String,
+    pub state: SessionActivityState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub seq: u64,
+    pub updated_at: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct TurnView {

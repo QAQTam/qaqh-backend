@@ -3,7 +3,7 @@
 //! SessionMeta 字段从 `sessions` 业务行读取;设置写入在同一个 SQLite 串行写边界
 //! 递增 settings_revision,并支持调用者提供的 CAS 前置条件。
 
-use qaqh_session::session_fact_v2::{SessionMetadataPatch, TitleSource};
+use qaqh_ringing_contract::fact::{SessionMetadataPatch, TitleSource};
 use qaqh_types::SessionMeta;
 
 /// Read a session's business row as a [`SessionMeta`].
@@ -18,7 +18,7 @@ pub(crate) fn read(
             qaqh_session::db::store::session_row_with_turn_count(conn, &owned)
         })
         .ok()?      // DbError → None
-        ?;          // 行不存在 → None
+        ?; // 行不存在 → None
     let (row, turn_count) = found;
     Some(SessionMeta {
         session_id: row.session_id,
@@ -116,17 +116,27 @@ fn patch_columns(
             let current = qaqh_session::db::store::session_settings_revision(conn, &owned)?;
             Ok::<_, qaqh_session::db::DbError>((changed, current))
         })
-        .map_err(|error| MetadataPatchError::Storage(format!("business session update for {session_id}: {error}")))?;
+        .map_err(|error| {
+            MetadataPatchError::Storage(format!(
+                "business session update for {session_id}: {error}"
+            ))
+        })?;
     if changed == 0 {
         let Some(actual) = current else {
-            return Err(MetadataPatchError::NotFound { session_id: session_id.to_string() });
+            return Err(MetadataPatchError::NotFound {
+                session_id: session_id.to_string(),
+            });
         };
         if let Some(expected) = expected_revision {
             return Err(MetadataPatchError::RevisionConflict { expected, actual });
         }
-        return Err(MetadataPatchError::NotFound { session_id: session_id.to_string() });
+        return Err(MetadataPatchError::NotFound {
+            session_id: session_id.to_string(),
+        });
     }
-    current.ok_or_else(|| MetadataPatchError::NotFound { session_id: session_id.to_string() })
+    current.ok_or_else(|| MetadataPatchError::NotFound {
+        session_id: session_id.to_string(),
+    })
 }
 
 /// Commit a title change to the business row.

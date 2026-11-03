@@ -7,8 +7,6 @@
 //! |---|---|
 //! | `session_config.rs` | 会话有效配置解析(profile / BYOK / effort) |
 //! | `prompt.rs` | 启动期 OS / 工具信息探测槽(系统提示词在 session_agent/prompt) |
-//! | `util/` | canonical interaction id |
 
 pub mod prompt;
 pub mod session_config;
-pub mod util;

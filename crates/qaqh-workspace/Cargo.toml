@@ -17,8 +17,6 @@ qaqh-permission = { path = "../qaqh-permission" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
-# PR-3-3 新增依赖边：workspace → qaqh_domain（R-4：仅限 Dashboard* 三类型，禁止事件类型）
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-types = { path = "../qaqh-types" }
 similar = { version = "3.1", features = ["text"] }
 serde = { version = "1", features = ["derive"] }

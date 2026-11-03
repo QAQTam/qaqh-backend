@@ -887,22 +887,74 @@ pub struct InteractionRow {
 }
 
 // ---------------------------------------------------------------------------
-// blobs
+// session content
 // ---------------------------------------------------------------------------
 
-/// 内容寻址大内容:同 hash 同字节,重复写入静默忽略。
-pub fn put_blob(conn: &mut Connection, hash: &str, bytes: &[u8]) -> rusqlite::Result<()> {
+/// Store binary content under the session that owns it. Bodies live in the
+/// business database and are removed with their session row.
+pub fn put_session_content(
+    conn: &Connection,
+    session_id: &str,
+    content_id: &str,
+    media_type: &str,
+    bytes: &[u8],
+    truncated: bool,
+) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO blobs (hash, bytes, size, created_at_ms) VALUES (?1, ?2, ?3, ?4)
-         ON CONFLICT(hash) DO NOTHING",
-        params![hash, bytes, bytes.len() as i64, now_ms()],
+        "INSERT INTO session_contents (session_id, content_id, media_type, bytes, truncated)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(session_id, content_id) DO UPDATE SET
+             media_type = excluded.media_type,
+             bytes = excluded.bytes,
+             truncated = excluded.truncated",
+        params![session_id, content_id, media_type, bytes, truncated],
     )?;
     Ok(())
 }
 
-pub fn get_blob(conn: &Connection, hash: &str) -> rusqlite::Result<Option<Vec<u8>>> {
-    conn.query_row("SELECT bytes FROM blobs WHERE hash = ?1", [hash], |row| {
-        row.get::<_, Vec<u8>>(0)
-    })
+pub fn get_session_content(
+    conn: &Connection,
+    session_id: &str,
+    content_id: &str,
+) -> rusqlite::Result<Option<(String, Vec<u8>, bool)>> {
+    conn.query_row(
+        "SELECT media_type, bytes, truncated FROM session_contents
+         WHERE session_id = ?1 AND content_id = ?2",
+        params![session_id, content_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
+    )
     .optional()
+}
+
+pub fn copy_session_content(
+    conn: &Connection,
+    source_session_id: &str,
+    target_session_id: &str,
+    content_id: &str,
+) -> rusqlite::Result<bool> {
+    let Some((media_type, bytes, truncated)) =
+        get_session_content(conn, source_session_id, content_id)?
+    else {
+        return Ok(false);
+    };
+    put_session_content(
+        conn,
+        target_session_id,
+        content_id,
+        &media_type,
+        &bytes,
+        truncated,
+    )?;
+    Ok(true)
+}
+
+pub fn session_content_owners(
+    conn: &Connection,
+    content_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT session_id FROM session_contents WHERE content_id = ?1 ORDER BY session_id",
+    )?;
+    let rows = statement.query_map([content_id], |row| row.get(0))?;
+    rows.collect()
 }

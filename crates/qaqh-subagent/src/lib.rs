@@ -27,7 +27,6 @@
 //! `register` retains the full tool set for explicit consumers and tests;
 //! it is not the production agent registrar during this suspension.
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
 
@@ -36,6 +35,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use qaqh_ringing::{ConversationSendMessage, RingingCommand};
+use qaqh_ringing_contract::commands::{
+    InterAgentEnvelope, SubagentTerminalKind, SubagentTerminalNotification,
+};
+use qaqh_ringing_contract::fact::InterAgentDelivery;
 use qaqh_tool_core::tool_api::{
     ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
     ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
@@ -52,13 +55,13 @@ pub use host::{
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
     BoardSubscriptionTarget, BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
-    CollectorBatch, CollectorEvent, CollectorSubscription, ContentRef, InterruptAgentRequest, InterruptedAgent,
-    ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
-    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
-    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
-    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
-    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, board_host, host, install_board_host,
-    install_host, install_task_host, task_host,
+    CollectorBatch, CollectorEvent, CollectorSubscription, ContentRef, InterruptAgentRequest,
+    InterruptedAgent, ListedAgent, ListedAgentResidency, ListedAgentStatus,
+    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
+    StartSubagentRequest, SubagentHost, TaskBoardArtifact, TaskBoardHost, TaskBoardTask,
+    TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
+    TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
+    board_host, host, install_board_host, install_host, install_task_host, task_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -327,7 +330,7 @@ impl TypedTool for SendMessageTool {
         ctx: &ToolCallContext,
         args: AgentMessageArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Queue)
+        handle_agent_message(ctx, args, InterAgentDelivery::Queue)
     }
 }
 
@@ -352,7 +355,7 @@ impl TypedTool for FollowupTaskTool {
         ctx: &ToolCallContext,
         args: AgentMessageArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Trigger)
+        handle_agent_message(ctx, args, InterAgentDelivery::Trigger)
     }
 }
 
@@ -377,7 +380,7 @@ impl TypedTool for SteerAgentTool {
         ctx: &ToolCallContext,
         args: AgentMessageArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Steer)
+        handle_agent_message(ctx, args, InterAgentDelivery::Steer)
     }
 }
 
@@ -402,7 +405,7 @@ impl TypedTool for InterjectAgentTool {
         ctx: &ToolCallContext,
         args: AgentMessageArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, qaqh_domain::InterAgentDelivery::Interject)
+        handle_agent_message(ctx, args, InterAgentDelivery::Interject)
     }
 }
 
@@ -685,7 +688,7 @@ impl TypedTool for InterruptAgentTool {
 fn handle_agent_message(
     ctx: &ToolCallContext,
     args: AgentMessageArgs,
-    delivery: qaqh_domain::InterAgentDelivery,
+    delivery: InterAgentDelivery,
 ) -> Result<AgentMessageOutput, ToolExecutionError> {
     if args.to.trim().is_empty() {
         return Err(subagent_error(
@@ -726,11 +729,11 @@ fn handle_agent_message(
         message_id: sent.message_id,
         recipient: sent.recipient,
         delivery: match sent.delivery {
-            qaqh_domain::InterAgentDelivery::Queue => "queue",
-            qaqh_domain::InterAgentDelivery::Trigger => "trigger",
-            qaqh_domain::InterAgentDelivery::Interrupt => "interrupt",
-            qaqh_domain::InterAgentDelivery::Steer => "steer",
-            qaqh_domain::InterAgentDelivery::Interject => "interject",
+            InterAgentDelivery::Queue => "queue",
+            InterAgentDelivery::Trigger => "trigger",
+            InterAgentDelivery::Interrupt => "interrupt",
+            InterAgentDelivery::Steer => "steer",
+            InterAgentDelivery::Interject => "interject",
         }
         .to_string(),
     })
@@ -842,10 +845,7 @@ impl SubagentTransport for HostTransport {
     fn send_command(&self, session_id: &str, command: RingingCommand) -> Result<bool, String> {
         // SessionClose 由 daemon registry 拦截处理（loop_core 会忽略该命令），
         // 进程内宿主直接执行 close（registry + 临时会话清理），语义一致。
-        if matches!(
-            &command,
-            RingingCommand::SessionClose {}
-        ) {
+        if matches!(&command, RingingCommand::SessionClose {}) {
             self.host.close(session_id)?;
             return Ok(true);
         }
@@ -1291,7 +1291,7 @@ fn collect_subagent_result(
     let mut exit_code: i32 = 0;
     let mut did_finish = false;
     let mut did_cancel = false;
-    let mut terminal = qaqh_domain::SubagentTerminalKind::Completed;
+    let mut terminal = SubagentTerminalKind::Completed;
     // 诊断：是否收到过子 seed 的任意事件（用于区分"子代理一开始就死了"
     // 与"中途卡死"——worker 侧 [SUBAGENT-WORKER] 日志 + 落盘开关配合）。
     let mut first_event_logged = false;
@@ -1314,7 +1314,7 @@ fn collect_subagent_result(
                 &final_answer,
             );
             exit_code = 1;
-            terminal = qaqh_domain::SubagentTerminalKind::TimedOut;
+            terminal = SubagentTerminalKind::TimedOut;
             break;
         }
         match transport.events().recv_timeout(Duration::from_millis(300)) {
@@ -1360,14 +1360,14 @@ fn collect_subagent_result(
                                     &final_answer,
                                 );
                                 exit_code = 1;
-                                terminal = qaqh_domain::SubagentTerminalKind::Failed;
+                                terminal = SubagentTerminalKind::Failed;
                             } else if cancelled {
                                 log::info!("[SUBAGENT] '{name}' conversation cancelled");
                                 final_answer = terminal_answer_with_partial(
                                     format!("[SUBAGENT '{name}' CANCELLED]"),
                                     &final_answer,
                                 );
-                                terminal = qaqh_domain::SubagentTerminalKind::Cancelled;
+                                terminal = SubagentTerminalKind::Cancelled;
                                 did_cancel = true;
                             } else {
                                 log::info!("[SUBAGENT] '{name}' turn completed");
@@ -1389,7 +1389,7 @@ fn collect_subagent_result(
                     "[SUBAGENT] '{name}' event stream closed, partial answer_len={}",
                     final_answer.len()
                 );
-                terminal = qaqh_domain::SubagentTerminalKind::Failed;
+                terminal = SubagentTerminalKind::Failed;
                 did_finish = true;
             }
         }
@@ -1408,19 +1408,13 @@ fn collect_subagent_result(
     // 主代理仍在运行中则进入回合 lap 边界的见缝插针通道。注入被 daemon 拒绝
     // （lease/compact 等）时重试一次并告警，避免静默丢失。
     let (state_tag, header) = match terminal {
-        qaqh_domain::SubagentTerminalKind::Completed => {
-            ("completed", format!("subagent '{name}' completed"))
-        }
-        qaqh_domain::SubagentTerminalKind::Failed => (
+        SubagentTerminalKind::Completed => ("completed", format!("subagent '{name}' completed")),
+        SubagentTerminalKind::Failed => (
             "error",
             format!("subagent '{name}' failed (exit={exit_code})"),
         ),
-        qaqh_domain::SubagentTerminalKind::Cancelled => {
-            ("cancelled", format!("subagent '{name}' cancelled"))
-        }
-        qaqh_domain::SubagentTerminalKind::TimedOut => {
-            ("timeout", format!("subagent '{name}' timed out"))
-        }
+        SubagentTerminalKind::Cancelled => ("cancelled", format!("subagent '{name}' cancelled")),
+        SubagentTerminalKind::TimedOut => ("timeout", format!("subagent '{name}' timed out")),
     };
     // T-1-2：被取消的子代理不得把结果注入父会话。取消是终态——父会话可能
     // 正是被用户取消（或本 collector 的 kill/timeout 路径）而停下的，注入会
@@ -1432,7 +1426,7 @@ fn collect_subagent_result(
         );
     }
     if !parent_session.is_empty() {
-        let terminal_notification = qaqh_domain::SubagentTerminalNotification {
+        let terminal_notification = SubagentTerminalNotification {
             child_session_id: child_session_id.to_string(),
             parent_call_id: parent_call_id.to_string(),
             terminal,
@@ -1442,45 +1436,42 @@ fn collect_subagent_result(
         } else {
             format!("subagent-result:{session_id}")
         };
-        let completion_inter_agent =
-            completion_route
-                .as_ref()
-                .map(|route| qaqh_domain::InterAgentEnvelope {
-                    message_id: completion_message_id.clone(),
-                    root_session_id: route.root_session_id.clone(),
-                    author: route.child_agent_path.clone(),
-                    recipient: route.parent_agent_path.clone(),
-                    other_recipients: vec![],
-                    task_id: None,
-                    reply_to: None,
-                    causation_id: None,
-                    delivery: qaqh_domain::InterAgentDelivery::Queue,
-                    created_at_ms: unix_ms(),
-                });
+        let completion_inter_agent = completion_route.as_ref().map(|route| InterAgentEnvelope {
+            message_id: completion_message_id.clone(),
+            root_session_id: route.root_session_id.clone(),
+            author: route.child_agent_path.clone(),
+            recipient: route.parent_agent_path.clone(),
+            other_recipients: vec![],
+            task_id: None,
+            reply_to: None,
+            causation_id: None,
+            delivery: InterAgentDelivery::Queue,
+            created_at_ms: unix_ms(),
+        });
         let v2_delivery = completion_inter_agent.is_some();
         let inject = RingingCommand::ConversationSendMessage(ConversationSendMessage {
-                text: if did_cancel {
-                    String::new()
-                } else {
-                    format!(
-                        "<qaqh_subagent_result name=\"{name}\" state=\"{state_tag}\" exit=\"{exit_code}\">\n{header}\n{final_answer}\n</qaqh_subagent_result>"
-                    )
-                },
-                images: vec![],
-                attachments: None,
-                message_id: Some(completion_message_id),
-                input_purpose: if did_cancel || v2_delivery {
-                    qaqh_ringing_contract::fact::InputPurpose::QueueOnly
-                } else {
-                    qaqh_ringing_contract::fact::InputPurpose::TriggerTurn
-                },
-                // V2 results are attributed inter-agent communications and are
-                // queue-only. The legacy fallback keeps its system injection
-                // shape until all callers carry a canonical route.
-                as_system: !v2_delivery,
-                inter_agent: completion_inter_agent,
-                subagent_terminal: Some(terminal_notification),
-            });
+            text: if did_cancel {
+                String::new()
+            } else {
+                format!(
+                    "<qaqh_subagent_result name=\"{name}\" state=\"{state_tag}\" exit=\"{exit_code}\">\n{header}\n{final_answer}\n</qaqh_subagent_result>"
+                )
+            },
+            images: vec![],
+            attachments: None,
+            message_id: Some(completion_message_id),
+            input_purpose: if did_cancel || v2_delivery {
+                qaqh_ringing_contract::fact::InputPurpose::QueueOnly
+            } else {
+                qaqh_ringing_contract::fact::InputPurpose::TriggerTurn
+            },
+            // V2 results are attributed inter-agent communications and are
+            // queue-only. The legacy fallback keeps its system injection
+            // shape until all callers carry a canonical route.
+            as_system: !v2_delivery,
+            inter_agent: completion_inter_agent,
+            subagent_terminal: Some(terminal_notification),
+        });
         let mut accepted = false;
         let mut last_rejected: Option<String> = None;
         const INJECT_ATTEMPTS: usize = 5;
@@ -1514,8 +1505,7 @@ fn collect_subagent_result(
             // 父会话。message_id 不变（幂等去重）；非取消场景在正文末尾追加
             // 结果指针（子会话 id），状态面此时已 record 可查。
             let mut fallback = inject.clone();
-            if let RingingCommand::ConversationSendMessage(message) = &mut fallback
-            {
+            if let RingingCommand::ConversationSendMessage(message) = &mut fallback {
                 message.input_purpose = qaqh_ringing_contract::fact::InputPurpose::QueueOnly;
                 if !did_cancel && !message.text.is_empty() {
                     message.text.push_str(&format!(
@@ -1558,10 +1548,7 @@ fn collect_subagent_result(
     // ── 自动卸载：终态后关闭子 agent（actor / worker 进程），释放后台资源。──
     // SessionClose 语义由进程内宿主直接执行（registry.close + 临时会话清理）。
     // 失败仅告警：结果已注入主会话 + 终态已回写注册表，残留不丢数据。
-    if let Err(e) = transport.send_command(
-        session_id,
-        RingingCommand::SessionClose {},
-    ) {
+    if let Err(e) = transport.send_command(session_id, RingingCommand::SessionClose {}) {
         log::warn!("[SUBAGENT] '{name}' close worker {session_id} failed: {e}");
     } else {
         log::info!("[SUBAGENT] '{name}' sub agent {session_id} closed (auto-unload)");
@@ -2067,7 +2054,7 @@ mod tests {
                             subagent_terminal: Some(terminal),
                             ..
                         }) if text.is_empty()
-                    && terminal.terminal == qaqh_domain::SubagentTerminalKind::Cancelled
+                    && terminal.terminal == SubagentTerminalKind::Cancelled
                     && terminal.child_session_id
                         == "0198f1a0-0000-7000-8000-000000000003"
             ),
@@ -2076,11 +2063,7 @@ mod tests {
         );
         assert!(
             sent.iter().any(|(session_id, command)| {
-                session_id == child
-                    && matches!(
-                        command,
-                        RingingCommand::SessionClose {}
-                    )
+                session_id == child && matches!(command, RingingCommand::SessionClose {})
             }),
             "子 worker 的自动卸载（SessionClose）不受抑制影响，实测: {sent:?}"
         );
@@ -2132,13 +2115,13 @@ mod tests {
             .find(|(session_id, _)| session_id == parent)
             .expect("completion must be delivered to the parent");
         let RingingCommand::ConversationSendMessage(ConversationSendMessage {
-                message_id,
-                input_purpose,
-                as_system,
-                inter_agent: Some(envelope),
-                subagent_terminal: Some(terminal),
-                ..
-            }) = &injected.1
+            message_id,
+            input_purpose,
+            as_system,
+            inter_agent: Some(envelope),
+            subagent_terminal: Some(terminal),
+            ..
+        }) = &injected.1
         else {
             panic!("unexpected completion command: {:?}", injected.1);
         };
@@ -2150,7 +2133,7 @@ mod tests {
             !*as_system,
             "V2 completion must use inter-agent attribution"
         );
-        assert_eq!(envelope.delivery, qaqh_domain::InterAgentDelivery::Queue);
+        assert_eq!(envelope.delivery, InterAgentDelivery::Queue);
         assert_eq!(envelope.author, "/root/complete_task");
         assert_eq!(envelope.recipient, "/root");
         assert_eq!(message_id.as_deref(), Some(envelope.message_id.as_str()));

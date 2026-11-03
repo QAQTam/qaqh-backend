@@ -5,7 +5,6 @@ members = [
     "crates/qaqh-config-api",
     "crates/qaqh-config",
     "crates/qaqh-profile",
-    "crates/qaqh-domain",
     "crates/qaqh-skills",
     "crates/qaqh-types",
     "crates/qaqh-siwc",

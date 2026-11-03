@@ -6,7 +6,6 @@ license.workspace = true
 description = "Ringing 线协议层（Wire）：envelope/ack/batch/snapshot/content ref/worker frame/能力协商"
 
 [dependencies]
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-profile = { path = "../qaqh-profile" }
 qaqh-types = { path = "../qaqh-types" }
@@ -18,7 +17,7 @@ ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-ser
 
 
 [features]
-ts = ["dep:ts-rs", "qaqh-domain/ts", "qaqh-profile/ts", "qaqh-types/ts"]
+ts = ["dep:ts-rs", "qaqh-profile/ts", "qaqh-types/ts"]
 
 [lints]
 workspace = true

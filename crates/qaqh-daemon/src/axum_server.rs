@@ -44,15 +44,11 @@ fn init_session_manager() {
 /// 鉴权矩阵测试共用 AppState:无 v2 投影(业务面已切 owner)。
 #[cfg(test)]
 pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
-    let hub = std::sync::Arc::new(qaqh_runtime::RingingHub::with_persistence(
-        String::from("test-epoch"),
-        std::env::temp_dir().join("qaqh-axum-test"),
-    ));
     let leases = std::sync::Arc::new(std::sync::Mutex::new(
-        qaqh_runtime::ringing::RingingLeaseStore::new(),
+        qaqh_ringing_runtime::RingingLeaseStore::new(),
     ));
     let pending = std::sync::Arc::new(std::sync::Mutex::new(
-        qaqh_runtime::ringing::PendingCommandStore::new(),
+        qaqh_ringing_runtime::PendingCommandStore::new(),
     ));
     static TEST_SERVICE: std::sync::OnceLock<qaqh_runtime::QaqhService> =
         std::sync::OnceLock::new();
@@ -62,6 +58,10 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
             qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
         })
         .clone();
+    let hub = std::sync::Arc::new(qaqh_ringing_runtime::RingingHub::with_database(
+        String::from("test-epoch"),
+        std::sync::Arc::clone(service.owners().db()),
+    ));
     let (shutdown, _) = tokio::sync::watch::channel(false);
     crate::axum_server::axum_impl::AppState {
         hub,
@@ -70,7 +70,7 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
         service,
         admin_token: String::from("test-token"),
         devices: std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_runtime::ringing::DeviceRegistry::new(),
+            qaqh_ringing_runtime::DeviceRegistry::new(),
         )),
         pairings: std::sync::Arc::new(std::sync::Mutex::new(
             crate::axum_server::PairingTable::new(),
