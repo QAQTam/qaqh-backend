@@ -281,17 +281,7 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             service
                 .write_title(&session_id, &title, TitleSource::User)
                 .map_err(QaqhError::message)?;
-            if let Some(hub) = service.v2_hub.get() {
-                let session_dir = service.sessions.session_path_dir(&session_id);
-                if let Err(error) = hub.publish_title_changed(
-                    &session_dir,
-                    &session_id,
-                    title,
-                    qaqh_session::session_fact_v2::TitleSource::User,
-                ) {
-                    log::warn!("[session] rename publish failed for {session_id}: {error}");
-                }
-            }
+            // 标题即业务库列;客户端经 GET state / session.list 取新值。
             Ok(Value::Null)
         }
         // ── Subagent orchestration ─────────────────────────────────────

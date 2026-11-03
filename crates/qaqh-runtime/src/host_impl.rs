@@ -8,24 +8,21 @@
 //! 工具 handler 通过该宿主句柄直达进程内 `AgentRegistry` + `RingingHub`，
 //! 不再建立 HTTP/SSE 连接。事件订阅直接走 hub 进程内 broadcast。
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use qaqh_ringing::RingingWorkerCommandEnvelope;
 use qaqh_session::canonical::generate_ulid;
-use qaqh_session::canonical::notify;
 use qaqh_session::projection::{MailboxProjection, Projection};
 use qaqh_session::session_fact_v2::{
     AgentPath, AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
-    ConversationDelta, EventId, LogId, ProjectionPayload, SessionId, TurnTerminal,
+    EventId, LogId, SessionId,
 };
 use qaqh_session::team::{
     BoardFact, BoardId, BoardPayload, BoardStore, BoardSubscriptionTarget, ChannelCreated,
     ChannelId, PostCreated, PostId, SubscriptionChanged, TaskAcceptanceSet, TaskArtifactAttached,
     TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot, TeamBoardSubscription,
-    TeamBoardSubscriptionTarget, TeamBoardThread, TeamTaskArtifact, TeamTaskSnapshot,
+    TeamBoardSubscriptionTarget, TeamBoardThread,
     TaskCancelled, TaskClaimed, TaskClosed, TaskCompleted, TaskCreated, TaskDependencyAdded,
     TaskId, TaskReleased, TaskState, TeamActor, TeamCreated, TeamFact, TeamId, TeamPayload,
     TeamStore, ThreadCreated, ThreadId, new_board_schema, new_team_schema,
@@ -44,62 +41,8 @@ use qaqh_subagent::{
 };
 
 use super::QaqhService;
-use crate::ringing::V2StreamItem;
-
-/// Observability counter: number of `mailbox_activity_after` invocations.
-///
-/// Each invocation re-opens the canonical reader and re-validates the
-/// committed prefix, so this doubles as an "idle wait I/O" probe. Used by
-/// the B2.3 regression (empty `wait_agent` must parse exactly once) and
-/// for diagnostics; not part of any wire contract.
-pub static MAILBOX_ACTIVITY_PARSE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 impl QaqhService {
-    /// Read mailbox activity strictly after `after_fact_seq`.
-    ///
-    /// Returns `(mailbox_activity_fact_seq, committed_fact_seq)`. Reopening the
-    /// reader each poll intentionally follows the durable commit marker rather
-    /// than an in-memory cache, so queue-only delivery is observable even when
-    /// the caller is blocked inside a tool.
-    fn mailbox_activity_after(
-        &self,
-        session_id: &str,
-        after_fact_seq: Option<u64>,
-    ) -> Result<(u64, u64), String> {
-        MAILBOX_ACTIVITY_PARSE_COUNT.fetch_add(1, Ordering::Relaxed);
-        let session_dir = self
-            .sessions
-            .session_dir_for_id(session_id)?
-            .ok_or_else(|| format!("mailbox session {session_id} has no canonical directory"))?;
-        let identity = qaqh_session::canonical::open_session_identity(&session_dir)
-            .map_err(|error| format!("open canonical identity for {session_id}: {error}"))?;
-        if identity.session_id.as_str() != session_id {
-            return Err(format!(
-                "mailbox session {session_id} identity is {}",
-                identity.session_id
-            ));
-        }
-        // A freshly allocated session can exist before its actor commits the
-        // first fact. Treat that as an empty mailbox rather than a recovery
-        // error; the next poll observes the newly committed marker. The probe
-        // must know both storage generations (`has_committed_facts`).
-        if !qaqh_session::canonical::has_committed_facts(&session_dir) {
-            return Ok((0, after_fact_seq.unwrap_or(0)));
-        }
-        let view = qaqh_session::canonical::read_session_facts_from(
-            &session_dir,
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-            after_fact_seq,
-        )
-        .map_err(|error| format!("read canonical facts for {session_id}: {error}"))?;
-        let mut mailbox = MailboxProjection::default();
-        for fact in &view.facts {
-            mailbox.apply(fact);
-        }
-        Ok((mailbox.last_activity_fact_seq(), view.head_fact_seq))
-    }
-
     /// Count queued messages from `author` to `recipient` in the target's
     /// canonical mailbox.
     ///
@@ -365,21 +308,8 @@ impl SubagentHost for QaqhService {
                 targets,
             );
         }
-        let (baseline_activity, mut cursor) =
-            self.mailbox_activity_after(caller_session_id, None)?;
-        let wait_dir = self
-            .sessions
-            .session_dir_for_id(caller_session_id)?
-            .ok_or_else(|| {
-                format!("mailbox session {caller_session_id} has no canonical directory")
-            })?;
-        // Block on durable-commit notifications instead of re-opening and
-        // re-validating the canonical log every 25ms (B2.3). The generation
-        // captured *after* the baseline read closes the lost-wakeup race: a
-        // commit racing the baseline is either already reflected in `cursor`
-        // or bumps the generation past `observed`, so the first loop
-        // iteration re-checks immediately.
-        let mut observed = notify::commit_generation(&wait_dir);
+        // 输入到达检测 = 回合循环的内存队列(排队输入 + 未合并 steer)。
+        // 旧 canonical commit 通知随旧框架退役;50ms 轮询对工具等待足够。
         let deadline = Instant::now() + timeout;
         loop {
             if should_cancel() {
@@ -387,24 +317,20 @@ impl SubagentHost for QaqhService {
             }
             if Instant::now() >= deadline {
                 return Ok(WaitAgentOutcome::TimedOut {
-                    activity_fact_seq: baseline_activity,
+                    activity_fact_seq: 0,
                 });
             }
-            // `false` means no commit notification arrived before the
-            // deadline: return without re-parsing (the acceptance contract is
-            // zero I/O for an empty wait).
-            if !notify::wait_for_commit_change(&wait_dir, observed, deadline) {
-                return Ok(WaitAgentOutcome::TimedOut {
-                    activity_fact_seq: baseline_activity,
-                });
+            {
+                let registry = self.registry()?;
+                if let Some(loop_) = registry.loop_for(caller_session_id)
+                    && loop_.pending_inputs() > 0
+                {
+                    return Ok(WaitAgentOutcome::Activity {
+                        activity_fact_seq: 1,
+                    });
+                }
             }
-            observed = notify::commit_generation(&wait_dir);
-            let (activity_fact_seq, committed_fact_seq) =
-                self.mailbox_activity_after(caller_session_id, Some(cursor))?;
-            cursor = committed_fact_seq;
-            if activity_fact_seq > baseline_activity {
-                return Ok(WaitAgentOutcome::Activity { activity_fact_seq });
-            }
+            std::thread::sleep(Duration::from_millis(50));
         }
     }
 
@@ -503,7 +429,7 @@ impl SubagentHost for QaqhService {
                 ..request
             },
         )?;
-        self.registry()?.mark_collector_armed(&child_session_id);
+        self.registry()?.mark_collector_armed(&child_session_id, request.parent_call_id);
         Ok(())
     }
 
@@ -554,41 +480,26 @@ impl SubagentHost for QaqhService {
 
     fn subscribe(&self, session_id: &str) -> CollectorSubscription {
         let (tx, rx) = mpsc::channel::<CollectorBatch>();
-        let Some(v2) = self.v2_hub.get().cloned() else {
-            log::error!("[SUBAGENT-HOST] subscribe {session_id}: v2 projection hub not attached");
-            return CollectorSubscription::new(rx, || {});
-        };
-        let session_dir = match self.sessions.session_dir_for_id(session_id).ok().flatten() {
-            Some(dir) => dir,
-            None => {
-                log::error!("[SUBAGENT-HOST] subscribe {session_id}: session dir not found");
-                return CollectorSubscription::new(rx, || {});
-            }
-        };
-        // since_cursor = None → 只收 live 事件，与 v1 桥接的订阅时机语义一致。
-        let mut sub = match v2.subscribe(&session_dir, session_id, None) {
-            Ok(sub) => sub,
-            Err(error) => {
-                log::error!("[SUBAGENT-HOST] subscribe {session_id}: v2 subscribe failed: {error}");
-                return CollectorSubscription::new(rx, || {});
-            }
-        };
+        // owner 单流广播即子代理输出源:Answer 块 seal → AnswerSealed,
+        // 回合终态 → TurnFinished。只收 live 事件(订阅点即起点),
+        // 与旧桥接的订阅时机语义一致。
+        let mut event_rx = self.owners().get_or_create(session_id).subscribe();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
+        let bridge_session = session_id.to_string();
         let bridge = std::thread::Builder::new()
             .name(format!("qaqh-subagent-sub-{session_id}"))
             .spawn(move || {
-                // hub-fact-bus spec 阶段 2.2：v2 单流桥接。广播 Receiver 是
-                // Send，用 try_recv 轮询（无 block_on 依赖），聚合到 std mpsc。
                 loop {
                     if stop_rx.try_recv().is_ok() {
                         break;
                     }
-                    match sub.try_next_status() {
-                        Ok(Some(V2StreamItem::Event(envelope))) => {
-                            if let Some(event) = collector_event_from_projection(&envelope.payload)
+                    match event_rx.blocking_recv() {
+                        Ok(frame) => {
+                            if let Some(event) =
+                                collector_event_from_session_event(&frame.event)
                             {
                                 let batch = CollectorBatch {
-                                    session_id: envelope.session_id.clone(),
+                                    session_id: bridge_session.clone(),
                                     events: vec![event],
                                 };
                                 if tx.send(batch).is_err() {
@@ -596,13 +507,10 @@ impl SubagentHost for QaqhService {
                                 }
                             }
                         }
-                        // Lagged/流终止：与 v1 桥接一致直接退出（收集器有
-                        // 超时与 Disconnected 兜底）。
-                        Ok(Some(V2StreamItem::Reset(_))) | Err(()) => break,
-                        Ok(None) => match stop_rx.recv_timeout(Duration::from_millis(20)) {
-                            Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        },
+                        // Lagged:收集器侧有超时与 Disconnected 兜底,丢一段
+                        // 输出不中断收集;Closed = owner 已销毁。
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             })
@@ -699,7 +607,6 @@ impl TaskBoardHost for QaqhService {
                 }),
             ))
             .map_err(|error| format!("task_create failed: {error}"))?;
-        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -727,7 +634,6 @@ impl TaskBoardHost for QaqhService {
         store
             .append(team_fact(&root, actor, payload))
             .map_err(|error| format!("task_claim failed: {error}"))?;
-        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -776,7 +682,6 @@ impl TaskBoardHost for QaqhService {
         store
             .append(team_fact(&root, actor, payload))
             .map_err(|error| format!("task_update failed: {error}"))?;
-        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -809,7 +714,6 @@ impl TaskBoardHost for QaqhService {
         store
             .append(team_fact(&root, actor, payload))
             .map_err(|error| format!("task_close failed: {error}"))?;
-        self.publish_task_change(&root, &store, task_id.as_str());
         find_task(&store, task_id.as_str())
     }
 
@@ -849,7 +753,6 @@ impl BoardHost for QaqhService {
                 }),
             ))
             .map_err(|error| format!("board_channel_create failed: {error}"))?;
-        self.publish_board_change(&root, &store);
         find_board_channel(&store, channel_id.as_str())
     }
 
@@ -879,7 +782,6 @@ impl BoardHost for QaqhService {
                 }),
             ))
             .map_err(|error| format!("board_thread_create failed: {error}"))?;
-        self.publish_board_change(&root, &store);
         find_board_thread(&store, thread_id.as_str())
     }
 
@@ -924,8 +826,7 @@ impl BoardHost for QaqhService {
                     }),
                 ))
                 .map_err(|error| format!("board_post failed: {error}"))?;
-            self.publish_board_change(&root, &store);
-            let post = find_board_post(&store, post_id.as_str())?;
+                let post = find_board_post(&store, post_id.as_str())?;
             let targets = board_notification_targets(
                 &store.snapshot(),
                 &thread.channel_id,
@@ -969,7 +870,6 @@ impl BoardHost for QaqhService {
                 }),
             ))
             .map_err(|error| format!("board_subscribe failed: {error}"))?;
-        self.publish_board_change(&root, &store);
         find_board_subscription(&store, &target, actor.agent_path.as_str())
     }
 
@@ -1103,26 +1003,6 @@ impl QaqhService {
         Ok(store.snapshot())
     }
 
-    fn publish_task_change(&self, root_session_id: &str, store: &TeamStore, task_id: &str) {
-        let snapshot = store.snapshot();
-        let Some(task) = snapshot
-            .tasks
-            .iter()
-            .find(|task| task.task_id.as_str() == task_id)
-        else {
-            return;
-        };
-        let Some(v2_hub) = self.v2_hub.get() else {
-            return;
-        };
-        let session_dir = self.sessions.session_path_dir(root_session_id);
-        if let Err(error) =
-            v2_hub.publish_task_delta(&session_dir, root_session_id, task_view_to_wire(task))
-        {
-            log::warn!("[team] task delta publish failed for {root_session_id}: {error}");
-        }
-    }
-
     fn board_store_for_caller(
         &self,
         caller_session_id: &str,
@@ -1189,20 +1069,6 @@ impl QaqhService {
         let (store, _actor) = self.board_store_for_caller(caller_session_id)?;
         let store = store.lock().unwrap_or_else(|error| error.into_inner());
         Ok(board_to_wire(&store.snapshot()))
-    }
-
-    fn publish_board_change(&self, root_session_id: &str, store: &BoardStore) {
-        let Some(v2_hub) = self.v2_hub.get() else {
-            return;
-        };
-        let session_dir = self.sessions.session_path_dir(root_session_id);
-        if let Err(error) = v2_hub.publish_board_change(
-            &session_dir,
-            root_session_id,
-            board_to_wire(&store.snapshot()),
-        ) {
-            log::warn!("[team] board delta publish failed for {root_session_id}: {error}");
-        }
     }
 
     fn notify_board_post(
@@ -1712,34 +1578,6 @@ fn task_state_name(state: TaskState) -> &'static str {
     }
 }
 
-fn task_view_to_wire(task: &qaqh_session::team::TaskView) -> TeamTaskSnapshot {
-    TeamTaskSnapshot {
-        task_id: task.task_id.as_str().to_string(),
-        title: task.title.clone(),
-        state: task_state_name(task.state).to_string(),
-        owner: task.owner.as_ref().map(|owner| owner.agent_path.clone()),
-        claim_epoch: task.claim_epoch,
-        depends_on: task
-            .depends_on
-            .iter()
-            .map(|task_id| task_id.as_str().to_string())
-            .collect(),
-        artifacts: task
-            .artifacts
-            .iter()
-            .map(|artifact| TeamTaskArtifact {
-                content_ref: artifact.artifact_ref.clone(),
-                media_type: artifact.media_type.clone(),
-                added_at_ms: artifact.added_at_ms,
-            })
-            .collect(),
-        acceptance: task.acceptance.clone(),
-        result_ref: task.result_ref.clone(),
-        created_at_ms: task.created_at_ms,
-        updated_at_ms: task.updated_at_ms,
-    }
-}
-
 fn parse_task_state(state: &str) -> Result<TaskState, String> {
     match state.trim().to_ascii_lowercase().as_str() {
         "open" => Ok(TaskState::Open),
@@ -1751,39 +1589,48 @@ fn parse_task_state(state: &str) -> Result<TaskState, String> {
     }
 }
 
-/// ProjectionPayload → 收集器事件（hub-fact-bus spec 阶段 2.2）。
+/// 会话事件 → 收集器事件。
 ///
-/// 只翻译收集器关心的语义：终答正文（Answer block seal）与 turn 终态。
-/// v1 的 `Control(OperationFailed)` 仅记日志且 fact 侧无对应物，不再翻译。
-fn collector_event_from_projection(payload: &ProjectionPayload) -> Option<CollectorEvent> {
-    match payload {
-        ProjectionPayload::ConversationDelta(ConversationDelta::AssistantBlockSealed {
-            block_kind: AssistantBlockKind::Answer,
-            content,
-            ..
-        }) => Some(CollectorEvent::AnswerSealed {
+/// 只翻译收集器关心的语义:终答正文(Answer 块 seal)与回合终态。
+fn collector_event_from_session_event(
+    event: &qaqh_ringing_contract::events::SessionEvent,
+) -> Option<CollectorEvent> {
+    use qaqh_ringing_contract::events::SessionEvent;
+    use qaqh_ringing_contract::fact::InterruptReason;
+    use qaqh_ringing_contract::state::{TimelineEntry, TurnOutcome};
+    match event {
+        SessionEvent::TimelineAppended {
+            entry:
+                TimelineEntry::AssistantBlock {
+                    block_kind: AssistantBlockKind::Answer,
+                    content,
+                    ..
+                },
+        } => Some(CollectorEvent::AnswerSealed {
             text: match content {
                 ContentValue::Inline { text } => Some(text.clone()),
                 _ => None,
             },
-            output_ref: match content {
-                ContentValue::Ref { content_ref } => Some(qaqh_types::ContentRef {
-                    content_id: content_ref.0.as_str().to_string(),
-                    media_type: "text/plain".to_string(),
-                    sha256: content_ref.0.as_str().to_string(),
-                    truncated: false,
-                }),
+            output_ref: None,
+        }),
+        SessionEvent::TurnEnded { outcome, .. } => Some(CollectorEvent::TurnFinished {
+            failed: match outcome {
+                TurnOutcome::Finished { error, .. } => error.is_some(),
+                TurnOutcome::Interrupted { .. } => true,
+            },
+            cancelled: matches!(
+                outcome,
+                TurnOutcome::Interrupted {
+                    reason: InterruptReason::CancelBeforeSeal,
+                }
+            ),
+            error: match outcome {
+                TurnOutcome::Finished {
+                    error: Some(error), ..
+                } => Some(format!("{}: {}", error.code, error.message)),
+                TurnOutcome::Interrupted { reason } => Some(format!("{reason:?}")),
                 _ => None,
             },
-        }),
-        ProjectionPayload::ConversationDelta(ConversationDelta::TurnFinished {
-            terminal,
-            error,
-            ..
-        }) => Some(CollectorEvent::TurnFinished {
-            failed: matches!(terminal, TurnTerminal::Failed),
-            cancelled: matches!(terminal, TurnTerminal::Cancelled),
-            error: error.as_ref().map(|e| format!("{}: {}", e.code, e.message)),
         }),
         _ => None,
     }

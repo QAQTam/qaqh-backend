@@ -171,7 +171,7 @@ async fn pair_device(router: &Router, scope: &str) -> (String, String) {
 
 #[tokio::test]
 async fn health_is_public_and_unknown_path_requires_auth() {
-    let app = build_router(super::axum_tests::test_state());
+    let app = build_router(super::test_state());
     let health = app
         .clone()
         .oneshot(request("GET", "/health", None, None, None))
@@ -188,7 +188,7 @@ async fn health_is_public_and_unknown_path_requires_auth() {
 
 #[tokio::test]
 async fn unknown_or_revoked_token_is_unauthorized() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
 
     let bogus = app
@@ -234,7 +234,7 @@ async fn unknown_or_revoked_token_is_unauthorized() {
 
 #[tokio::test]
 async fn pairing_requires_admin_and_token_is_one_shot() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
 
     // 设备 token 调配对签发 → 403 insufficient_scope。
@@ -314,7 +314,7 @@ async fn pairing_requires_admin_and_token_is_one_shot() {
 
 #[tokio::test]
 async fn view_token_cannot_read_unattached_session() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
     let (token, _, cs) = open_device(&app, &state, Scope::View).await;
 
@@ -334,7 +334,7 @@ async fn view_token_cannot_read_unattached_session() {
 
 #[tokio::test]
 async fn view_token_cannot_issue_non_attach_command() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
     let (token, _, cs) = open_device(&app, &state, Scope::View).await;
 
@@ -348,7 +348,7 @@ async fn view_token_cannot_issue_non_attach_command() {
 /// （`SessionAttach` 仅建立归属、不触碰 actor，故 scope 门槛降为 view。）
 #[tokio::test]
 async fn view_token_can_attach_then_read() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
     let (token, _, cs) = open_device(&app, &state, Scope::View).await;
 
@@ -376,7 +376,7 @@ async fn view_token_can_attach_then_read() {
 
 #[tokio::test]
 async fn interact_token_attach_establishes_ownership() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
     let (token, _, cs) = open_device(&app, &state, Scope::Interact).await;
 
@@ -412,7 +412,7 @@ async fn interact_token_attach_establishes_ownership() {
 
 #[tokio::test]
 async fn command_rejects_foreign_target_session() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
     let (token, _, cs) = open_device(&app, &state, Scope::Interact).await;
 
@@ -424,7 +424,7 @@ async fn command_rejects_foreign_target_session() {
 
 #[tokio::test]
 async fn device_cannot_impersonate_other_lease() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
     let (_t1, _d1, cs1) = open_device(&app, &state, Scope::View).await;
     let (t2, _d2, cs2) = open_device(&app, &state, Scope::View).await;
@@ -463,7 +463,7 @@ async fn device_cannot_impersonate_other_lease() {
 
 #[tokio::test]
 async fn admin_is_exempt_from_ownership_and_scope() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
 
     let open = app
@@ -498,7 +498,7 @@ async fn admin_is_exempt_from_ownership_and_scope() {
 
 #[tokio::test]
 async fn devices_list_excludes_token_material() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
     let (device_token, device_id) = pair_device(&app, "view").await;
 
@@ -536,7 +536,7 @@ async fn devices_list_excludes_token_material() {
 /// 3. 设备请求从未触达凭据存储（临时目录里不出现 `chatgpt-auth.json`）。
 #[tokio::test]
 async fn siwc_methods_deny_devices_and_serve_admin_without_tokens() {
-    let state = super::axum_tests::test_state();
+    let state = super::test_state();
     let app = build_router(state.clone());
 
     // 先接到临时目录：万一某个设备请求真的漏过了 scope 裁决，污染的是 tmp

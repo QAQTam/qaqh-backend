@@ -24,10 +24,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
-use qaqh_domain::RingingChannel;
 use qaqh_ringing::{
     RingingCommandAckStatus, RingingCommandState, RingingV2CommandAck, RingingV2CommandEnvelope,
-    RingingV2ContentValue,
 };
 use qaqh_runtime::ringing::{
     DeviceRegistry, PendingCommandStore, RingingLeaseStore, Scope, service_methods,
@@ -50,8 +48,6 @@ pub(crate) mod test_hooks;
 pub mod unified;
 pub mod v2;
 
-#[cfg(test)]
-pub(crate) use auth::parse_channel;
 pub(crate) use auth::{
     get_session_id, is_authorized, lease_required_json, session_close_session, unauthorized,
 };
@@ -81,7 +77,6 @@ fn lease_ttl_ms() -> u64 {
 #[derive(Clone)]
 pub struct AppState {
     pub hub: Arc<RingingHub>,
-    pub v2_hub: Arc<qaqh_runtime::ringing::V2ProjectionHub>,
     pub leases: Arc<Mutex<RingingLeaseStore>>,
     pub pending: Arc<Mutex<PendingCommandStore>>,
     pub service: QaqhService,
@@ -190,16 +185,6 @@ pub fn build_router(state: AppState) -> Router {
 #[cfg(test)]
 pub(crate) mod pure_tests {
     use super::*;
-    #[test]
-    fn channel_parsing() {
-        assert_eq!(parse_channel("control"), Some(RingingChannel::Control));
-        assert_eq!(
-            parse_channel("conversation"),
-            Some(RingingChannel::Conversation)
-        );
-        assert_eq!(parse_channel("tool"), Some(RingingChannel::Tool));
-        assert_eq!(parse_channel("bogus"), None);
-    }
     #[test]
     fn session_close_session_resolution_prefers_command_session() {
         assert_eq!(

@@ -20,10 +20,8 @@ fn main() {
                 on_liveness: std::sync::Arc::new(|| {}),
                 on_v2_event: std::sync::Arc::new(|session_id, event| {
                     println!(
-                        "[event] seed={session_id} id={} delivery={:?} cursor={:?}",
-                        event.event_id,
-                        event.delivery,
-                        event.cursor.as_ref().map(|c| c.as_str()),
+                        "[event] seed={session_id} seq={}",
+                        event.seq,
                     );
                 }),
                 on_v2_reset: std::sync::Arc::new(|session_id, reset| {

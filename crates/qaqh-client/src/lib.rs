@@ -81,30 +81,12 @@ pub use types::{
     ToolCommand, ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult,
     ToolStatus, UsageInfo, is_safe_integer,
 };
-pub use v2::projection as session_projection;
 pub use v2::{
-    CLIENT_V2_END_OF_FACT, ClientV2Bootstrap, ClientV2ControlState, ClientV2ConversationState,
-    ClientV2Event, ClientV2EventEnvelope, ClientV2SessionState, ClientV2Subscription,
-    ClientV2SubscriptionEvent, ClientV2TeamResponse, ClientV2ToolState, RINGING_V2_BASE_PATH,
-    RINGING_V2_VERSION, fact::ActivityState, fact::ActorRef, fact::ContentValue,
-    fact::ControlDelta, fact::ConversationDelta, fact::DeleteReason, fact::InterAgentDelivery,
-    fact::InteractionDecision, fact::InteractionExpiryReason, fact::InteractionId, fact::MetaDelta,
-    fact::ProjectionPayload, fact::ResourceDelta, fact::SubagentTerminalStatus,
-    contract_team::TeamAgentResidency, contract_team::TeamAgentSnapshot, contract_team::TeamAgentStatus,
-    contract_team::TeamBoardSnapshot, contract_team::TeamDelta, contract_team::TeamInboxSummary,
-    contract_team::TeamTaskSnapshot,
-    fact::ToolCallId, fact::TurnId, fact::TurnTerminal, projection::ConversationContextKind,
-    projection::TeamSnapshot, ringing::CanonicalCursor, ringing::CursorToken,
-    ringing::RingingV2ContentValue, ringing_v2::RingingV2AskOutcome,
-    ringing_v2::RingingV2Capabilities, ringing_v2::RingingV2CommandAck,
-    ringing_v2::RingingV2CommandResult, ringing_v2::RingingV2CommandStatus,
-    ringing_v2::RingingV2Delivery, ringing_v2::RingingV2DriverState,
-    ringing_v2::RingingV2ExistingResult, ringing_v2::RingingV2InteractionKind,
-    ringing_v2::RingingV2PendingInteraction, ringing_v2::RingingV2PendingSet,
-    ringing_v2::RingingV2ResetReason, ringing_v2::RingingV2ResetRequired,
-    ringing_v2::RingingV2StreamKey, team::TaskBoardSnapshot,
+    CLIENT_V2_END_OF_FACT, ClientV2Bootstrap, ClientV2Event, ClientV2EventEnvelope,
+    ClientV2ResyncRequired, ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent,
+    ClientV2TeamResponse, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
 /// The v2 contract exposes the session fact model under its real module
 /// names; there is no `ClientV2*` renaming layer.
-pub use v2::{fact, ringing, ringing_v2, team};
+pub use v2::{fact, ringing, ringing_v2};
 pub use v2_stream::{V2Stream, V2StreamHandlers, V2StreamStatus};

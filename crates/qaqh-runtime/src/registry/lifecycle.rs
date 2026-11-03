@@ -34,82 +34,70 @@ impl AgentRegistry {
         self.subagent_outcomes.contains_key(child_session_id)
     }
 
-    /// Commit a metadata patch through the running actor.
+    /// Commit a metadata patch to the session's business row.
     ///
-    /// The actor owns the journal's single-writer lock, so a second
-    /// `SessionCommit` cannot be opened while it lives. Callers fall back to a
-    /// direct journal write only when this returns an error.
+    /// SQLite sessions 列承载 cwd/model/effort/profile/mode/tool_mode/
+    /// archived/ephemeral;skills/custom_tools 等暂无业务列的字段继续由
+    /// meta 存储承载(随 P3-D 旧 meta 存储迁移一并收敛)。
     pub(crate) fn write_session_metadata(
         &self,
         session_id: &str,
         patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
     ) -> Result<(), String> {
-        let Some(instance) = self.instances.get(session_id) else {
-            return Err(format!("session {session_id} has no running actor"));
+        let columns = qaqh_session::db::store::SessionColumnPatch {
+            title: None,
+            cwd: patch.cwd.clone(),
+            model: patch.model.clone(),
+            effort: patch.effort.clone(),
+            profile: patch.profile.clone(),
+            mode: patch.mode.map(|mode| mode.to_string()),
+            tool_mode: patch.tool_mode.clone(),
+            archived: patch.archived,
+            ephemeral: patch.ephemeral,
         };
-        let AgentTransport::ThinAgent { handle, .. } = &instance.transport;
-        handle
-            .set_metadata(patch)
-            .map_err(|error| format!("{error:?}"))
+        let owned = session_id.to_string();
+        self.owners
+            .db()
+            .write_blocking(move |conn| {
+                qaqh_session::db::store::update_session_columns(conn, &owned, &columns)
+            })
+            .map_err(|error| format!("business session update for {session_id}: {error}"))?;
+        qaqh_session::meta::patch(crate::session_meta::dir(session_id), patch)
     }
 
-    /// Commit a title change through the running actor.
+    /// Commit a title change to the session's business row (title is a column).
     pub(crate) fn write_session_title(
         &self,
         session_id: &str,
         title: &str,
         source: qaqh_session::session_fact_v2::TitleSource,
     ) -> Result<(), String> {
-        let Some(instance) = self.instances.get(session_id) else {
-            return Err(format!("session {session_id} has no running actor"));
-        };
-        let AgentTransport::ThinAgent { handle, .. } = &instance.transport;
-        handle
-            .set_title(title, source)
-            .map_err(|error| format!("{error:?}"))
-    }
-
-    pub(crate) fn subagent_spawn_config(
-        &self,
-        parent_id: &str,
-        child_id: &str,
-    ) -> QaqhResult<(SubagentSpawnConfig, String)> {
-        let parent_dir = self.sessions.session_path_dir(parent_id);
-        let identity = CanonicalSessionIdentity::open(&parent_dir)
-            .map_err(|error| format!("open parent canonical identity for {parent_id}: {error}"))?;
-        let reader = CommittedFactReader::open(
-            &parent_dir,
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-        )
-        .map_err(|error| format!("open parent canonical facts for {parent_id}: {error}"))?;
-        let child_id = SessionId::new(child_id);
-        reader
-            .read_all()
-            .map_err(|error| format!("read parent canonical facts for {parent_id}: {error}"))?
-            .into_iter()
-            .rev()
-            .find_map(|fact| match fact.payload {
-                FactPayload::SubagentSpawned(payload) if payload.child_session_id == child_id => {
-                    payload
-                        .spawn_config
-                        .map(|config| (config, payload.parent_call_id.as_str().to_string()))
+        let owned = session_id.to_string();
+        let title = title.to_string();
+        self.owners
+            .db()
+            .write_blocking({
+                let title = title.clone();
+                move |conn| {
+                    qaqh_session::db::store::update_session_columns(
+                        conn,
+                        &owned,
+                        &qaqh_session::db::store::SessionColumnPatch {
+                            title: Some(title),
+                            ..Default::default()
+                        },
+                    )
                 }
-                _ => None,
             })
-            .ok_or_else(|| {
-                format!(
-                    "child agent {child_id} has no canonical spawn config in parent {parent_id}"
-                )
-                .into()
-            })
+            .map_err(|error| format!("business title update for {session_id}: {error}"))?;
+        qaqh_session::meta::set_title(crate::session_meta::dir(session_id), &title, source)
     }
 
     pub(crate) fn prepare_collector_arm(
         &mut self,
         child_id: &str,
     ) -> QaqhResult<Option<CollectorArmSpec>> {
-        if self.armed_collectors.contains(child_id) {
+        if self.armed_collectors.contains_key(child_id) {
             return Ok(None);
         }
         let child = self
@@ -136,9 +124,9 @@ impl AgentRegistry {
             )
             .into());
         }
-        let (config, parent_call_id) =
-            self.subagent_spawn_config(parent.agent_id.as_str(), child_id)?;
-        self.armed_collectors.insert(child_id.to_string());
+        let parent_call_id = self.armed_collectors.get(child_id).cloned().unwrap_or_default();
+        self.armed_collectors
+            .insert(child_id.to_string(), parent_call_id.clone());
         Ok(Some(CollectorArmSpec {
             child_session_id: child.agent_id.as_str().to_string(),
             name: child.role.clone().unwrap_or_else(|| {
@@ -152,15 +140,18 @@ impl AgentRegistry {
             }),
             parent_session_id: parent.agent_id.as_str().to_string(),
             parent_call_id,
-            timeout_secs: config.timeout_secs,
+            // 收集器超时:spawn spec 不再携带 canonical 超时配置,取 15 分钟
+            // 上界(子代理回合自身有 provider/tool 超时兜底)。
+            timeout_secs: 900,
             root_session_id: child.root_session_id.as_str().to_string(),
             parent_agent_path: parent.agent_path.as_str().to_string(),
             child_agent_path: child.agent_path.as_str().to_string(),
         }))
     }
 
-    pub(crate) fn mark_collector_armed(&mut self, child_id: &str) {
-        self.armed_collectors.insert(child_id.to_string());
+    pub(crate) fn mark_collector_armed(&mut self, child_id: &str, parent_call_id: &str) {
+        self.armed_collectors
+            .insert(child_id.to_string(), parent_call_id.to_string());
     }
 
     pub(crate) fn unmark_collector_armed(&mut self, child_id: &str) {
@@ -270,37 +261,27 @@ impl AgentRegistry {
             }
             let delivered = match self.instances.get(&child) {
                 Some(AgentInstance {
-                    transport: AgentTransport::ThinAgent { handle, .. },
+                    transport: AgentTransport::Loop { loop_ },
                     ..
-                }) => handle.cancel(None, "subagent-parent-cancel").is_ok(),
+                }) => {
+                    loop_.cancel_turn(None);
+                    true
+                }
                 None => false,
             };
             log::info!(
                 "[subagent] parent cancel {parent} propagated to child {child} (delivered={delivered})"
             );
-            // 子 actor 自身分派取消时不经过 registry，孙代在此逐层传播。
+            // 子循环自身分派取消时不经过 registry，孙代在此逐层传播。
             self.cancel_subagent_children(&child);
         }
     }
 
-    /// Test/ops hook: the idle-unload liveness handle of a worker, if it has
-    /// one (in-process actors only).
-    #[doc(hidden)]
-    pub fn worker_liveness(
-        &self,
-        session_id: &str,
-    ) -> Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>> {
-        self.instances
-            .get(session_id)
-            .and_then(|instance| instance.liveness.clone())
-    }
-
-    /// E: idle-unload workers whose last dispatch is older than `idle_secs`.
-    /// Only in-process Session actors participate; subagents are short-lived
-    /// and legacy process workers have no liveness handle. The close path is
-    /// the regular graceful shutdown (signal → join → drop bundle → final
-    /// flush/drain), so the next input resumes from disk via
-    /// `load_for_resume`. Returns the seeds that were unloaded.
+    /// E: idle-unload loops whose last turn activity is older than `idle_secs`.
+    /// The idle clock comes from the loop itself (last turn start/finish);
+    /// only a settled (idle) session may go. The close path is the regular
+    /// graceful shutdown (cancel + abandon), so the next input resumes from
+    /// SQLite via a fresh loop. Returns the seeds that were unloaded.
     pub fn unload_idle_sessions(&mut self, idle_secs: u64) -> Vec<String> {
         if self.shutting_down || idle_secs == 0 {
             return Vec::new();
@@ -309,18 +290,10 @@ impl AgentRegistry {
             .instances
             .iter()
             .filter_map(|(session_id, instance)| {
-                if let Some(liveness) = instance.liveness.as_ref() {
-                    return (liveness.unloadable() && liveness.idle_secs() >= idle_secs)
-                        .then(|| session_id.clone());
-                }
-                // Thin agents have no liveness handle: idle is derived from the
-                // activity tracker, and only a settled (idle) session may go.
-                let activity = self.activity.get(session_id)?;
-                if activity.state != qaqh_domain::ActivityState::Idle {
-                    return None;
-                }
-                let idle_ms = unix_ms().saturating_sub(activity.updated_at as i64);
-                (idle_ms >= (idle_secs as i64).saturating_mul(1000)).then(|| session_id.clone())
+                let AgentTransport::Loop { loop_ } = &instance.transport;
+                (loop_.activity_state() == qaqh_ringing_contract::fact::ActivityState::Idle
+                    && loop_.idle_secs() >= idle_secs)
+                    .then(|| session_id.clone())
             })
             .collect();
         let mut unloaded = Vec::new();
@@ -328,8 +301,9 @@ impl AgentRegistry {
             let idle = self
                 .instances
                 .get(&session_id)
-                .and_then(|instance| instance.liveness.as_ref())
-                .map(|liveness| liveness.idle_secs())
+                .map(|instance| match &instance.transport {
+                    AgentTransport::Loop { loop_ } => loop_.idle_secs(),
+                })
                 .unwrap_or(0);
             log::info!("[registry] idle unload seed={session_id} idle={idle}s");
             self.close(&session_id);
