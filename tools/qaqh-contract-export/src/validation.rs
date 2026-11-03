@@ -107,6 +107,31 @@ pub(super) fn validate(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 .into());
             }
         }
+        // B02 路由漂移闸:coverage 声明的单一 Ringing v2 路由必须出现在
+        // 契约路由表(daemon build_router 亦由该表驱动)。组合路径
+        // ("A + B")与控制面端点不在本闸内;service/{method} 参数化端点
+        // 归一到路由表字面量后再比对。
+        let method = capability["method"].as_str().unwrap_or_default();
+        let path = capability["path"].as_str().unwrap_or_default();
+        let path = path
+            .strip_prefix("/ringing/v2/service/")
+            .map(|_| "/ringing/v2/service/{method}")
+            .unwrap_or(path);
+        if path.starts_with("/ringing/v2/") && !path.contains('+') {
+            let known = qaqh_ringing::RINGING_V2_HTTP_ROUTES.iter().any(
+                |(route_method, route_path)| {
+                    *route_path == path
+                        && (method == *route_method
+                            || method.split(" + ").any(|part| part.trim() == *route_method))
+                },
+            );
+            if !known {
+                return Err(format!(
+                    "coverage capability {id} declares route {method} {path} that is not in RINGING_V2_HTTP_ROUTES"
+                )
+                .into());
+            }
+        }
     }
     Ok(())
 }

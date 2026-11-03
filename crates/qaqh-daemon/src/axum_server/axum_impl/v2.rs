@@ -80,6 +80,8 @@ pub(crate) async fn handle_open_v2(
             single_stream: true,
             pairing: true,
         },
+        // B07:命令目录代际随握手下发,客户端在发命令前即可校验兼容性。
+        command_contract_revision: qaqh_ringing::COMMAND_CONTRACT_REVISION.into(),
     };
     json_response(StatusCode::OK, &response)
 }
@@ -156,7 +158,7 @@ pub(crate) async fn handle_bootstrap_v2(
         return response;
     }
     let owner = state.service.owners().get_or_create(&session_id);
-    let snapshot = match owner.snapshot().await {
+    let mut snapshot = match owner.snapshot().await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return api_error_response(
@@ -166,6 +168,9 @@ pub(crate) async fn handle_bootstrap_v2(
             );
         }
     };
+    // driver 席位归属 daemon(内存);overlay 进快照,claim/release 经 owner
+    // 发 DriverChanged 保持实时一致。
+    snapshot.driver = state.drivers.get(&session_id);
     let response = SessionBootstrap {
         schema: RINGING_SCHEMA.into(),
         version: RINGING_V2_VERSION,
@@ -555,28 +560,29 @@ pub(crate) async fn handle_events_v2(
             "missing seed",
         );
     }
-    // 游标格式 `{epoch}:{seq}`;epoch 不匹配或不可解析一律按无游标处理
-    // (客户端拿 live 流,重叠由自身幂等消费吸收)。
+    // 游标格式 `{epoch}:{seq}`;解析为 (epoch 是否匹配, seq)。裸 seq 视为
+    // 当前 epoch 的水位;不可解析 = 无游标(live,重叠由客户端幂等吸收)。
     if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
         return response;
     }
-    let since_seq = query.since_cursor.as_deref().and_then(|cursor| {
-        // 全形 `{epoch}:{seq}`;裸 seq 视为当前 epoch 的水位。
-        if let Some((cursor_epoch, seq)) = cursor.rsplit_once(':') {
-            (cursor_epoch == state.epoch)
-                .then_some(())
-                .and_then(|_| seq.parse::<u64>().ok())
-        } else {
-            cursor.parse::<u64>().ok()
-        }
-    });
+    let (cursor_epoch_matches, since_seq) = match query.since_cursor.as_deref() {
+        None => (true, None),
+        Some(cursor) => match cursor.rsplit_once(':') {
+            Some((cursor_epoch, seq)) => (cursor_epoch == state.epoch, seq.parse::<u64>().ok()),
+            None => (true, cursor.parse::<u64>().ok()),
+        },
+    };
     let owner = state.service.owners().get_or_create(&session_id);
     let mut subscription = owner.subscribe();
-    // 快照水位:游标落后于水位 = 订阅窗口外有缺口 → resync;游标 ≥ 水位
-    // (或无游标)= live 直推。
-    let needs_resync = match owner.snapshot().await {
-        Ok(snapshot) => since_seq.is_some_and(|since| since < snapshot.seq),
-        Err(_) => true,
+    // resync 判定(B01):订阅后读实时位置 P(`current_seq` = 下一个将分配的
+    // seq,纯内存原子,不查库)。游标 epoch 不匹配 → 客户端持旧代状态,必须
+    // resync;`since < P` → 订阅窗口外有缺口(无回放尾)→ resync;`since >= P`
+    // 或无游标 → live 直推,重叠由客户端幂等消费吸收。
+    let live_position = owner.current_seq();
+    let needs_resync = if !cursor_epoch_matches {
+        true
+    } else {
+        since_seq.is_some_and(|since| since < live_position)
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);

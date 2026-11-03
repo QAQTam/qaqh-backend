@@ -350,6 +350,9 @@ pub struct RingingV2OpenResponse {
     pub lease_ttl_ms: u64,
     pub renew_interval_ms: u64,
     pub capabilities: RingingV2Capabilities,
+    /// 命令目录代际(B07):客户端在发送命令前校验;不匹配即给出可读错误,
+    /// 而不是等到命令被 `unsupported_contract_revision` 拒绝才发现不兼容。
+    pub command_contract_revision: String,
 }
 
 impl RingingV2OpenResponse {
@@ -358,10 +361,14 @@ impl RingingV2OpenResponse {
             || self.version != RINGING_V2_VERSION
             || self.client_session_id.trim().is_empty()
             || self.server_epoch.trim().is_empty()
+            || self.command_contract_revision.trim().is_empty()
             || !is_safe_integer(self.lease_ttl_ms)
             || !is_safe_integer(self.renew_interval_ms)
         {
             return Err("invalid_open_response");
+        }
+        if self.command_contract_revision != COMMAND_CONTRACT_REVISION {
+            return Err("unsupported_contract_revision");
         }
         Ok(())
     }
@@ -601,11 +608,26 @@ pub enum RingingV2ExistingResult {
         /// Typed terminal payload, when the command produced one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         result: Option<RingingV2CommandResult>,
+        /// 完整同步结果回放(B05):首次执行的 result/operation/revision 原样
+        /// 恢复;`succeeded` 而此字段缺失 = 引擎类命令,不携带同步结果。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sync_result: Option<RingingV2SyncResult>,
     },
     /// A different command answered an interaction that was already resolved
     /// (first-answer-wins). Carries the winning verdict so the loser can
     /// reconcile without string-matching `code`.
     InteractionResolved { result: RingingV2CommandResult },
+}
+
+/// 同步命令结果的 receipt 回放形状(B05):ACK 丢失后,重放原 `command_id`
+/// 或轮询 status 都能拿回首次执行承诺的 result/operation/revision。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2SyncResult {
+    pub operation: String,
+    pub result: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
 }
 
 /// Typed terminal payload of a command.
@@ -657,6 +679,9 @@ pub struct RingingV2CommandStatus {
     pub error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<RingingV2CommandResult>,
+    /// 同步命令结果回放(B05):succeeded 且缺失 = 引擎类命令,不携带。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_result: Option<RingingV2SyncResult>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -789,6 +814,7 @@ mod tests {
                     interaction_id: "i1".into(),
                     outcome: RingingV2AskOutcome::Answered,
                 }),
+                sync_result: None,
             }),
         };
         let json = serde_json::to_value(&ack).expect("serialize");
@@ -838,6 +864,7 @@ mod tests {
                 interaction_id: "i2".into(),
                 approved: false,
             }),
+            sync_result: None,
         };
         let json = serde_json::to_value(&status).expect("serialize");
         assert_eq!(json["result"]["kind"], "plan_review_resolved");

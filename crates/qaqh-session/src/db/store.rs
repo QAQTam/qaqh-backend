@@ -584,7 +584,8 @@ pub fn read_transcript_page(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockRow {
     pub block_id: String,
-    pub turn_id: String,
+    /// 压缩块等无回合锚点的条目为 NULL;读取侧必须容忍(架构 DDL 允许 NULL)。
+    pub turn_id: Option<String>,
     pub ord: i64,
     pub kind: String,
     pub text: Option<String>,

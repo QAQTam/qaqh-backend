@@ -5,7 +5,7 @@
 //! 写入侧保存 serde wire 形式,此处反序列化;坏数据返回 `Corrupt` 报错,
 //! 不静默降级。
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 
 use qaqh_ringing_contract::fact::{
@@ -13,8 +13,8 @@ use qaqh_ringing_contract::fact::{
     TurnMode,
 };
 use qaqh_ringing_contract::state::{
-    InteractionResolution, InteractionView, SessionState, TimelineEntry, ToolCallStatus,
-    ToolCallView, TurnOutcome, TurnView,
+    InteractionResolution, InteractionView, SessionState, SubagentView, TimelineEntry,
+    ToolCallStatus, ToolCallView, TurnOutcome, TurnView,
 };
 
 use super::DbError;
@@ -60,20 +60,110 @@ pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<Session
         .filter(|turn| turn.outcome.is_none())
         .map(|turn| turn.turn_id.clone())
         .next_back();
+    // 权威来源:sessions.title(rename 唯一写口是 owner::set_title)。
+    let title = session_title(conn, session_id)?;
+    let subagents = load_subagents(conn, session_id)?;
 
     Ok(SessionState {
         session_id: Some(SessionId::new(session_id)),
         seq: 0,
         activity,
         current_turn_id,
-        title: None,
+        title,
         turns,
         timeline,
         tools,
         interactions,
-        subagents: Vec::new(),
+        subagents,
         driver: None,
     })
+}
+
+/// `sessions.title`;空串归一为 None(创建时默认 '')。
+fn session_title(conn: &Connection, session_id: &str) -> Result<Option<String>, DbError> {
+    let mut stmt = conn.prepare("SELECT title FROM sessions WHERE session_id = ?1")?;
+    let title: Option<String> = stmt
+        .query_row([session_id], |row| row.get(0))
+        .optional()
+        .map_err(rusqlite_error)?;
+    Ok(title.filter(|title| !title.is_empty()))
+}
+
+/// 子代理花名册:spawn 工具调用的 `SubagentSpawned` effect 是血缘权威
+/// (parent_call_id / role),子会话业务行推导终态 status。`result` 不在此
+/// 填充——子代理正文属于子会话自身 bootstrap,不为其复制第二份状态。
+fn load_subagents(conn: &Connection, session_id: &str) -> Result<Vec<SubagentView>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT call_id, effects_json FROM tool_calls
+         WHERE session_id = ?1 AND effects_json IS NOT NULL ORDER BY started_at_ms",
+    )?;
+    let rows = stmt.query_map([session_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+        ))
+    })?;
+    let mut subagents = Vec::new();
+    for row in rows {
+        let (call_id, effects_json) = row?;
+        let effects = parse_typed::<Vec<qaqh_ringing_contract::state::ToolEffectInfo>>(
+            &format!("tool call {call_id}"),
+            "effects",
+            &effects_json,
+        )?;
+        for effect in effects {
+            let qaqh_ringing_contract::state::ToolEffectInfo::SubagentSpawned {
+                child_session_id,
+                name,
+                ..
+            } = effect
+            else {
+                continue;
+            };
+            let status = child_terminal_status(conn, &child_session_id)?;
+            subagents.push(SubagentView {
+                child_session_id: SessionId::new(child_session_id),
+                parent_call_id: ToolCallId::new(call_id.clone()),
+                role: Some(name),
+                status,
+                result: None,
+            });
+        }
+    }
+    Ok(subagents)
+}
+
+/// 子会话终态:最后一回合 finished → Completed;interrupted → Cancelled;
+/// 仍在跑 / 从未开回合 → None(运行中,不是终态)。
+fn child_terminal_status(
+    conn: &Connection,
+    child_session_id: &str,
+) -> Result<Option<qaqh_ringing_contract::fact::SubagentTerminalStatus>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT status FROM turns WHERE session_id = ?1
+         AND status IN ('active', 'finished', 'interrupted')
+         ORDER BY seq DESC LIMIT 1",
+    )?;
+    let status: Option<String> = stmt
+        .query_row([child_session_id], |row| row.get(0))
+        .optional()
+        .map_err(rusqlite_error)?;
+    Ok(match status.as_deref() {
+        Some("active") | None => None,
+        Some("finished") => Some(qaqh_ringing_contract::fact::SubagentTerminalStatus::Completed),
+        Some("interrupted") => {
+            Some(qaqh_ringing_contract::fact::SubagentTerminalStatus::Cancelled)
+        }
+        Some(other) => {
+            return Err(DbError::Corrupt(format!(
+                "subagent {child_session_id}: unknown turn status {other:?}"
+            )));
+        }
+    })
+}
+
+fn rusqlite_error(error: rusqlite::Error) -> DbError {
+    DbError::Corrupt(format!("query failed: {error}"))
 }
 
 fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbError> {

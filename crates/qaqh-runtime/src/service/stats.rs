@@ -1,6 +1,6 @@
 //! service::stats — dashboard/activity/config/context_stats 查询函数。
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use std::io::BufRead;
 
@@ -16,21 +16,23 @@ struct ToolActivityRow {
     finished_at_ms: Option<i64>,
 }
 
-pub(crate) fn dashboard(session_id: &str) -> Result<Value, String> {
+/// `session.dashboard`:任务卡来自 todo 状态投影,recent_edits 来自
+/// code_stats.jsonl 的去重尾部(最近优先)。B08 权威 DTO,handler 直出
+/// typed 结构,序列化即 wire 形状。
+pub(crate) fn dashboard(session_id: &str) -> Result<crate::ringing::service_methods::SessionDashboard, String> {
+    use crate::ringing::service_methods::{SessionDashboard, SessionDashboardTask};
     let dir = qaqh_types::platform::sessions_dir().join(session_id);
-    let tasks: Vec<Value> = qaqh_workspace::todo::todo_status_value(session_id)
+    let tasks: Vec<SessionDashboardTask> = qaqh_workspace::todo::todo_status_value(session_id)
         .ok()
         .and_then(|v| {
             v.get("items")?.as_array().map(|arr| {
                 arr.iter()
-                    .map(|item| {
-                        json!({
-                            "id": item["id"],
-                            "subject": item["title"],
-                            "description": item["description"],
-                            "status": item["status"],
-                            "evidence": item["evidence"],
-                        })
+                    .map(|item| SessionDashboardTask {
+                        id: item["id"].as_str().unwrap_or_default().to_string(),
+                        subject: item["title"].as_str().unwrap_or_default().to_string(),
+                        description: item["description"].as_str().unwrap_or_default().to_string(),
+                        status: item["status"].as_str().unwrap_or_default().to_string(),
+                        evidence: item["evidence"].as_str().map(str::to_string),
                     })
                     .collect()
             })
@@ -51,7 +53,10 @@ pub(crate) fn dashboard(session_id: &str) -> Result<Value, String> {
     edits.reverse();
     edits.dedup();
     edits.truncate(10);
-    Ok(json!({"tasks":tasks,"recent_edits":edits}))
+    Ok(SessionDashboard {
+        tasks,
+        recent_edits: edits,
+    })
 }
 
 pub(crate) fn activity(

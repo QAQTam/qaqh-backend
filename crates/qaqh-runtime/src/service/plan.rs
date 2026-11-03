@@ -6,15 +6,17 @@ use super::common::err;
 
 use super::fs_git::qaqh_dir;
 
+/// plan 条目状态的规范词表(B08/D9):旧 wire 的 "✓/-/?" 字形无 typed 消费方,
+/// 收口为 snake_case 枚举;PLAN.md 文件本身仍是标记字形,解析在此边界映射。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum PlanItemStatus {
-    #[serde(rename = "")]
+    #[serde(rename = "pending")]
     Pending,
-    #[serde(rename = "✓")]
+    #[serde(rename = "approved")]
     Approved,
-    #[serde(rename = "-")]
+    #[serde(rename = "rejected")]
     Rejected,
-    #[serde(rename = "?")]
+    #[serde(rename = "question")]
     Question,
 }
 
@@ -161,21 +163,21 @@ mod typed_plan_tests {
                 {
                     "id": "item-1",
                     "title": "first step",
-                    "status": "",
+                    "status": "pending",
                     "comment": "",
                     "actions": []
                 },
                 {
                     "id": "item-2",
                     "title": "second step",
-                    "status": "✓",
+                    "status": "approved",
                     "comment": "approved in review",
                     "actions": []
                 },
                 {
                     "id": "item-3",
                     "title": "rejected step",
-                    "status": "-",
+                    "status": "rejected",
                     "comment": "not needed",
                     "actions": []
                 }

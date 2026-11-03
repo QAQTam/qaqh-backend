@@ -74,6 +74,7 @@ impl Default for ModelDef {
 
 /// 模型提供商 / 服务端点定义
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ProviderDef {
     /// 服务商展示名（如 "DeepSeek 官方"、"SiliconFlow 硅基流动"）
     pub name: String,
@@ -101,6 +102,7 @@ pub struct ProviderDef {
 
 /// 档案预设定义（由 Provider + Model + 个性化参数组装）
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ProfileDef {
     /// 预设展示名称（如 "代码深度重构 (R1)"）
     pub name: String,
@@ -121,6 +123,7 @@ pub struct ProfileDef {
 
 /// 完整的 profiles.toml 配置树
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ProfilesDocument {
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,

@@ -15,7 +15,10 @@ use crate::fact::{
     TurnError, TurnId, TurnMode, TurnTerminal, UsageInfo,
 };
 
-/// 会话当前状态的唯一权威快照。`seq` 是本快照覆盖到的 SSE 水位。
+/// 会话当前状态的唯一权威快照。`seq` 是"下一个将分配的事件序号"(exclusive
+/// 水位):快照已覆盖全部 `seq < state.seq` 的 SSE 帧;客户端跳过
+/// `seq < state.seq`、处理 `seq >= state.seq`(相等边界必须处理)。与
+/// `SessionEventFrame` 的文档同源。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct SessionState {
