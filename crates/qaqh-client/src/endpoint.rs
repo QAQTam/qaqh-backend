@@ -10,13 +10,28 @@ pub enum QueryRequest {
     ConfigLoad,
     WorkspaceList,
     SkillsListTools,
-    SkillsCatalog { cwd: Option<String> },
-    FsList { path: String },
-    FsRead { path: String, max_bytes: Option<u64> },
-    SessionDashboard { session_id: String },
-    TodoStatus { session_id: String },
-    SessionMeta { session_id: String },
-    PlanRead { session_id: String },
+    SkillsCatalog {
+        cwd: Option<String>,
+    },
+    FsList {
+        path: String,
+    },
+    FsRead {
+        path: String,
+        max_bytes: Option<u64>,
+    },
+    SessionDashboard {
+        session_id: String,
+    },
+    TodoStatus {
+        session_id: String,
+    },
+    SessionMeta {
+        session_id: String,
+    },
+    PlanRead {
+        session_id: String,
+    },
 }
 
 impl QueryRequest {
@@ -45,9 +60,7 @@ impl QueryRequest {
             Self::SessionDashboard { session_id } => {
                 ("session.dashboard", json!({ "session_id": session_id }))
             }
-            Self::TodoStatus { session_id } => {
-                ("todo.status", json!({ "session_id": session_id }))
-            }
+            Self::TodoStatus { session_id } => ("todo.status", json!({ "session_id": session_id })),
             Self::SessionMeta { session_id } => {
                 ("session.meta", json!({ "session_id": session_id }))
             }

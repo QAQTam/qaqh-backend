@@ -2238,7 +2238,6 @@ dependencies = [
  "qaqh-domain",
  "qaqh-ringing",
  "qaqh-ringing-contract",
- "qaqh-session",
  "qaqh-types",
  "reqwest",
  "rustls",
@@ -2572,7 +2571,6 @@ dependencies = [
 name = "qaqh-ringing"
 version = "2.1.20261031-1"
 dependencies = [
- "base64 0.22.1",
  "qaqh-domain",
  "qaqh-profile",
  "qaqh-ringing-contract",

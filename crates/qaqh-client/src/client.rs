@@ -357,8 +357,7 @@ impl Client {
         command: RingingCommand,
         options: CommandOptions,
     ) -> Result<RingingV2CommandAck> {
-        self.send_command_v2_typed(target, command, options)
-            .await
+        self.send_command_v2_typed(target, command, options).await
     }
 
     /// `GET /ringing/v2/commands/{command_id}` — resolve post-acceptance uncertainty.
@@ -391,9 +390,8 @@ impl Client {
 
     /// `GET /ringing/v2/sessions/{seed}/bootstrap` — authoritative snapshot.
     ///
-    /// 2026-09-24 硬切：v1 `/ringing/v1/…/bootstrap` 已删除，本方法直接走 v2
-    /// 三频道 typed 快照（`control` / `conversation` / `tool`）。返回类型从
-    /// v1 的 `RingingSessionBootstrap` 换成 [`crate::ClientV2Bootstrap`]。
+    /// The response is the shared `SessionBootstrap` contract with one
+    /// `SessionState` snapshot.
     pub async fn bootstrap(&self, session_id: &str) -> Result<crate::ClientV2Bootstrap> {
         self.bootstrap_v2(session_id).await
     }

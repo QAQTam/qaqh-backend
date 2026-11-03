@@ -53,7 +53,6 @@ impl RingingWorkerCommandEnvelope {
         self.actor = actor;
         self
     }
-
 }
 
 /// agent → daemon 事件消息。
@@ -80,7 +79,6 @@ impl RingingWorkerEventEnvelope {
             event,
         }
     }
-
 }
 
 #[cfg(test)]
@@ -97,7 +95,10 @@ mod tests {
         let frame = RingingWorkerCommandEnvelope::new("s1", "cmd-1", cmd);
         let json = serde_json::to_string(&frame).expect("serialize");
         let back: RingingWorkerCommandEnvelope = serde_json::from_str(&json).expect("deserialize");
-        assert!(matches!(back.command, RingingCommand::ToolPermissionRespond { .. }));
+        assert!(matches!(
+            back.command,
+            RingingCommand::ToolPermissionRespond { .. }
+        ));
         assert_eq!(back.command_id, "cmd-1");
     }
 }

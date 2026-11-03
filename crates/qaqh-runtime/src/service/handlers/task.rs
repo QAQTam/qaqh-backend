@@ -34,11 +34,14 @@ pub(crate) fn handle_ringing(
     command: &RingingCommand,
 ) -> QaqhResult<Value> {
     let CommandTarget::Session { session_id } = target else {
-        return Err(QaqhError::invalid("task mutation requires a session target"));
+        return Err(QaqhError::invalid(
+            "task mutation requires a session target",
+        ));
     };
     match command {
-        RingingCommand::TodoSet { args } => qaqh_workspace::todo::todo_set_value_for(session_id, args)
-            .map_err(QaqhError::message),
+        RingingCommand::TodoSet { args } => {
+            qaqh_workspace::todo::todo_set_value_for(session_id, args).map_err(QaqhError::message)
+        }
         RingingCommand::TodoCancel { id } => {
             qaqh_workspace::todo::todo_cancel_value(session_id, id).map_err(QaqhError::message)
         }
