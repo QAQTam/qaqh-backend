@@ -545,11 +545,14 @@ pub(crate) async fn execute_command(
                     e.to_string(),
                 );
             }
+            // 回执终态由 execute_command 的返回值直接落库:命令成功进入会话
+            // 循环即 Succeeded(回合的业务进展经 SSE 事件承载,不再有第二条
+            // 折叠链把回执拖到 Running 僵尸态)。
             state
                 .pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .mark_running(&envelope.command_id);
+                .mark_terminal(&envelope.command_id, RingingCommandState::Succeeded, None, None);
             (StatusCode::OK, accept_ack(envelope.command_id, None))
         }
     }

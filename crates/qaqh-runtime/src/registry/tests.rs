@@ -1,44 +1,5 @@
 use super::*;
 
-/// Registry tests spawn real thin-agent tasks, which require a runtime
-/// context even when the test itself never awaits.
-fn test_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("test runtime")
-    })
-}
-
-fn dummy_thin_agent(session_id: &str) -> AgentInstance {
-    let (mailbox_handle, mailbox) = qaqh_agentloop_core::mailbox::Mailbox::new(
-        qaqh_agentloop_core::mailbox::LaneBudget::COMMANDS,
-        qaqh_agentloop_core::mailbox::LaneBudget::CONTROL,
-        qaqh_agentloop_core::mailbox::LaneBudget::COMPLETIONS,
-    )
-    .unwrap();
-    // Keep the receiver alive: these tests exercise command routing, not
-    // the closed-mailbox respawn path.
-    Box::leak(Box::new(mailbox));
-    AgentInstance {
-        session_id: session_id.into(),
-        transport: AgentTransport::ThinAgent {
-            handle: crate::session_agent::AgentHandle::from_mailbox(
-                session_id.into(),
-                mailbox_handle,
-            ),
-            task: test_runtime().spawn(async { Ok(()) }),
-        },
-        kind: AgentKind::Session,
-        subscription_actor: SessionActor::new(4),
-        liveness: None,
-        reader: None,
-        thread: None,
-    }
-}
-
 /// 正常路径：探测命令秒回，输出拿得到。
 #[cfg(unix)] // Windows 无 sh：存量环境失败，与探测逻辑无关
 #[test]
@@ -95,119 +56,46 @@ fn probe_output_missing_program_is_none() {
     assert!(probe_output(command, Duration::from_millis(200)).is_none());
 }
 
+/// spawn/reopen 循环不动已提交的会话基线:业务行在 SQLite,循环实例
+/// 重建对既有数据零写入。
 #[tokio::test]
-async fn materialized_batch_session_spawns_and_reopens_without_reset() {
+async fn spawn_and_reopen_preserves_the_session_baseline() {
     let root = tempfile::tempdir().expect("tempdir");
     let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
         root.path().join("sessions"),
         root.path().join(".active_session"),
     ));
     let identity = sessions.allocate_session(None).expect("allocate");
-    let session_id = identity.session_id.as_str();
-    let dir = sessions.session_path_dir(session_id);
+    let session_id = identity.session_id.as_str().to_string();
+    let dir = sessions.session_path_dir(&session_id);
     crate::service::materialize_canonical_session_in(&dir, "/tmp", "test-model", None, false)
         .expect("materialize");
     let journal_before =
         std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("baseline journal");
     let mut registry = AgentRegistry::new(sessions, test_owner_dir());
-    // session.new/session.create both materialize before calling spawn_new.
     for _ in 0..2 {
         registry
-            .spawn_new(session_id)
+            .spawn_new(&session_id)
             .expect("spawn existing baseline");
-        let instance = registry.instances.remove(session_id).expect("running");
-        let AgentTransport::ThinAgent { handle, task } = instance.transport;
-        handle.shutdown().expect("shutdown");
-        task.await.expect("join").expect("clean shutdown");
+        registry.close(&session_id);
     }
     assert_eq!(
         std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("journal"),
         journal_before,
         "spawning and reopening must preserve the committed baseline"
     );
-    assert!(!dir.join(EVENTS_FILE).exists());
-    assert!(!dir.join(EVENTS_COMMIT_FILE).exists());
+    // 业务库:会话行已登记(幂等),且未被 spawn 重复插入。
+    let parent = registry
+        .owners
+        .session_parent(&session_id)
+        .expect("business row");
+    assert_eq!(parent, None, "root session has no parent");
 }
 
+/// 结果面:collector 经 `SubagentHost::finish_subagent` 落到 agent 状态上,
+/// `list_agents` 直接返回终态,unloaded 与 completed 正交。
 #[test]
-fn v2_residency_overlay_tracks_worker_lifecycle() {
-    let root_dir = std::env::temp_dir().join(format!(
-        "qaqh-registry-v2-residency-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
-        root_dir.join("sessions"),
-        root_dir.join(".active_session"),
-    ));
-    let identity = sessions
-        .allocate_session(None)
-        .expect("allocate root session");
-    let session_id = identity.session_id.as_str().to_string();
-    let session_dir = sessions.session_path_dir(&session_id);
-    crate::service::materialize_canonical_session_in(
-        &session_dir,
-        "/tmp",
-        "test-model",
-        None,
-        false,
-    )
-    .expect("materialize canonical session");
-
-    let hub = Arc::new(V2ProjectionHub::new("registry-residency-test"));
-    let mut registry = AgentRegistry::new(sessions.clone(), test_owner_dir());
-    registry
-        .register_root_agent(&session_id, unix_ms())
-        .expect("register root");
-    registry.attach_v2_projection(hub.clone());
-    test_runtime().block_on(async {
-        registry
-            .get_or_spawn(&session_id)
-            .expect("spawn root worker");
-    });
-
-    let loaded = hub
-        .bootstrap(&session_dir, &session_id)
-        .expect("bootstrap loaded root");
-    assert_eq!(
-        loaded
-            .projections
-            .team
-            .agents
-            .iter()
-            .find(|agent| agent.agent_id.as_str() == session_id)
-            .expect("root roster entry")
-            .residency,
-        TeamAgentResidency::Loaded
-    );
-
-    registry.close(&session_id);
-    let unloaded = hub
-        .bootstrap(&session_dir, &session_id)
-        .expect("bootstrap unloaded root");
-    assert_eq!(
-        unloaded
-            .projections
-            .team
-            .agents
-            .iter()
-            .find(|agent| agent.agent_id.as_str() == session_id)
-            .expect("root roster entry")
-            .residency,
-        TeamAgentResidency::Unloaded
-    );
-}
-
-#[test]
-fn list_agents_uses_explicit_residency_and_parent_terminal_status() {
-    use qaqh_session::canonical::{CanonicalLog, WriterId, generate_ulid};
-    use qaqh_session::session_fact_v2::{
-        EventId, FactSchema, SessionCreated, SubagentSpawned, ToolCallId,
-    };
-
+fn list_agents_reports_recorded_outcome_and_residency() {
     let root_dir = std::env::temp_dir().join(format!(
         "qaqh-registry-list-state-{}-{}",
         std::process::id(),
@@ -232,6 +120,11 @@ fn list_agents_uses_explicit_residency_and_parent_terminal_status() {
     registry
         .register_root_agent(&root, now)
         .expect("register root metadata");
+    // 子会话业务行(血缘 = 根)。
+    registry
+        .owners
+        .ensure_session(child.as_str(), Some(&root), true)
+        .expect("ensure child business row");
     registry
         .agent_catalog
         .register(AgentMetadata {
@@ -248,76 +141,6 @@ fn list_agents_uses_explicit_residency_and_parent_terminal_status() {
         .residency
         .insert(child.as_str().to_string(), ListedAgentResidency::Unloaded);
 
-    let parent_dir = sessions.session_path_dir(&root);
-    let identity =
-        CanonicalSessionIdentity::open(&parent_dir).expect("open root canonical identity");
-    let mut log = CanonicalLog::open(
-        &parent_dir,
-        identity.session_id.clone(),
-        identity.log_id.clone(),
-    )
-    .expect("open root canonical log");
-    let lease = log
-        .acquire_writer(WriterId::new("registry-list-state"), now, 10_000)
-        .expect("acquire writer");
-    for (fact_seq, payload) in [
-        (
-            1,
-            FactPayload::SessionCreated(SessionCreated {
-                created_at_ms: now,
-                cwd: "/".to_string(),
-                model: "test-model".to_string(),
-                parent_session_id: None,
-                schema_caps: vec![],
-            }),
-        ),
-        (
-            2,
-            FactPayload::SubagentSpawned(SubagentSpawned {
-                child_session_id: child.clone(),
-                parent_call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
-                parent_agent_path: Some(AgentPath::root()),
-                child_agent_path: Some(child_path.clone()),
-                role: Some("review".to_string()),
-                spawn_config: None,
-                spawned_at_ms: now,
-            }),
-        ),
-        (
-            3,
-            FactPayload::SubagentFinished(qaqh_session::session_fact_v2::SubagentFinished {
-                child_session_id: child.clone(),
-                parent_call_id: ToolCallId::new(format!("call_{}", generate_ulid())),
-                status: SubagentTerminalStatus::Completed,
-                result_ref: None,
-                finished_at_ms: now,
-                recovery_ref: None,
-            }),
-        ),
-    ] {
-        log.append(
-            &lease,
-            SessionFact {
-                schema: FactSchema::v2(),
-                session_id: identity.session_id.clone(),
-                log_id: identity.log_id.clone(),
-                fact_seq,
-                event_id: EventId::new(generate_ulid()),
-                ts_ms: now,
-                causation_id: None,
-                turn_id: None,
-                call_id: None,
-                interaction_id: None,
-                payload,
-            },
-            now,
-        )
-        .expect("append canonical agent fact");
-    }
-    drop(log);
-
-    // 结果面：collector 经 `SubagentHost::finish_subagent` 落到 agent 状态上，
-    // `list_agents` 直接返回，不再需要 `process check`。
     registry.record_subagent_outcome(child.as_str(), "final answer body", 0);
 
     let listed = registry
@@ -337,227 +160,7 @@ fn list_agents_uses_explicit_residency_and_parent_terminal_status() {
     assert_eq!(outcome.exit_code, 0);
 }
 
-#[tokio::test]
-async fn subscription_actor_is_idempotent_and_shutdown_closes_ingress() {
-    let mut instance = dummy_thin_agent("seed-subscription");
-    let connection_id = ConnectionId::new("connection-1");
-
-    assert_eq!(
-        instance.apply_subscription(SubscriptionCommand::Subscribe {
-            connection_id: connection_id.clone(),
-            channel: RingingChannel::Control,
-        }),
-        Ok(SubscriptionEffect::Subscribed {
-            connection_id: connection_id.clone(),
-            channel: RingingChannel::Control,
-            changed: true,
-        })
-    );
-    assert_eq!(
-        instance.apply_subscription(SubscriptionCommand::Subscribe {
-            connection_id: connection_id.clone(),
-            channel: RingingChannel::Control,
-        }),
-        Ok(SubscriptionEffect::Subscribed {
-            connection_id: connection_id.clone(),
-            channel: RingingChannel::Control,
-            changed: false,
-        })
-    );
-    assert_eq!(
-        instance.apply_subscription(SubscriptionCommand::ConnectionClosed {
-            connection_id: connection_id.clone(),
-        }),
-        Ok(SubscriptionEffect::ConnectionClosed {
-            connection_id: connection_id.clone(),
-            removed: 1,
-        })
-    );
-
-    instance.signal_shutdown();
-    assert!(
-        instance
-            .apply_subscription(SubscriptionCommand::Subscribe {
-                connection_id,
-                channel: RingingChannel::Tool,
-            })
-            .is_err()
-    );
-}
-
-#[test]
-fn registry_subscription_ingress_is_connection_scoped_and_shutdown_is_terminal() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
-        directory.path().join("sessions"),
-        directory.path().join(".active_session"),
-    ));
-    let instance = dummy_thin_agent("seed-registry");
-    let mut registry = AgentRegistry {
-        instances: HashMap::from([("seed-registry".into(), instance)]),
-        activity: SessionActivityTracker::default(),
-        sessions,
-        owners: test_owner_dir(),
-        hub: None,
-        shutting_down: false,
-        last_spawn: HashMap::new(),
-        supervisor: SubagentSupervisor::default(),
-        agent_catalog: AgentCatalog::default(),
-        residency: HashMap::new(),
-        v2_hub: None,
-        quota_ledgers: HashMap::new(),
-        quota_limits: QuotaLimits::unlimited(),
-        max_depth: 1,
-        message_in_flight_per_pair: 16,
-        message_outbound_per_sender: 1024,
-        outbound_attempts: HashMap::new(),
-        armed_collectors: HashSet::new(),
-        subagent_outcomes: HashMap::new(),
-    };
-    let connection_id = ConnectionId::new("connection-registry");
-
-    assert_eq!(
-        registry.subscribe_channel(
-            "seed-registry",
-            connection_id.clone(),
-            RingingChannel::Control
-        ),
-        Ok(true)
-    );
-    assert_eq!(
-        registry.subscribe_channel(
-            "seed-registry",
-            connection_id.clone(),
-            RingingChannel::Control
-        ),
-        Ok(false)
-    );
-    assert_eq!(
-        registry.unsubscribe_channel(
-            "seed-registry",
-            connection_id.clone(),
-            RingingChannel::Control
-        ),
-        Ok(true)
-    );
-    assert_eq!(
-        registry.subscribe_channel("seed-registry", connection_id.clone(), RingingChannel::Tool),
-        Ok(true)
-    );
-    assert_eq!(
-        registry.connection_closed("seed-registry", connection_id.clone()),
-        Ok(1)
-    );
-
-    registry.close("seed-registry");
-    assert_eq!(
-        registry.connection_closed("seed-registry", connection_id),
-        Ok(0)
-    );
-}
-
-#[test]
-fn parent_cancel_uses_token_tree_and_still_delivers_child_terminal_command() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
-        directory.path().join("sessions"),
-        directory.path().join(".active_session"),
-    ));
-    let parent_cancel = crate::agent::types::CancelToken::new();
-    let _child_cancel = parent_cancel.child();
-    let parent = dummy_thin_agent("parent-seed");
-    let child = dummy_thin_agent("child-seed");
-    let mut registry = AgentRegistry {
-        instances: HashMap::from([("parent-seed".into(), parent), ("child-seed".into(), child)]),
-        activity: SessionActivityTracker::default(),
-        sessions,
-        owners: test_owner_dir(),
-        hub: None,
-        shutting_down: false,
-        last_spawn: HashMap::new(),
-        supervisor: SubagentSupervisor::default(),
-        agent_catalog: AgentCatalog::default(),
-        residency: HashMap::new(),
-        v2_hub: None,
-        quota_ledgers: HashMap::new(),
-        quota_limits: QuotaLimits::unlimited(),
-        max_depth: 1,
-        message_in_flight_per_pair: 16,
-        message_outbound_per_sender: 1024,
-        outbound_attempts: HashMap::new(),
-        armed_collectors: HashSet::new(),
-        subagent_outcomes: HashMap::new(),
-    };
-    registry
-        .link_subagent("parent-seed", "child-seed")
-        .expect("link subagent");
-    let cancel = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-        "parent-seed",
-        "cancel-parent",
-        qaqh_ringing::RingingCommand::Conversation(
-            qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
-        ),
-    );
-
-    registry
-        .send_ringing("parent-seed", &cancel)
-        .expect("cancel parent");
-
-    qaqh_workspace::remove_session_cancel("parent-seed");
-    qaqh_workspace::remove_session_cancel("child-seed");
-}
-
-#[test]
-fn targeted_cancel_does_not_preset_the_cancel_token() {
-    let directory = tempfile::tempdir().expect("tempdir");
-    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
-        directory.path().join("sessions"),
-        directory.path().join(".active_session"),
-    ));
-    let cancel_token = crate::agent::types::CancelToken::new();
-    let instance = dummy_thin_agent("seed-a");
-    let mut registry = AgentRegistry {
-        instances: HashMap::from([("seed-a".into(), instance)]),
-        activity: SessionActivityTracker::default(),
-        sessions,
-        owners: test_owner_dir(),
-        hub: None,
-        shutting_down: false,
-        last_spawn: HashMap::new(),
-        supervisor: SubagentSupervisor::default(),
-        agent_catalog: AgentCatalog::default(),
-        residency: HashMap::new(),
-        v2_hub: None,
-        quota_ledgers: HashMap::new(),
-        quota_limits: QuotaLimits::unlimited(),
-        max_depth: 1,
-        message_in_flight_per_pair: 16,
-        message_outbound_per_sender: 1024,
-        outbound_attempts: HashMap::new(),
-        armed_collectors: HashSet::new(),
-        subagent_outcomes: HashMap::new(),
-    };
-    // §7：显式 turn_id 的取消必须先经 actor 目标校验——入队不得预置取消
-    // 标记，滞留/错目标的旧请求在入队瞬间不得中止在途工具。
-    let targeted = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-        "seed-a",
-        "cancel-targeted",
-        qaqh_ringing::RingingCommand::Conversation(
-            qaqh_domain::ConversationCommand::ConversationCancel {
-                turn_id: Some("turn-stale".into()),
-            },
-        ),
-    );
-    registry
-        .send_ringing("seed-a", &targeted)
-        .expect("targeted cancel delivered");
-    assert!(
-        !cancel_token.is_set(),
-        "targeted cancel must not preset the token before actor-side validation"
-    );
-    qaqh_workspace::remove_session_cancel("seed-a");
-}
-
+/// 消息配额:in-flight 与累计 outbound 双闸,按 root/author 隔离。
 #[test]
 fn message_quota_rejects_in_flight_and_outbound_over_limit() {
     let temp = tempfile::tempdir().expect("tempdir");

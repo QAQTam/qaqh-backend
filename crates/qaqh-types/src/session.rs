@@ -370,7 +370,9 @@ mod tests {
             "frozen_annotation",
             "mode",
             "model",
+            "model_selection",
             "profile",
+            "requested_model_selection",
             "session_id",
             "skills",
             // ── 运行期附加字段 ──

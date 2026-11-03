@@ -38,6 +38,18 @@ pub struct SessionState {
     pub driver: Option<DriverState>,
 }
 
+/// `GET /ringing/v2/sessions/{id}/bootstrap` 的响应:一次 HTTP 拿到
+/// 单份 `SessionState` 快照 + 同步游标所需的服务器 epoch。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionBootstrap {
+    pub schema: String,
+    pub version: u32,
+    pub server_epoch: String,
+    pub session_id: String,
+    pub state: SessionState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct TurnView {

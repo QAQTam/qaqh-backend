@@ -3,7 +3,6 @@
 //! Follows the same pattern as qaqh-workspace::ToolManager.
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
-pub mod actor;
 pub mod canonical;
 pub mod db;
 mod wire;

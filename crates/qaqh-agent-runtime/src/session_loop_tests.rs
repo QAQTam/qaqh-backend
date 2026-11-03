@@ -9,7 +9,7 @@ mod tests {
     use qaqh_ringing_contract::events::{SessionEvent, SessionEventFrame};
     use qaqh_ringing_contract::fact::InputPurpose;
     use qaqh_ringing_contract::state::TimelineEntry;
-    use qaqh_session::db::{store, Db};
+    use qaqh_session::db::store;
     use qaqh_session::owner::OwnerDirectory;
 
     use crate::provider_job::ProviderRequestSpec;
@@ -169,5 +169,36 @@ mod tests {
             qaqh_ringing_contract::fact::ActivityState::Idle
         );
         let _ = owners;
+    }
+
+    /// 取消契约:stale/错目标的 turn_id 不取消任何东西;无目标取消生效。
+    #[tokio::test]
+    async fn cancel_turn_validates_the_target_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (loop_, _owners, _rx) = test_loop(dir.path()).await;
+
+        // 空闲:任何取消都不生效。
+        assert!(!loop_.cancel_turn(None));
+        assert!(!loop_.cancel_turn(Some("turn_stale")));
+
+        loop_
+            .send_input(LoopInput {
+                input_id: Some("IN-CANCEL".into()),
+                text: "长回合".into(),
+                purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: vec![],
+            })
+            .expect("send input");
+        // 等回合出现(sse mock 立即完成,给 spawn 一点时间)。
+        for _ in 0..100 {
+            if loop_.active_turn().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let turn = loop_.active_turn().expect("active turn");
+        assert!(!loop_.cancel_turn(Some("turn_stale")), "错目标不生效");
+        assert!(loop_.cancel_turn(Some(&turn)), "匹配目标生效");
     }
 }

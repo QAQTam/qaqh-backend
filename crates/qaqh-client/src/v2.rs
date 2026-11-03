@@ -8,10 +8,10 @@ use std::fmt;
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_ringing::{
-    CursorToken, RingingV2Bootstrap, RingingV2Capabilities, RingingV2CommandAck,
-    RingingV2CommandEnvelope, RingingV2CommandStatus, RingingV2EventEnvelope,
+    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandStatus,
     RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
 };
+use qaqh_ringing_contract::events::SessionEventFrame;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::client::Client;
@@ -23,101 +23,21 @@ pub use qaqh_ringing::{
     END_OF_FACT as CLIENT_V2_END_OF_FACT, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
 
-// The v2 wire contract **is** the session fact model. There is no renaming
-// layer: callers import the real modules instead of former `ClientV2*` aliases.
 pub use qaqh_ringing as ringing;
 pub use qaqh_ringing::v2 as ringing_v2;
-pub use qaqh_session::projection;
 pub use qaqh_session::session_fact_v2 as fact;
-pub use qaqh_session::team;
 
-/// Typed control delta (#323 缺口 1).
-/// 壳层必须能 `match fact::ControlDelta::InteractionRequested { .. }` —— match
-/// 枚举变体**必须写出枚举名**，所以只导出 `fact::ProjectionPayload` 不够。
-/// 命名注意：这里的 `kind` 字段是 [`fact::InteractionKind`]（wire 值
-/// `ask` / `plan` / `permission`），与 bootstrap 的
-/// [`ringing_v2::RingingV2PendingInteraction`]`.kind`（[`ringing_v2::RingingV2InteractionKind`]，wire 值
-/// 同样为 `ask` / `plan` / `permission`）**不是同一个 Rust 枚举**。两者 wire
-/// 语义已在 2026-09-24 统一，本别名只让壳层能同时命名它们。
-
-/// `fact::ControlDelta::SubagentFinished.status`。
-
-/// 压缩瞬态终态（`ConversationDelta::CompactFinished.status`）。
-/// 与 `qaqh_client::types::CompactStatus`（域事件面）wire 值一致，但这是 v2 契约
-/// 自己的类型；壳层 match delta 变体时用它。
-/// 会话删除原因（`MetaDelta::Deleted.reason`）。
-/// 会话回合 id（`ConversationDelta::TurnStarted.turn_id` 等）。
-/// 回合终态（`ConversationDelta::TurnFinished.terminal`）。
-
-/// `fact::ProjectionPayload::ConversationDelta` 的载荷。
-/// `fact::ProjectionPayload::MetaDelta` 的载荷。
-/// `fact::ProjectionPayload::ResourceDelta` 的载荷。
-
-/// `fact::ControlDelta::InteractionRequested.kind` 的类型。
-
-/// `fact::ControlDelta::InteractionRequested/Resolved/Expired.interaction_id`.
-
-/// `fact::ControlDelta::InteractionRequested.call_id`.
-
-/// `InteractionRequested.request` / `InteractionResolved.decision` 的载荷
-/// （**SSE control delta** 面，canonical 类型）。
-
-/// `ringing_v2::RingingV2PendingInteraction.request` 的载荷（**bootstrap** 面）。
-/// 与 [`fact::ContentValue`] 的 JSON 形态一致（`kind` / `data` 判别式），但
-/// bootstrap 走 wire 层类型（`qaqh-ringing` 不依赖 session crate），所以是两个
-/// 类型；两侧 serde 形态由 daemon 的映射函数保持一致。
-
-/// `InteractionResolved.verdict`（结构化裁决；legacy fact 为 `None`）。
-
-/// `InteractionResolved.resolved_by`.
-
-/// `InteractionExpired.reason`。
-
-/// **Team projection**：TUI/WinUI 的 roster / inbox 唯一权威投影。
-///  —— `TeamSnapshot/TeamDelta` 是
-/// TUI/WinUI 的唯一 roster/inbox 投影。壳层**不得**再从 `spawn_subagent`
-/// 工具卡 JSON 推导 agent 身份。
-/// 快照来自 `GET /ringing/v2/sessions/{seed}/team`（[`Client::team_v2`]），
-/// 之后的增量来自 per-seed 单流的 [`fact::ProjectionPayload::TeamDelta`]。
-/// inbox 消息的投递语义（queue / trigger / interrupt / steer / interject）。
-/// agent residency（loaded / unloaded）。**`unloaded != completed != closed`**。
-/// roster 里一个 agent 的快照：`agent_path` 为主键，`nickname` 只是显示辅助。
-/// agent 生命周期状态（pending_init / running / waiting_user / interrupted / completed / errored / shutdown / not_found）。
-/// message board 快照（`/team` 的 `board` 字段）。
-/// 单流上的 Team 增量。
-/// inbox 里一条待投递消息的摘要：author / recipient / task / delivery。
-/// 单条 task（`TeamDelta::TaskChanged.task`）。
-/// task board 快照（`/team` 的 `tasks` 字段）。
-
-/// `GET /ringing/v2/sessions/{seed}/team` 的 typed 响应。
-/// 一次拿到三份快照：roster + inbox（`team`）、task board（`tasks`）、
-/// message board（`board`）。Phase 4（roster/inbox）、TEAM-01e（task board）与
-/// BOARD-01d（message board）消费的都是这一个端点，避免壳层各拉一次。
-/// 所有权在 `qaqh_ringing_contract`（daemon handler 与 TS 契约导出共用）；
-/// 此处保留壳层既有命名。
-pub use qaqh_ringing_contract::TeamResponse as ClientV2TeamResponse;
-
-/// Typed v2 SSE envelope.
-pub type ClientV2Event = RingingV2EventEnvelope<fact::ProjectionPayload>;
+/// Typed v2 SSE 帧:类型化 `SessionEventFrame`(seq + 业务事件)。
+pub type ClientV2Event = SessionEventFrame;
 
 /// Alias kept explicit for shells that prefer the full contract name.
 pub type ClientV2EventEnvelope = ClientV2Event;
 
-/// bootstrap `control.state` / `tool.state` 的具体组合。
-/// 所有权在 `qaqh_ringing_contract`：daemon handler 序列化、客户端反序列化
-/// 与 TS 契约导出共用同一份定义，不再各自维护镜像 struct。
+/// 单份会话状态(报告二 §5):bootstrap 直接返回契约 `SessionState`。
+pub use qaqh_ringing_contract::SessionBootstrap as ClientV2Bootstrap;
 pub use qaqh_ringing_contract::SessionState;
+pub use qaqh_ringing_contract::TeamResponse as ClientV2TeamResponse;
 pub use qaqh_ringing_contract::team as contract_team;
-pub use qaqh_session::{ClientV2ControlState, ClientV2ToolState};
-
-pub type ClientV2ConversationState = qaqh_session::projection::ConversationSnapshot;
-
-/// `conversation.state.context[].kind`（typed 快照里逐条上下文项）。
-/// `control.state.activity` 的 v2 词汇（idle / running / interrupted）。
-
-/// Typed authoritative v2 bootstrap.
-pub type ClientV2Bootstrap =
-    RingingV2Bootstrap<ClientV2ControlState, ClientV2ConversationState, ClientV2ToolState>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientV2SessionState {
@@ -153,10 +73,18 @@ impl ClientV2SessionState {
     }
 }
 
+/// 服务端要求重新同步:`ringing.resync_required` 帧载荷。
+/// owner 广播无回放尾,游标出现缺口时唯一正确的动作是重新 bootstrap。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct ClientV2ResyncRequired {
+    pub session_id: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone)]
 pub enum ClientV2SubscriptionEvent {
     Event(Box<ClientV2Event>),
-    Reset(ringing_v2::RingingV2ResetRequired),
+    Reset(ClientV2ResyncRequired),
     /// 字节到达但凑不出完整帧（daemon 的 keepalive 注释行 / 跨 chunk 半帧）。
     /// 把「到达」本身呈现给调用方，v2 流的空闲计时器才能在**字节层**复位：
     /// 会话安静期里 daemon 的 15s keepalive 是唯一字节来源，只按事件复位
@@ -207,17 +135,11 @@ impl ClientV2Subscription {
     fn decode_frame(frame: std::result::Result<SseFrame, ()>) -> Result<ClientV2SubscriptionEvent> {
         let frame =
             frame.map_err(|()| ClientError::Protocol("invalid UTF-8 in v2 SSE frame".into()))?;
-        if frame.event_type == "ringing.reset_required" {
-            let reset: ringing_v2::RingingV2ResetRequired = serde_json::from_str(&frame.data)?;
-            reset
-                .validate()
-                .map_err(|code| ClientError::Protocol(format!("invalid v2 reset: {code}")))?;
+        if frame.event_type == "ringing.resync_required" {
+            let reset: ClientV2ResyncRequired = serde_json::from_str(&frame.data)?;
             return Ok(ClientV2SubscriptionEvent::Reset(reset));
         }
         let event: ClientV2Event = serde_json::from_str(&frame.data)?;
-        event
-            .validate()
-            .map_err(|code| ClientError::Protocol(format!("invalid v2 event: {code}")))?;
         Ok(ClientV2SubscriptionEvent::Event(Box::new(event)))
     }
 }
@@ -291,9 +213,6 @@ impl Client {
             return Err(api_error(response, &path).await);
         }
         let bootstrap: ClientV2Bootstrap = response.json().await?;
-        bootstrap
-            .validate()
-            .map_err(|code| ClientError::Protocol(format!("invalid v2 bootstrap: {code}")))?;
         Ok(bootstrap)
     }
 
@@ -328,7 +247,7 @@ impl Client {
     pub async fn subscribe_v2(
         &self,
         session_id: &str,
-        since_cursor: Option<&CursorToken>,
+        since_cursor: Option<&str>,
     ) -> Result<ClientV2Subscription> {
         let state = self.require_v2_session().await?;
         let path = qaqh_ringing::events_path(session_id);
@@ -340,7 +259,7 @@ impl Client {
             .header("X-QAQH-Client-Session-Id", &state.client_session_id)
             .header("Accept", "text/event-stream");
         if let Some(cursor) = since_cursor {
-            request = request.query(&[("since_cursor", cursor.as_str())]);
+            request = request.query(&[("since_cursor", cursor)]);
         }
         let response = request.send().await?;
         if !response.status().is_success() {
@@ -608,8 +527,14 @@ mod tests {
         );
 
         // unloaded != completed：两者是**两个正交字段**，前端不能把 unloaded 画成 deleted。
-        assert_eq!(child.residency, fact::TeamAgentResidency::Unloaded);
-        assert_eq!(child.status, fact::TeamAgentStatus::Completed);
+        assert_eq!(
+            child.residency,
+            qaqh_ringing_contract::team::TeamAgentResidency::Unloaded
+        );
+        assert_eq!(
+            child.status,
+            qaqh_ringing_contract::team::TeamAgentStatus::Completed
+        );
 
         // inbox 必须带 author / recipient / task / delivery 四要素。
         let inbox = &response.team.unread_messages[0];
@@ -620,35 +545,6 @@ mod tests {
             inbox.delivery,
             qaqh_session::session_fact_v2::InterAgentDelivery::Queue
         );
-    }
-
-    /// 壳层必须能**命名** TeamDelta 的变体（这是 TUI 之前做不到的事：类型没导出）。
-    #[test]
-    fn team_delta_variants_are_nameable_from_the_client_surface() {
-        let delta = fact::TeamDelta::AgentResidencyChanged {
-            revision: 3,
-            agent_id: qaqh_session::session_fact_v2::SessionId::new(
-                "0199a0f0-0000-7000-8000-000000000002",
-            ),
-            residency: fact::TeamAgentResidency::Unloaded,
-        };
-        let value = serde_json::to_value(&delta).expect("json");
-        assert_eq!(value["kind"], "agent_residency_changed");
-        assert_eq!(value["data"]["residency"], "unloaded");
-
-        // 同一个 delta 也能从 `fact::ProjectionPayload` 里取出来并匹配。
-        let payload: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
-            "kind": "team_delta",
-            "data": value,
-        }))
-        .expect("payload");
-        match payload {
-            fact::ProjectionPayload::TeamDelta(fact::TeamDelta::AgentResidencyChanged {
-                residency,
-                ..
-            }) => assert_eq!(residency, fact::TeamAgentResidency::Unloaded),
-            other => panic!("expected TeamDelta, got {other:?}"),
-        }
     }
 
     #[test]
@@ -722,17 +618,14 @@ mod tests {
     /// 反序列化形状）。
     fn event_frame_chunk() -> Vec<u8> {
         let event = serde_json::json!({
-            "schema": qaqh_ringing::RINGING_SCHEMA,
-            "version": RINGING_V2_VERSION,
-            "server_epoch": "epoch-1",
-            "session_id": "session-1",
-            "event_id": "event-1",
-            "stream_key": {"kind": "channel", "data": "control"},
-            "delivery": "ephemeral",
-            "payload": {"kind": "team_delta", "data": {"kind": "agent_residency_changed",
-                "data": {"revision": 3,
-                         "agent_id": "0199a0f0-0000-7000-8000-000000000002",
-                         "residency": "unloaded"}}}
+            "seq": 7,
+            "type": "timeline_appended",
+            "entry": {"kind": "input", "data": {
+                "block_id": "block_1",
+                "purpose": "trigger_turn",
+                "content": {"kind": "inline", "data": {"text": "hi"}},
+                "attachments": [],
+                "actor": {"kind": "user", "id": "user"}}}
         });
         format!(
             "event: ringing.event\ndata: {}\n\n",

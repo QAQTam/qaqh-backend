@@ -48,9 +48,9 @@ pub struct ClientHandlers {
     /// 2026-09-24 硬切：v1 的三条 `events/{channel}` 全局流已删除，投影事件只从
     /// 这条单流来；`(seed, event)` 由调用方按 seed 分派。
     pub on_v2_event: std::sync::Arc<dyn Fn(String, crate::v2::ClientV2Event) + Send + Sync>,
-    /// v2 `ResetRequired`：服务端发完即断流，调用方应重新 bootstrap 再订阅。
+    /// v2 `resync_required`:服务端发完即断流,调用方应重新 bootstrap 再订阅。
     pub on_v2_reset:
-        std::sync::Arc<dyn Fn(String, crate::v2::ringing_v2::RingingV2ResetRequired) + Send + Sync>,
+        std::sync::Arc<dyn Fn(String, crate::v2::ClientV2ResyncRequired) + Send + Sync>,
     /// v2 单流状态迁移（每 seed 一条）。
     pub on_v2_status:
         std::sync::Arc<dyn Fn(String, crate::v2_stream::V2StreamStatus) + Send + Sync>,

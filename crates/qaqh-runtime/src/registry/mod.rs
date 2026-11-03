@@ -1,23 +1,9 @@
-use crate::error::QaqhResult;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use qaqh_domain::RingingChannel;
-use qaqh_session::actor::{
-    ConnectionId, SessionActor, SessionActorEffect, SessionCommand, SubscriptionCommand,
-    SubscriptionEffect,
-};
-use qaqh_session::canonical::{
-    CANONICAL_IDENTITY_FILE, CanonicalSessionIdentity, CommittedFactReader, EVENTS_COMMIT_FILE,
-    EVENTS_FILE,
-};
-use qaqh_session::session_fact_v2::{
-    AgentMetadata, AgentPath, FactPayload, SessionFact, SessionId, SubagentSpawnConfig,
-    SubagentTerminalStatus,
-};
-use qaqh_session::team::TeamAgentResidency;
+use qaqh_session::session_fact_v2::{AgentMetadata, AgentPath, SessionId};
 use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
 #[derive(Clone, Debug)]
@@ -30,9 +16,8 @@ pub struct SubagentSpawnSpec {
 }
 use crate::agent_catalog::AgentCatalog;
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason};
-use crate::ringing::V2ProjectionHub;
 use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
-use crate::{RingingHub, SessionActivityTracker};
+use crate::RingingHub;
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
 
@@ -250,11 +235,8 @@ fn background_command(program: &str) -> Command {
 
 /// How an agent worker is attached to this daemon process.
 enum AgentTransport {
-    /// RLC-4 thin-loop SessionAgent task.
-    ThinAgent {
-        handle: crate::session_agent::AgentHandle,
-        task: tokio::task::JoinHandle<Result<(), crate::session_agent::SessionAgentError>>,
-    },
+    /// owner 驱动的回合循环(`qaqh_agent_runtime::session_loop`)。
+    Loop { loop_: Arc<qaqh_agent_runtime::session_loop::SessionLoop> },
 }
 
 enum AgentKind {
@@ -266,18 +248,6 @@ pub struct AgentInstance {
     session_id: String,
     transport: AgentTransport,
     kind: AgentKind,
-    /// P2-2d-b migration bridge: daemon-side logical subscription mailbox.
-    /// The worker `TurnActor` remains authoritative for turn state until the
-    /// actors are consolidated.
-    subscription_actor: SessionActor,
-    /// Idle-unload liveness (shared with the Loop actor).
-    liveness: Option<std::sync::Arc<crate::agent::liveness::WorkerLiveness>>,
-    /// Event consumer thread (event channel reader for the in-process actor).
-    /// daemon 关闭时必须 join：worker 退出 ≠ 尾部 intent（含 seal_turn）已消费
-    /// ——通道里的最后几个事件仍由本线程读取并 publish（见 shutdown）。
-    reader: Option<std::thread::JoinHandle<()>>,
-    /// In-process loop thread.
-    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 /// Logical identity allocated for a newly spawned subagent.
@@ -313,19 +283,8 @@ pub(crate) struct CollectorArmSpec {
     pub(crate) child_agent_path: String,
 }
 
-fn listed_terminal_status(status: SubagentTerminalStatus) -> ListedAgentStatus {
-    match status {
-        SubagentTerminalStatus::Completed => ListedAgentStatus::Completed,
-        SubagentTerminalStatus::Failed | SubagentTerminalStatus::TimedOut => {
-            ListedAgentStatus::Errored
-        }
-        SubagentTerminalStatus::Cancelled => ListedAgentStatus::Interrupted,
-    }
-}
-
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
-    activity: SessionActivityTracker,
     /// 会话存储句柄（PR-3-1 注入化；spawn 诊断读 meta 用）。
     sessions: Arc<qaqh_session::SessionManager>,
     /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。
@@ -344,9 +303,6 @@ pub struct AgentRegistry {
     /// `instances` so `list_agents` reads lifecycle state rather than guessing
     /// from the worker table.
     residency: HashMap<String, ListedAgentResidency>,
-    /// Runtime-only Team residency overlay. It is never persisted: after a
-    /// daemon restart canonical projection rebuilds every agent as unloaded.
-    v2_hub: Option<Arc<V2ProjectionHub>>,
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
@@ -366,13 +322,16 @@ pub struct AgentRegistry {
     /// 消息配额是安全阀，不要求跨 daemon 重启持久化。
     outbound_attempts: HashMap<String, HashMap<String, u64>>,
     /// Child result collectors currently armed for a running/reloaded turn.
-    armed_collectors: HashSet<String>,
+    /// 已武装的子代理收集器:child id → 关联的父工具 call id。
+    armed_collectors: HashMap<String, String>,
     /// V2 子代理终态摘要（**结果面**）：`child_session_id` → outcome。
     ///
     /// 结果不再寄存在 `ProcessRegistry` 的 `answer` 槽：状态面自己承载最终
     /// 答复，由 `list_agents` 直接返回（与 codex `AgentStatus::Completed`
     /// 同构）。键是 canonical 主键，reload 不会换 id。
     subagent_outcomes: HashMap<String, AgentOutcome>,
+    /// 子代理 spawn 参数(reload 用):child id → spawn spec。
+    spawn_configs: HashMap<String, SubagentSpawnSpec>,
 }
 
 impl AgentRegistry {
@@ -382,7 +341,6 @@ impl AgentRegistry {
     ) -> Self {
         Self {
             instances: HashMap::new(),
-            activity: SessionActivityTracker::default(),
             sessions,
             owners,
             hub: None,
@@ -391,27 +349,21 @@ impl AgentRegistry {
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
             residency: HashMap::new(),
-            v2_hub: None,
             quota_ledgers: HashMap::new(),
             quota_limits: QuotaLimits::unlimited(),
             max_depth: 1,
             message_in_flight_per_pair: 16,
             message_outbound_per_sender: 1024,
             outbound_attempts: HashMap::new(),
-            armed_collectors: HashSet::new(),
+            armed_collectors: HashMap::new(),
             subagent_outcomes: HashMap::new(),
+            spawn_configs: HashMap::new(),
         }
     }
 
     /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。
     pub fn attach_ringing(&mut self, hub: Arc<RingingHub>) {
         self.hub = Some(hub);
-    }
-
-    /// Attach the canonical V2 projection hub used for runtime residency
-    /// overlays and ephemeral `TeamDelta` publication.
-    pub fn attach_v2_projection(&mut self, hub: Arc<V2ProjectionHub>) {
-        self.v2_hub = Some(hub);
     }
 }
 
@@ -421,48 +373,12 @@ mod queries;
 mod spawn;
 
 impl AgentInstance {
-    fn apply_subscription(
-        &mut self,
-        command: SubscriptionCommand,
-    ) -> QaqhResult<SubscriptionEffect> {
-        self.subscription_actor
-            .submit(SessionCommand::Subscription(command))
-            .map_err(|error| error.to_string())?;
-        match self
-            .subscription_actor
-            .step()
-            .map_err(|error| error.to_string())?
-        {
-            Some(SessionActorEffect::Subscription(effect)) => Ok(effect),
-            Some(effect) => Err(format!("unexpected subscription actor effect: {effect:?}").into()),
-            None => Err("subscription actor produced no effect".into()),
-        }
-    }
-
     fn is_dead(&self) -> bool {
-        match &self.transport {
-            AgentTransport::ThinAgent { task, .. } => task.is_finished(),
-        }
+        // 回合循环无独立执行线程可崩:任务失败由循环自身收尾,实例常驻。
+        false
     }
 
-    fn is_fully_stopped(&self) -> bool {
-        match &self.transport {
-            AgentTransport::ThinAgent { task, .. } => task.is_finished(),
-        }
-    }
-
-    fn wait_until_stopped(&self, session_id: &str) -> bool {
-        const TERMINAL_WAIT: Duration = Duration::from_secs(30);
-        let deadline = Instant::now() + TERMINAL_WAIT;
-        while !self.is_fully_stopped() {
-            if Instant::now() >= deadline {
-                log::error!(
-                    "[registry] child {session_id} terminal observation timed out after {TERMINAL_WAIT:?}"
-                );
-                return false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+    fn wait_until_stopped(&self, _session_id: &str) -> bool {
         true
     }
 
@@ -474,33 +390,14 @@ impl AgentInstance {
     }
 
     fn signal_shutdown(&mut self) {
-        let _ = self.subscription_actor.submit(SessionCommand::Shutdown);
-        let _ = self.subscription_actor.step();
-        match &self.transport {
-            AgentTransport::ThinAgent { handle, .. } => {
-                let _ = handle.shutdown();
-                qaqh_workspace::set_session_cancel(&self.session_id, true);
-            }
-        }
+        let AgentTransport::Loop { loop_ } = &self.transport;
+        loop_.abandon();
+        qaqh_workspace::set_session_cancel(&self.session_id, true);
     }
 
-    /// Blocking join of the worker loop + reader threads. Contract (D-4):
-    /// must run in a blocking context (spawn_blocking / dedicated thread /
-    /// daemon teardown) — never directly on a tokio worker thread. The
-    /// caller holds the registry mutex across the join by design; other
-    /// registry RPCs stall until the join completes.
+    /// Unload 收尾:owner 泵线程持有全部落库职责,实例 drop 即完成,
+    /// 无线程可 join。回合任务感知取消后自行结算挂起交互并结束。
     fn finish_shutdown(&mut self) {
-        let AgentTransport::ThinAgent { task, .. } = &mut self.transport;
-        task.abort();
-        // Join the loop thread first so it drops `event_tx`; the event reader
-        // then drains the channel tail and publishes the last intents
-        // (含 seal_turn——terminal intent 同步落盘).
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
-        if let Some(reader) = self.reader.take() {
-            let _ = reader.join();
-        }
         log::info!("stopped agent {}", self.session_id);
     }
 

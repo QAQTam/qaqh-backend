@@ -59,6 +59,68 @@ pub fn create_session(conn: &mut Connection, session: &NewSession) -> rusqlite::
     Ok(())
 }
 
+/// Spawn 期登记:行不存在则插入默认行,已存在则不动(幂等)。
+/// 血缘后补:spawn 先建行、拿到父会话后再把 `parent_session_id` 补上——
+/// 只在当前为 NULL 时写,不覆盖已有的明确血缘。
+pub fn ensure_session(
+    conn: &mut Connection,
+    session_id: &str,
+    parent_session_id: Option<&str>,
+    ephemeral: bool,
+) -> rusqlite::Result<()> {
+    let now = now_ms();
+    conn.execute(
+        "INSERT INTO sessions
+            (session_id, parent_session_id, title, title_source, cwd, model, effort,
+             profile, mode, tool_mode, ephemeral, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?1, 'user', NULL, NULL, NULL, NULL, NULL, NULL, ?3, ?4, ?4)
+         ON CONFLICT(session_id) DO NOTHING",
+        params![session_id, parent_session_id, i64::from(ephemeral), now],
+    )?;
+    if let Some(parent) = parent_session_id {
+        conn.execute(
+            "UPDATE sessions SET parent_session_id = ?2, updated_at_ms = ?3
+             WHERE session_id = ?1 AND parent_session_id IS NULL",
+            params![session_id, parent, now],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn session_parent(
+    conn: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Option<String>> {
+    match conn.query_row(
+        "SELECT parent_session_id FROM sessions WHERE session_id = ?1",
+        [session_id],
+        |row| row.get::<_, Option<String>>(0),
+    ) {
+        Ok(parent) => Ok(parent),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+pub fn child_session_ids(
+    conn: &Connection,
+    parent_session_id: &str,
+) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id FROM sessions WHERE parent_session_id = ?1 ORDER BY created_at_ms",
+    )?;
+    let rows = stmt.query_map([parent_session_id], |row| row.get(0))?;
+    rows.collect()
+}
+
+pub fn turn_count(conn: &Connection, session_id: &str) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM turns WHERE session_id = ?1",
+        [session_id],
+        |row| row.get(0),
+    )
+}
+
 /// 会话列表行:列表页直接查询,不重建投影。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionListRow {
@@ -100,6 +162,59 @@ pub fn list_sessions(
         })
     })?;
     rows.collect()
+}
+
+/// 元数据补丁的 SQLite 列投影:出现的字段写列,未出现的不动。
+/// skills/custom_tools 等尚无业务列的字段不在此收口(随旧 meta 存储迁移时处理)。
+#[derive(Debug, Clone, Default)]
+pub struct SessionColumnPatch {
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub profile: Option<String>,
+    pub mode: Option<String>,
+    pub tool_mode: Option<String>,
+    pub archived: Option<bool>,
+    pub ephemeral: Option<bool>,
+}
+
+pub fn update_session_columns(
+    conn: &mut Connection,
+    session_id: &str,
+    patch: &SessionColumnPatch,
+) -> rusqlite::Result<usize> {
+    let mut sets: Vec<String> = vec!["updated_at_ms = ?1".to_string()];
+    let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now_ms())];
+    let mut push = |column: &str, value: Option<String>, flag: Option<bool>| {
+        match (value, flag) {
+            (Some(value), _) => {
+                values.push(Box::new(value));
+            }
+            (None, Some(flag)) => {
+                values.push(Box::new(i64::from(flag)));
+            }
+            (None, None) => return,
+        }
+        sets.push(format!("{column} = ?{}", values.len() + 1));
+    };
+    push("title", patch.title.clone(), None);
+    push("cwd", patch.cwd.clone(), None);
+    push("model", patch.model.clone(), None);
+    push("effort", patch.effort.clone(), None);
+    push("profile", patch.profile.clone(), None);
+    push("mode", patch.mode.clone(), None);
+    push("tool_mode", patch.tool_mode.clone(), None);
+    push("archived", None, patch.archived);
+    push("ephemeral", None, patch.ephemeral);
+    values.push(Box::new(session_id.to_string()));
+    let placeholders: Vec<String> = (1..=values.len()).map(|index| format!("?{index}")).collect();
+    let sql = format!(
+        "UPDATE sessions SET {} WHERE session_id = {}",
+        sets.join(", "),
+        placeholders.last().expect("session id placeholder"),
+    );
+    conn.execute(&sql, rusqlite::params_from_iter(values))
 }
 
 pub fn session_exists(conn: &Connection, session_id: &str) -> rusqlite::Result<bool> {
