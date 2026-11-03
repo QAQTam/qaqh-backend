@@ -340,24 +340,6 @@ fn restart_keeps_nonterminal_receipts_nonterminal_and_terminal_payloads_replayab
 }
 
 #[test]
-fn restart_rebuilds_causation_index_for_uuid_command_receipts() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("receipts.json");
-    let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
-    assert!(reserve(&mut store));
-    store.mark_running(COMMAND);
-    drop(store);
-    let mut reloaded = PendingCommandStore::open_persistent_at(&path).unwrap();
-    let event =
-        super::tests::control_event(qaqh_session::canonical::causation_for_command(COMMAND));
-    let event_id = event.event_id.0.clone();
-    reloaded.observe_projection_events(&[event]);
-    let status = reloaded.v2_status_for_session(COMMAND, OWNER).unwrap();
-    assert_eq!(status.state, RingingCommandState::Succeeded);
-    assert_eq!(status.terminal_event_id.as_deref(), Some(event_id.as_str()));
-}
-
-#[test]
 fn persisted_rollback_and_missing_file_are_unknown() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("receipts.json");

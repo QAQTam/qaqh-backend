@@ -79,22 +79,44 @@ fn apply_model_selection(
 ///
 /// `None` = 权威配置不可用（调用方按 `Config::default()` 兜底）。
 pub fn session_effective_config(
-    manager: Option<&qaqh_session::SessionManager>,
+    owners: Option<&qaqh_session::owner::OwnerDirectory>,
     session_id: &str,
 ) -> Option<(qaqh_config::Config, Option<String>)> {
+    use qaqh_types::SettingValue;
     let global = qaqh_config::watch::authoritative()?;
-    let profile = manager.and_then(|manager| manager.session_profile(session_id));
+    let owned = session_id.to_string();
+    let row = owners.and_then(|owners| {
+        owners
+            .db()
+            .read_blocking(move |conn| qaqh_session::db::store::session_row(conn, &owned))
+            .ok()?
+    });
+    let profile = row
+        .as_ref()
+        .and_then(|row| row.profile.clone())
+        .filter(|name| !name.is_empty());
     let own_key = profile
         .as_deref()
         .and_then(|name| resolve_profile_key(&global, name));
     let mut cfg = qaqh_config::Config::for_session(&global, profile.as_deref(), own_key);
-    if let Some(effort) = manager.and_then(|m| m.session_effort(session_id)) {
+    if let Some(effort) = row.as_ref().and_then(|row| row.effort.clone()).filter(|e| !e.is_empty()) {
         cfg.reasoning_effort = effort;
     }
-    let selection = manager
-        .and_then(|m| m.session_model_selection(session_id))
-        .or_else(|| global.default_model_selection.clone());
+    let selection = row
+        .as_ref()
+        .and_then(|row| row.model_selection.clone())
+        .map(|selection| SettingValue::Use { value: selection })
+        .or_else(|| {
+            global
+                .default_model_selection
+                .clone()
+                .map(|value| qaqh_types::SettingValue::Use { value })
+        });
     if let Some(selection) = selection {
+        let selection = match selection {
+            SettingValue::Use { value } => value,
+            SettingValue::Inherit => return Some((cfg, profile)),
+        };
         apply_model_selection(&mut cfg, &global.profiles_catalog, &selection);
     }
     Some((cfg, profile))

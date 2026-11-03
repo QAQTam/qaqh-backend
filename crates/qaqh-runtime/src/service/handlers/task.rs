@@ -30,12 +30,12 @@ pub(crate) fn handle(service: &QaqhService, command: TaskCommand) -> QaqhResult<
                 .map_err(QaqhError::message)
         }
         TaskCommand::PlanRead(args) => {
-            let plan = read_plan(&service.sessions, &args.session_id);
+            let plan = read_plan(&service.owners, &args.session_id);
             QaqhError::to_value("plan", plan)
         }
         TaskCommand::PlanAction(args) => {
             let output = plan_action(
-                &service.sessions,
+                &service.owners,
                 &args.session_id,
                 &args.item_id,
                 &args.action,

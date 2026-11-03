@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use qaqh_types::SessionMeta;
 
 /// 生成稳定 id：`ws-{unix_ms}-{path 哈希前 8 位}-{计数器}`（不引入 uuid 依赖；
 /// 时间戳 + 路径哈希 + 进程内计数器防碰撞，同一毫秒同路径也得不同 id）。
@@ -233,7 +232,11 @@ impl WorkspaceStore {
 
     /// 注册一个目录为 workspace。目录必须存在（canonicalize）；
     /// 已存在的 cwd 匹配会话自动归属（D1 双轨自动侧）。
-    pub fn create(&self, path: &str, existing: &[SessionMeta]) -> Result<WorkspaceMeta, String> {
+    pub fn create(
+        &self,
+        path: &str,
+        existing: &[(String, Option<String>)],
+    ) -> Result<WorkspaceMeta, String> {
         if !Path::new(path).is_dir() {
             return Err(format!("workspace.create: not a directory: {path}"));
         }
@@ -263,17 +266,16 @@ impl WorkspaceStore {
 
         let mut session_ids: Vec<String> = Vec::new();
         // 自动归属：已有会话 cwd 匹配本 workspace，且当前未归属其他 workspace。
-        for meta in existing {
-            let belongs = meta
-                .cwd
+        for (session_id, cwd) in existing {
+            let belongs = cwd
                 .as_deref()
                 .is_some_and(|cwd| cwd_belongs(cwd, &canonical_str));
             if belongs
                 && !items
                     .iter()
-                    .any(|w| w.session_ids.iter().any(|s| s == &meta.session_id))
+                    .any(|w| w.session_ids.iter().any(|s| s == session_id))
             {
-                session_ids.push(meta.session_id.clone());
+                session_ids.push(session_id.clone());
             }
         }
         let ws = WorkspaceMeta {

@@ -285,8 +285,6 @@ pub(crate) struct CollectorArmSpec {
 
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
-    /// 会话存储句柄（PR-3-1 注入化；spawn 诊断读 meta 用）。
-    sessions: Arc<qaqh_session::SessionManager>,
     /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。
     owners: Arc<qaqh_session::owner::OwnerDirectory>,
     /// Ringing 运行时；None = 未启用 legacy worker-only 模式。
@@ -335,13 +333,9 @@ pub struct AgentRegistry {
 }
 
 impl AgentRegistry {
-    pub fn new(
-        sessions: Arc<qaqh_session::SessionManager>,
-        owners: Arc<qaqh_session::owner::OwnerDirectory>,
-    ) -> Self {
+    pub fn new(owners: Arc<qaqh_session::owner::OwnerDirectory>) -> Self {
         Self {
             instances: HashMap::new(),
-            sessions,
             owners,
             hub: None,
             shutting_down: false,
@@ -370,7 +364,7 @@ impl AgentRegistry {
 mod lifecycle;
 mod messaging;
 mod queries;
-mod spawn;
+pub(crate) mod spawn;
 
 impl AgentInstance {
     fn is_dead(&self) -> bool {

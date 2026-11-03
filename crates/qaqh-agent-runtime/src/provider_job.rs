@@ -7,16 +7,7 @@
 //! that happens after the gate call has begun is `StartedUnknown` until a
 //! terminal response from the provider stream is observed and classified.
 
-use qaqh_agentloop_core::mailbox::FrameSize;
-use qaqh_session::{
-    canonical::sha256_content_hash,
-    session_commit::{CommittedExecution, FenceReason, SessionCommit, SessionCommitError},
-    session_fact_v2::{
-        ContentHash, EventId, FactPayload, FactSchema, ModelRoundStarted, ProviderFinish,
-        ProviderResponseCommitted, RequestIdentity, SessionFact, ToolCallDeclared, ToolCallId,
-        TurnId,
-    },
-};
+use qaqh_ringing_contract::fact::{ContentHash, ProviderFinish, RequestIdentity};
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 use std::{
     collections::HashMap,
@@ -27,9 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::progress::{
-    AssistantProgress, AttemptBlocks, ProgressBlockKind, ProgressStream, ToolInputProgress,
-};
+use crate::progress::{AssistantProgress, ProgressBlockKind, ProgressStream, ToolInputProgress};
 
 /// Upper bound on the streamed text retained for a failed attempt.
 const MAX_PARTIAL_TEXT_BYTES: usize = 64 * 1024;
@@ -62,6 +51,23 @@ pub enum Evidence {
     StartedUnknown,
     /// 拿到完整终态响应。
     Terminal,
+}
+
+/// 一次模型请求的结果:证据级别 + 中性消息 + 流式展示残段。
+pub struct ProviderOutcome {
+    /// How far the effect actually got.
+    pub evidence: Evidence,
+    pub message: Option<Message>,
+    pub opaque_items: Vec<serde_json::Value>,
+    pub usage: Option<UsageInfo>,
+    pub stop_reason: Option<String>,
+    /// Terminal classification; only a complete finish may start tools or
+    /// the next round.
+    pub finish: Option<ProviderFinish>,
+    pub incomplete_reason: Option<String>,
+    pub partial_text: Option<String>,
+    pub partial_reasoning: Option<String>,
+    pub error: Option<String>,
 }
 
 impl ProviderRequestSpec {
@@ -169,301 +175,6 @@ pub fn compute_request_identity(
     }
 }
 
-/// Build a `ModelRoundStarted` payload whose `request_hash` and `RequestIdentity`
-/// are derived directly from the session's frozen context and `ProviderRequestSpec`.
-pub fn build_model_round_started(
-    commit: &SessionCommit,
-    turn_id: TurnId,
-    round: u32,
-    attempt: u32,
-    spec: &ProviderRequestSpec,
-) -> Result<ModelRoundStarted, SessionCommitError> {
-    let head = commit.head()?;
-    let messages = commit.request_messages()?;
-    let request_hash = json_hash(&messages);
-    let identity = compute_request_identity(attempt, messages, spec);
-    Ok(ModelRoundStarted {
-        turn_id,
-        round,
-        request_hash,
-        context_revision: head,
-        identity: Some(identity),
-    })
-}
-
-#[derive(Debug, Clone)]
-pub struct ProviderOutcome {
-    /// How far the effect actually got.
-    pub evidence: Evidence,
-    /// Neutral assistant message (`Reasoning`, `Text`, `ToolUse`, `WebSearchCall`).
-    /// Provider-specific `ResponseOutputItem` entries are separated into
-    /// [`Self::opaque_items`] so they can be persisted in `opaque_refs`.
-    pub message: Option<Message>,
-    /// Verbatim provider output items (`encrypted_content`, `phase`, native
-    /// function call items) extracted from the stream.
-    pub opaque_items: Vec<serde_json::Value>,
-    pub usage: Option<UsageInfo>,
-    pub stop_reason: Option<String>,
-    /// Terminal classification the commit port records in
-    /// `ProviderResponseCommitted`. Only a complete finish may start tools or
-    /// the next round.
-    pub finish: Option<ProviderFinish>,
-    pub incomplete_reason: Option<String>,
-    /// Text streamed before the terminal event. Retained so a failed or
-    /// interrupted attempt still has a display source.
-    pub partial_text: Option<String>,
-    /// Reasoning streamed before the terminal event.
-    pub partial_reasoning: Option<String>,
-    pub error: Option<String>,
-}
-
-impl FrameSize for ProviderOutcome {
-    fn retained_bytes(&self) -> usize {
-        let opaque_bytes: usize = self
-            .opaque_items
-            .iter()
-            .map(|item| item.to_string().len())
-            .sum();
-        std::mem::size_of::<Self>()
-            .saturating_add(self.message.as_ref().map_or(0, |message| {
-                message.memory_usage_estimate().heap_estimate_bytes as usize
-            }))
-            .saturating_add(opaque_bytes)
-            .saturating_add(self.error.as_ref().map_or(0, String::capacity))
-            .saturating_add(self.stop_reason.as_ref().map_or(0, String::capacity))
-            .saturating_add(self.incomplete_reason.as_ref().map_or(0, String::capacity))
-            .saturating_add(self.partial_text.as_ref().map_or(0, String::capacity))
-            .saturating_add(self.partial_reasoning.as_ref().map_or(0, String::capacity))
-    }
-}
-
-/// Materialize a `ProviderOutcome` into a `ProviderResponseCommitted` fact,
-/// display `AssistantBlockSealed` facts, and matching `ToolCallDeclared` facts.
-///
-/// `ProviderResponseCommitted` is context only: the projection registry gives it
-/// no public slot, so the transcript text/reasoning must also be sealed here.
-#[allow(clippy::too_many_arguments)]
-pub fn prepare_response_commit_facts(
-    commit: &SessionCommit,
-    turn_id: &TurnId,
-    round: u32,
-    attempt: u32,
-    model: &str,
-    // Identities allocated when generation started; the sealed blocks reuse
-    // them so the streamed text and the durable block are one block.
-    blocks: Option<&AttemptBlocks>,
-    outcome: &ProviderOutcome,
-    response_event_id: EventId,
-    mut next_tool_event_id: impl FnMut(usize) -> EventId,
-    mut next_block_event_id: impl FnMut(usize) -> EventId,
-    ts_ms: i64,
-) -> Result<Vec<SessionFact>, SessionCommitError> {
-    let finish = outcome.finish.unwrap_or(ProviderFinish::Unknown);
-    let neutral_message = outcome.message.clone().unwrap_or_else(|| Message {
-        msg_id: None,
-        role: "assistant".into(),
-        name: None,
-        content: Vec::new(),
-    });
-    let message_bytes =
-        serde_json::to_vec(&neutral_message).map_err(|e| SessionCommitError::Storage(e.into()))?;
-    let message_ref = commit.put_blob(&message_bytes)?;
-
-    let mut opaque_refs = Vec::with_capacity(outcome.opaque_items.len());
-    for item in &outcome.opaque_items {
-        let bytes = serde_json::to_vec(item).map_err(|e| SessionCommitError::Storage(e.into()))?;
-        opaque_refs.push(commit.put_blob(&bytes)?);
-    }
-
-    let mut facts = Vec::new();
-    facts.push(SessionFact {
-        schema: FactSchema::v2(),
-        session_id: commit.session_id().clone(),
-        log_id: commit.log_id().clone(),
-        fact_seq: 0,
-        event_id: response_event_id,
-        ts_ms,
-        causation_id: None,
-        turn_id: Some(turn_id.clone()),
-        call_id: None,
-        interaction_id: None,
-        payload: FactPayload::ProviderResponseCommitted(ProviderResponseCommitted {
-            turn_id: turn_id.clone(),
-            round,
-            attempt,
-            message_ref,
-            opaque_refs,
-            usage: outcome.usage.clone(),
-            finish,
-            incomplete_reason: outcome.incomplete_reason.clone(),
-        }),
-    });
-
-    // Display facts. The conversation projection builds assistant text from
-    // `AssistantBlockSealed` only, so a missing block here means a silent turn.
-    let mut block_ordinal = 0usize;
-    let mut used_reasoning_id = false;
-    let mut used_answer_id = false;
-    let mut push_block = |facts: &mut Vec<SessionFact>,
-                          kind: qaqh_session::session_fact_v2::AssistantBlockKind,
-                          body: &str,
-                          usage: Option<UsageInfo>|
-     -> Result<(), SessionCommitError> {
-        let content_ref = commit.put_blob(body.as_bytes())?;
-        // Reuse the identity the display channel already published under.
-        let block_id = match (blocks, kind) {
-            (
-                Some(blocks),
-                qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning,
-            ) if !used_reasoning_id => {
-                used_reasoning_id = true;
-                qaqh_session::session_fact_v2::BlockId::new(blocks.reasoning_block_id.clone())
-            }
-            (Some(blocks), qaqh_session::session_fact_v2::AssistantBlockKind::Answer)
-                if !used_answer_id =>
-            {
-                used_answer_id = true;
-                qaqh_session::session_fact_v2::BlockId::new(blocks.answer_block_id.clone())
-            }
-            _ => qaqh_session::session_fact_v2::BlockId::new(format!(
-                "block_{}",
-                qaqh_session::canonical::generate_ulid()
-            )),
-        };
-        facts.push(SessionFact {
-            schema: FactSchema::v2(),
-            session_id: commit.session_id().clone(),
-            log_id: commit.log_id().clone(),
-            fact_seq: 0,
-            event_id: next_block_event_id(block_ordinal),
-            ts_ms: ts_ms + block_ordinal as i64 + 1,
-            causation_id: None,
-            turn_id: Some(turn_id.clone()),
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::AssistantBlockSealed(
-                qaqh_session::session_fact_v2::AssistantBlockSealed {
-                    turn_id: turn_id.clone(),
-                    block_id,
-                    kind,
-                    content_ref,
-                    model: model.to_string(),
-                    usage,
-                },
-            ),
-        });
-        block_ordinal += 1;
-        Ok(())
-    };
-
-    let mut sealed_any = false;
-    for block in &neutral_message.content {
-        match block {
-            ContentBlock::Reasoning { reasoning, .. } if !reasoning.is_empty() => {
-                push_block(
-                    &mut facts,
-                    qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning,
-                    reasoning,
-                    None,
-                )?;
-                sealed_any = true;
-            }
-            ContentBlock::Text { text } if !text.is_empty() => {
-                push_block(
-                    &mut facts,
-                    qaqh_session::session_fact_v2::AssistantBlockKind::Answer,
-                    text,
-                    outcome.usage.clone(),
-                )?;
-                sealed_any = true;
-            }
-            _ => {}
-        }
-    }
-    // A stream that never produced a terminal message still has visible text:
-    // keep it rather than reporting an empty turn.
-    if !sealed_any {
-        if let Some(reasoning) = outcome
-            .partial_reasoning
-            .as_deref()
-            .filter(|t| !t.is_empty())
-        {
-            push_block(
-                &mut facts,
-                qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning,
-                reasoning,
-                None,
-            )?;
-        }
-        if let Some(text) = outcome.partial_text.as_deref().filter(|t| !t.is_empty()) {
-            push_block(
-                &mut facts,
-                qaqh_session::session_fact_v2::AssistantBlockKind::Answer,
-                text,
-                outcome.usage.clone(),
-            )?;
-        }
-    }
-
-    if finish == ProviderFinish::ToolUse {
-        let mut tool_ordinal = 0usize;
-        for block in &neutral_message.content {
-            if let ContentBlock::ToolUse { id, name, input } = block {
-                let args_bytes =
-                    serde_json::to_vec(input).map_err(|e| SessionCommitError::Storage(e.into()))?;
-                let args_ref = commit.put_blob(&args_bytes)?;
-                let args_hash = sha256_content_hash(&args_bytes);
-                // The provider id is the protocol identity: it goes back to the
-                // model in the tool result, so it must be stored verbatim.
-                let call_id = ToolCallId::new(id.clone());
-                facts.push(SessionFact {
-                    schema: FactSchema::v2(),
-                    session_id: commit.session_id().clone(),
-                    log_id: commit.log_id().clone(),
-                    fact_seq: 0,
-                    event_id: next_tool_event_id(tool_ordinal),
-                    ts_ms: ts_ms + tool_ordinal as i64 + 1,
-                    causation_id: None,
-                    turn_id: Some(turn_id.clone()),
-                    call_id: Some(call_id.clone()),
-                    interaction_id: None,
-                    payload: FactPayload::ToolCallDeclared(ToolCallDeclared {
-                        turn_id: turn_id.clone(),
-                        call_id,
-                        tool_name: name.clone(),
-                        args_ref,
-                        args_hash,
-                    }),
-                });
-                tool_ordinal += 1;
-            }
-        }
-    }
-
-    Ok(facts)
-}
-
-/// Run a committed model intent with default options.
-pub async fn run(
-    provider: qaqh_gate::ProviderConfig,
-    effect: CommittedExecution,
-    max_tokens: u32,
-    cancel: tokio::sync::watch::Receiver<bool>,
-) -> ProviderOutcome {
-    run_spec(
-        ProviderRequestSpec::new(provider, max_tokens),
-        false,
-        effect,
-        cancel,
-        None,
-    )
-    .await
-}
-
-/// 一次模型请求(新回合循环直驱;无执行证明链)。
-///
-/// 取消语义与证明链时代一致:gate 调用开始后取消不算终态,返回
-/// `StartedUnknown` 并保留已流出的部分文本。
 pub async fn run_round(
     spec: ProviderRequestSpec,
     messages: Vec<Message>,
@@ -682,128 +393,6 @@ fn stream_once(
 
 /// Run a committed model intent and verify that its `RequestIdentity` matches
 /// the exact `ProviderRequestSpec` and frozen context before touching the wire.
-pub async fn run_verified(
-    spec: ProviderRequestSpec,
-    effect: CommittedExecution,
-    cancel: tokio::sync::watch::Receiver<bool>,
-) -> ProviderOutcome {
-    run_spec(spec, true, effect, cancel, None).await
-}
-
-/// Same as run_verified, but publishing in-flight display updates.
-pub async fn run_verified_with_progress(
-    spec: ProviderRequestSpec,
-    effect: CommittedExecution,
-    cancel: tokio::sync::watch::Receiver<bool>,
-    progress: ProgressStream,
-) -> ProviderOutcome {
-    run_spec(spec, true, effect, cancel, Some(progress)).await
-}
-
-pub async fn run_spec(
-    spec: ProviderRequestSpec,
-    verify_wire_identity: bool,
-    effect: CommittedExecution,
-    mut cancel: tokio::sync::watch::Receiver<bool>,
-    progress: Option<ProgressStream>,
-) -> ProviderOutcome {
-    let parts = match effect.into_parts() {
-        Ok(parts) => parts,
-        Err(reason) => return fenced(reason),
-    };
-    let qaqh_session::session_commit::CommittedParts {
-        identity,
-        fact,
-        request_messages,
-        tool_args,
-    } = parts;
-    let FactPayload::ModelRoundStarted(round) = &fact.payload else {
-        return fenced(FenceReason::UnsupportedIntent);
-    };
-    debug_assert!(tool_args.is_none(), "model rounds carry no tool arguments");
-    let Some(messages) = request_messages else {
-        // The commit port froze the input at mint time. Rebuilding it from a
-        // later context would silently run a different request.
-        return not_started("committed model round has no frozen context");
-    };
-    if let Some(committed_id) = &round.identity {
-        if committed_id.model != spec.provider.model {
-            return not_started("provider model does not match committed request identity");
-        }
-        if verify_wire_identity {
-            let actual = compute_request_identity(committed_id.attempt, &messages, &spec);
-            if &actual != committed_id {
-                return not_started(
-                    "provider request spec does not match committed request identity",
-                );
-            }
-        }
-    } else if verify_wire_identity {
-        return not_started("committed model round is missing request identity");
-    }
-    if *cancel.borrow() {
-        return not_started("cancelled before provider request started");
-    }
-
-    let spec = match resolve_provider_credential(spec) {
-        Ok(spec) => spec,
-        Err(error) => {
-            log::error!("[provider] credential resolution failed: {error}");
-            return not_started(&error);
-        }
-    };
-
-    let user_id = identity.actor.session_id;
-    let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));
-    let flag = cancelled.clone();
-    let display = progress.clone();
-    let mut job = tokio::task::spawn_blocking(move || {
-        stream_once(spec, messages, user_id, &flag, display)
-    });
-    let mut finished: Option<ProviderOutcome> = None;
-    loop {
-        tokio::select! {
-            result = &mut job => {
-                finished = Some(match result {
-                    Ok(value) => value,
-                    Err(error) => {
-                        failed_after_start(&format!("provider worker join failed: {error}"))
-                    }
-                });
-                break;
-            }
-            changed = cancel.changed() => {
-                if changed.is_err() || *cancel.borrow() {
-                    cancelled.store(true, Ordering::Release);
-                    break;
-                }
-            }
-        }
-    }
-    let outcome = match finished {
-        Some(value) => value,
-        // Never drop a running blocking handle and claim the provider stopped.
-        None => match job.await {
-            Ok(value) => value,
-            Err(error) => failed_after_start(&format!("provider worker join failed: {error}")),
-        },
-    };
-    // Publish the final cumulative value regardless of the throttle window so a
-    // cancelled or failed attempt still shows everything that was generated.
-    if let Some(display) = &progress {
-        if let Some(text) = outcome.partial_text.as_deref() {
-            publish_block(display, ProgressBlockKind::Answer, text);
-        }
-        if let Some(text) = outcome.partial_reasoning.as_deref() {
-            publish_block(display, ProgressBlockKind::Reasoning, text);
-        }
-    }
-    outcome
-}
-
-/// Resolve account credentials at dispatch time so each model round sees the
-/// current account token. The token is carried only in the in-flight provider
-/// config; request identity contains the credential source, never the secret.
 fn resolve_provider_credential(
     mut spec: ProviderRequestSpec,
 ) -> Result<ProviderRequestSpec, String> {
@@ -878,9 +467,6 @@ fn publish_tool_input(display: &ProgressStream, call_id: &str, tool_name: &str, 
     });
 }
 
-fn fenced(reason: FenceReason) -> ProviderOutcome {
-    not_started(&format!("capability fenced before start: {reason}"))
-}
 
 /// Terminal classification for the committed response fact.
 ///
@@ -940,7 +526,7 @@ fn classify(stop_reason: Option<&str>, message: &Message) -> (ProviderFinish, Op
 
 fn json_hash<T: serde::Serialize + ?Sized>(value: &T) -> ContentHash {
     let bytes = serde_json::to_vec(value).expect("serialize canonical digest input");
-    sha256_content_hash(&bytes)
+    ContentHash::new(crate::tool_job::sha256_hex(&bytes))
 }
 
 /// Nothing was submitted to the provider under this identity.

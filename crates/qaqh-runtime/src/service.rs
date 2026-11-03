@@ -1,18 +1,8 @@
-use std::{
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::sync::{Arc, Mutex};
 
 use qaqh_domain::{ActivityState, ControlCommand};
 use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
-use qaqh_session::{
-    canonical::{CanonicalSessionIdentity, generate_ulid},
-    session_commit::SessionCommit,
-    session_fact_v2::{
-        EventId, FactPayload, FactSchema, MetadataSource, SessionCreated, SessionFact, SessionId,
-        SessionMetadataChanged, SessionMetadataPatch,
-    },
-};
+use qaqh_types::SessionMeta;
 use serde_json::Value;
 
 use crate::error::{QaqhError, QaqhResult};
@@ -28,12 +18,6 @@ pub struct QaqhService {
     /// 会话存储句柄（PR-3-1 注入化：daemon main 装配点 init 后注入，
     /// service 内不再触达会话单例的全局访问器）。
     pub(crate) sessions: Arc<qaqh_session::SessionManager>,
-    /// Per-root task board stores, opened lazily.
-    pub(crate) task_stores:
-        Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<qaqh_session::team::TeamStore>>>>>,
-    /// Per-root message board stores, opened lazily.
-    pub(crate) board_stores:
-        Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<qaqh_session::team::BoardStore>>>>>,
     /// Sign in with ChatGPT（套餐用量）会话管理器。懒装配：只有真正用到该能力时
     /// 才去建目录、读 host id——未使用它的用户不该多出任何磁盘副作用。
     pub(crate) siwc: std::sync::OnceLock<Arc<qaqh_siwc::SiwcManager>>,
@@ -99,7 +83,7 @@ impl QaqhService {
             qaqh_types::platform::data_dir().join("qaqh.db"),
         )
         .expect("open business database"));
-        let mut registry = AgentRegistry::new(sessions.clone(), Arc::clone(&owners));
+        let mut registry = AgentRegistry::new(Arc::clone(&owners));
         registry.set_max_depth(config.subagent.max_depth as usize);
         registry.set_message_quota_limits(
             config.subagent.message_in_flight_per_pair,
@@ -110,8 +94,6 @@ impl QaqhService {
             hub: std::sync::OnceLock::new(),
             owners,
             sessions,
-            task_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            board_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
             siwc: std::sync::OnceLock::new(),
             dsaccount: std::sync::OnceLock::new(),
         }
@@ -302,32 +284,6 @@ impl QaqhService {
                 monitor.update_component(component);
             }
         }
-        let task_stores = self
-            .task_stores
-            .lock()
-            .map(|stores| stores.len() as u64)
-            .unwrap_or_default();
-        let board_stores = self
-            .board_stores
-            .lock()
-            .map(|stores| stores.len() as u64)
-            .unwrap_or_default();
-        monitor.update_component(qaqh_memwatch::ComponentMemory {
-            name: "service.task_stores".into(),
-            item_count: task_stores,
-            payload_bytes: None,
-            heap_estimate_bytes: None,
-            ..Default::default()
-        });
-        component_count += 1;
-        monitor.update_component(qaqh_memwatch::ComponentMemory {
-            name: "service.board_stores".into(),
-            item_count: board_stores,
-            payload_bytes: None,
-            heap_estimate_bytes: None,
-            ..Default::default()
-        });
-        component_count += 1;
         let mcp_connections = qaqh_mcp::manager_slot().connections();
         let mcp_name_bytes = mcp_connections
             .iter()
@@ -489,24 +445,22 @@ impl QaqhService {
         session_id: &str,
         patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
     ) -> Result<(), String> {
-        let registry = self.registry()?;
-        crate::session_meta::patch(Some(&registry), session_id, patch)
+        crate::session_meta::patch(&self.owners, session_id, patch)
     }
 
-    /// Write a session title (actor first, journal fallback).
+    /// Write a session title (business column).
     pub(crate) fn write_title(
         &self,
         session_id: &str,
         title: &str,
         source: qaqh_session::session_fact_v2::TitleSource,
     ) -> Result<(), String> {
-        let registry = self.registry()?;
-        crate::session_meta::set_title(Some(&registry), session_id, title, source)
+        crate::session_meta::set_title(&self.owners, session_id, title, source)
     }
 
-    /// Session metadata read from committed facts.
+    /// Session metadata read from the business row.
     pub(crate) fn session_meta(&self, session_id: &str) -> Option<qaqh_types::SessionMeta> {
-        crate::session_meta::read(session_id)
+        crate::session_meta::read(&self.owners, session_id)
     }
 
     pub(crate) fn registry(&self) -> Result<std::sync::MutexGuard<'_, AgentRegistry>, String> {
@@ -564,27 +518,50 @@ impl QaqhService {
     /// 必须先拆掉类型才行。形状锁在 `qaqh-types` 的
     /// `session_list_entry_wire_keys_are_locked`。
     fn list_sessions(&self) -> Vec<qaqh_types::SessionListEntry> {
-        let manager = &self.sessions;
         let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         let workspaces = qaqh_session::WorkspaceStore::global();
-        manager
-            .list()
-            .into_iter()
-            .map(|meta| {
-                let loaded = registry.is_running(&meta.session_id);
+        let rows = self
+            .owners
+            .db()
+            .read_blocking(|conn| qaqh_session::db::store::list_sessions(conn, false, 256))
+            .unwrap_or_default();
+        rows.into_iter()
+            .map(|row| {
+                let session_id = row.session_id.clone();
+                let loaded = registry.is_running(&session_id);
                 let fallback = registry
                     .activities()
                     .into_iter()
-                    .find(|activity| activity.session_id == meta.session_id)
+                    .find(|activity| activity.session_id == session_id)
                     .map(|activity| activity.state);
-                let status = self.session_run_status(loaded, fallback, &meta.session_id);
-                let mut workspace_id = workspaces.workspace_of(&meta.session_id);
+                let status = self.session_run_status(loaded, fallback, &session_id);
+                let meta = qaqh_types::SessionMeta {
+                    session_id: session_id.clone(),
+                    title: Some(row.title).filter(|title| !title.is_empty()),
+                    cwd: row.cwd,
+                    model: row.model.unwrap_or_default(),
+                    effort: row.effort,
+                    profile: row.profile,
+                    mode: row
+                        .mode
+                        .and_then(|mode| mode.parse::<u8>().ok())
+                        .unwrap_or(0),
+                    tool_mode: row.tool_mode.unwrap_or_default(),
+                    model_selection: row.model_selection,
+                    turn_count: row.turn_count.max(0) as usize,
+                    archived: row.archived,
+                    ephemeral: row.ephemeral,
+                    created_at: (row.created_at_ms.max(0) as u64) / 1000,
+                    updated_at: (row.updated_at_ms.max(0) as u64) / 1000,
+                    ..SessionMeta::default()
+                };
+                let mut workspace_id = workspaces.workspace_of(&session_id);
                 // 存量自愈：若该非临时会话带有合法 cwd 且未归属任何工作区，自动纳管归入
                 if workspace_id.is_none()
                     && !meta.ephemeral
                     && let Some(cwd) = meta.cwd.as_deref()
                 {
-                    workspace_id = workspaces.attach_by_cwd(&meta.session_id, cwd);
+                    workspace_id = workspaces.attach_by_cwd(&session_id, cwd);
                 }
                 qaqh_types::SessionListEntry {
                     meta,
@@ -763,7 +740,7 @@ fn spawn_config_file_poller() {
 /// 默认目录由我们创建，与 `load_session_workspace` 注入的目录同源。
 /// 模型读不到配置时记 `unknown`（不阻塞建会话）。
 pub(crate) fn session_canonical_cwd(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
     requested: Option<&str>,
 ) -> Result<(String, String), String> {
@@ -795,9 +772,7 @@ pub(crate) fn session_canonical_cwd(
         }
         return Ok((path.to_string_lossy().into_owned(), model));
     }
-    let bound = sessions
-        .workspace_cwd(session_id)
-        .filter(|cwd| !cwd.is_empty() && cwd != ".");
+    let bound = crate::registry::spawn::session_cwd(owners, session_id);
     let cwd = match bound {
         // A workspace the user picked must already exist: silently creating an
         // empty directory with the same name hides a vanished project.
@@ -852,108 +827,6 @@ pub(crate) fn normalize_workspace_path(path: std::path::PathBuf) -> std::path::P
     path
 }
 
-/// 在 `session.new` 的持久化阶段写入 canonical 基线。
-/// Bootstrap and the actor use the same batch store. Drop this temporary owner
-/// before spawning the actor so there is only one journal writer at a time.
-fn materialize_canonical_session(session_id: &str, cwd: &str, model: &str) -> Result<(), String> {
-    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
-    materialize_canonical_session_in(&session_dir, cwd, model, None, false)
-}
-
-pub(crate) fn materialize_canonical_session_in(
-    session_dir: &std::path::Path,
-    cwd: &str,
-    model: &str,
-    parent_session_id: Option<SessionId>,
-    ephemeral: bool,
-) -> Result<(), String> {
-    let identity =
-        CanonicalSessionIdentity::open_or_create(session_dir).map_err(|error| error.to_string())?;
-    let session_id = identity.session_id.clone();
-    let log_id = identity.log_id.clone();
-    let budget = crate::session_agent::assembly::default_context_budget();
-    let mut store =
-        SessionCommit::open_or_create(session_dir, session_id.clone(), log_id.clone(), budget)
-            .map_err(|error| error.to_string())?;
-    // Opening verifies business transitions, including SessionCreated at seq 1.
-    if store.head().map_err(|error| error.to_string())? > 0 {
-        return Ok(());
-    }
-    let now_ms = system_time_ms();
-    let cwd = if std::path::Path::new(cwd).is_absolute() {
-        cwd.to_string()
-    } else {
-        std::env::current_dir()
-            .map(|base| base.join(cwd).to_string_lossy().into_owned())
-            .unwrap_or_else(|_| cwd.to_string())
-    };
-    let model = if model.trim().is_empty() {
-        "unknown"
-    } else {
-        model
-    };
-    let created = SessionFact {
-        schema: FactSchema::v2(),
-        session_id,
-        log_id,
-        fact_seq: 0,
-        event_id: EventId::new(generate_ulid()),
-        ts_ms: now_ms,
-        causation_id: None,
-        turn_id: None,
-        call_id: None,
-        interaction_id: None,
-        payload: FactPayload::SessionCreated(SessionCreated {
-            created_at_ms: now_ms,
-            cwd,
-            model: model.to_string(),
-            parent_session_id,
-            schema_caps: Vec::new(),
-        }),
-    };
-    let mut facts = vec![created];
-    if ephemeral {
-        // 子会话在创世批次里就带上 ephemeral：投影要求创世是第一事实，
-        // 之后单独补 patch 也行，但同一批次更省一次提交且没有中间态。
-        facts.push(SessionFact {
-            schema: FactSchema::v2(),
-            session_id: store.session_id().clone(),
-            log_id: store.log_id().clone(),
-            fact_seq: 0,
-            event_id: EventId::new(generate_ulid()),
-            ts_ms: now_ms,
-            causation_id: None,
-            turn_id: None,
-            call_id: None,
-            interaction_id: None,
-            payload: FactPayload::SessionMetadataChanged(SessionMetadataChanged {
-                patch: SessionMetadataPatch {
-                    ephemeral: Some(true),
-                    ..Default::default()
-                },
-                source: MetadataSource::Api,
-                changed_at_ms: now_ms,
-            }),
-        });
-    }
-    store
-        .commit("session-created", 0, facts)
-        .map_err(|error| error.to_string())?;
-    drop(store);
-    if !ephemeral {
-        // 列表缓存从 journal 重建：创世后立刻让会话出现在 `session.list`。
-        qaqh_session::meta::refresh_index(session_dir);
-    }
-    Ok(())
-}
-
-fn system_time_ms() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
-}
 
 pub(crate) mod command;
 pub(crate) mod common;
@@ -965,98 +838,6 @@ pub(crate) mod stats;
 
 use self::common::{command_id, err, release_freed_heap_memory};
 
-#[cfg(test)]
-mod canonical_session_materialization_tests {
-    use qaqh_session::canonical::{
-        BatchJournal, CANONICAL_IDENTITY_FILE, EVENTS_COMMIT_FILE, EVENTS_FILE, WRITER_FENCE_FILE,
-    };
-
-    use super::*;
-
-    #[test]
-    fn session_creation_materializes_one_canonical_baseline() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
-            .expect("materialize");
-        assert!(dir.path().join(CANONICAL_IDENTITY_FILE).exists());
-        assert!(dir.path().join("storage-format").exists());
-        assert!(!dir.path().join(EVENTS_COMMIT_FILE).exists());
-        assert!(!dir.path().join(EVENTS_FILE).exists());
-        assert!(!dir.path().join(WRITER_FENCE_FILE).exists());
-
-        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
-        let journal = BatchJournal::open(
-            dir.path(),
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-        )
-        .expect("journal");
-        let mut facts = Vec::new();
-        journal
-            .visit_committed(|batch| {
-                facts.extend_from_slice(batch);
-                Ok::<_, ()>(())
-            })
-            .expect("facts");
-        assert_eq!(facts.len(), 1);
-        let FactPayload::SessionCreated(created) = &facts[0].payload else {
-            panic!("first fact must be SessionCreated");
-        };
-        // Windows 会把 /tmp/workspace 规范化成 "D:/tmp/workspace"（当前盘符
-        // 前缀）；这里只断言路径尾部不被改写，盘符差异不属于本测试的关注点。
-        assert!(
-            created.cwd.ends_with("/tmp/workspace"),
-            "cwd tail must survive canonicalization: {}",
-            created.cwd
-        );
-        assert_eq!(created.model, "test-model");
-        drop(journal);
-
-        // 幂等：重复调用不得追加第二个 SessionCreated。
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
-            .expect("second materialize");
-        let journal =
-            BatchJournal::open(dir.path(), identity.session_id, identity.log_id).expect("journal");
-        assert_eq!(journal.committed_head(), 1);
-    }
-
-    #[test]
-    fn session_creation_resumes_an_empty_batch_store() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let identity = CanonicalSessionIdentity::open_or_create(dir.path()).expect("identity");
-        drop(
-            BatchJournal::create(
-                dir.path(),
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-            )
-            .expect("empty journal"),
-        );
-        materialize_canonical_session_in(dir.path(), "/tmp/workspace", "test-model", None, false)
-            .expect("resume before baseline commit");
-        let journal =
-            BatchJournal::open(dir.path(), identity.session_id, identity.log_id).expect("journal");
-        assert_eq!(journal.committed_head(), 1);
-    }
-
-    #[test]
-    fn session_creation_does_not_overwrite_legacy_storage() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bytes = b"legacy session data\n";
-        std::fs::write(dir.path().join(EVENTS_FILE), bytes).expect("legacy log");
-        let error = materialize_canonical_session_in(
-            dir.path(),
-            "/tmp/workspace",
-            "test-model",
-            None,
-            false,
-        )
-        .expect_err("legacy stores require explicit migration");
-        assert!(error.contains("isolated data root"), "{error}");
-        assert_eq!(std::fs::read(dir.path().join(EVENTS_FILE)).unwrap(), bytes);
-        assert!(!dir.path().join("storage-format").exists());
-    }
-}
 
 #[cfg(test)]
 mod tool_mode_tests {

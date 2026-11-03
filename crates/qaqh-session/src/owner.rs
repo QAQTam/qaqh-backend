@@ -780,6 +780,33 @@ impl OwnerDirectory {
             .read_blocking(move |conn| store::session_parent(conn, &session_id))
     }
 
+    /// 子代理转为持久(reload/显式 persist 时把 ephemeral 落回 false)。
+    pub fn set_ephemeral(&self, session_id: &str, ephemeral: bool) -> Result<(), DbError> {
+        let owned = session_id.to_string();
+        self.db.write_blocking(move |conn| {
+            store::update_session_columns(
+                conn,
+                &owned,
+                &store::SessionColumnPatch {
+                    title: None,
+                    cwd: None,
+                    model: None,
+                    effort: None,
+                    profile: None,
+                    mode: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    archived: None,
+                    ephemeral: Some(ephemeral),
+                },
+            )
+            .map(|_| ())
+        })
+    }
+
     /// 直接子会话(team 花名册用)。
     pub fn session_children(&self, parent_session_id: &str) -> Result<Vec<String>, DbError> {
         let parent = parent_session_id.to_string();

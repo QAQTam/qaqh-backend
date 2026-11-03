@@ -12,20 +12,12 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use qaqh_ringing::RingingWorkerCommandEnvelope;
-use qaqh_session::canonical::generate_ulid;
-use qaqh_session::projection::{MailboxProjection, Projection};
-use qaqh_session::session_fact_v2::{
-    AgentPath, AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
-    EventId, LogId, SessionId,
+use qaqh_ringing_contract::team::{
+    ChannelId, PostId, TaskId, ThreadId, TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot,
+    TeamBoardSubscription, TeamBoardSubscriptionTarget, TeamBoardThread,
 };
-use qaqh_session::team::{
-    BoardFact, BoardId, BoardPayload, BoardStore, BoardSubscriptionTarget, ChannelCreated,
-    ChannelId, PostCreated, PostId, SubscriptionChanged, TaskAcceptanceSet, TaskArtifactAttached,
-    TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot, TeamBoardSubscription,
-    TeamBoardSubscriptionTarget, TeamBoardThread,
-    TaskCancelled, TaskClaimed, TaskClosed, TaskCompleted, TaskCreated, TaskDependencyAdded,
-    TaskId, TaskReleased, TaskState, TeamActor, TeamCreated, TeamFact, TeamId, TeamPayload,
-    TeamStore, ThreadCreated, ThreadId, new_board_schema, new_team_schema,
+use qaqh_session::session_fact_v2::{
+    AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
 };
 use qaqh_subagent::{
     ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
@@ -42,6 +34,23 @@ use qaqh_subagent::{
 
 use super::QaqhService;
 
+use qaqh_session::db::team as dbteam;
+
+/// 调用方上下文:root 会话 + actor 标识(team/board 写路径共用)。
+struct CallerContext {
+    root_session_id: String,
+    actor_path: String,
+    actor_session_id: String,
+}
+
+/// root 的 message board 全量行。
+struct BoardRows {
+    channels: Vec<dbteam::BoardChannelRow>,
+    threads: Vec<dbteam::BoardThreadRow>,
+    posts: Vec<dbteam::BoardPostRow>,
+    subscriptions: Vec<dbteam::BoardSubscriptionRow>,
+}
+
 impl QaqhService {
     /// Count queued messages from `author` to `recipient` in the target's
     /// canonical mailbox.
@@ -53,40 +62,16 @@ impl QaqhService {
     fn count_in_flight_messages(
         &self,
         target_session_id: &str,
-        author: &str,
-        recipient: &str,
+        _author: &str,
+        _recipient: &str,
     ) -> Result<u64, String> {
-        let Some(session_dir) = self.sessions.session_dir_for_id(target_session_id)? else {
-            return Ok(0);
-        };
-        if !qaqh_session::canonical::has_committed_facts(&session_dir) {
-            return Ok(0);
-        }
-        let identity = qaqh_session::canonical::open_session_identity(&session_dir)
-            .map_err(|error| format!("open canonical identity for {target_session_id}: {error}"))?;
-        if identity.session_id.as_str() != target_session_id {
-            return Err(format!(
-                "mailbox session {target_session_id} identity is {}",
-                identity.session_id
-            ));
-        }
-        let facts = qaqh_session::canonical::read_session_facts(
-            &session_dir,
-            identity.session_id.clone(),
-            identity.log_id.clone(),
-        )
-        .map_err(|error| format!("read canonical facts for {target_session_id}: {error}"))?;
-        let mut mailbox = MailboxProjection::default();
-        for fact in &facts {
-            mailbox.apply(fact);
-        }
-        Ok(mailbox
-            .pending()
-            .filter(|message| {
-                message.communication.author.as_str() == author
-                    && message.communication.recipient.as_str() == recipient
-            })
-            .count() as u64)
+        // 进程内无第二份 mailbox:排队输入本身就是 in-flight(配额是安全阀,
+        // 不区分 author 的近似计数)。
+        let registry = self.registry()?;
+        Ok(registry
+            .loop_for(target_session_id)
+            .map(|loop_| loop_.pending_inputs() as u64)
+            .unwrap_or(0))
     }
 }
 
@@ -105,11 +90,10 @@ impl SubagentHost for QaqhService {
         // BUG-2026-09-13-24 + BETA-01：子代理也先分配 canonical identity，
         // 目录名与 `child_session_id` 必须是同一个 UUID。子代理目录保持
         // unindexed，由 V2 residency 决定生命周期。
-        let identity = self
+        let session_id = self
             .sessions
-            .allocate_agent_session(workspace.filter(|w| !w.is_empty() && *w != "."))
+            .allocate_session()
             .map_err(|error| format!("allocate child session failed: {error}"))?;
-        let session_id = identity.session_id.as_str().to_string();
         if let Some(workspace) = workspace.filter(|w| !w.is_empty() && *w != ".") {
             log::info!("[SUBAGENT-HOST] inherited workspace for seed={session_id}: {workspace}");
         }
@@ -216,7 +200,7 @@ impl SubagentHost for QaqhService {
             )?;
         }
 
-        let message_id = format!("msg_{}", qaqh_session::canonical::generate_ulid());
+        let message_id = format!("msg_{}", qaqh_ringing_contract::ulid::generate_ulid());
         let envelope = qaqh_domain::InterAgentEnvelope {
             message_id: message_id.clone(),
             root_session_id: target.root_session_id.as_str().to_string(),
@@ -410,7 +394,7 @@ impl SubagentHost for QaqhService {
             .map(|path| path.as_str().to_string())
             .unwrap_or_else(|| "/root".to_string());
         let envelope = qaqh_domain::InterAgentEnvelope {
-            message_id: format!("msg_{}", qaqh_session::canonical::generate_ulid()),
+            message_id: format!("msg_{}", qaqh_ringing_contract::ulid::generate_ulid()),
             root_session_id: metadata.root_session_id.as_str().to_string(),
             author,
             recipient: metadata.agent_path.as_str().to_string(),
@@ -542,15 +526,10 @@ impl SubagentHost for QaqhService {
         }) {
             entry.bytes
         } else {
-            let session_dir = self
-                .sessions
-                .session_dir_for_id(session_id)?
-                .ok_or_else(|| format!("content session {session_id} not found"))?;
-            let store = qaqh_session::canonical::SessionBlobStore::open(session_dir)
-                .map_err(|error| format!("open canonical blob store: {error}"))?;
-            store
-                .get(&canonical_ref)
-                .map_err(|error| format!("content {} not found: {error}", reference.content_id))?
+            return Err(format!(
+                "content {} not found",
+                reference.content_id
+            ));
         };
         let digest = {
             use sha2::Digest;
@@ -581,153 +560,214 @@ impl TaskBoardHost for QaqhService {
         if request.title.trim().is_empty() {
             return Err("task title must not be empty".to_string());
         }
-        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
+        let caller = self.caller_context(request.caller_session_id)?;
         let description_ref = request
             .description_ref
             .map(canonical_content_ref)
-            .transpose()?;
+            .transpose()?
+            .map(|content_ref| content_ref.hash().as_str().to_string());
         let task_id = TaskId::generate();
-        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-        if store.snapshot().tasks.len() >= MAX_TASKS_PER_ROOT {
-            return Err(format!(
-                "task board limit {MAX_TASKS_PER_ROOT} reached for this root tree"
-            ));
-        }
-        let root = store.team_id().as_str().to_string();
-        store
-            .append(team_fact(
-                &root,
-                actor.clone(),
-                TeamPayload::TaskCreated(TaskCreated {
-                    task_id: task_id.clone(),
-                    title: request.title.to_string(),
-                    description_ref,
-                    created_by: actor,
-                    created_at_ms: unix_ms(),
-                }),
-            ))
+        let closure_task_id = task_id.clone();
+        let now = unix_ms();
+        let title = request.title.trim().to_string();
+        let caller_session = request.caller_session_id.to_string();
+        self.owners
+            .db()
+            .write_blocking(move |conn| {
+                if dbteam::task_count(conn, &caller.root_session_id)? >= MAX_TASKS_PER_ROOT as i64
+                {
+                    return Err(qaqh_session::db::DbError::Corrupt(format!(
+                        "task board limit {MAX_TASKS_PER_ROOT} reached for this root tree"
+                    )));
+                }
+                dbteam::task_insert(
+                    conn,
+                    &dbteam::NewTeamTask {
+                        task_id: closure_task_id.as_str(),
+                        root_session_id: &caller.root_session_id,
+                        title: &title,
+                        description_ref: description_ref.as_deref(),
+                        created_by: &caller.actor_path,
+                        created_at_ms: now,
+                    },
+                )?;
+                Ok(())
+            })
             .map_err(|error| format!("task_create failed: {error}"))?;
-        find_task(&store, task_id.as_str())
+        self.task_get(&caller_session, task_id.as_str())
     }
 
     fn task_claim(&self, request: TaskClaimRequest<'_>) -> Result<TaskBoardTask, String> {
-        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
-        let task_id = TaskId::new(request.task_id);
-        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-        let current = find_task(&store, task_id.as_str())?;
-        let root = store.team_id().as_str().to_string();
-        let payload = match request.action {
-            TaskClaimAction::Claim => TeamPayload::TaskClaimed(TaskClaimed {
-                task_id: task_id.clone(),
-                owner: actor.clone(),
-                claim_epoch: current.claim_epoch.saturating_add(1),
-                claimed_at_ms: unix_ms(),
-            }),
-            TaskClaimAction::Release => TeamPayload::TaskReleased(TaskReleased {
-                task_id: task_id.clone(),
-                owner: actor.clone(),
-                claim_epoch: current.claim_epoch,
-                reason: request.reason.unwrap_or("released").to_string(),
-                released_at_ms: unix_ms(),
-            }),
-        };
-        store
-            .append(team_fact(&root, actor, payload))
+        let caller = self.caller_context(request.caller_session_id)?;
+        let now = unix_ms();
+        let task_id = request.task_id.to_string();
+        let closure_task_id = task_id.clone();
+        let caller_session = request.caller_session_id.to_string();
+        let action = request.action;
+        self.owners
+            .db()
+            .write_blocking(move |conn| {
+                match action {
+                    TaskClaimAction::Claim => dbteam::task_claim(
+                        conn,
+                        &caller.root_session_id,
+                        &closure_task_id,
+                        &caller.actor_path,
+                        &caller.actor_session_id,
+                        now,
+                    ),
+                    TaskClaimAction::Release => dbteam::task_release(
+                        conn,
+                        &caller.root_session_id,
+                        &closure_task_id,
+                        &caller.actor_path,
+                        now,
+                    ),
+                }
+                .map_err(qaqh_session::db::DbError::Corrupt)
+            })
             .map_err(|error| format!("task_claim failed: {error}"))?;
-        find_task(&store, task_id.as_str())
+        self.task_get(&caller_session, &task_id)
     }
 
     fn task_update(&self, request: TaskUpdateRequest<'_>) -> Result<TaskBoardTask, String> {
-        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
-        let task_id = TaskId::new(request.task_id);
-        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-        let _ = find_task(&store, task_id.as_str())?;
-        let root = store.team_id().as_str().to_string();
-        let payload = match request.action {
-            TaskUpdateAction::AddDependency => {
-                let depends_on = request
-                    .depends_on
-                    .ok_or_else(|| "task_update add_dependency requires depends_on".to_string())?;
-                TeamPayload::TaskDependencyAdded(TaskDependencyAdded {
-                    task_id: task_id.clone(),
-                    depends_on: TaskId::new(depends_on),
-                    added_at_ms: unix_ms(),
-                })
-            }
-            TaskUpdateAction::AttachArtifact => {
-                let artifact_ref = request.artifact_ref.ok_or_else(|| {
-                    "task_update attach_artifact requires artifact_ref".to_string()
-                })?;
-                let media_type = request
-                    .media_type
-                    .ok_or_else(|| "task_update attach_artifact requires media_type".to_string())?;
-                TeamPayload::TaskArtifactAttached(TaskArtifactAttached {
-                    task_id: task_id.clone(),
-                    artifact_ref: canonical_content_ref(artifact_ref)?,
-                    media_type: media_type.to_string(),
-                    added_at_ms: unix_ms(),
-                })
-            }
-            TaskUpdateAction::SetAcceptance => {
-                let acceptance = request
-                    .acceptance
-                    .ok_or_else(|| "task_update set_acceptance requires acceptance".to_string())?;
-                TeamPayload::TaskAcceptanceSet(TaskAcceptanceSet {
-                    task_id: task_id.clone(),
-                    acceptance: acceptance.to_vec(),
-                    updated_at_ms: unix_ms(),
-                })
-            }
-        };
-        store
-            .append(team_fact(&root, actor, payload))
+        let caller = self.caller_context(request.caller_session_id)?;
+        let now = unix_ms();
+        let task_id = request.task_id.to_string();
+        let closure_task_id = task_id.clone();
+        let caller_session = request.caller_session_id.to_string();
+        let action = request.action;
+        let depends_on = request.depends_on.map(str::to_string);
+        let artifact_ref = request.artifact_ref.map(str::to_string);
+        let media_type = request.media_type.map(str::to_string);
+        let acceptance = request.acceptance.map(<[String]>::to_vec);
+        self.owners
+            .db()
+            .write_blocking(move |conn| match action {
+                TaskUpdateAction::AddDependency => {
+                    let depends_on = depends_on.ok_or_else(|| {
+                        qaqh_session::db::DbError::Corrupt(
+                            "task_update add_dependency requires depends_on".into(),
+                        )
+                    })?;
+                    dbteam::task_add_dependency(
+                        conn,
+                        &caller.root_session_id,
+                        &closure_task_id,
+                        &depends_on,
+                        now,
+                    )
+                    .map_err(qaqh_session::db::DbError::Corrupt)
+                }
+                TaskUpdateAction::AttachArtifact => {
+                    let artifact_ref = artifact_ref.ok_or_else(|| {
+                        qaqh_session::db::DbError::Corrupt(
+                            "task_update attach_artifact requires artifact_ref".into(),
+                        )
+                    })?;
+                    let media_type = media_type.ok_or_else(|| {
+                        qaqh_session::db::DbError::Corrupt(
+                            "task_update attach_artifact requires media_type".into(),
+                        )
+                    })?;
+                    let content_id = canonical_content_ref(&artifact_ref)
+                        .map_err(qaqh_session::db::DbError::Corrupt)?
+                        .hash()
+                        .as_str()
+                        .trim_start_matches("sha256:")
+                        .to_string();
+                    dbteam::task_attach_artifact(
+                        conn,
+                        &caller.root_session_id,
+                        &closure_task_id,
+                        &content_id,
+                        &media_type,
+                        now,
+                    )
+                    .map_err(qaqh_session::db::DbError::Corrupt)
+                }
+                TaskUpdateAction::SetAcceptance => {
+                    let acceptance = acceptance.ok_or_else(|| {
+                        qaqh_session::db::DbError::Corrupt(
+                            "task_update set_acceptance requires acceptance".into(),
+                        )
+                    })?;
+                    let items_json = serde_json::to_string(&acceptance)
+                        .map_err(|error| {
+                            qaqh_session::db::DbError::Corrupt(format!("acceptance json: {error}"))
+                        })?;
+                    dbteam::task_set_acceptance(
+                        conn,
+                        &caller.root_session_id,
+                        &closure_task_id,
+                        &items_json,
+                        now,
+                    )
+                    .map_err(qaqh_session::db::DbError::Corrupt)
+                }
+            })
             .map_err(|error| format!("task_update failed: {error}"))?;
-        find_task(&store, task_id.as_str())
+        self.task_get(&caller_session, &task_id)
     }
 
     fn task_close(&self, request: TaskCloseRequest<'_>) -> Result<TaskBoardTask, String> {
-        let (store, actor) = self.task_store_for_caller(request.caller_session_id)?;
-        let task_id = TaskId::new(request.task_id);
-        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-        let current = find_task(&store, task_id.as_str())?;
-        let root = store.team_id().as_str().to_string();
-        let payload = match request.action {
-            TaskCloseAction::Complete => TeamPayload::TaskCompleted(TaskCompleted {
-                task_id: task_id.clone(),
-                owner: actor.clone(),
-                claim_epoch: current.claim_epoch,
-                result_ref: request.result_ref.map(canonical_content_ref).transpose()?,
-                completed_at_ms: unix_ms(),
-            }),
-            TaskCloseAction::Close => TeamPayload::TaskClosed(TaskClosed {
-                task_id: task_id.clone(),
-                closed_by: actor.clone(),
-                closed_at_ms: unix_ms(),
-            }),
-            TaskCloseAction::Cancel => TeamPayload::TaskCancelled(TaskCancelled {
-                task_id: task_id.clone(),
-                cancelled_by: actor.clone(),
-                reason: request.reason.unwrap_or("cancelled").to_string(),
-                cancelled_at_ms: unix_ms(),
-            }),
-        };
-        store
-            .append(team_fact(&root, actor, payload))
+        let caller = self.caller_context(request.caller_session_id)?;
+        let now = unix_ms();
+        let task_id = request.task_id.to_string();
+        let closure_task_id = task_id.clone();
+        let caller_session = request.caller_session_id.to_string();
+        let action = request.action;
+        let result_ref = request
+            .result_ref
+            .map(canonical_content_ref)
+            .transpose()?
+            .map(|content_ref| content_ref.hash().as_str().to_string());
+        let reason = request.reason.unwrap_or("cancelled").to_string();
+        self.owners
+            .db()
+            .write_blocking(move |conn| match action {
+                TaskCloseAction::Complete => {
+                    dbteam::task_complete(
+                        conn,
+                        &caller.root_session_id,
+                        &closure_task_id,
+                        &caller.actor_path,
+                        result_ref.as_deref(),
+                        now,
+                    )
+                    .map_err(qaqh_session::db::DbError::Corrupt)
+                }
+                TaskCloseAction::Close => dbteam::task_close(
+                    conn,
+                    &caller.root_session_id,
+                    &closure_task_id,
+                    now,
+                )
+                .map_err(qaqh_session::db::DbError::Corrupt),
+                TaskCloseAction::Cancel => {
+                    dbteam::task_cancel(conn, &caller.root_session_id, &closure_task_id, &reason, now)
+                        .map_err(qaqh_session::db::DbError::Corrupt)
+                }
+            })
             .map_err(|error| format!("task_close failed: {error}"))?;
-        find_task(&store, task_id.as_str())
+        self.task_get(&caller_session, &task_id)
     }
 
     fn task_list(&self, request: TaskListRequest<'_>) -> Result<Vec<TaskBoardTask>, String> {
-        let (store, _actor) = self.task_store_for_caller(request.caller_session_id)?;
-        let store = store.lock().unwrap_or_else(|error| error.into_inner());
-        let state_filter = request.state.map(parse_task_state).transpose()?;
-        Ok(store
-            .snapshot()
-            .tasks
-            .iter()
-            .filter(|task| state_filter.is_none_or(|state| task.state == state))
-            .map(task_to_dto)
-            .collect())
+        let caller = self.caller_context(request.caller_session_id)?;
+        let state_filter = request
+            .state
+            .map(parse_task_state)
+            .transpose()?
+            .map(|state| task_state_wire(&state).to_string());
+        let tasks = self
+            .owners
+            .db()
+            .read_blocking(move |conn| {
+                dbteam::task_list(conn, &caller.root_session_id, state_filter.as_deref())
+            })
+            .map_err(|error| format!("task_list failed: {error}"))?;
+        Ok(tasks.iter().map(task_to_dto).collect())
     }
 }
 
@@ -736,108 +776,174 @@ impl BoardHost for QaqhService {
         &self,
         request: BoardChannelCreateRequest<'_>,
     ) -> Result<BoardChannel, String> {
-        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let caller = self.caller_context(request.caller_session_id)?;
         let channel_id = ChannelId::generate();
-        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-        let root = store.board_id().as_str().to_string();
-        store
-            .append(board_fact(
-                &root,
-                actor.clone(),
-                BoardPayload::ChannelCreated(ChannelCreated {
-                    channel_id: channel_id.clone(),
-                    name: request.name.to_string(),
-                    topic: request.topic.map(str::to_string),
-                    created_by: actor,
-                    created_at_ms: unix_ms(),
-                }),
-            ))
+        let closure_channel_id = channel_id.as_str().to_string();
+        let now = unix_ms();
+        let name = request.name.to_string();
+        let closure_name = name.clone();
+        let topic = request.topic.map(str::to_string);
+        let closure_topic = topic.clone();
+        let actor_path = caller.actor_path.clone();
+        self.owners
+            .db()
+            .write_blocking(move |conn| {
+                dbteam::board_channel_insert(
+                    conn,
+                    &dbteam::BoardChannelRow {
+                        channel_id: closure_channel_id,
+                        root_session_id: caller.root_session_id.clone(),
+                        name: closure_name,
+                        topic: closure_topic,
+                        created_by: actor_path,
+                        created_at_ms: now,
+                    },
+                )
+            })
             .map_err(|error| format!("board_channel_create failed: {error}"))?;
-        find_board_channel(&store, channel_id.as_str())
+        Ok(BoardChannel {
+            channel_id: channel_id.as_str().to_string(),
+            name,
+            topic,
+            created_by: caller.actor_path,
+            created_at_ms: now,
+        })
     }
 
     fn board_thread_create(
         &self,
         request: BoardThreadCreateRequest<'_>,
     ) -> Result<BoardThread, String> {
-        let task_id = request.task_id.map(TaskId::new);
-        if let Some(task_id) = &task_id {
-            self.require_task_exists(request.caller_session_id, task_id.as_str())?;
+        if let Some(task_id) = request.task_id {
+            self.require_task_exists(request.caller_session_id, task_id)?;
         }
-        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let caller = self.caller_context(request.caller_session_id)?;
         let thread_id = ThreadId::generate();
-        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-        let root = store.board_id().as_str().to_string();
-        store
-            .append(board_fact(
-                &root,
-                actor.clone(),
-                BoardPayload::ThreadCreated(ThreadCreated {
-                    thread_id: thread_id.clone(),
-                    channel_id: ChannelId::new(request.channel_id),
-                    title: request.title.to_string(),
-                    task_id,
-                    created_by: actor,
-                    created_at_ms: unix_ms(),
-                }),
-            ))
+        let closure_thread_id = thread_id.as_str().to_string();
+        let now = unix_ms();
+        let channel_id = request.channel_id.to_string();
+        let closure_channel_id = channel_id.clone();
+        let title = request.title.to_string();
+        let closure_title = title.clone();
+        let task_id = request.task_id.map(str::to_string);
+        let closure_task_id = task_id.clone();
+        let actor_path = caller.actor_path.clone();
+        self.owners
+            .db()
+            .write_blocking(move |conn| {
+                dbteam::board_thread_insert(
+                    conn,
+                    &dbteam::BoardThreadRow {
+                        thread_id: closure_thread_id,
+                        root_session_id: caller.root_session_id.clone(),
+                        channel_id: closure_channel_id,
+                        title: closure_title,
+                        task_id: closure_task_id,
+                        created_by: actor_path,
+                        created_at_ms: now,
+                        post_count: 0,
+                    },
+                )
+            })
             .map_err(|error| format!("board_thread_create failed: {error}"))?;
-        find_board_thread(&store, thread_id.as_str())
+        Ok(BoardThread {
+            thread_id: thread_id.as_str().to_string(),
+            channel_id,
+            title,
+            task_id,
+            created_by: caller.actor_path,
+            created_at_ms: now,
+            post_count: 0,
+        })
     }
 
     fn board_post(&self, request: BoardPostRequest<'_>) -> Result<BoardPostOutcome, String> {
-        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
+        let caller = self.caller_context(request.caller_session_id)?;
         let post_id = PostId::generate();
-        let (post, targets) = {
-            let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-            let thread = store
-                .snapshot()
-                .threads
-                .iter()
-                .find(|thread| thread.thread_id.as_str() == request.thread_id)
-                .cloned()
-                .ok_or_else(|| format!("board thread not found: {}", request.thread_id))?;
-            let requested_task = request.task_id.map(TaskId::new);
-            let task_id = match (&thread.task_id, requested_task) {
-                (Some(thread_task), Some(post_task)) if thread_task != &post_task => {
-                    return Err(format!(
-                        "post task {post_task} does not match thread task {thread_task}"
-                    ));
-                }
-                (Some(thread_task), _) => Some(thread_task.clone()),
-                (None, post_task) => post_task,
-            };
-            if let Some(task_id) = &task_id {
-                self.require_task_exists(request.caller_session_id, task_id.as_str())?;
-            }
-            let root = store.board_id().as_str().to_string();
-            store
-                .append(board_fact(
-                    &root,
-                    actor.clone(),
-                    BoardPayload::PostCreated(PostCreated {
-                        post_id: post_id.clone(),
+        let now = unix_ms();
+        let thread_id = request.thread_id.to_string();
+        let closure_thread_id = thread_id.clone();
+        let task_id = request.task_id.map(str::to_string);
+        let closure_task_id = task_id.clone();
+        let body = request.body.to_string();
+        let caller_session = request.caller_session_id.to_string();
+        let outcome = {
+            // 帖子线程归属 + 任务一致性在写事务里裁决;订阅目标在写后读取。
+            self.owners
+                .db()
+                .write_blocking(move |conn| {
+                    let threads = dbteam::board_threads(conn, &caller.root_session_id)?;
+                    let thread = threads
+                        .iter()
+                        .find(|thread| thread.thread_id == closure_thread_id)
+                        .ok_or_else(|| {
+                            qaqh_session::db::DbError::Corrupt(format!(
+                                "board thread not found: {}",
+                                closure_thread_id
+                            ))
+                        })?
+                        .clone();
+                    let requested_task = closure_task_id.clone();
+                    let task_id = match (&thread.task_id, requested_task) {
+                        (Some(thread_task), Some(post_task)) if thread_task != &post_task => {
+                            return Err(qaqh_session::db::DbError::Corrupt(format!(
+                                "post task {post_task} does not match thread task {thread_task}"
+                            )));
+                        }
+                        (Some(thread_task), _) => Some(thread_task.clone()),
+                        (None, post_task) => post_task,
+                    };
+                    if let Some(task_id) = &task_id {
+                        dbteam::task_get(conn, &caller.root_session_id, task_id)?
+                            .ok_or_else(|| {
+                                qaqh_session::db::DbError::Corrupt(format!(
+                                    "task not found: {task_id}"
+                                ))
+                            })?;
+                    }
+                    let post = dbteam::BoardPostRow {
+                        post_id: post_id.as_str().to_string(),
+                        root_session_id: caller.root_session_id.clone(),
                         thread_id: thread.thread_id.clone(),
-                        task_id: task_id.clone(),
-                        author: actor.clone(),
-                        body: request.body.to_string(),
-                        created_at_ms: unix_ms(),
+                        task_id,
+                        author_path: caller.actor_path.clone(),
+                        author_session_id: Some(caller.actor_session_id.clone()),
+                        body: body.clone(),
                         reply_to: None,
-                    }),
-                ))
-                .map_err(|error| format!("board_post failed: {error}"))?;
-                let post = find_board_post(&store, post_id.as_str())?;
-            let targets = board_notification_targets(
-                &store.snapshot(),
-                &thread.channel_id,
-                &thread.thread_id,
-                actor.agent_path.as_str(),
-            );
-            (post, targets)
+                        created_at_ms: now,
+                    };
+                    dbteam::board_post_insert(conn, &post)?;
+                    let subscriptions =
+                        dbteam::board_subscriptions(conn, &caller.root_session_id)?;
+                    let mut targets = std::collections::BTreeSet::new();
+                    for subscription in subscriptions {
+                        if !subscription.subscribed
+                            || subscription.subscriber_path == caller.actor_path
+                        {
+                            continue;
+                        }
+                        let matches = match subscription.target_kind.as_str() {
+                            "channel" => subscription.target_id == thread.channel_id,
+                            "thread" => subscription.target_id == thread.thread_id,
+                            _ => false,
+                        };
+                        if matches {
+                            targets.insert(subscription.subscriber_path);
+                        }
+                    }
+                    Ok((post, targets.into_iter().collect::<Vec<_>>()))
+                })
+                .map_err(|error: qaqh_session::db::DbError| match error {
+                    qaqh_session::db::DbError::Corrupt(message) => message,
+                    other => format!("board_post failed: {other}"),
+                })?
         };
-        let (notified, skipped) = self.notify_board_post(request.caller_session_id, &post, targets);
+        let (post, targets) = outcome;
+        let post_dto = board_post_to_dto(&post);
+        let (notified, skipped) =
+            self.notify_board_post(&caller_session, &post_dto, targets);
         Ok(BoardPostOutcome {
-            post,
+            post: post_dto,
             notified,
             skipped,
         })
@@ -847,37 +953,56 @@ impl BoardHost for QaqhService {
         &self,
         request: BoardSubscriptionRequest<'_>,
     ) -> Result<BoardSubscription, String> {
-        let (store, actor) = self.board_store_for_caller(request.caller_session_id)?;
-        let target = match request.target_kind {
-            BoardSubscriptionTargetKind::Channel => BoardSubscriptionTarget::Channel {
-                channel_id: ChannelId::new(request.target_id),
-            },
-            BoardSubscriptionTargetKind::Thread => BoardSubscriptionTarget::Thread {
-                thread_id: ThreadId::new(request.target_id),
-            },
+        let caller = self.caller_context(request.caller_session_id)?;
+        let target_kind = match request.target_kind {
+            BoardSubscriptionTargetKind::Channel => "channel",
+            BoardSubscriptionTargetKind::Thread => "thread",
         };
-        let mut store = store.lock().unwrap_or_else(|error| error.into_inner());
-        let root = store.board_id().as_str().to_string();
-        store
-            .append(board_fact(
-                &root,
-                actor.clone(),
-                BoardPayload::SubscriptionChanged(SubscriptionChanged {
-                    target: target.clone(),
-                    subscriber: actor.clone(),
-                    subscribed: request.action == BoardSubscriptionAction::Subscribe,
-                    updated_at_ms: unix_ms(),
-                }),
-            ))
+        let target_id = request.target_id.to_string();
+        let subscribed = request.action == BoardSubscriptionAction::Subscribe;
+        let now = unix_ms();
+        let root = caller.root_session_id.clone();
+        let actor_path = caller.actor_path.clone();
+        self.owners
+            .db()
+            .write_blocking(move |conn| {
+                dbteam::board_subscription_set(
+                    conn,
+                    &dbteam::BoardSubscriptionRow {
+                        root_session_id: root,
+                        target_kind: target_kind.to_string(),
+                        target_id,
+                        subscriber_path: actor_path,
+                        subscribed,
+                        updated_at_ms: now,
+                    },
+                )
+            })
             .map_err(|error| format!("board_subscribe failed: {error}"))?;
-        find_board_subscription(&store, &target, actor.agent_path.as_str())
+        Ok(BoardSubscription {
+            target: match request.target_kind {
+                BoardSubscriptionTargetKind::Channel => {
+                    qaqh_subagent::BoardSubscriptionTarget::Channel {
+                        channel_id: request.target_id.to_string(),
+                    }
+                }
+                BoardSubscriptionTargetKind::Thread => {
+                    qaqh_subagent::BoardSubscriptionTarget::Thread {
+                        thread_id: request.target_id.to_string(),
+                    }
+                }
+            },
+            subscriber: caller.actor_path,
+            subscribed,
+            updated_at_ms: now,
+        })
     }
 
     fn board_list(&self, request: BoardListRequest<'_>) -> Result<BoardSnapshot, String> {
-        let (store, _actor) = self.board_store_for_caller(request.caller_session_id)?;
-        let store = store.lock().unwrap_or_else(|error| error.into_inner());
+        let caller = self.caller_context(request.caller_session_id)?;
+        let snapshot = self.board_rows(&caller.root_session_id)?;
         board_snapshot_view(
-            &store.snapshot(),
+            &snapshot,
             request.channel_id,
             request.thread_id,
             request.include_posts,
@@ -945,51 +1070,29 @@ impl QaqhService {
         }
     }
 
-    fn task_store_for_caller(
-        &self,
-        caller_session_id: &str,
-    ) -> Result<(Arc<std::sync::Mutex<TeamStore>>, TeamActor), String> {
-        let (root_session_id, caller_actor) = {
-            let registry = self.registry()?;
-            let caller = registry
-                .agent_metadata(caller_session_id)
-                .ok_or_else(|| format!("caller agent metadata missing for {caller_session_id}"))?;
-            let actor = TeamActor::new(caller.agent_path.clone(), Some(caller.agent_id.clone()));
-            (caller.root_session_id.as_str().to_string(), actor)
-        };
-        let mut stores = self
-            .task_stores
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(store) = stores.get(&root_session_id) {
-            return Ok((Arc::clone(store), caller_actor));
-        }
-        let dir = self.sessions.data_dir().join("team").join(&root_session_id);
-        let mut store = TeamStore::open_or_create(
-            dir,
-            TeamId::new(SessionId::new(root_session_id.clone())),
-            unix_ms(),
-        )
-        .map_err(|error| format!("open task board for {root_session_id}: {error}"))?;
-        if store.snapshot().team_id.is_none() {
-            let root_actor = TeamActor::new(
-                AgentPath::root(),
-                Some(SessionId::new(root_session_id.clone())),
-            );
-            store
-                .append(team_fact(
-                    &root_session_id,
-                    root_actor,
-                    TeamPayload::TeamCreated(TeamCreated {
-                        root_session_id: SessionId::new(root_session_id.clone()),
-                        created_at_ms: unix_ms(),
-                    }),
-                ))
-                .map_err(|error| format!("initialize task board for {root_session_id}: {error}"))?;
-        }
-        let store = Arc::new(std::sync::Mutex::new(store));
-        stores.insert(root_session_id, Arc::clone(&store));
-        Ok((store, caller_actor))
+    fn caller_context(&self, caller_session_id: &str) -> Result<CallerContext, String> {
+        let caller = self
+            .registry()?
+            .agent_metadata(caller_session_id)
+            .ok_or_else(|| format!("caller agent metadata missing for {caller_session_id}"))?;
+        Ok(CallerContext {
+            root_session_id: caller.root_session_id.as_str().to_string(),
+            actor_path: caller.agent_path.as_str().to_string(),
+            actor_session_id: caller.agent_id.as_str().to_string(),
+        })
+    }
+
+    fn task_get(&self, caller_session_id: &str, task_id: &str) -> Result<TaskBoardTask, String> {
+        let caller = self.caller_context(caller_session_id)?;
+        let owned_task = task_id.to_string();
+        let task = self
+            .owners
+            .db()
+            .read_blocking(move |conn| dbteam::task_get(conn, &caller.root_session_id, &owned_task))
+            .map_err(|error| format!("task read failed: {error}"))?;
+        task.as_ref()
+            .map(task_to_dto)
+            .ok_or_else(|| format!("task not found: {task_id}"))
     }
 
     /// Snapshot the caller's root task board for the daemon team endpoint.
@@ -997,78 +1100,50 @@ impl QaqhService {
     pub fn task_board_snapshot(
         &self,
         caller_session_id: &str,
-    ) -> Result<qaqh_session::team::TaskBoardSnapshot, String> {
-        let (store, _actor) = self.task_store_for_caller(caller_session_id)?;
-        let store = store.lock().unwrap_or_else(|error| error.into_inner());
-        Ok(store.snapshot())
-    }
-
-    fn board_store_for_caller(
-        &self,
-        caller_session_id: &str,
-    ) -> Result<(Arc<std::sync::Mutex<BoardStore>>, TeamActor), String> {
-        let (root_session_id, caller_actor) = {
-            let registry = self.registry()?;
-            let caller = registry
-                .agent_metadata(caller_session_id)
-                .ok_or_else(|| format!("caller agent metadata missing for {caller_session_id}"))?;
-            let actor = TeamActor::new(caller.agent_path.clone(), Some(caller.agent_id.clone()));
-            (caller.root_session_id.as_str().to_string(), actor)
-        };
-        let mut stores = self
-            .board_stores
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(store) = stores.get(&root_session_id) {
-            return Ok((Arc::clone(store), caller_actor));
-        }
-        let dir = self
-            .sessions
-            .data_dir()
-            .join("team")
-            .join(&root_session_id)
-            .join("board");
-        let mut store = BoardStore::open_or_create(
-            dir,
-            BoardId::new(SessionId::new(root_session_id.clone())),
-            unix_ms(),
-        )
-        .map_err(|error| format!("open message board for {root_session_id}: {error}"))?;
-        if store.snapshot().board_id.is_none() {
-            let root_actor = TeamActor::new(
-                AgentPath::root(),
-                Some(SessionId::new(root_session_id.clone())),
-            );
-            store
-                .append(board_fact(
-                    &root_session_id,
-                    root_actor,
-                    BoardPayload::BoardCreated(qaqh_session::team::BoardCreated {
-                        root_session_id: SessionId::new(root_session_id.clone()),
-                        created_at_ms: unix_ms(),
-                    }),
-                ))
-                .map_err(|error| {
-                    format!("initialize message board for {root_session_id}: {error}")
-                })?;
-        }
-        let store = Arc::new(std::sync::Mutex::new(store));
-        stores.insert(root_session_id, Arc::clone(&store));
-        Ok((store, caller_actor))
+    ) -> Result<qaqh_ringing_contract::team::TaskBoardSnapshot, String> {
+        let caller = self.caller_context(caller_session_id)?;
+        let root_for_snapshot = caller.root_session_id.clone();
+        let tasks = self
+            .owners
+            .db()
+            .read_blocking(move |conn| dbteam::task_list(conn, &caller.root_session_id, None))
+            .map_err(|error| format!("task board snapshot failed: {error}"))?;
+        Ok(qaqh_ringing_contract::team::TaskBoardSnapshot {
+            team_id: Some(qaqh_ringing_contract::team::TeamId::new(
+                qaqh_ringing_contract::fact::SessionId::new(root_for_snapshot),
+            )),
+            revision: 0,
+            last_fact_seq: 0,
+            tasks: tasks.iter().map(task_view_of_row).collect(),
+        })
     }
 
     fn require_task_exists(&self, caller_session_id: &str, task_id: &str) -> Result<(), String> {
-        let (store, _actor) = self.task_store_for_caller(caller_session_id)?;
-        let store = store.lock().unwrap_or_else(|error| error.into_inner());
-        find_task(&store, task_id).map(|_| ())
+        self.task_get(caller_session_id, task_id).map(|_| ())
     }
 
     /// Snapshot the caller's root message board for the daemon team endpoint.
     #[doc(hidden)]
     pub fn board_snapshot(&self, caller_session_id: &str) -> Result<TeamBoardSnapshot, String> {
-        let (store, _actor) = self.board_store_for_caller(caller_session_id)?;
-        let store = store.lock().unwrap_or_else(|error| error.into_inner());
-        Ok(board_to_wire(&store.snapshot()))
+        let caller = self.caller_context(caller_session_id)?;
+        let snapshot = self.board_rows(&caller.root_session_id)?;
+        Ok(board_rows_to_wire(&snapshot))
+    }
+
+    /// 一次读出 root 的 board 全量行(board_list / board_snapshot 共用)。
+    fn board_rows(&self, root_session_id: &str) -> Result<BoardRows, String> {
+        let root = root_session_id.to_string();
+        self.owners
+            .db()
+            .read_blocking(move |conn| {
+                Ok::<_, qaqh_session::db::DbError>(BoardRows {
+                    channels: dbteam::board_channels(conn, &root)?,
+                    threads: dbteam::board_threads(conn, &root)?,
+                    posts: dbteam::board_posts(conn, &root)?,
+                    subscriptions: dbteam::board_subscriptions(conn, &root)?,
+                })
+            })
+            .map_err(|error| format!("board snapshot failed: {error}"))
     }
 
     fn notify_board_post(
@@ -1134,103 +1209,101 @@ impl QaqhService {
     }
 }
 
-fn team_fact(root_session_id: &str, actor: TeamActor, payload: TeamPayload) -> TeamFact {
-    TeamFact {
-        schema: new_team_schema(),
-        team_id: TeamId::new(SessionId::new(root_session_id)),
-        // The store owns log identity and overwrites this placeholder.
-        log_id: LogId::new(""),
-        fact_seq: 0,
-        event_id: EventId::new(generate_ulid()),
-        ts_ms: unix_ms(),
-        causation_id: None,
-        actor,
-        payload,
+fn task_to_dto(task: &dbteam::TeamTaskRow) -> TaskBoardTask {
+    TaskBoardTask {
+        task_id: task.task_id.clone(),
+        title: task.title.clone(),
+        state: task.state.clone(),
+        owner: task.owner_path.clone(),
+        claim_epoch: task.claim_epoch.max(0) as u64,
+        depends_on: task.depends_on.clone(),
+        artifacts: task
+            .artifacts
+            .iter()
+            .map(|(content_id, media_type, added_at_ms)| TaskBoardArtifact {
+                content_id: format!("sha256:{content_id}"),
+                media_type: media_type.clone(),
+                added_at_ms: *added_at_ms,
+            })
+            .collect(),
+        acceptance: task.acceptance.clone(),
+        result_ref: task.result_ref.clone(),
+        created_at_ms: task.created_at_ms,
+        updated_at_ms: task.updated_at_ms,
     }
 }
 
-fn board_fact(root_session_id: &str, actor: TeamActor, payload: BoardPayload) -> BoardFact {
-    BoardFact {
-        schema: new_board_schema(),
-        board_id: BoardId::new(SessionId::new(root_session_id)),
-        // The store owns log identity and overwrites this placeholder.
-        log_id: LogId::new(""),
-        fact_seq: 0,
-        event_id: EventId::new(generate_ulid()),
-        ts_ms: unix_ms(),
-        causation_id: None,
-        actor,
-        payload,
+fn task_view_of_row(task: &dbteam::TeamTaskRow) -> qaqh_ringing_contract::team::TaskView {
+    qaqh_ringing_contract::team::TaskView {
+        task_id: qaqh_ringing_contract::team::TaskId::new(task.task_id.clone()),
+        title: task.title.clone(),
+        description_ref: task
+            .description_ref
+            .as_deref()
+            .map(|raw| qaqh_ringing_contract::fact::ContentRef::new(
+                qaqh_ringing_contract::fact::ContentHash::new(raw),
+            )),
+        state: parse_task_state(&task.state)
+            .unwrap_or(qaqh_ringing_contract::team::TaskState::Open),
+        created_by: {
+            let actor = qaqh_ringing_contract::team::TeamActor::new(
+                qaqh_ringing_contract::fact::AgentPath::parse_absolute(&task.created_by)
+                    .unwrap_or_else(|_| qaqh_ringing_contract::fact::AgentPath::root()),
+                None,
+            );
+            actor
+        },
+        owner: task.owner_path.as_deref().map(|path| {
+            qaqh_ringing_contract::team::TeamActor::new(
+                qaqh_ringing_contract::fact::AgentPath::parse_absolute(path)
+                    .unwrap_or_else(|_| qaqh_ringing_contract::fact::AgentPath::root()),
+                None,
+            )
+        }),
+        claim_epoch: task.claim_epoch.max(0) as u64,
+        depends_on: task
+            .depends_on
+            .iter()
+            .map(|task_id| qaqh_ringing_contract::team::TaskId::new(task_id.clone()))
+            .collect(),
+        artifacts: task
+            .artifacts
+            .iter()
+            .map(|(content_id, media_type, added_at_ms)| qaqh_ringing_contract::team::TaskArtifact {
+                artifact_ref: qaqh_ringing_contract::fact::ContentRef::new(
+                    qaqh_ringing_contract::fact::ContentHash::new(format!("sha256:{content_id}")),
+                ),
+                media_type: media_type.clone(),
+                added_at_ms: *added_at_ms,
+            })
+            .collect(),
+        acceptance: task.acceptance.clone(),
+        result_ref: task.result_ref.as_deref().map(|raw| {
+            qaqh_ringing_contract::fact::ContentRef::new(qaqh_ringing_contract::fact::ContentHash::new(raw))
+        }),
+        created_at_ms: task.created_at_ms,
+        updated_at_ms: task.updated_at_ms,
     }
-}
-
-fn find_board_channel(store: &BoardStore, channel_id: &str) -> Result<BoardChannel, String> {
-    store
-        .snapshot()
-        .channels
-        .iter()
-        .find(|channel| channel.channel_id.as_str() == channel_id)
-        .map(board_channel_to_dto)
-        .ok_or_else(|| format!("board channel not found: {channel_id}"))
-}
-
-fn find_board_thread(store: &BoardStore, thread_id: &str) -> Result<BoardThread, String> {
-    store
-        .snapshot()
-        .threads
-        .iter()
-        .find(|thread| thread.thread_id.as_str() == thread_id)
-        .map(board_thread_to_dto)
-        .ok_or_else(|| format!("board thread not found: {thread_id}"))
-}
-
-fn find_board_post(store: &BoardStore, post_id: &str) -> Result<BoardPost, String> {
-    store
-        .snapshot()
-        .posts
-        .iter()
-        .find(|post| post.post_id.as_str() == post_id)
-        .map(board_post_to_dto)
-        .ok_or_else(|| format!("board post not found: {post_id}"))
-}
-
-fn find_board_subscription(
-    store: &BoardStore,
-    target: &BoardSubscriptionTarget,
-    subscriber: &str,
-) -> Result<BoardSubscription, String> {
-    store
-        .snapshot()
-        .subscriptions
-        .iter()
-        .find(|subscription| {
-            &subscription.target == target
-                && subscription.subscriber.agent_path.as_str() == subscriber
-        })
-        .map(board_subscription_to_dto)
-        .ok_or_else(|| "board subscription not found after append".to_string())
 }
 
 fn board_snapshot_view(
-    snapshot: &qaqh_session::team::BoardSnapshot,
+    snapshot: &BoardRows,
     channel_id: Option<&str>,
     thread_id: Option<&str>,
     include_posts: bool,
     post_limit: Option<usize>,
 ) -> Result<BoardSnapshot, String> {
-    let requested_channel = channel_id.map(ChannelId::new);
-    let requested_thread = thread_id.map(ThreadId::new);
-    let selected_thread = match &requested_thread {
-        Some(thread_id) => Some(
+    let requested_channel = channel_id.map(str::to_string);
+    let selected_thread = thread_id
+        .map(|thread_id| {
             snapshot
                 .threads
                 .iter()
-                .find(|thread| &thread.thread_id == thread_id)
+                .find(|thread| thread.thread_id == thread_id)
                 .cloned()
-                .ok_or_else(|| format!("board thread not found: {thread_id}"))?,
-        ),
-        None => None,
-    };
+                .ok_or_else(|| format!("board thread not found: {thread_id}"))
+        })
+        .transpose()?;
     if let (Some(channel_id), Some(thread)) = (&requested_channel, &selected_thread)
         && &thread.channel_id != channel_id
     {
@@ -1239,11 +1312,9 @@ fn board_snapshot_view(
             thread.thread_id, channel_id
         ));
     }
-    let selected_channel = requested_channel.clone().or_else(|| {
-        selected_thread
-            .as_ref()
-            .map(|thread| thread.channel_id.clone())
-    });
+    let selected_channel = requested_channel
+        .clone()
+        .or_else(|| selected_thread.as_ref().map(|thread| thread.channel_id.clone()));
     if let Some(channel_id) = &selected_channel
         && !snapshot
             .channels
@@ -1270,9 +1341,9 @@ fn board_snapshot_view(
             selected_channel
                 .as_ref()
                 .is_none_or(|selected| &thread.channel_id == selected)
-                && requested_thread
-                    .as_ref()
-                    .is_none_or(|selected| &thread.thread_id == selected)
+                && thread_id
+                    .map(|selected| thread.thread_id == selected)
+                    .unwrap_or(true)
         })
         .map(board_thread_to_dto)
         .collect::<Vec<_>>();
@@ -1306,28 +1377,36 @@ fn board_snapshot_view(
     let subscriptions = snapshot
         .subscriptions
         .iter()
-        .filter(|subscription| match &subscription.target {
-            BoardSubscriptionTarget::Channel { channel_id } => selected_channel
+        .filter(|subscription| match subscription.target_kind.as_str() {
+            "channel" => selected_channel
                 .as_ref()
-                .is_none_or(|selected| selected == channel_id),
-            BoardSubscriptionTarget::Thread { thread_id } => {
-                requested_thread
-                    .as_ref()
-                    .is_none_or(|selected| selected == thread_id)
+                .is_none_or(|selected| &subscription.target_id == selected),
+            "thread" => {
+                thread_id
+                    .map(|selected| subscription.target_id == selected)
+                    .unwrap_or(true)
                     && selected_channel.as_ref().is_none_or(|selected| {
-                        snapshot.threads.iter().any(|thread| {
-                            &thread.thread_id == thread_id && &thread.channel_id == selected
-                        })
+                        snapshot
+                            .threads
+                            .iter()
+                            .any(|thread| {
+                                &thread.thread_id == &subscription.target_id
+                                    && &thread.channel_id == selected
+                            })
                     })
             }
+            _ => false,
         })
         .map(board_subscription_to_dto)
         .collect::<Vec<_>>();
 
     Ok(BoardSnapshot {
-        board_id: snapshot.board_id.as_ref().map(|id| id.as_str().to_string()),
-        revision: snapshot.revision,
-        last_fact_seq: snapshot.last_fact_seq,
+        board_id: Some(snapshot.channels.first().map_or_else(
+            || "unset".to_string(),
+            |channel| channel.root_session_id.clone(),
+        )),
+        revision: 0,
+        last_fact_seq: 0,
         channels,
         threads,
         posts,
@@ -1335,96 +1414,57 @@ fn board_snapshot_view(
     })
 }
 
-fn board_channel_to_dto(channel: &qaqh_session::team::BoardChannelView) -> BoardChannel {
+fn board_channel_to_dto(channel: &dbteam::BoardChannelRow) -> BoardChannel {
     BoardChannel {
-        channel_id: channel.channel_id.as_str().to_string(),
+        channel_id: channel.channel_id.clone(),
         name: channel.name.clone(),
         topic: channel.topic.clone(),
-        created_by: channel.created_by.agent_path.as_str().to_string(),
+        created_by: channel.created_by.clone(),
         created_at_ms: channel.created_at_ms,
     }
 }
 
-fn board_thread_to_dto(thread: &qaqh_session::team::BoardThreadView) -> BoardThread {
+fn board_thread_to_dto(thread: &dbteam::BoardThreadRow) -> BoardThread {
     BoardThread {
-        thread_id: thread.thread_id.as_str().to_string(),
-        channel_id: thread.channel_id.as_str().to_string(),
+        thread_id: thread.thread_id.clone(),
+        channel_id: thread.channel_id.clone(),
         title: thread.title.clone(),
-        task_id: thread
-            .task_id
-            .as_ref()
-            .map(|task_id| task_id.as_str().to_string()),
-        created_by: thread.created_by.agent_path.as_str().to_string(),
+        task_id: thread.task_id.clone(),
+        created_by: thread.created_by.clone(),
         created_at_ms: thread.created_at_ms,
-        post_count: thread.post_count,
+        post_count: thread.post_count.max(0) as u64,
     }
 }
 
-fn board_post_to_dto(post: &qaqh_session::team::BoardPostView) -> BoardPost {
+fn board_post_to_dto(post: &dbteam::BoardPostRow) -> BoardPost {
     BoardPost {
-        post_id: post.post_id.as_str().to_string(),
-        thread_id: post.thread_id.as_str().to_string(),
-        task_id: post
-            .task_id
-            .as_ref()
-            .map(|task_id| task_id.as_str().to_string()),
-        author: post.author.agent_path.as_str().to_string(),
+        post_id: post.post_id.clone(),
+        thread_id: post.thread_id.clone(),
+        task_id: post.task_id.clone(),
+        author: post.author_path.clone(),
         body: post.body.clone(),
         created_at_ms: post.created_at_ms,
-        reply_to: post
-            .reply_to
-            .as_ref()
-            .map(|post_id| post_id.as_str().to_string()),
+        reply_to: post.reply_to.clone(),
     }
 }
 
 fn board_subscription_to_dto(
-    subscription: &qaqh_session::team::BoardSubscriptionView,
+    subscription: &dbteam::BoardSubscriptionRow,
 ) -> BoardSubscription {
-    let target = match &subscription.target {
-        BoardSubscriptionTarget::Channel { channel_id } => {
-            qaqh_subagent::BoardSubscriptionTarget::Channel {
-                channel_id: channel_id.as_str().to_string(),
-            }
-        }
-        BoardSubscriptionTarget::Thread { thread_id } => {
-            qaqh_subagent::BoardSubscriptionTarget::Thread {
-                thread_id: thread_id.as_str().to_string(),
-            }
-        }
+    let target = match subscription.target_kind.as_str() {
+        "channel" => qaqh_subagent::BoardSubscriptionTarget::Channel {
+            channel_id: subscription.target_id.clone(),
+        },
+        _ => qaqh_subagent::BoardSubscriptionTarget::Thread {
+            thread_id: subscription.target_id.clone(),
+        },
     };
     BoardSubscription {
         target,
-        subscriber: subscription.subscriber.agent_path.as_str().to_string(),
+        subscriber: subscription.subscriber_path.clone(),
         subscribed: subscription.subscribed,
         updated_at_ms: subscription.updated_at_ms,
     }
-}
-
-fn board_notification_targets(
-    snapshot: &qaqh_session::team::BoardSnapshot,
-    channel_id: &ChannelId,
-    thread_id: &ThreadId,
-    author: &str,
-) -> Vec<String> {
-    let mut targets = std::collections::BTreeSet::new();
-    for subscription in &snapshot.subscriptions {
-        if !subscription.subscribed {
-            continue;
-        }
-        let matches = match &subscription.target {
-            BoardSubscriptionTarget::Channel {
-                channel_id: subscribed,
-            } => subscribed == channel_id,
-            BoardSubscriptionTarget::Thread {
-                thread_id: subscribed,
-            } => subscribed == thread_id,
-        };
-        if matches && subscription.subscriber.agent_path.as_str() != author {
-            targets.insert(subscription.subscriber.agent_path.as_str().to_string());
-        }
-    }
-    targets.into_iter().collect()
 }
 
 fn board_notification_text(post: &BoardPost) -> String {
@@ -1435,19 +1475,27 @@ fn board_notification_text(post: &BoardPost) -> String {
     )
 }
 
-fn board_to_wire(snapshot: &qaqh_session::team::BoardSnapshot) -> TeamBoardSnapshot {
+fn board_rows_to_wire(snapshot: &BoardRows) -> TeamBoardSnapshot {
     TeamBoardSnapshot {
-        board_id: snapshot.board_id.as_ref().map(|id| id.0.clone()),
-        revision: snapshot.revision,
-        last_fact_seq: snapshot.last_fact_seq,
+        board_id: snapshot
+            .channels
+            .first()
+            .map(|channel| {
+                qaqh_ringing_contract::fact::SessionId::new(channel.root_session_id.clone())
+            }),
+        revision: 0,
+        last_fact_seq: 0,
         channels: snapshot
             .channels
             .iter()
             .map(|channel| TeamBoardChannel {
-                channel_id: channel.channel_id.as_str().to_string(),
+                channel_id: channel.channel_id.clone(),
                 name: channel.name.clone(),
                 topic: channel.topic.clone(),
-                created_by: channel.created_by.agent_path.clone(),
+                created_by: qaqh_ringing_contract::fact::AgentPath::parse_absolute(
+                    &channel.created_by,
+                )
+                .unwrap_or_else(|_| qaqh_ringing_contract::fact::AgentPath::root()),
                 created_at_ms: channel.created_at_ms,
             })
             .collect(),
@@ -1455,54 +1503,48 @@ fn board_to_wire(snapshot: &qaqh_session::team::BoardSnapshot) -> TeamBoardSnaps
             .threads
             .iter()
             .map(|thread| TeamBoardThread {
-                thread_id: thread.thread_id.as_str().to_string(),
-                channel_id: thread.channel_id.as_str().to_string(),
+                thread_id: thread.thread_id.clone(),
+                channel_id: thread.channel_id.clone(),
                 title: thread.title.clone(),
-                task_id: thread
-                    .task_id
-                    .as_ref()
-                    .map(|task_id| task_id.as_str().to_string()),
-                created_by: thread.created_by.agent_path.clone(),
+                task_id: thread.task_id.clone(),
+                created_by: qaqh_ringing_contract::fact::AgentPath::parse_absolute(
+                    &thread.created_by,
+                )
+                .unwrap_or_else(|_| qaqh_ringing_contract::fact::AgentPath::root()),
                 created_at_ms: thread.created_at_ms,
-                post_count: thread.post_count,
+                post_count: thread.post_count.max(0) as u64,
             })
             .collect(),
         posts: snapshot
             .posts
             .iter()
             .map(|post| TeamBoardPost {
-                post_id: post.post_id.as_str().to_string(),
-                thread_id: post.thread_id.as_str().to_string(),
-                task_id: post
-                    .task_id
-                    .as_ref()
-                    .map(|task_id| task_id.as_str().to_string()),
-                author: post.author.agent_path.clone(),
+                post_id: post.post_id.clone(),
+                thread_id: post.thread_id.clone(),
+                task_id: post.task_id.clone(),
+                author: qaqh_ringing_contract::fact::AgentPath::parse_absolute(&post.author_path)
+                    .unwrap_or_else(|_| qaqh_ringing_contract::fact::AgentPath::root()),
                 body: post.body.clone(),
                 created_at_ms: post.created_at_ms,
-                reply_to: post
-                    .reply_to
-                    .as_ref()
-                    .map(|post_id| post_id.as_str().to_string()),
+                reply_to: post.reply_to.clone(),
             })
             .collect(),
         subscriptions: snapshot
             .subscriptions
             .iter()
             .map(|subscription| TeamBoardSubscription {
-                target: match &subscription.target {
-                    BoardSubscriptionTarget::Channel { channel_id } => {
-                        TeamBoardSubscriptionTarget::Channel {
-                            channel_id: channel_id.as_str().to_string(),
-                        }
-                    }
-                    BoardSubscriptionTarget::Thread { thread_id } => {
-                        TeamBoardSubscriptionTarget::Thread {
-                            thread_id: thread_id.as_str().to_string(),
-                        }
-                    }
+                target: match subscription.target_kind.as_str() {
+                    "channel" => TeamBoardSubscriptionTarget::Channel {
+                        channel_id: subscription.target_id.clone(),
+                    },
+                    _ => TeamBoardSubscriptionTarget::Thread {
+                        thread_id: subscription.target_id.clone(),
+                    },
                 },
-                subscriber: subscription.subscriber.agent_path.clone(),
+                subscriber: qaqh_ringing_contract::fact::AgentPath::parse_absolute(
+                    &subscription.subscriber_path,
+                )
+                .unwrap_or_else(|_| qaqh_ringing_contract::fact::AgentPath::root()),
                 subscribed: subscription.subscribed,
                 updated_at_ms: subscription.updated_at_ms,
             })
@@ -1524,67 +1566,23 @@ fn canonical_content_ref(raw: &str) -> Result<CanonicalContentRef, String> {
     ))))
 }
 
-fn find_task(store: &TeamStore, task_id: &str) -> Result<TaskBoardTask, String> {
-    store
-        .snapshot()
-        .tasks
-        .iter()
-        .find(|task| task.task_id.as_str() == task_id)
-        .map(task_to_dto)
-        .ok_or_else(|| format!("task not found: {task_id}"))
-}
-
-fn task_to_dto(task: &qaqh_session::team::TaskView) -> TaskBoardTask {
-    TaskBoardTask {
-        task_id: task.task_id.as_str().to_string(),
-        title: task.title.clone(),
-        state: task_state_name(task.state).to_string(),
-        owner: task
-            .owner
-            .as_ref()
-            .map(|owner| owner.agent_path.as_str().to_string()),
-        claim_epoch: task.claim_epoch,
-        depends_on: task
-            .depends_on
-            .iter()
-            .map(|task_id| task_id.as_str().to_string())
-            .collect(),
-        artifacts: task
-            .artifacts
-            .iter()
-            .map(|artifact| TaskBoardArtifact {
-                content_id: artifact.artifact_ref.hash().as_str().to_string(),
-                media_type: artifact.media_type.clone(),
-                added_at_ms: artifact.added_at_ms,
-            })
-            .collect(),
-        acceptance: task.acceptance.clone(),
-        result_ref: task
-            .result_ref
-            .as_ref()
-            .map(|content_ref| content_ref.hash().as_str().to_string()),
-        created_at_ms: task.created_at_ms,
-        updated_at_ms: task.updated_at_ms,
-    }
-}
-
-fn task_state_name(state: TaskState) -> &'static str {
+fn task_state_wire(state: &qaqh_ringing_contract::team::TaskState) -> &'static str {
     match state {
-        TaskState::Open => "open",
-        TaskState::Claimed => "claimed",
-        TaskState::Completed => "completed",
-        TaskState::Closed => "closed",
-        TaskState::Cancelled => "cancelled",
+        qaqh_ringing_contract::team::TaskState::Open => "open",
+        qaqh_ringing_contract::team::TaskState::Claimed => "claimed",
+        qaqh_ringing_contract::team::TaskState::Completed => "completed",
+        qaqh_ringing_contract::team::TaskState::Closed => "closed",
+        qaqh_ringing_contract::team::TaskState::Cancelled => "cancelled",
     }
 }
 
-fn parse_task_state(state: &str) -> Result<TaskState, String> {
+fn parse_task_state(state: &str) -> Result<qaqh_ringing_contract::team::TaskState, String> {
     match state.trim().to_ascii_lowercase().as_str() {
-        "open" => Ok(TaskState::Open),
-        "claimed" => Ok(TaskState::Claimed),
-        "completed" => Ok(TaskState::Completed),
-        "closed" => Ok(TaskState::Closed),
-        "cancelled" | "canceled" => Ok(TaskState::Cancelled),
+        "open" => Ok(qaqh_ringing_contract::team::TaskState::Open),
+        "claimed" => Ok(qaqh_ringing_contract::team::TaskState::Claimed),
+        "completed" => Ok(qaqh_ringing_contract::team::TaskState::Completed),
+        "closed" => Ok(qaqh_ringing_contract::team::TaskState::Closed),
+        "cancelled" | "canceled" => Ok(qaqh_ringing_contract::team::TaskState::Cancelled),
         other => Err(format!("unknown task state {other:?}")),
     }
 }

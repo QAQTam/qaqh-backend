@@ -4,7 +4,6 @@ use serde_json::{Value, json};
 
 use qaqh_domain::ControlCommand;
 use qaqh_ringing::RingingCommand;
-use qaqh_types::SettingValue;
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::QaqhService;
@@ -13,7 +12,7 @@ use qaqh_session::session_fact_v2::{SessionMetadataPatch, TitleSource};
 use crate::service::command::SessionCommand;
 use crate::service::params::optional_tool_mode;
 use crate::service::stats::{activity, dashboard};
-use crate::service::{materialize_canonical_session, session_canonical_cwd};
+use crate::service::session_canonical_cwd;
 
 pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResult<Value> {
     match command {
@@ -47,51 +46,33 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             QaqhError::to_value("session activity", activities)
         }
         SessionCommand::SessionGetActivity(args) => {
-            activity(&service.sessions, &args.session_id).map_err(QaqhError::message)
+            activity(&service.owners, &args.session_id).map_err(QaqhError::message)
         }
         SessionCommand::SessionDashboard(args) => {
             dashboard(&args.session_id).map_err(QaqhError::message)
         }
         SessionCommand::SessionNew(args) => create_new(service, args),
         SessionCommand::SessionCreate(args) => {
-            let identity = service
+            let session_id = service
                 .sessions
-                .allocate_session(args.cwd.as_deref())
+                .allocate_session()
                 .map_err(|error| {
                     QaqhError::context("session.create: allocate session failed", error)
                 })?;
-            let session_id = identity.session_id.as_str().to_string();
             service.sessions.clear_active();
-
-            let (canonical_cwd, model) =
-                session_canonical_cwd(&service.sessions, &session_id, args.cwd.as_deref())
-                    .inspect_err(|_| {
-                        let _ = service.sessions.delete(&session_id);
-                    })?;
-            if let Err(error) = materialize_canonical_session(&session_id, &canonical_cwd, &model) {
+            create_business_row(service, &session_id, CreateRowInput {
+                cwd: args.cwd.as_deref(),
+                title: args.title.as_deref().map(str::trim).filter(|t| !t.is_empty()),
+                profile: args.profile.as_deref(),
+                effort: args.effort.as_deref(),
+                tool_mode: None,
+                custom_tools: None,
+                model_selection: None,
+            })
+            .inspect_err(|_| {
                 let _ = service.sessions.delete(&session_id);
-                return Err(QaqhError::context(
-                    "session.create: canonical materialization failed",
-                    error,
-                ));
-            }
-            let mut patch = SessionMetadataPatch::default();
-            if let Some(profile) = args.profile.as_deref().filter(|name| !name.is_empty()) {
-                patch.profile = Some(profile.to_string());
-            }
-            if let Some(effort) = args.effort.as_deref().filter(|effort| !effort.is_empty()) {
-                patch.effort = Some(effort.to_string());
-            }
-            if patch != SessionMetadataPatch::default() {
-                service
-                    .write_meta(&session_id, patch)
-                    .map_err(QaqhError::message)?;
-            }
-            if let Some(title) = args.title.as_deref().filter(|title| !title.is_empty()) {
-                service
-                    .write_title(&session_id, title, TitleSource::User)
-                    .map_err(QaqhError::message)?;
-            }
+            })
+            .map_err(QaqhError::message)?;
             service
                 .registry()
                 .map_err(QaqhError::message)?
@@ -302,69 +283,30 @@ pub(crate) fn create_new(
     let custom_tools = args.custom_tools.unwrap_or_default();
     let preset =
         optional_tool_mode(args.tool_mode.as_deref(), &custom_tools).map_err(QaqhError::message)?;
-    // BUG-2026-09-13-24 + BETA-01：先分配 canonical identity，再用 `SessionId`
-    // 作为 seed 和目录名。分配、identity sidecar 与初始 meta 都在同一把
-    // session 锁内落盘，不再产生 8 位 seed 与 UUID 并存的新会话。
-    let identity = service
+    // BUG-2026-09-13-24 + BETA-01：先分配会话 id，再以它建业务行。
+    // 业务行一次性落齐 cwd/model/tool_mode/model_selection/title——spawn 与
+    // 首回合直接读行，不再有 meta.json 中间态。
+    let session_id = service
         .sessions
-        .allocate_session(args.cwd.as_deref())
+        .allocate_session()
         .map_err(|error| QaqhError::context("session.new: allocate session failed", error))?;
-    let session_id = identity.session_id.as_str().to_string();
     service.sessions.clear_active();
-    // 先于 spawn 落盘：worker 的 init_session 从 meta 恢复并应用，
-    // 保证 `minimal` 等预置工具模式首轮就生效。
-    // 纯 v2：session_create 即物化 canonical identity + 首个 `SessionCreated`
-    // 事实。否则 bootstrap/events 要等首个工具事实才可用，新建会话在第一
-    // 回合前一直处于 snapshot_missing 瞬态。
-    let (canonical_cwd, model) =
-        session_canonical_cwd(&service.sessions, &session_id, args.cwd.as_deref()).inspect_err(
-            |_| {
-                let _ = service.sessions.delete(&session_id);
-            },
-        )?;
-    if let Err(error) = materialize_canonical_session(&session_id, &canonical_cwd, &model) {
+    let (tool_mode, custom_tools) = preset
+        .map(|(tool_mode, custom_tools)| (Some(tool_mode), Some(custom_tools)))
+        .unwrap_or((None, None));
+    create_business_row(service, &session_id, CreateRowInput {
+        cwd: args.cwd.as_deref(),
+        title: args.title.as_deref().map(str::trim).filter(|t| !t.is_empty()),
+        profile: None,
+        effort: None,
+        tool_mode,
+        custom_tools,
+        model_selection: args.model_selection.clone(),
+    })
+    .inspect_err(|_| {
         let _ = service.sessions.delete(&session_id);
-        return Err(QaqhError::context(
-            "session.new: canonical materialization failed",
-            error,
-        ));
-    }
-    if let Some((tool_mode, custom_tools)) = preset {
-        service
-            .write_meta(
-                &session_id,
-                SessionMetadataPatch {
-                    tool_mode: Some(tool_mode),
-                    custom_tools: Some(custom_tools),
-                    ..Default::default()
-                },
-            )
-            .map_err(|error| QaqhError::context("persist tool_mode failed", error))?;
-    }
-    // 统一命令面：创建即选定模型选择（spawn 前落 meta，worker 首轮即生效）；
-    // requested 位同步落审计值。
-    if let Some(selection) = &args.model_selection {
-        service
-            .write_meta(
-                &session_id,
-                SessionMetadataPatch {
-                    model_selection: Some(SettingValue::Use {
-                        value: selection.clone(),
-                    }),
-                    requested_model_selection: Some(SettingValue::Use {
-                        value: selection.clone(),
-                    }),
-                    ..Default::default()
-                },
-            )
-            .map_err(|error| QaqhError::context("persist model_selection failed", error))?;
-    }
-    // 显式标题：首个用户请求到来前即定名（TitleSource::User，抑制自动总结覆盖）。
-    if let Some(title) = args.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
-        service
-            .write_title(&session_id, title, TitleSource::User)
-            .map_err(QaqhError::message)?;
-    }
+    })
+    .map_err(QaqhError::message)?;
     service
         .registry()
         .map_err(QaqhError::message)?
@@ -399,6 +341,51 @@ impl QaqhService {
     }
 }
 
+/// 业务行创建输入:cwd/model 由 `session_canonical_cwd` 解析,其余字段直通。
+struct CreateRowInput<'a> {
+    cwd: Option<&'a str>,
+    title: Option<&'a str>,
+    profile: Option<&'a str>,
+    effort: Option<&'a str>,
+    tool_mode: Option<String>,
+    custom_tools: Option<Vec<String>>,
+    model_selection: Option<qaqh_types::ModelSelection>,
+}
+
+/// 会话创建的第一站:一次性落 SQLite 业务行(cwd/model/profile/effort/
+/// tool_mode/model_selection/title)。行存在即 spawn 可读,无 meta.json 中间态。
+fn create_business_row(
+    service: &QaqhService,
+    session_id: &str,
+    input: CreateRowInput<'_>,
+) -> Result<(), String> {
+    let (canonical_cwd, model) = session_canonical_cwd(&service.owners, session_id, input.cwd)?;
+    let row = qaqh_session::db::store::NewSession {
+        session_id: session_id.to_string(),
+        parent_session_id: None,
+        title: input.title.map(str::to_string).unwrap_or_default(),
+        title_source: input.title.map(|_| "user".to_string()),
+        cwd: Some(canonical_cwd),
+        model: Some(model),
+        effort: input.effort.filter(|e| !e.is_empty()).map(str::to_string),
+        profile: input.profile.filter(|p| !p.is_empty()).map(str::to_string),
+        mode: None,
+        tool_mode: input.tool_mode,
+        model_selection: input.model_selection,
+        custom_tools: input.custom_tools,
+        skills: None,
+        frozen_annotation: None,
+        ephemeral: false,
+    };
+    let error_session_id = session_id.to_string();
+    service
+        .owners
+        .db()
+        .write_blocking(move |conn| qaqh_session::db::store::create_session(conn, &row))
+        .map(|_| ())
+        .map_err(|error| format!("create business row for {error_session_id}: {error}"))
+}
+
 fn spawn_subagent(
     service: &QaqhService,
     args: crate::service::command::SubagentSpawnArgs,
@@ -415,14 +402,12 @@ fn spawn_subagent(
         .workspace
         .map(|workspace| workspace.trim().to_string())
         .filter(|workspace| !workspace.is_empty() && workspace != ".");
-    // BETA-01：子代理与主会话共享 canonical identity 规则，目录名、seed、
-    // child_session_id 都是同一个 UUID；子代理保持 unindexed，不污染普通
-    // 会话列表。
-    let identity = service
+    // BETA-01：子代理与主会话共享 id 规则；cwd 由 spawn_subagent_in_workspace
+    // 落进业务行（显式 workspace 优先，其次继承父会话 cwd）。
+    let session_id = service
         .sessions
-        .allocate_agent_session(workspace.as_deref())
+        .allocate_session()
         .map_err(|error| QaqhError::context("subagent.spawn: allocate child session", error))?;
-    let session_id = identity.session_id.as_str().to_string();
     if let Some(workspace) = &workspace {
         log::info!("[subagent] inherited workspace for seed={session_id}: {workspace}");
     }
