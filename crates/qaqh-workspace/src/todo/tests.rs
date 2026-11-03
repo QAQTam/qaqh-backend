@@ -14,6 +14,13 @@ use std::ffi::OsString;
 
 /// 隔离数据目录（USERPROFILE/HOME → 临时目录）并设置会话上下文；
 /// 结束恢复环境，避免污染真实 ~/.qaqh/sessions。
+///
+/// 注意 Linux 的 `data_dir()` 优先级是 `QAQH_DATA_DIR` > `XDG_CONFIG_HOME`
+/// > HOME：只换 HOME 在带 XDG_CONFIG_HOME 的环境（桌面会话/CI 沙箱）下
+/// 不生效，全部用例会共用真实 `~/.config/qaqh`，跨用例互写 todo.json
+/// （meta_snapshot_none_without_a_list 偶发读到别的用例列表就是这个）。
+/// 因此数据根统一用 `QAQH_DATA_DIR` 直指临时目录——它是文档化的
+/// test-harness 覆盖入口，优先级最高，一份设置隔离所有解析。
 fn with_isolated_todo<F: FnOnce(&str)>(f: F) {
     let _guard = crate::TEST_RUNTIME_SERIAL
         .lock()
@@ -21,17 +28,25 @@ fn with_isolated_todo<F: FnOnce(&str)>(f: F) {
     let dir = tempfile::tempdir().unwrap();
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     let old_home: Option<OsString> = std::env::var_os(home_var);
+    let old_data_dir: Option<OsString> = std::env::var_os("QAQH_DATA_DIR");
     // SAFETY: Rust 2024 的 set_var/remove_var 是 unsafe；此处仅测试用，且所有
     // 用例经 TEST_RUNTIME_SERIAL 串行化，不存在并发读者。
-    unsafe { std::env::set_var(home_var, dir.path()) };
+    unsafe {
+        std::env::set_var(home_var, dir.path());
+        std::env::set_var("QAQH_DATA_DIR", dir.path());
+    }
     let session_id = format!("test-seed-{}", std::process::id());
     crate::runtime::set_context(&session_id, 4);
     f(&session_id);
-    // SAFETY: 恢复进入本函数前的 HOME/USERPROFILE；同样受 TEST_RUNTIME_SERIAL 保护。
+    // SAFETY: 恢复进入本函数前的 HOME/USERPROFILE/QAQH_DATA_DIR；同样受 TEST_RUNTIME_SERIAL 保护。
     unsafe {
         match old_home {
             Some(value) => std::env::set_var(home_var, value),
             None => std::env::remove_var(home_var),
+        }
+        match old_data_dir {
+            Some(value) => std::env::set_var("QAQH_DATA_DIR", value),
+            None => std::env::remove_var("QAQH_DATA_DIR"),
         }
     }
 }
