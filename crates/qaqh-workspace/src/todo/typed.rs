@@ -406,8 +406,10 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
 /// service 查询面(`todo.list`)的纯快照入口:typed 解析后不经工具信封。
 /// `status` 与 todo 工具同词表(pending|in_progress|completed|cancelled)。
 pub fn todo_list_snapshot_value(session_id: &str, status: Option<&str>) -> Result<Value, String> {
+    // 无过滤也必须是 `{}` 而不是 `Null`:`TodoListArgs` 是 struct,`null`
+    // 解不出来(service 面无 status 查询曾因此 400,真机验收实证)。
     let args = match status {
-        None => Value::Null,
+        None => serde_json::json!({}),
         Some(status) => serde_json::json!({ "status": status }),
     };
     todo_list_for_typed(session_id, &args)?.to_snapshot_value()

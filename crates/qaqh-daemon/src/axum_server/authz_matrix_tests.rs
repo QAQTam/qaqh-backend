@@ -610,3 +610,117 @@ async fn siwc_methods_deny_devices_and_serve_admin_without_tokens() {
         "设备请求不得触碰凭据存储"
     );
 }
+
+/// D3/真机验收回归：目录 CAS 冲突必须是 409 Conflict（`revision_conflict`），
+/// 不得经 `map_err(to_string)` 落进 502 operation_failed——把并发修订事实
+/// 伪装成参数错误，客户端（409 后重读重试）就无法工作。
+#[tokio::test]
+async fn provider_cas_conflict_is_http_409_not_502() {
+    let state = super::test_state();
+    let app = build_router(state.clone());
+    let (token, _device_id, client_session) = open_device(&app, &state, Scope::Admin).await;
+    let provider = serde_json::json!({
+        "name": "Acme Conflict",
+        "base_url": "https://acme-conflict.invalid/v1",
+        "wire": "chat",
+        "credential": "api_key",
+        "headers": {},
+        "compat": null,
+        "api_key": { "operation": "set", "value": "sk-conflict-test" },
+    });
+    let command = serde_json::json!({ "type": "provider.upsert", "id": "acme-conflict", "provider": provider });
+    let envelope_with_revision = |revision: u64| {
+        serde_json::json!({
+            "schema": qaqh_ringing::RINGING_SCHEMA,
+            "version": qaqh_ringing::RINGING_V2_VERSION,
+            "contract_revision": qaqh_ringing::COMMAND_CONTRACT_REVISION,
+            "command_id": qaqh_ringing_contract::ulid::generate_ulid(),
+            "client_instance_id": "inst",
+            "client_session_id": client_session,
+            "target": { "kind": "global" },
+            "preconditions": [{ "kind": "config_revision", "revision": revision }],
+            "command": command,
+        })
+    };
+    // 首写 revision 0（合法首次写）→ 200 accepted，目录推进到新 revision。
+    let first = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/commands",
+            Some(&token),
+            Some(&client_session),
+            Some(envelope_with_revision(0)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK, "revision 0 first write must be accepted");
+    // 同一 revision 0 重发 = 并发修订冲突 → 409 revision_conflict，而非 502。
+    let conflict = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/commands",
+            Some(&token),
+            Some(&client_session),
+            Some(envelope_with_revision(0)),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        conflict.status(),
+        StatusCode::CONFLICT,
+        "stale config_revision must map to 409, got {}",
+        conflict.status()
+    );
+    let body = body_json(conflict).await;
+    assert_eq!(body["code"], "revision_conflict", "conflict code: {body}");
+    // 清理：用当前 revision 删除，保持共享 test service 的目录干净。
+    let current = body_json(
+        app.clone()
+            .clone()
+        .oneshot(request(
+                "POST",
+                "/ringing/v2/commands",
+                Some(&token),
+                Some(&client_session),
+                Some(serde_json::json!({
+                    "schema": qaqh_ringing::RINGING_SCHEMA,
+                    "version": qaqh_ringing::RINGING_V2_VERSION,
+                    "contract_revision": qaqh_ringing::COMMAND_CONTRACT_REVISION,
+                    "command_id": qaqh_ringing_contract::ulid::generate_ulid(),
+                    "client_instance_id": "inst",
+                    "client_session_id": client_session,
+                    "target": { "kind": "global" },
+                    "preconditions": [],
+                    "command": { "type": "provider.list" },
+                })),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await["result"]["revision"]
+        .as_u64()
+        .expect("provider.list carries catalog revision");
+    let _ = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/commands",
+            Some(&token),
+            Some(&client_session),
+            Some(serde_json::json!({
+                "schema": qaqh_ringing::RINGING_SCHEMA,
+                "version": qaqh_ringing::RINGING_V2_VERSION,
+                "contract_revision": qaqh_ringing::COMMAND_CONTRACT_REVISION,
+                "command_id": qaqh_ringing_contract::ulid::generate_ulid(),
+                "client_instance_id": "inst",
+                "client_session_id": client_session,
+                "target": { "kind": "global" },
+                "preconditions": [{ "kind": "config_revision", "revision": current }],
+                "command": { "type": "provider.delete", "id": "acme-conflict" },
+            })),
+        ))
+        .await
+        .unwrap();
+}
