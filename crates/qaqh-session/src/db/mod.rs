@@ -12,6 +12,7 @@ use tokio::sync::oneshot;
 
 pub mod schema;
 pub mod store;
+pub mod team;
 pub mod view;
 #[cfg(test)]
 mod view_tests;

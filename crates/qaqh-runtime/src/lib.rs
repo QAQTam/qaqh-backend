@@ -33,14 +33,13 @@ mod subagent_supervisor;
 
 // 已外移的执行层：同名重导出，路径不变。
 pub use qaqh_agent_runtime::{
-    activity, agent, provider_job, quota_ledger, session_agent, tool_job,
+    agent, provider_job, quota_ledger, session_agent, tool_job,
 };
 // 已外移的传输层：registry 仍需读 canonical 事实（`load_agent_graph` /
 // `read_session_facts`）。
 
 pub use error::{QaqhError, QaqhResult};
 #[doc(hidden)]
-pub use qaqh_agent_runtime::SessionActivityTracker;
 pub use qaqh_ringing_runtime::RingingHub;
 pub use registry::{AgentRegistry, cache_system_path, detect_os_info, detect_shell};
 pub use service::QaqhService;

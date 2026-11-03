@@ -14,7 +14,6 @@ members = [
     "crates/qaqh-agent-runtime",
     "crates/qaqh-ringing-runtime",
     "crates/qaqh-runtime",
-    "crates/qaqh-agentloop-core",
     "crates/qaqh-ringing",
     "crates/qaqh-ringing-contract",
     "crates/qaqh-daemon",

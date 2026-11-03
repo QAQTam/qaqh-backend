@@ -8,7 +8,7 @@ use qaqh_client::{
     RINGING_V2_VERSION,
 };
 
-use qaqh_client::{fact, ringing_v2};
+use qaqh_client::{contract_state, fact, ringing_v2};
 
 #[test]
 fn v2_surface_is_nameable_from_the_client_root() {
@@ -40,117 +40,69 @@ fn v2_surface_is_nameable_from_the_client_root() {
     );
 }
 
-/// #323 缺口 1：壳层必须能只靠 `qaqh-client` **命名并 match** control delta 的
-/// interaction 分支（match 枚举变体必须写出枚举名，只导出 `fact::ProjectionPayload` 不够）。
+/// 壳层必须能只靠 `qaqh-client` **命名并 match** 会话事件流的 interaction /
+/// tool 分支(`ClientV2Event` = 契约 `SessionEventFrame`,事件内部 tagged
+/// `type`)。match 枚举变体必须写出枚举名,别名导出不够。
 #[test]
-fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
-    fn classify(delta: &fact::ControlDelta) -> &'static str {
-        match delta {
-            fact::ControlDelta::InteractionRequested {
-                interaction_id,
-                call_id,
-                kind,
-                request,
-                expires_at_ms,
-                ..
-            } => {
-                // 字段必须能用 client 导出的类型命名。
-                let _: &fact::InteractionId = interaction_id;
-                let _: &Option<fact::ToolCallId> = call_id;
-                let _: &fact::InteractionKind = kind;
-                let _: &fact::ContentValue = request;
-                let _: &Option<i64> = expires_at_ms;
+fn session_event_interaction_branches_are_matchable_from_the_client_root() {
+    use qaqh_client::contract_events::SessionEvent;
+
+    fn classify(frame: &ClientV2Event) -> &'static str {
+        match &frame.event {
+            SessionEvent::InteractionRequested { interaction } => {
+                // 字段必须能用 client 导出的契约类型命名。
+                let _: &fact::InteractionId = &interaction.interaction_id;
+                let _: &Option<fact::ToolCallId> = &interaction.call_id;
+                let _: &fact::InteractionKind = &interaction.kind;
+                let _: &fact::ContentValue = &interaction.request;
                 "requested"
             }
-            fact::ControlDelta::InteractionResolved {
-                interaction_id,
-                decision,
-                verdict,
-                resolved_by,
-                ..
-            } => {
+            SessionEvent::InteractionResolved { interaction_id, .. } => {
                 let _: &fact::InteractionId = interaction_id;
-                let _: &fact::ContentValue = decision;
-                let _: &Option<fact::InteractionDecision> = verdict;
-                let _: &fact::ActorRef = resolved_by;
                 "resolved"
             }
-            fact::ControlDelta::InteractionExpired {
-                interaction_id,
-                reason,
+            SessionEvent::ToolFinished {
+                call_id,
+                status,
+                error,
                 ..
             } => {
-                let _: &fact::InteractionId = interaction_id;
-                let _: &fact::InteractionExpiryReason = reason;
-                "expired"
-            }
-            fact::ControlDelta::DriverChanged {
-                holder,
-                driver_epoch,
-                ..
-            } => {
-                let _: &Option<String> = holder;
-                let _: &u64 = driver_epoch;
-                "driver"
+                let _: &fact::ToolCallId = call_id;
+                let _: &contract_state::ToolCallStatus = status;
+                let _: &Option<fact::ToolError> = error;
+                "tool"
             }
             _ => "other",
         }
     }
 
-    let requested: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
-        "kind": "control_delta",
-        "data": {
-            "kind": "interaction_requested",
-            "data": {
-                "revision": 3,
-                "interaction_id": "int_1",
-                "call_id": "call_1",
-                "kind": "plan",
-                "request": { "kind": "inline", "data": { "text": "approve?" } },
-                "expires_at_ms": null
-            }
+    let requested: ClientV2Event = serde_json::from_value(serde_json::json!({
+        "seq": 3,
+        "type": "interaction_requested",
+        "interaction": {
+            "interaction_id": "int_1",
+            "call_id": "call_1",
+            "kind": "plan",
+            "request": { "kind": "inline", "data": { "text": "approve?" } },
+            "expires_at_ms": null
         }
     }))
-    .expect("decode interaction_requested payload");
-    let fact::ProjectionPayload::ControlDelta(delta) = &requested else {
-        panic!("expected control_delta, got {requested:?}");
-    };
-    assert_eq!(classify(delta), "requested");
+    .expect("decode interaction_requested frame");
+    assert_eq!(requested.seq, 3);
+    assert_eq!(classify(&requested), "requested");
 
-    // wire 事实：delta 与 bootstrap 的 plan kind 都已统一为 `plan`；两个
-    // Rust 枚举都在 client 面可命名，壳层按类型匹配即可。
-    let resolved: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
-        "kind": "control_delta",
-        "data": {
-            "kind": "interaction_resolved",
-            "data": {
-                "revision": 4,
-                "interaction_id": "int_1",
-                "decision": { "kind": "inline", "data": { "text": "approved" } },
-                "verdict": "approved",
-                "resolved_by": { "kind": "user", "id": "local" },
-                "resolution_seq": 1
-            }
-        }
+    let finished: ClientV2Event = serde_json::from_value(serde_json::json!({
+        "seq": 4,
+        "type": "tool_finished",
+        "call_id": "call_1",
+        "status": "finished",
+        "output": null,
+        "output_truncated": false,
+        "error": null,
+        "metrics": null
     }))
-    .expect("decode interaction_resolved payload");
-    let fact::ProjectionPayload::ControlDelta(delta) = &resolved else {
-        panic!("expected control_delta, got {resolved:?}");
-    };
-    assert_eq!(classify(delta), "resolved");
-
-    let expired: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
-        "kind": "control_delta",
-        "data": {
-            "kind": "interaction_expired",
-            "data": { "revision": 5, "interaction_id": "int_1", "reason": "timeout" }
-        }
-    }))
-    .expect("decode interaction_expired payload");
-    let fact::ProjectionPayload::ControlDelta(delta) = &expired else {
-        panic!("expected control_delta, got {expired:?}");
-    };
-    assert_eq!(classify(delta), "expired");
+    .expect("decode tool_finished frame");
+    assert_eq!(classify(&finished), "tool");
 }
 
 #[test]

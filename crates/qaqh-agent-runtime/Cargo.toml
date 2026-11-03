@@ -6,7 +6,6 @@ license.workspace = true
 description = "Single-session agent runtime: state machine, engines, provider/tool jobs (split out of qaqh-runtime)"
 
 [dependencies]
-qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-profile = { path = "../qaqh-profile" }
 qaqh-domain = { path = "../qaqh-domain" }

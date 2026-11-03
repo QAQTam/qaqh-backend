@@ -30,6 +30,10 @@ pub struct NewSession {
     pub profile: Option<String>,
     pub mode: Option<String>,
     pub tool_mode: Option<String>,
+    pub model_selection: Option<qaqh_types::ModelSelection>,
+    pub custom_tools: Option<Vec<String>>,
+    pub skills: Option<qaqh_types::SkillSessionStateV2>,
+    pub frozen_annotation: Option<String>,
     pub ephemeral: bool,
 }
 
@@ -38,8 +42,9 @@ pub fn create_session(conn: &mut Connection, session: &NewSession) -> rusqlite::
     conn.execute(
         "INSERT INTO sessions
             (session_id, parent_session_id, title, title_source, cwd, model, effort,
-             profile, mode, tool_mode, ephemeral, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+             profile, mode, tool_mode, model_selection, custom_tools_json, skills_json,
+             frozen_annotation, ephemeral, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)",
         params![
             session.session_id,
             session.parent_session_id,
@@ -51,8 +56,26 @@ pub fn create_session(conn: &mut Connection, session: &NewSession) -> rusqlite::
             session.profile,
             session.mode,
             session.tool_mode,
+            session
+                .model_selection
+                .as_ref()
+                .map(|selection| serde_json::to_string(selection))
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+            session
+                .custom_tools
+                .as_ref()
+                .map(|tools| serde_json::to_string(tools))
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+            session
+                .skills
+                .as_ref()
+                .map(|skills| serde_json::to_string(skills))
+                .transpose()
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?,
+            session.frozen_annotation,
             i64::from(session.ephemeral),
-            now,
             now,
         ],
     )?;
@@ -85,6 +108,74 @@ pub fn ensure_session(
         )?;
     }
     Ok(())
+}
+
+/// 单会话业务行(元数据读取用)。
+#[derive(Debug, Clone)]
+pub struct SessionRow {
+    pub session_id: String,
+    pub title: String,
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub profile: Option<String>,
+    pub mode: Option<String>,
+    pub tool_mode: Option<String>,
+    pub model_selection: Option<qaqh_types::ModelSelection>,
+    pub custom_tools: Vec<String>,
+    pub skills: Option<qaqh_types::SkillSessionStateV2>,
+    pub frozen_annotation: Option<String>,
+    pub archived: bool,
+    pub ephemeral: bool,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+pub fn session_row(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<SessionRow>> {
+    conn.query_row(
+        "SELECT session_id, title, cwd, model, effort, profile, mode, tool_mode,
+                model_selection, custom_tools_json, skills_json, frozen_annotation,
+                archived, ephemeral, created_at_ms, updated_at_ms
+         FROM sessions WHERE session_id = ?1",
+        [session_id],
+        |row| {
+            Ok(SessionRow {
+                session_id: row.get(0)?,
+                title: row.get(1)?,
+                cwd: row.get(2)?,
+                model: row.get(3)?,
+                effort: row.get(4)?,
+                profile: row.get(5)?,
+                mode: row.get(6)?,
+                tool_mode: row.get(7)?,
+                model_selection: row
+                    .get::<_, Option<String>>(8)?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                custom_tools: row
+                    .get::<_, Option<String>>(9)?
+                    .and_then(|json| serde_json::from_str(&json).ok())
+                    .unwrap_or_default(),
+                skills: row
+                    .get::<_, Option<String>>(10)?
+                    .and_then(|json| serde_json::from_str(&json).ok()),
+                frozen_annotation: row.get(11)?,
+                archived: row.get::<_, i64>(12)? != 0,
+                ephemeral: row.get::<_, i64>(13)? != 0,
+                created_at_ms: row.get(14)?,
+                updated_at_ms: row.get(15)?,
+            })
+        },
+    )
+    .optional()
+}
+
+/// 行 + 回合计数,一次读取(session_meta 组装用)。
+pub fn session_row_with_turn_count(
+    conn: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Option<(SessionRow, i64)>> {
+    let count = turn_count(conn, session_id)?;
+    Ok(session_row(conn, session_id)?.map(|row| (row, count)))
 }
 
 pub fn session_parent(
@@ -121,7 +212,8 @@ pub fn turn_count(conn: &Connection, session_id: &str) -> rusqlite::Result<i64> 
     )
 }
 
-/// 会话列表行:列表页直接查询,不重建投影。
+/// 会话列表行:列表页直接查询,不重建投影(列与 [`SessionRow`] 对齐,另带
+/// 回合计数)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionListRow {
     pub session_id: String,
@@ -129,6 +221,12 @@ pub struct SessionListRow {
     pub title: String,
     pub cwd: Option<String>,
     pub model: Option<String>,
+    pub effort: Option<String>,
+    pub profile: Option<String>,
+    pub mode: Option<String>,
+    pub tool_mode: Option<String>,
+    pub model_selection: Option<qaqh_types::ModelSelection>,
+    pub turn_count: i64,
     pub archived: bool,
     pub ephemeral: bool,
     pub created_at_ms: i64,
@@ -141,8 +239,11 @@ pub fn list_sessions(
     limit: u32,
 ) -> rusqlite::Result<Vec<SessionListRow>> {
     let mut stmt = conn.prepare(
-        "SELECT session_id, parent_session_id, title, cwd, model, archived, ephemeral,
-                created_at_ms, updated_at_ms
+        "SELECT session_id, parent_session_id, title, cwd, model, effort, profile,
+                mode, tool_mode, model_selection,
+                (SELECT COUNT(*) FROM turns WHERE turns.session_id = sessions.session_id)
+                    AS turn_count,
+                archived, ephemeral, created_at_ms, updated_at_ms
          FROM sessions
          WHERE (?1 = 1 OR archived = 0)
          ORDER BY updated_at_ms DESC
@@ -155,17 +256,25 @@ pub fn list_sessions(
             title: row.get(2)?,
             cwd: row.get(3)?,
             model: row.get(4)?,
-            archived: row.get::<_, i64>(5)? != 0,
-            ephemeral: row.get::<_, i64>(6)? != 0,
-            created_at_ms: row.get(7)?,
-            updated_at_ms: row.get(8)?,
+            effort: row.get(5)?,
+            profile: row.get(6)?,
+            mode: row.get(7)?,
+            tool_mode: row.get(8)?,
+            model_selection: row
+                .get::<_, Option<String>>(9)?
+                .and_then(|json| serde_json::from_str(&json).ok()),
+            turn_count: row.get(10)?,
+            archived: row.get::<_, i64>(11)? != 0,
+            ephemeral: row.get::<_, i64>(12)? != 0,
+            created_at_ms: row.get(13)?,
+            updated_at_ms: row.get(14)?,
         })
     })?;
     rows.collect()
 }
 
 /// 元数据补丁的 SQLite 列投影:出现的字段写列,未出现的不动。
-/// skills/custom_tools 等尚无业务列的字段不在此收口(随旧 meta 存储迁移时处理)。
+/// `model_selection` 的 `Use` 落 JSON、`Inherit` 清列(跟随全局默认)。
 #[derive(Debug, Clone, Default)]
 pub struct SessionColumnPatch {
     pub title: Option<String>,
@@ -175,6 +284,10 @@ pub struct SessionColumnPatch {
     pub profile: Option<String>,
     pub mode: Option<String>,
     pub tool_mode: Option<String>,
+    pub model_selection: Option<qaqh_types::SettingValue<qaqh_types::ModelSelection>>,
+    pub custom_tools: Option<Vec<String>>,
+    pub skills: Option<qaqh_types::SkillSessionStateV2>,
+    pub frozen_annotation: Option<String>,
     pub archived: Option<bool>,
     pub ephemeral: Option<bool>,
 }
@@ -186,28 +299,55 @@ pub fn update_session_columns(
 ) -> rusqlite::Result<usize> {
     let mut sets: Vec<String> = vec!["updated_at_ms = ?1".to_string()];
     let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now_ms())];
-    let mut push = |column: &str, value: Option<String>, flag: Option<bool>| {
-        match (value, flag) {
-            (Some(value), _) => {
-                values.push(Box::new(value));
-            }
-            (None, Some(flag)) => {
-                values.push(Box::new(i64::from(flag)));
-            }
-            (None, None) => return,
+    // 文本列统一字符串入参;JSON 列先序列化;`None` = 不动该列。
+    let mut push_column = |column: &str, value: Option<String>| {
+        if let Some(value) = value {
+            values.push(Box::new(value) as Box<dyn rusqlite::ToSql>);
+            sets.push(format!("{column} = ?{}", values.len() + 1));
         }
-        sets.push(format!("{column} = ?{}", values.len() + 1));
     };
-    push("title", patch.title.clone(), None);
-    push("cwd", patch.cwd.clone(), None);
-    push("model", patch.model.clone(), None);
-    push("effort", patch.effort.clone(), None);
-    push("profile", patch.profile.clone(), None);
-    push("mode", patch.mode.clone(), None);
-    push("tool_mode", patch.tool_mode.clone(), None);
-    push("archived", None, patch.archived);
-    push("ephemeral", None, patch.ephemeral);
-    values.push(Box::new(session_id.to_string()));
+    push_column("title", patch.title.clone());
+    push_column("cwd", patch.cwd.clone());
+    push_column("model", patch.model.clone());
+    push_column("effort", patch.effort.clone());
+    push_column("profile", patch.profile.clone());
+    push_column("mode", patch.mode.clone());
+    push_column("tool_mode", patch.tool_mode.clone());
+    push_column(
+        "model_selection",
+        patch
+            .model_selection
+            .clone()
+            .map(|selection| match selection {
+                qaqh_types::SettingValue::Use { value } => {
+                    serde_json::to_string(&value).map(Some)
+                }
+                qaqh_types::SettingValue::Inherit => Ok(None),
+            })
+            .transpose()
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))
+            .map(|nested| nested.flatten())?,
+    );
+    if let Some(tools) = patch.custom_tools.as_ref() {
+        let json = serde_json::to_string(tools)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+        push_column("custom_tools_json", Some(json));
+    }
+    if let Some(skills) = patch.skills.as_ref() {
+        let json = serde_json::to_string(skills)
+            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(error.into()))?;
+        push_column("skills_json", Some(json));
+    }
+    push_column("frozen_annotation", patch.frozen_annotation.clone());
+    if let Some(flag) = patch.archived {
+        values.push(Box::new(i64::from(flag)) as Box<dyn rusqlite::ToSql>);
+        sets.push(format!("archived = ?{}", values.len() + 1));
+    }
+    if let Some(flag) = patch.ephemeral {
+        values.push(Box::new(i64::from(flag)) as Box<dyn rusqlite::ToSql>);
+        sets.push(format!("ephemeral = ?{}", values.len() + 1));
+    }
+    values.push(Box::new(session_id.to_string()) as Box<dyn rusqlite::ToSql>);
     let placeholders: Vec<String> = (1..=values.len()).map(|index| format!("?{index}")).collect();
     let sql = format!(
         "UPDATE sessions SET {} WHERE session_id = {}",

@@ -38,52 +38,42 @@ fn service() -> &'static qaqh_runtime::QaqhService {
         }
         qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
         let manager = qaqh_session::SessionManager::global();
-        // 建一个会话并写创世事实：workspace() 经 `SessionCreated.cwd` 成为
-        // 该会话的工作根（meta.json 已退役，cwd 只能来自 journal）。
-        let workspace_text = workspace().to_str().expect("utf8 workspace");
-        let identity = manager
-            .allocate_session(Some(workspace_text))
-            .expect("allocate session");
-        let session_id = identity.session_id.as_str().to_string();
-        let dir = manager.session_path_dir(&session_id);
-        let now_ms = 1_759_000_000_000i64;
-        {
-            use qaqh_session::session_fact_v2::{
-                EventId, FactPayload, FactSchema, SessionCreated, SessionFact,
-            };
-            let mut commit = qaqh_session::session_commit::SessionCommit::open_or_create(
-                &dir,
-                identity.session_id.clone(),
-                identity.log_id.clone(),
-                qaqh_session::meta::default_context_budget(),
-            )
-            .expect("open session journal");
-            let fact = SessionFact {
-                schema: FactSchema::v2(),
-                session_id: identity.session_id.clone(),
-                log_id: identity.log_id.clone(),
-                fact_seq: 0,
-                event_id: EventId::new(qaqh_session::canonical::generate_ulid()),
-                ts_ms: now_ms,
-                causation_id: None,
-                turn_id: None,
-                call_id: None,
-                interaction_id: None,
-                payload: FactPayload::SessionCreated(SessionCreated {
-                    created_at_ms: now_ms,
-                    cwd: workspace_text.to_string(),
-                    model: "test-model".to_string(),
-                    parent_session_id: None,
-                    schema_caps: Vec::new(),
-                }),
-            };
-            commit
-                .commit("session-created", 0, vec![fact])
-                .expect("commit genesis");
-        }
-        qaqh_session::meta::refresh_index(&dir);
+        // 业务行:cwd 落 SQLite —— 白名单(`allowed_roots`)与 scope 判定的
+        // 唯一读取源就是 `sessions.cwd`。
+        let workspace_text = workspace().to_str().expect("utf8 workspace").to_string();
+        let session_id = manager.allocate_session().expect("allocate session");
+        let service = qaqh_runtime::QaqhService::init(manager);
+        service
+            .owners()
+            .db()
+            .write_blocking({
+                let session_id = session_id.clone();
+                move |conn| {
+                    qaqh_session::db::store::create_session(
+                        conn,
+                        &qaqh_session::db::store::NewSession {
+                            session_id,
+                            parent_session_id: None,
+                            title: "fs allowlist".into(),
+                            title_source: Some("user".into()),
+                            cwd: Some(workspace_text),
+                            model: Some("test-model".into()),
+                            effort: None,
+                            profile: None,
+                            mode: None,
+                            tool_mode: None,
+                            model_selection: None,
+                            custom_tools: None,
+                            skills: None,
+                            frozen_annotation: None,
+                            ephemeral: false,
+                        },
+                    )
+                }
+            })
+            .expect("business row");
         let _ = SEED.set(session_id);
-        qaqh_runtime::QaqhService::init(manager)
+        service
     })
 }
 
@@ -153,13 +143,33 @@ fn fs_read_scope_rejects_other_session_workspace() {
     let other_file = other_workspace.join("secret.txt");
     std::fs::write(&other_file, "other\n").expect("seed other file");
     let other_session = "fs-other-seed";
-    assert!(
-        qaqh_session::SessionManager::global().persist_new_session_if_absent_with(
-            other_session,
-            Some(other_workspace.to_str().expect("utf8 other workspace")),
-            |_| true,
-        )
-    );
+    let other_cwd = other_workspace.to_str().expect("utf8 other workspace").to_string();
+    service()
+        .owners()
+        .db()
+        .write_blocking(move |conn| {
+            qaqh_session::db::store::create_session(
+                conn,
+                &qaqh_session::db::store::NewSession {
+                    session_id: other_session.to_string(),
+                    parent_session_id: None,
+                    title: "fs allowlist other".into(),
+                    title_source: Some("user".into()),
+                    cwd: Some(other_cwd),
+                    model: Some("test-model".into()),
+                    effort: None,
+                    profile: None,
+                    mode: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                },
+            )
+        })
+        .expect("other business row");
 
     let error = read_scoped(other_file.to_str().expect("utf8 other file"), seed())
         .expect_err("cross-seed workspace read must be rejected");

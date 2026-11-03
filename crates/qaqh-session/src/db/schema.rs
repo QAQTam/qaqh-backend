@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::DbError;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 const DDL_V1: &str = r#"
 CREATE TABLE sessions (
@@ -21,6 +21,7 @@ CREATE TABLE sessions (
     profile           TEXT,
     mode              TEXT,
     tool_mode         TEXT,
+    model_selection   TEXT,
     skills_json       TEXT,
     custom_tools_json TEXT,
     frozen_annotation TEXT,
@@ -92,41 +93,6 @@ CREATE TABLE interactions (
 );
 CREATE INDEX idx_interactions_pending ON interactions(session_id, status);
 
-CREATE TABLE team_tasks (
-    task_id       TEXT PRIMARY KEY,
-    team_id       TEXT NOT NULL,
-    title         TEXT NOT NULL,
-    state         TEXT NOT NULL,
-    claimed_by    TEXT,
-    payload_json  TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL
-);
-CREATE INDEX idx_team_tasks_team ON team_tasks(team_id, state);
-
-CREATE TABLE board_channels (
-    channel_id    TEXT PRIMARY KEY,
-    board_id      TEXT NOT NULL,
-    name          TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL
-);
-
-CREATE TABLE board_posts (
-    post_id       TEXT PRIMARY KEY,
-    channel_id    TEXT NOT NULL,
-    thread_id     TEXT,
-    author        TEXT NOT NULL,
-    body          TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL
-);
-CREATE INDEX idx_board_posts_channel ON board_posts(channel_id, created_at_ms);
-
-CREATE TABLE board_subscriptions (
-    subscriber  TEXT NOT NULL,
-    target_json TEXT NOT NULL,
-    PRIMARY KEY (subscriber, target_json)
-);
-
 CREATE TABLE blobs (
     hash          TEXT PRIMARY KEY,
     bytes         BLOB NOT NULL,
@@ -135,7 +101,92 @@ CREATE TABLE blobs (
 );
 "#;
 
-/// 初始化 schema:空库建 v1;已有库校验版本,比代码新直接报错。
+const DDL_V2: &str = r#"
+DROP TABLE IF EXISTS team_tasks;
+DROP TABLE IF EXISTS board_channels;
+DROP TABLE IF EXISTS board_posts;
+DROP TABLE IF EXISTS board_subscriptions;
+
+CREATE TABLE team_tasks (
+    task_id          TEXT PRIMARY KEY,
+    root_session_id  TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    description_ref  TEXT,
+    state            TEXT NOT NULL,
+    owner_path       TEXT,
+    owner_session_id TEXT,
+    claim_epoch      INTEGER NOT NULL DEFAULT 0,
+    result_ref       TEXT,
+    created_by       TEXT NOT NULL,
+    created_at_ms    INTEGER NOT NULL,
+    updated_at_ms    INTEGER NOT NULL
+);
+CREATE INDEX idx_team_tasks_root ON team_tasks(root_session_id, state);
+
+CREATE TABLE team_task_dependencies (
+    task_id    TEXT NOT NULL REFERENCES team_tasks(task_id) ON DELETE CASCADE,
+    depends_on TEXT NOT NULL,
+    PRIMARY KEY (task_id, depends_on)
+);
+
+CREATE TABLE team_task_artifacts (
+    task_id     TEXT NOT NULL REFERENCES team_tasks(task_id) ON DELETE CASCADE,
+    content_id  TEXT NOT NULL,
+    media_type  TEXT NOT NULL,
+    added_at_ms INTEGER NOT NULL
+);
+
+CREATE TABLE team_task_acceptance (
+    task_id    TEXT PRIMARY KEY REFERENCES team_tasks(task_id) ON DELETE CASCADE,
+    items_json TEXT NOT NULL
+);
+
+CREATE TABLE board_channels (
+    channel_id      TEXT PRIMARY KEY,
+    root_session_id TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    topic           TEXT,
+    created_by      TEXT NOT NULL,
+    created_at_ms   INTEGER NOT NULL
+);
+CREATE INDEX idx_board_channels_root ON board_channels(root_session_id);
+
+CREATE TABLE board_threads (
+    thread_id       TEXT PRIMARY KEY,
+    root_session_id TEXT NOT NULL,
+    channel_id      TEXT NOT NULL REFERENCES board_channels(channel_id) ON DELETE CASCADE,
+    title           TEXT NOT NULL,
+    task_id         TEXT,
+    created_by      TEXT NOT NULL,
+    created_at_ms   INTEGER NOT NULL
+);
+CREATE INDEX idx_board_threads_root ON board_threads(root_session_id, channel_id);
+
+CREATE TABLE board_posts (
+    post_id           TEXT PRIMARY KEY,
+    root_session_id   TEXT NOT NULL,
+    thread_id         TEXT NOT NULL REFERENCES board_threads(thread_id) ON DELETE CASCADE,
+    task_id           TEXT,
+    author_path       TEXT NOT NULL,
+    author_session_id TEXT,
+    body              TEXT NOT NULL,
+    reply_to          TEXT,
+    created_at_ms     INTEGER NOT NULL
+);
+CREATE INDEX idx_board_posts_root ON board_posts(root_session_id, created_at_ms);
+
+CREATE TABLE board_subscriptions (
+    root_session_id TEXT NOT NULL,
+    target_kind     TEXT NOT NULL,
+    target_id       TEXT NOT NULL,
+    subscriber_path TEXT NOT NULL,
+    subscribed      INTEGER NOT NULL,
+    updated_at_ms   INTEGER NOT NULL,
+    PRIMARY KEY (root_session_id, target_kind, target_id, subscriber_path)
+);
+"#;
+
+/// 初始化 schema:空库建到最新版;已有库校验版本并按步进升级,比代码新直接报错。
 pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
     let tx = conn.transaction()?;
     tx.execute(
@@ -145,18 +196,21 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
     let existing: Option<u32> = tx
         .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
         .optional()?;
-    match existing {
+    let found = match existing {
         Some(found) if found > SCHEMA_VERSION => {
             return Err(DbError::SchemaTooNew { found, supported: SCHEMA_VERSION });
         }
-        Some(_) => {
-            // 当前只有 v1;未来升级在这里按 found 版本追加明确步骤。
-        }
+        Some(found) => found,
         None => {
             tx.execute_batch(DDL_V1)?;
-            tx.execute("INSERT INTO schema_version (version) VALUES (?1)", [SCHEMA_VERSION])?;
+            0
         }
+    };
+    if found < 2 {
+        // v2:team/board 草稿表换成正式业务表(旧数据不迁移,旧库直接重建这些表)。
+        tx.execute_batch(DDL_V2)?;
     }
+    tx.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)", [SCHEMA_VERSION])?;
     tx.commit()?;
     Ok(())
 }

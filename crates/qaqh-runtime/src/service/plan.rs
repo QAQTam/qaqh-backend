@@ -39,10 +39,10 @@ pub(crate) struct PlanActionOutput {
 }
 
 pub(crate) fn read_plan(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
 ) -> Result<PlanListOutput, String> {
-    let content = match std::fs::read_to_string(qaqh_dir(sessions, session_id).join("PLAN.md")) {
+    let content = match std::fs::read_to_string(qaqh_dir(owners, session_id).join("PLAN.md")) {
         Ok(value) => value,
         Err(_) => return Ok(PlanListOutput(Vec::new())),
     };
@@ -50,13 +50,13 @@ pub(crate) fn read_plan(
 }
 
 pub(crate) fn plan_action(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
     item_id: &str,
     action: &str,
     comment: &str,
 ) -> Result<PlanActionOutput, String> {
-    let path = qaqh_dir(sessions, session_id).join("PLAN.md");
+    let path = qaqh_dir(owners, session_id).join("PLAN.md");
     let content = std::fs::read_to_string(&path).map_err(err)?;
     let mut found = false;
     let output = content

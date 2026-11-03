@@ -34,65 +34,6 @@ impl AgentRegistry {
         self.subagent_outcomes.contains_key(child_session_id)
     }
 
-    /// Commit a metadata patch to the session's business row.
-    ///
-    /// SQLite sessions 列承载 cwd/model/effort/profile/mode/tool_mode/
-    /// archived/ephemeral;skills/custom_tools 等暂无业务列的字段继续由
-    /// meta 存储承载(随 P3-D 旧 meta 存储迁移一并收敛)。
-    pub(crate) fn write_session_metadata(
-        &self,
-        session_id: &str,
-        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
-    ) -> Result<(), String> {
-        let columns = qaqh_session::db::store::SessionColumnPatch {
-            title: None,
-            cwd: patch.cwd.clone(),
-            model: patch.model.clone(),
-            effort: patch.effort.clone(),
-            profile: patch.profile.clone(),
-            mode: patch.mode.map(|mode| mode.to_string()),
-            tool_mode: patch.tool_mode.clone(),
-            archived: patch.archived,
-            ephemeral: patch.ephemeral,
-        };
-        let owned = session_id.to_string();
-        self.owners
-            .db()
-            .write_blocking(move |conn| {
-                qaqh_session::db::store::update_session_columns(conn, &owned, &columns)
-            })
-            .map_err(|error| format!("business session update for {session_id}: {error}"))?;
-        qaqh_session::meta::patch(crate::session_meta::dir(session_id), patch)
-    }
-
-    /// Commit a title change to the session's business row (title is a column).
-    pub(crate) fn write_session_title(
-        &self,
-        session_id: &str,
-        title: &str,
-        source: qaqh_session::session_fact_v2::TitleSource,
-    ) -> Result<(), String> {
-        let owned = session_id.to_string();
-        let title = title.to_string();
-        self.owners
-            .db()
-            .write_blocking({
-                let title = title.clone();
-                move |conn| {
-                    qaqh_session::db::store::update_session_columns(
-                        conn,
-                        &owned,
-                        &qaqh_session::db::store::SessionColumnPatch {
-                            title: Some(title),
-                            ..Default::default()
-                        },
-                    )
-                }
-            })
-            .map_err(|error| format!("business title update for {session_id}: {error}"))?;
-        qaqh_session::meta::set_title(crate::session_meta::dir(session_id), &title, source)
-    }
-
     pub(crate) fn prepare_collector_arm(
         &mut self,
         child_id: &str,
@@ -349,7 +290,7 @@ impl AgentRegistry {
         if self.shutting_down {
             return;
         }
-        let dead: Vec<(String, AgentKind, Option<crate::agent::types::CancelToken>)> = self
+        let dead: Vec<(String, AgentKind)> = self
             .instances
             .iter()
             .filter(|(_, instance)| instance.is_dead())
@@ -361,16 +302,9 @@ impl AgentRegistry {
                         .is_some_and(AgentInstance::is_dead)
                 })
             })
-            .map(|(session_id, instance)| {
-                let parent_cancel = self
-                    .supervisor
-                    .parent_of(session_id)
-                    .as_ref()
-                    .and_then(|parent| self.cancel_for_session(parent));
-                (session_id.clone(), instance.kind_name(), parent_cancel)
-            })
+            .map(|(session_id, instance)| (session_id.clone(), instance.kind_name()))
             .collect();
-        for (session_id, kind, parent_cancel) in dead {
+        for (session_id, kind) in dead {
             // 退避：同一 seed 最近 1 秒内刚 spawn 过（例如刚拉起又立刻崩溃）
             // 则跳过本轮，避免无意义的重启风暴。
             if self
@@ -396,9 +330,7 @@ impl AgentRegistry {
             }
             let spawned = match kind {
                 AgentKind::Session => self.spawn(&session_id, None),
-                AgentKind::Subagent(spec) => {
-                    self.spawn_subagent_inprocess(&session_id, spec, parent_cancel)
-                }
+                AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(&session_id, spec),
             };
             if let Err(error) = spawned {
                 log::error!("[AGENT:{session_id}] respawn failed: {error}");

@@ -1,12 +1,7 @@
-pub mod agent;
-pub mod assembly;
-pub mod host;
-pub mod prompt;
-pub mod types;
+//! 会话装配与系统提示词:SessionLoop 的两个支撑面。
+//!
+//! 旧 SessionAgent/AgentHost/agentloop 执行框架已删除;回合执行职责在
+//! [`crate::session_loop::SessionLoop`]。
 
-pub use agent::{ActivityTap, SessionAgent};
-pub use host::{AgentHandle, AgentHost};
-pub use types::{
-    ActivePhase, AgentCommand, AgentCompletion, AgentControl, AgentOutcome, QueuedUserInput,
-    SessionAgentError, SessionAgentMemory, SessionAgentMemorySnapshot, SessionPhase,
-};
+pub mod assembly;
+pub mod prompt;

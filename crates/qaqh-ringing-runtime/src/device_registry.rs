@@ -61,15 +61,15 @@ fn now_ms() -> u64 {
 }
 
 fn new_device_id() -> String {
-    qaqh_session::canonical::generate_ulid()
+    qaqh_ringing_contract::ulid::generate_ulid()
 }
 
 /// 设备 token 明文：两个 ULID 拼接（UUIDv7 载荷），约 148 bit 随机熵。
 fn new_device_token() -> String {
     format!(
         "{}{}",
-        qaqh_session::canonical::generate_ulid(),
-        qaqh_session::canonical::generate_ulid()
+        qaqh_ringing_contract::ulid::generate_ulid(),
+        qaqh_ringing_contract::ulid::generate_ulid()
     )
 }
 

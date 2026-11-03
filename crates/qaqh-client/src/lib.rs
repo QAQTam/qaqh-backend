@@ -88,5 +88,5 @@ pub use v2::{
 };
 /// The v2 contract exposes the session fact model under its real module
 /// names; there is no `ClientV2*` renaming layer.
-pub use v2::{fact, ringing, ringing_v2};
+pub use v2::{contract_events, contract_state, fact, ringing, ringing_v2};
 pub use v2_stream::{V2Stream, V2StreamHandlers, V2StreamStatus};
