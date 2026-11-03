@@ -3,12 +3,11 @@
 use std::path::Path;
 
 use qaqh_ringing::{
-    CanonicalCursor, CursorToken, RingingCommandAckStatus, RingingCommandState,
-    RingingV2AskOutcome, RingingV2CommandAck, RingingV2CommandResult, RingingV2CommandStatus,
-    RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
-    RingingV2PairRequest, RingingV2PairResponse, RingingV2PairTokenRequest,
-    RingingV2PairTokenResponse, RingingV2ResetReason, RingingV2ResetRequired,
+    RingingCommandAckStatus, RingingCommandState, RingingV2AskOutcome, RingingV2CommandAck,
+    RingingV2CommandResult, RingingV2CommandStatus, RingingV2DeviceWire, RingingV2DevicesResponse,
+    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2ExistingResult,
+    RingingV2LeaseRenewResponse, RingingV2PairRequest, RingingV2PairResponse,
+    RingingV2PairTokenRequest, RingingV2PairTokenResponse,
 };
 
 pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -26,20 +25,6 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             renew_interval_ms: 10_000,
         },
     )?;
-    let cursor = CursorToken::encode_snapshot(&CanonicalCursor::snapshot("fixture-log", 3))?;
-    let reset = RingingV2ResetRequired {
-        schema: qaqh_ringing::RINGING_SCHEMA.into(),
-        version: qaqh_ringing::RINGING_V2_VERSION,
-        server_epoch: "fixture-epoch".into(),
-        session_id: "session-fixture".into(),
-        log_id: Some("fixture-log".into()),
-        snapshot_cursor: Some(cursor),
-        reason: RingingV2ResetReason::ReplayOverflow,
-    };
-    reset
-        .validate()
-        .map_err(|code| format!("invalid reset fixture: {code}"))?;
-    super::write_fixture(stage, "reset-required.json", &reset)?;
     super::write_fixture(
         stage,
         "driver-claim-busy.json",

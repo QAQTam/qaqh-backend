@@ -17,22 +17,19 @@ use qaqh_ringing_contract::state::{
     ToolCallView, TurnOutcome, TurnView,
 };
 
-use super::store::{self, InteractionRow, ToolCallRow};
 use super::DbError;
-
+use super::store::{self, InteractionRow, ToolCallRow};
 
 fn parse_typed<T: DeserializeOwned>(who: &str, label: &str, text: &str) -> Result<T, DbError> {
-    serde_json::from_str(text)
-        .map_err(|error| DbError::Corrupt(format!("{who} {label}: {error}")))
+    serde_json::from_str(text).map_err(|error| DbError::Corrupt(format!("{who} {label}: {error}")))
 }
 
 /// 从业务表组装 SessionState。
-pub fn load_session_state(
-    conn: &Connection,
-    session_id: &str,
-) -> Result<SessionState, DbError> {
+pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<SessionState, DbError> {
     if !store::session_exists(conn, session_id)? {
-        return Err(DbError::SessionNotFound { session_id: session_id.to_string() });
+        return Err(DbError::SessionNotFound {
+            session_id: session_id.to_string(),
+        });
     }
 
     let turns = load_turns(conn, session_id)?;
@@ -48,9 +45,8 @@ pub fn load_session_state(
 
     let pending_tools = store::unfinished_tool_calls(conn, session_id)?;
     let has_active_turn = {
-        let mut stmt = conn.prepare(
-            "SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND status = 'active'",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND status = 'active'")?;
         let count: i64 = stmt.query_row([session_id], |row| row.get(0))?;
         count > 0
     };
@@ -109,9 +105,10 @@ fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbEr
             _ => None,
         };
         let mode = match mode {
-            Some(text) => Some(serde_json::from_str::<TurnMode>(&text).map_err(|error| {
-                DbError::Corrupt(format!("turn {turn_id} mode: {error}"))
-            })?),
+            Some(text) => Some(
+                serde_json::from_str::<TurnMode>(&text)
+                    .map_err(|error| DbError::Corrupt(format!("turn {turn_id} mode: {error}")))?,
+            ),
             None => None,
         };
         turns.push(TurnView {
@@ -146,7 +143,11 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
         "finished" => ToolCallStatus::Finished,
         "failed" => ToolCallStatus::Failed,
         "cancelled" => ToolCallStatus::Cancelled,
-        other => return Err(DbError::Corrupt(format!("unknown tool call status {other:?}"))),
+        other => {
+            return Err(DbError::Corrupt(format!(
+                "unknown tool call status {other:?}"
+            )));
+        }
     };
     let who = format!("tool call {}", call.call_id);
     let args = match call.args_json {
@@ -163,7 +164,9 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
     };
     let code_delta = match call.code_delta_json {
         Some(text) => Some(parse_typed::<qaqh_ringing_contract::state::CodeDelta>(
-            &who, "code_delta", &text,
+            &who,
+            "code_delta",
+            &text,
         )?),
         None => None,
     };
@@ -195,16 +198,17 @@ fn interaction_view(row: InteractionRow) -> Result<InteractionView, DbError> {
     // payload_json 保存写侧的完整 InteractionView(request/choices 随行);
     // kind 列是查询冗余,以 payload 为准反序列化。
     let mut view = parse_typed::<InteractionView>(&who, "payload", &row.payload_json)?;
-    let resolution = match row.decision_json {
-        Some(text) => parse_typed::<Option<InteractionDecision>>(&who, "decision", &text)?.map(
-            |decision| InteractionResolution {
-                decision,
-                detail: None,
-                resolved_at_ms: row.resolved_at_ms.unwrap_or(row.created_at_ms),
-            },
-        ),
-        None => None,
-    };
+    let resolution =
+        match row.decision_json {
+            Some(text) => parse_typed::<Option<InteractionDecision>>(&who, "decision", &text)?.map(
+                |decision| InteractionResolution {
+                    decision,
+                    detail: None,
+                    resolved_at_ms: row.resolved_at_ms.unwrap_or(row.created_at_ms),
+                },
+            ),
+            None => None,
+        };
     view.resolution = resolution;
     Ok(view)
 }

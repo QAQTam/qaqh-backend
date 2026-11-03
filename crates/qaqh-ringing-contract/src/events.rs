@@ -8,12 +8,10 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use crate::fact::{
-    ActivityState, BlockId, ContentValue, InputId, InteractionDecision, InteractionId,
-    ToolCallId, ToolError, ToolMetrics, TurnId, TurnMode,
+    ActivityState, BlockId, ContentValue, InputId, InteractionDecision, InteractionId, ToolCallId,
+    ToolError, ToolMetrics, TurnId, TurnMode,
 };
-use crate::state::{
-    InteractionView, SubagentView, TimelineEntry, ToolCallStatus, TurnOutcome,
-};
+use crate::state::{InteractionView, SubagentView, TimelineEntry, ToolCallStatus, TurnOutcome};
 
 /// 工具实时输出流标识;无输出的工具不产生 output.delta 事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,8 +110,11 @@ impl SessionEvent {
     /// 事件影响的回合(用于前端局部刷新;无关联回合为 None)。
     pub fn turn_id(&self) -> Option<&TurnId> {
         match self {
-            SessionEvent::ActivityChanged { current_turn_id, .. } => current_turn_id.as_ref(),
-            SessionEvent::TurnStarted { turn_id, .. } | SessionEvent::TurnEnded { turn_id, .. }
+            SessionEvent::ActivityChanged {
+                current_turn_id, ..
+            } => current_turn_id.as_ref(),
+            SessionEvent::TurnStarted { turn_id, .. }
+            | SessionEvent::TurnEnded { turn_id, .. }
             | SessionEvent::MessageDelta { turn_id, .. } => Some(turn_id),
             SessionEvent::ToolArgumentsDelta { turn_id, .. } => Some(turn_id),
             _ => None,

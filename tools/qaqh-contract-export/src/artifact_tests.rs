@@ -75,7 +75,7 @@ fn artifact_file_walk_rejects_symlinks_instead_of_following_them() {
 }
 
 #[test]
-fn wire_decoders_reject_invalid_discriminants_and_unsafe_cursors() {
+fn wire_decoders_reject_invalid_discriminants() {
     assert!(
         serde_json::from_value::<RingingV2CommandStatus>(serde_json::json!({
             "command_id":"synthetic", "state":"finished", "payload_fingerprint":"synthetic"
@@ -87,11 +87,6 @@ fn wire_decoders_reject_invalid_discriminants_and_unsafe_cursors() {
             "status":"accepted"
         }))
         .is_err()
-    );
-    assert!(
-        qaqh_ringing::CanonicalCursor::new("synthetic", qaqh_ringing::MAX_SAFE_INTEGER + 1, 0)
-            .validate_reliable()
-            .is_err()
     );
     let mut open = RingingV2OpenRequest::new("synthetic");
     open.version = 99;

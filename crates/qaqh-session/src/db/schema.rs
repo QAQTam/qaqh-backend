@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::DbError;
 
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -100,6 +100,18 @@ CREATE TABLE blobs (
     size          INTEGER NOT NULL,
     created_at_ms INTEGER NOT NULL
 );
+
+CREATE TABLE workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    path         TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    order_index  INTEGER NOT NULL UNIQUE
+);
+CREATE TABLE workspace_sessions (
+    session_id   TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_workspace_sessions_workspace ON workspace_sessions(workspace_id);
 "#;
 
 const DDL_TEAM: &str = r#"
@@ -199,10 +211,16 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
         .optional()?;
     match existing {
         Some(found) if found > SCHEMA_VERSION => {
-            return Err(DbError::SchemaTooNew { found, supported: SCHEMA_VERSION });
+            return Err(DbError::SchemaTooNew {
+                found,
+                supported: SCHEMA_VERSION,
+            });
         }
         Some(found) if found < SCHEMA_VERSION => {
-            return Err(DbError::SchemaTooOld { found, supported: SCHEMA_VERSION });
+            return Err(DbError::SchemaTooOld {
+                found,
+                supported: SCHEMA_VERSION,
+            });
         }
         Some(_) => {}
         None => {
@@ -210,7 +228,10 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
             tx.execute_batch(DDL_TEAM)?;
         }
     }
-    tx.execute("INSERT OR REPLACE INTO schema_version (version) VALUES (?1)", [SCHEMA_VERSION])?;
+    tx.execute(
+        "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
+        [SCHEMA_VERSION],
+    )?;
     tx.commit()?;
     Ok(())
 }

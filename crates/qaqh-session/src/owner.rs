@@ -9,9 +9,11 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
-use qaqh_ringing_contract::events::{InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame};
+use qaqh_ringing_contract::events::{
+    InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
+};
 use qaqh_ringing_contract::fact::{
     BlockId, ContentValue, InteractionDecision, InteractionId, ToolCallId, ToolError, ToolMetrics,
     TurnId, TurnMode,
@@ -21,11 +23,11 @@ use qaqh_ringing_contract::state::{
     TurnOutcome,
 };
 use qaqh_tool_core::{
-    bounded_exec_progress_channel, ExecOutputStream, ExecProgressEvent, ExecProgressSender,
-    ExecProgressTotals,
+    ExecOutputStream, ExecProgressEvent, ExecProgressSender, ExecProgressTotals,
+    bounded_exec_progress_channel,
 };
 
-use crate::db::{store, view, Db, DbError};
+use crate::db::{Db, DbError, store, view};
 
 /// 每会话 SSE 事件缓冲;落后客户端经快照 + `seq` 水位重新同步(报告一 §194)。
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -160,7 +162,9 @@ impl SessionOwner {
             .map_err(|error| DbError::Corrupt(format!("turn {turn_id} outcome: {error}")))?;
         let turn_id_owned = turn_id.to_string();
         self.db
-            .write(move |conn| store::finish_turn(conn, &turn_id_owned, status, Some(&outcome_json)))
+            .write(move |conn| {
+                store::finish_turn(conn, &turn_id_owned, status, Some(&outcome_json))
+            })
             .await?;
         let turn = TurnId::new(turn_id);
         emit(
@@ -185,7 +189,9 @@ impl SessionOwner {
     /// 追加 timeline 块:业务表 + TimelineAppended 事件。
     pub async fn append_block(&self, entry: TimelineEntry) -> Result<(), DbError> {
         let block = timeline_block(&self.session_id, &entry)?;
-        self.db.write(move |conn| store::append_block(conn, &block)).await?;
+        self.db
+            .write(move |conn| store::append_block(conn, &block))
+            .await?;
         emit(
             &self.events,
             &self.next_seq,
@@ -199,13 +205,20 @@ impl SessionOwner {
         let interaction_id = interaction.interaction_id.as_ref().to_string();
         let payload_json = serde_json::to_string(&interaction)
             .map_err(|error| DbError::Corrupt(format!("interaction {interaction_id}: {error}")))?;
-        let kind = serde_json::to_string(&interaction.kind)
-            .map_err(|error| DbError::Corrupt(format!("interaction {interaction_id} kind: {error}")))?;
+        let kind = serde_json::to_string(&interaction.kind).map_err(|error| {
+            DbError::Corrupt(format!("interaction {interaction_id} kind: {error}"))
+        })?;
         let row = store::NewInteraction {
             interaction_id: interaction_id.clone(),
             session_id: self.session_id.clone(),
-            turn_id: interaction.turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
-            call_id: interaction.call_id.as_ref().map(|call| call.as_ref().to_string()),
+            turn_id: interaction
+                .turn_id
+                .as_ref()
+                .map(|turn| turn.as_ref().to_string()),
+            call_id: interaction
+                .call_id
+                .as_ref()
+                .map(|call| call.as_ref().to_string()),
             kind,
             payload_json,
         };
@@ -343,7 +356,10 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
         Option<String>,
     ) = match entry {
         TimelineEntry::Input {
-            block_id, turn_id, content, ..
+            block_id,
+            turn_id,
+            content,
+            ..
         } => (
             block_id.as_ref().to_string(),
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
@@ -352,7 +368,10 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             inline_text(content),
         ),
         TimelineEntry::AssistantBlock {
-            block_id, turn_id, content, ..
+            block_id,
+            turn_id,
+            content,
+            ..
         } => (
             block_id.as_ref().to_string(),
             Some(turn_id.as_ref().to_string()),
@@ -642,8 +661,9 @@ impl OwnerPump {
                     args_json,
                     status: "running",
                 };
-                if let Err(error) =
-                    self.db.write_blocking(move |conn| store::upsert_tool_call(conn, &upsert))
+                if let Err(error) = self
+                    .db
+                    .write_blocking(move |conn| store::upsert_tool_call(conn, &upsert))
                 {
                     log::error!("[owner] tool {call_id} start not recorded: {error}");
                     return;
@@ -694,10 +714,14 @@ impl OwnerPump {
                         .as_ref()
                         .and_then(|d| serialize_typed(&who, "code_delta", d)),
                 };
-                if let Err(error) =
-                    self.db.write_blocking(move |conn| store::finish_tool_call(conn, &finish))
+                if let Err(error) = self
+                    .db
+                    .write_blocking(move |conn| store::finish_tool_call(conn, &finish))
                 {
-                    log::error!("[owner] tool {} finish not recorded: {error}", settlement.call_id);
+                    log::error!(
+                        "[owner] tool {} finish not recorded: {error}",
+                        settlement.call_id
+                    );
                     return;
                 }
                 self.emit(SessionEvent::ToolFinished {
@@ -737,7 +761,10 @@ impl OwnerDirectory {
     }
 
     pub fn get_or_create(&self, session_id: &str) -> Arc<SessionOwner> {
-        let mut owners = self.owners.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         Arc::clone(
             owners
                 .entry(session_id.to_string())

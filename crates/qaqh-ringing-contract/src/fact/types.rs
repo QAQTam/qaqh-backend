@@ -4,8 +4,8 @@
 //! shape and the pure validation surface. Session-store and runtime wiring
 //! live outside this module.
 
-pub use qaqh_types::UsageInfo;
 use qaqh_types::SettingValue;
+pub use qaqh_types::UsageInfo;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;

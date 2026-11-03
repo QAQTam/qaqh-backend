@@ -4,9 +4,7 @@
 //! 双端点已合并于此，其 slash/dot 双别名容忍一并拆除：单一规范形态
 //! `module.method`，一个方法一个条目，`Read` = 无副作用查询，`Write` = 变更操作。
 //!
-//! 会话生命周期（`session.create`/`session.resume`/`skills.activate`/`todo.cancel`/
-//! `plan.action` 等命令语义方法）刻意不在表中——会话命令只走三频道
-//! command envelope（开发标准 N5），服务面仅承载非会话 RPC。
+//! 会话写操作走唯一 RingingCommand 目录；服务面只保留查询与账户 RPC。
 
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -172,7 +170,7 @@ pub struct WorkspaceGetParams {
 }
 
 /// `workspace.list` 无参数；params 恒为 `{}`。结果条目为
-/// `qaqh_session::WorkspaceEntry`（meta + `missing_dir`）。
+/// `qaqh_ringing_contract::WorkspaceEntry`（meta + `missing_dir`）。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct WorkspaceListParams {}
@@ -233,7 +231,7 @@ validators! {
         validate_session_activity_result => Vec<qaqh_domain::SessionActivity>,
         validate_session_get_activity_result => Vec<SessionToolActivity>,
         validate_skills_catalog_result => SkillsCatalogResult,
-        validate_workspace_list_result => Vec<qaqh_session::WorkspaceEntry>,
+        validate_workspace_list_result => Vec<qaqh_ringing_contract::WorkspaceEntry>,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -354,7 +352,7 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
     TypedMethodInfo {
         method: "workspace.list",
         params_type: "WorkspaceListParams",
-        // 条目为 WorkspaceStore::list_entries 的一手视图（meta + missing_dir）。
+        // 条目来自 SQLite workspace 行与实际目录状态（meta + missing_dir）。
         result_type: "WorkspaceEntry[]",
         info: MethodInfo {
             kind: MethodKind::Read,
@@ -920,7 +918,7 @@ mod tests {
     fn service() -> &'static QaqhService {
         SERVICE.get_or_init(|| {
             // 隔离 data root：lib 单测不读/不写真实用户根（sessions/、
-            // workspaces.json），与其他测试二进制同一纪律。
+            // workspace SQLite rows），与其他测试二进制同一纪律。
             static ISOLATED_DATA_ROOT: std::sync::OnceLock<tempfile::TempDir> =
                 std::sync::OnceLock::new();
             let tmp = ISOLATED_DATA_ROOT.get_or_init(|| {
@@ -988,7 +986,7 @@ mod tests {
 
     /// 产出边界：`workspace.list` 的条目必须能被 `WorkspaceEntry` 吃下且
     /// 往返逐键相同；目录存活标记真实参与计算（存在 → `missing_dir=false`）。
-    /// WorkspaceStore remains the authoritative workspace directory.
+    /// SQLite remains the authoritative workspace directory.
     #[test]
     fn workspace_list_entries_are_typed_at_the_boundary() {
         let dir = tempfile::tempdir().expect("workspace dir");
@@ -1001,7 +999,7 @@ mod tests {
             )
             .expect("create workspace");
         let wire = dispatch(service(), "workspace.list", &serde_json::json!({})).expect("list");
-        let entries: Vec<qaqh_session::WorkspaceEntry> =
+        let entries: Vec<qaqh_ringing_contract::WorkspaceEntry> =
             serde_json::from_value(wire.clone()).expect("条目必须能被权威类型解析");
         assert_eq!(entries.len(), wire.as_array().unwrap().len());
         assert_eq!(

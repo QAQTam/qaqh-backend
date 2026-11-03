@@ -12,7 +12,7 @@ use qaqh_ringing::{
     RingingV2PendingInteractionView, RingingV2PendingPermissionView,
 };
 use qaqh_ringing_contract::fact::{
-    ActivityState, AgentPath, ContentValue, InteractionKind, InterAgentDelivery, MessageId,
+    ActivityState, AgentPath, ContentValue, InterAgentDelivery, InteractionKind, MessageId,
     SessionId,
 };
 use qaqh_ringing_contract::state::{DriverState, InteractionView};
@@ -20,7 +20,7 @@ use qaqh_ringing_contract::team::{
     TaskBoardSnapshot, TaskView, TeamAgentResidency, TeamAgentSnapshot, TeamAgentStatus,
     TeamBoardSnapshot, TeamInboxSummary, TeamSnapshot,
 };
-use qaqh_ringing_contract::{TEAM_SCHEMA, SessionBootstrap, SessionEvent, SessionEventFrame};
+use qaqh_ringing_contract::{SessionBootstrap, SessionEvent, SessionEventFrame, TEAM_SCHEMA};
 
 fn session_id() -> SessionId {
     SessionId::new("0199a0f0-0000-7000-8000-000000000001")
@@ -146,7 +146,7 @@ fn write_approvals(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }),
         pending_interaction: Some(RingingV2PendingInteractionView {
             id: "int_fixture".into(),
-            kind: qaqh_ringing::RingingV2InteractionKind::PlanReview,
+            kind: InteractionKind::Plan,
             details: Some(serde_json::json!({"plan": "synthetic plan"})),
         }),
     };

@@ -1,12 +1,7 @@
-//! 三频道快照 `state` 的**类型化视图**（前端契约 G1）。
-//! `state` 是中立 `serde_json::Value`，其形状由本模块的 Rust 类型固定，三端
-//! （winui / web / TUI）共用，web 端可经 `ts` feature 直接生成 TS 类型。v2
-//! bootstrap 快照的 `base` 字段直接复用这些类型（见 `qaqh-ringing::v2` 的
-//! `RingingV2Bootstrap`）。
-//! # 兼容策略
-//! 全部字段带 `#[serde(default)]`：缺字段 = 保持缺省，**解析失败一律降级而不是崩**
-//! ——这是各端一致的行为契约。代价是「形状漂移会静默变成缺省」，故**漂移由测试兜**
-//! （`qaqh-runtime` 的产出方往返测试直接拿真实快照断言字段非缺省），不靠运行期报错。
+//! Domain-local projections retained for internal orchestration.
+//!
+//! Public session bootstrap and events are defined by
+//! `qaqh-ringing-contract::SessionState` and `SessionEventFrame`.
 
 use serde::{Deserialize, Serialize};
 
