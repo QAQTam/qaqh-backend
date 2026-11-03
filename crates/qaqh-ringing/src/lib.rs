@@ -26,9 +26,7 @@ pub mod protocol;
 pub mod v2;
 pub mod worker;
 
-pub use command::{
-    RingingCommand, RingingControlCommand, RingingConversationCommand, RingingToolCommand,
-};
+pub use command::{ConversationSendMessage, RingingCommand};
 pub use content::RingingContentRef;
 pub use envelope::{
     RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,

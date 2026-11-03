@@ -35,8 +35,7 @@ use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use qaqh_domain::ConversationCommand;
-use qaqh_ringing::RingingCommand;
+use qaqh_ringing::{ConversationSendMessage, RingingCommand};
 use qaqh_tool_core::tool_api::{
     ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
     ToolExecutionError, ToolMeta, ToolProjection, TypedTool,
@@ -845,7 +844,7 @@ impl SubagentTransport for HostTransport {
         // 进程内宿主直接执行 close（registry + 临时会话清理），语义一致。
         if matches!(
             &command,
-            RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose { .. })
+            RingingCommand::SessionClose {}
         ) {
             self.host.close(session_id)?;
             return Ok(true);
@@ -1172,12 +1171,12 @@ pub fn start_subagent_collector(
         parent_agent_path: envelope.author.clone(),
         child_agent_path: envelope.recipient.clone(),
     });
-    let send = RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
+    let send = RingingCommand::ConversationSendMessage(ConversationSendMessage {
         text: task_text.to_string(),
         images: vec![],
         attachments: None,
         message_id: Some(message_id),
-        input_purpose: qaqh_domain::ConversationInputPurpose::TriggerTurn,
+        input_purpose: qaqh_ringing_contract::fact::InputPurpose::TriggerTurn,
         as_system: false,
         inter_agent,
         subagent_terminal: None,
@@ -1306,9 +1305,7 @@ fn collect_subagent_result(
             log::warn!(
                 "[SUBAGENT] '{name}' timeout after {timeout_secs}s (first_event={first_event_logged}) — cancelling sub turn"
             );
-            let cancel = RingingCommand::Conversation(
-                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
-            );
+            let cancel = RingingCommand::ConversationCancel { turn_id: None };
             if let Err(e) = transport.send_command(session_id, cancel) {
                 log::warn!("[SUBAGENT] '{name}' timeout cancel send failed: {e}");
             }
@@ -1461,8 +1458,7 @@ fn collect_subagent_result(
                     created_at_ms: unix_ms(),
                 });
         let v2_delivery = completion_inter_agent.is_some();
-        let inject = RingingCommand::Conversation(
-            qaqh_domain::ConversationCommand::ConversationSendMessage {
+        let inject = RingingCommand::ConversationSendMessage(ConversationSendMessage {
                 text: if did_cancel {
                     String::new()
                 } else {
@@ -1474,9 +1470,9 @@ fn collect_subagent_result(
                 attachments: None,
                 message_id: Some(completion_message_id),
                 input_purpose: if did_cancel || v2_delivery {
-                    qaqh_domain::ConversationInputPurpose::QueueOnly
+                    qaqh_ringing_contract::fact::InputPurpose::QueueOnly
                 } else {
-                    qaqh_domain::ConversationInputPurpose::TriggerTurn
+                    qaqh_ringing_contract::fact::InputPurpose::TriggerTurn
                 },
                 // V2 results are attributed inter-agent communications and are
                 // queue-only. The legacy fallback keeps its system injection
@@ -1484,8 +1480,7 @@ fn collect_subagent_result(
                 as_system: !v2_delivery,
                 inter_agent: completion_inter_agent,
                 subagent_terminal: Some(terminal_notification),
-            },
-        );
+            });
         let mut accepted = false;
         let mut last_rejected: Option<String> = None;
         const INJECT_ATTEMPTS: usize = 5;
@@ -1519,17 +1514,11 @@ fn collect_subagent_result(
             // 父会话。message_id 不变（幂等去重）；非取消场景在正文末尾追加
             // 结果指针（子会话 id），状态面此时已 record 可查。
             let mut fallback = inject.clone();
-            if let RingingCommand::Conversation(
-                qaqh_domain::ConversationCommand::ConversationSendMessage {
-                    input_purpose,
-                    text,
-                    ..
-                },
-            ) = &mut fallback
+            if let RingingCommand::ConversationSendMessage(message) = &mut fallback
             {
-                *input_purpose = qaqh_domain::ConversationInputPurpose::QueueOnly;
-                if !did_cancel && !text.is_empty() {
-                    text.push_str(&format!(
+                message.input_purpose = qaqh_ringing_contract::fact::InputPurpose::QueueOnly;
+                if !did_cancel && !message.text.is_empty() {
+                    message.text.push_str(&format!(
                         "\n[result-pointer] child session {child_session_id} · read it with list_agents"
                     ));
                 }
@@ -1571,9 +1560,7 @@ fn collect_subagent_result(
     // 失败仅告警：结果已注入主会话 + 终态已回写注册表，残留不丢数据。
     if let Err(e) = transport.send_command(
         session_id,
-        RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose {
-            session_id: session_id.to_string(),
-        }),
+        RingingCommand::SessionClose {},
     ) {
         log::warn!("[SUBAGENT] '{name}' close worker {session_id} failed: {e}");
     } else {
@@ -2075,13 +2062,11 @@ mod tests {
         assert!(
             matches!(
                 &injected[0].1,
-                RingingCommand::Conversation(
-                    qaqh_domain::ConversationCommand::ConversationSendMessage {
-                        text,
-                        subagent_terminal: Some(terminal),
-                        ..
-                    }
-                ) if text.is_empty()
+                RingingCommand::ConversationSendMessage(ConversationSendMessage {
+                            text,
+                            subagent_terminal: Some(terminal),
+                            ..
+                        }) if text.is_empty()
                     && terminal.terminal == qaqh_domain::SubagentTerminalKind::Cancelled
                     && terminal.child_session_id
                         == "0198f1a0-0000-7000-8000-000000000003"
@@ -2094,7 +2079,7 @@ mod tests {
                 session_id == child
                     && matches!(
                         command,
-                        RingingCommand::Control(qaqh_domain::ControlCommand::SessionClose { .. })
+                        RingingCommand::SessionClose {}
                     )
             }),
             "子 worker 的自动卸载（SessionClose）不受抑制影响，实测: {sent:?}"
@@ -2146,20 +2131,20 @@ mod tests {
             .iter()
             .find(|(session_id, _)| session_id == parent)
             .expect("completion must be delivered to the parent");
-        let RingingCommand::Conversation(ConversationCommand::ConversationSendMessage {
-            message_id,
-            input_purpose,
-            as_system,
-            inter_agent: Some(envelope),
-            subagent_terminal: Some(terminal),
-            ..
-        }) = &injected.1
+        let RingingCommand::ConversationSendMessage(ConversationSendMessage {
+                message_id,
+                input_purpose,
+                as_system,
+                inter_agent: Some(envelope),
+                subagent_terminal: Some(terminal),
+                ..
+            }) = &injected.1
         else {
             panic!("unexpected completion command: {:?}", injected.1);
         };
         assert_eq!(
             *input_purpose,
-            qaqh_domain::ConversationInputPurpose::QueueOnly
+            qaqh_ringing_contract::fact::InputPurpose::QueueOnly
         );
         assert!(
             !*as_system,
@@ -2207,13 +2192,11 @@ mod tests {
                 session_id == "reload-parent"
                     && matches!(
                         command,
-                        RingingCommand::Conversation(
-                            ConversationCommand::ConversationSendMessage {
-                                input_purpose: qaqh_domain::ConversationInputPurpose::QueueOnly,
-                                inter_agent: Some(envelope),
-                                ..
-                            }
-                        ) if envelope.author == "/root/reload_task"
+                        RingingCommand::ConversationSendMessage(ConversationSendMessage {
+                                    input_purpose: qaqh_ringing_contract::fact::InputPurpose::QueueOnly,
+                                    inter_agent: Some(envelope),
+                                    ..
+                                }) if envelope.author == "/root/reload_task"
                             && envelope.recipient == "/root"
                     )
             }) {

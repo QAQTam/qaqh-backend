@@ -3,10 +3,11 @@ name = "qaqh-domain"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Ringing 领域层：中立 DomainCommand/DomainEvent，不依赖 legacy wire 类型"
+description = "Ringing 共享领域类型：事件、状态、回合与业务值对象"
 
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `no-serde-warnings`：见 qaqh-types/Cargo.toml 的同名说明（`ConversationMode`
@@ -15,7 +16,7 @@ ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-ser
 
 
 [features]
-ts = ["dep:ts-rs", "qaqh-types/ts"]
+ts = ["dep:ts-rs", "qaqh-types/ts", "qaqh-ringing-contract/ts"]
 
 [lints]
 workspace = true

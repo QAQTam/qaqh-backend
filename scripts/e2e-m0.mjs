@@ -108,15 +108,15 @@ r = await req('/ringing/v2/sessions/seed-e2e/bootstrap', { token: devView.device
 check('7  view 读未 attach 会话 bootstrap → 403 forbidden_not_owner', r.status === 403 && r.json?.code === 'forbidden_not_owner', `status=${r.status} code=${r.json?.code}`);
 r = await req('/ringing/v2/sessions/seed-e2e/approvals', { token: devView.device_token, headers: hdr });
 check('7a view 读未 attach 会话 approvals → 403', r.status === 403, `status=${r.status}`);
-r = await req('/ringing/v2/commands/control', { method: 'POST', token: devView.device_token, headers: hdr, body: {} });
+r = await req('/ringing/v2/commands', { method: 'POST', token: devView.device_token, headers: hdr, body: {} });
 check('7b view 发命令(畸形体) → 400 invalid_body', r.status === 400, `status=${r.status}`);
 const viewEnv = (cmd) => ({
-  schema: 'qaqh.Ringing', version: 2, channel: 'control', command_id: `cmd-${Math.random().toString(36).slice(2)}`,
-  client_instance_id: 'inst', client_session_id: csView, session_id: 'seed-e2e', command: cmd,
+  schema: 'qaqh.Ringing', version: 2, contract_revision: 'ringing-commands-6', command_id: `cmd-${Math.random().toString(36).slice(2)}`,
+  client_instance_id: 'inst', client_session_id: csView, target: { kind: 'session', session_id: 'seed-e2e' }, preconditions: [], command: cmd,
 });
-r = await req('/ringing/v2/commands/control', { method: 'POST', token: devView.device_token, headers: hdr, body: viewEnv({ channel: 'control', type: 'session_close', session_id: 'seed-e2e' }) });
+r = await req('/ringing/v2/commands', { method: 'POST', token: devView.device_token, headers: hdr, body: viewEnv({ type: 'session.close' }) });
 check('7b2 view 发非 attach 命令 → 403 insufficient_scope', r.status === 403 && r.json?.code === 'insufficient_scope', `status=${r.status} code=${r.json?.code}`);
-r = await req('/ringing/v2/commands/control', { method: 'POST', token: devView.device_token, headers: hdr, body: viewEnv({ channel: 'control', type: 'session_attach', session_id: 'seed-e2e' }) });
+r = await req('/ringing/v2/commands', { method: 'POST', token: devView.device_token, headers: hdr, body: viewEnv({ type: 'session.attach' }) });
 check('7b3 view 可 SessionAttach（仅建立归属）→ 200', r.status === 200, `status=${r.status} code=${r.json?.code}`);
 r = await req('/ringing/v2/sessions/seed-e2e/bootstrap', { token: devView.device_token, headers: hdr });
 check('7b4 attach 后 view 读 bootstrap 不再 403', r.status !== 403 && r.status !== 401, `status=${r.status}`);
@@ -136,14 +136,15 @@ check('9a attach 前读 bootstrap → 403', r.status === 403, `status=${r.status
 const envelope = {
   schema: 'qaqh.Ringing',
   version: 2,
-  channel: 'control',
+  contract_revision: 'ringing-commands-6',
   command_id: 'cmd-attach-1',
   client_instance_id: 'dev-int',
   client_session_id: int.cs,
-  session_id: 'seed-e2e',
-  command: { channel: 'control', type: 'session_attach', session_id: 'seed-e2e' },
+  target: { kind: 'session', session_id: 'seed-e2e' },
+  preconditions: [],
+  command: { type: 'session.attach' },
 };
-r = await req('/ringing/v2/commands/control', { method: 'POST', token: int.device_token, headers: hdrInt, body: envelope });
+r = await req('/ringing/v2/commands', { method: 'POST', token: int.device_token, headers: hdrInt, body: envelope });
 check('9b SessionAttach 被接受(200/ack)', r.status === 200, `status=${r.status} body=${JSON.stringify(r.json)?.slice(0, 120)}`);
 r = await req('/ringing/v2/sessions/seed-e2e/bootstrap', { token: int.device_token, headers: hdrInt });
 check('9c attach 后读 bootstrap 不再 403（归属已建立）', r.status !== 403 && r.status !== 401, `status=${r.status} code=${r.json?.code}`);

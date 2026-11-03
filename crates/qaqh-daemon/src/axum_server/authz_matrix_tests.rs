@@ -90,41 +90,47 @@ async fn open_device(router: &Router, state: &AppState, scope: Scope) -> (String
 }
 
 /// 构造一个合法的 v2 命令信封（`command` 为内层命令 JSON）。
-fn envelope(client_session: &str, command: serde_json::Value) -> serde_json::Value {
+fn envelope(
+    client_session: &str,
+    session_id: &str,
+    command: serde_json::Value,
+) -> serde_json::Value {
     serde_json::json!({
         "schema": qaqh_ringing::RINGING_SCHEMA,
         "version": qaqh_ringing::RINGING_V2_VERSION,
-        "channel": "control",
+        "contract_revision": qaqh_ringing::COMMAND_CONTRACT_REVISION,
         "command_id": qaqh_ringing_contract::ulid::generate_ulid(),
         "client_instance_id": "inst",
         "client_session_id": client_session,
-        "session_id": SEED,
+        "target": { "kind": "session", "session_id": session_id },
+        "preconditions": [],
         "command": command,
     })
 }
 
-fn session_attach(seed: &str) -> serde_json::Value {
-    serde_json::json!({ "channel": "control", "type": "session_attach", "session_id": seed })
+fn session_attach() -> serde_json::Value {
+    serde_json::json!({ "type": "session.attach" })
 }
 
-fn session_close(seed: &str) -> serde_json::Value {
-    serde_json::json!({ "channel": "control", "type": "session_close", "session_id": seed })
+fn session_close() -> serde_json::Value {
+    serde_json::json!({ "type": "session.close" })
 }
 
 async fn post_command(
     router: &Router,
     token: &str,
     client_session: &str,
+    session_id: &str,
     command: serde_json::Value,
 ) -> (StatusCode, serde_json::Value) {
     let response = router
         .clone()
         .oneshot(request(
             "POST",
-            "/ringing/v2/commands/control",
+            "/ringing/v2/commands",
             Some(token),
             Some(client_session),
-            Some(envelope(client_session, command)),
+            Some(envelope(client_session, session_id, command)),
         ))
         .await
         .unwrap();
@@ -339,7 +345,7 @@ async fn view_token_cannot_issue_non_attach_command() {
     let (token, _, cs) = open_device(&app, &state, Scope::View).await;
 
     // 非 attach 命令 → interact 不足 → 403 insufficient_scope。
-    let (status, json) = post_command(&app, &token, &cs, session_close(SEED)).await;
+    let (status, json) = post_command(&app, &token, &cs, SEED, session_close()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(json["code"], "insufficient_scope");
 }
@@ -352,7 +358,7 @@ async fn view_token_can_attach_then_read() {
     let app = build_router(state.clone());
     let (token, _, cs) = open_device(&app, &state, Scope::View).await;
 
-    let (status, json) = post_command(&app, &token, &cs, session_attach(SEED)).await;
+    let (status, json) = post_command(&app, &token, &cs, SEED, session_attach()).await;
     assert_eq!(
         status,
         StatusCode::OK,
@@ -393,7 +399,7 @@ async fn interact_token_attach_establishes_ownership() {
         .unwrap();
     assert_eq!(before.status(), StatusCode::FORBIDDEN);
 
-    let (status, _) = post_command(&app, &token, &cs, session_attach(SEED)).await;
+    let (status, _) = post_command(&app, &token, &cs, SEED, session_attach()).await;
     assert_eq!(status, StatusCode::OK);
 
     let after = app
@@ -417,7 +423,7 @@ async fn command_rejects_foreign_target_session() {
     let (token, _, cs) = open_device(&app, &state, Scope::Interact).await;
 
     // 未 attach 的会话上执行非 attach 命令 → 归属检查 403。
-    let (status, json) = post_command(&app, &token, &cs, session_close(SEED)).await;
+    let (status, json) = post_command(&app, &token, &cs, SEED, session_close()).await;
     assert_eq!(status, StatusCode::FORBIDDEN);
     assert_eq!(json["code"], "forbidden_not_owner");
 }
@@ -430,7 +436,7 @@ async fn device_cannot_impersonate_other_lease() {
     let (t2, _d2, cs2) = open_device(&app, &state, Scope::View).await;
 
     // d2 用自己的 cs 先 attach SEED（建立归属）。
-    let (status, _) = post_command(&app, &t2, &cs2, session_attach(SEED)).await;
+    let (status, _) = post_command(&app, &t2, &cs2, SEED, session_attach()).await;
     assert_eq!(status, StatusCode::OK);
 
     // d2 拿 d1 的 cs → 身份↔lease 绑定失败 → 401（不能借 d1 的 lease）。

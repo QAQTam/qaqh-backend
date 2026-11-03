@@ -2,19 +2,18 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use qaqh_domain::ControlCommand;
 use qaqh_ringing::{
-    RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
+    CommandTarget, RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
     RingingCommandStatus, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
-    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope,
-    RingingV2CommandResult, RingingV2CommandStatus, RingingV2ContentUploadResponse,
-    RingingV2ContentValue, RingingV2Delivery, RingingV2DeviceApprovalKind,
-    RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2DriverState,
-    RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
-    RingingV2PendingInteraction, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
-    RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
+    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
+    RingingV2CommandStatus, RingingV2ContentUploadResponse, RingingV2ContentValue,
+    RingingV2Delivery, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
+    RingingV2DeviceChallenges, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,
+    RingingV2DriverState, RingingV2ExistingResult, RingingV2InteractionKind,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    RingingV2PendingApprovals, RingingV2PendingInteraction, RingingV2PendingInteractionView,
+    RingingV2PendingPermissionView, RingingV2ResetReason, RingingV2ResetRequired,
+    RingingV2StreamKey,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -209,13 +208,13 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "constants.ts",
         &format!(
-            "export const RINGING_SCHEMA = {:?} as const;\nexport const RINGING_V2_VERSION = {} as const;\nexport const RINGING_V2_BASE_PATH = {:?} as const;\nexport const CLIENT_SESSION_HEADER = {:?} as const;\nexport const MAX_SAFE_INTEGER = {} as const;\nexport const UNIFIED_CONTRACT_REVISION = {:?} as const;\n",
+            "export const RINGING_SCHEMA = {:?} as const;\nexport const RINGING_V2_VERSION = {} as const;\nexport const RINGING_V2_BASE_PATH = {:?} as const;\nexport const CLIENT_SESSION_HEADER = {:?} as const;\nexport const MAX_SAFE_INTEGER = {} as const;\nexport const COMMAND_CONTRACT_REVISION = {:?} as const;\n",
             qaqh_ringing::RINGING_SCHEMA,
             qaqh_ringing::RINGING_V2_VERSION,
             qaqh_ringing::RINGING_V2_BASE_PATH,
             qaqh_ringing::CLIENT_SESSION_HEADER,
             qaqh_ringing::MAX_SAFE_INTEGER,
-            qaqh_ringing::UNIFIED_CONTRACT_REVISION,
+            qaqh_ringing::COMMAND_CONTRACT_REVISION,
         ),
     )?;
     write_service_map(stage)?;
@@ -234,25 +233,21 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
         DaemonVersionParams, FsEntry, FsListParams, FsReadParams, FsReadResult,
-        SessionActivityParams, SessionCreateParams, SessionCreateResult, SessionGetActivityParams,
-        SessionListParams, SessionMetaParams, SessionRenameParams, SessionSetEffortParams,
-        SessionSetProfileParams, SessionSetToolModeParams, SessionToolActivity,
-        SkillCatalogDiagnostic, SkillCatalogEntry, SkillsCatalogParams, SkillsCatalogResult,
-        WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceDetachParams, WorkspaceGetParams,
-        WorkspaceListParams, WorkspaceMoveSessionParams, WorkspaceRenameParams, WorkspaceSetParams,
+        SessionActivityParams, SessionGetActivityParams, SessionListParams, SessionMetaParams,
+        SessionToolActivity, SkillCatalogDiagnostic, SkillCatalogEntry, SkillsCatalogParams,
+        SkillsCatalogResult, WorkspaceGetParams, WorkspaceListParams,
     };
     let open_request = RingingV2OpenRequest::new("fixture-client");
     write_fixture(stage, "open-request.json", &open_request)?;
 
     let command = RingingV2CommandEnvelope::new(
         "cmd-fixture-1",
-        "fixture-client",
-        RingingCommand::Control(ControlCommand::SessionAttach {
+        CommandTarget::Session {
             session_id: "session-fixture".to_owned(),
-        }),
+        },
+        RingingCommand::SessionAttach {},
     )
-    .with_client_session_id("client-session-fixture")
-    .with_session_id("session-fixture");
+    .with_client_identity("fixture-client", "client-session-fixture");
     command
         .validate()
         .map_err(|code| format!("invalid generated command fixture: {code}"))?;
@@ -312,16 +307,6 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "service-daemon-version-result.json",
         &env!("CARGO_PKG_VERSION").to_owned(),
-    )?;
-    let rename_params = SessionRenameParams {
-        session_id: "session-fixture".to_owned(),
-        title: "synthetic-title".to_owned(),
-    };
-    write_fixture(stage, "service-session-rename-params.json", &rename_params)?;
-    write_fixture(
-        stage,
-        "service-session-rename-result.json",
-        &Option::<()>::None,
     )?;
     write_fixture(
         stage,
@@ -447,59 +432,8 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixture(
         stage,
-        "service-session-set_profile-params.json",
-        &SessionSetProfileParams {
-            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
-            name: "synthetic-profile".to_owned(),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-session-set_profile-result.json",
-        &Option::<()>::None,
-    )?;
-    write_fixture(
-        stage,
-        "service-session-set_effort-params.json",
-        &SessionSetEffortParams {
-            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
-            effort: "high".to_owned(),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-session-set_effort-result.json",
-        &Option::<()>::None,
-    )?;
-    write_fixture(
-        stage,
-        "service-session-set_tool_mode-params.json",
-        &SessionSetToolModeParams {
-            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
-            tool_mode: "custom".to_owned(),
-            custom_tools: Some(vec!["fs_read".to_owned()]),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-session-set_tool_mode-result.json",
-        &Option::<()>::None,
-    )?;
-    write_fixture(
-        stage,
-        "service-session-create-params.json",
-        &SessionCreateParams {
-            cwd: Some("/synthetic/workspace".to_owned()),
-            profile: Some("default".to_owned()),
-            effort: None,
-            title: Some("New Session".to_owned()),
-            mode: Some(0),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-session-create-result.json",
-        &SessionCreateResult {
+        "session-create-result.json",
+        &qaqh_ringing::SessionCreateResult {
             session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
         },
     )?;
@@ -525,81 +459,6 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "service-workspace-list-result.json",
         &vec![workspace_entry_fixture()],
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-set-params.json",
-        &WorkspaceSetParams {
-            session_id: workspace_session_id.clone(),
-            path: "/synthetic/workspace".to_owned(),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-set-result.json",
-        &Option::<()>::None,
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-create-params.json",
-        &WorkspaceCreateParams {
-            path: "/synthetic/workspace".to_owned(),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-create-result.json",
-        &workspace_meta_fixture(),
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-rename-params.json",
-        &WorkspaceRenameParams {
-            id: "ws-fixture-1".to_owned(),
-            title: "synthetic workspace".to_owned(),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-rename-result.json",
-        &workspace_meta_fixture(),
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-delete-params.json",
-        &WorkspaceDeleteParams {
-            id: "ws-fixture-1".to_owned(),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-delete-result.json",
-        &Option::<()>::None,
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-move_session-params.json",
-        &WorkspaceMoveSessionParams {
-            session_id: workspace_session_id.clone(),
-            workspace_id: "ws-fixture-1".to_owned(),
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-move_session-result.json",
-        &Option::<()>::None,
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-detach-params.json",
-        &WorkspaceDetachParams {
-            session_id: workspace_session_id,
-        },
-    )?;
-    write_fixture(
-        stage,
-        "service-workspace-detach-result.json",
-        &Option::<()>::None,
     )?;
     account_fixtures::write(stage)?;
     client_fixtures::write(stage)?;
@@ -662,19 +521,38 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     macro_rules! export_all { ($($ty:ty),+ $(,)?) => { $(<$ty>::export_all(config)?;)+ } }
     export_all!(
         qaqh_types::DaemonDiscovery,
-        RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
-        RingingCommandStatus, RingingV2AskOutcome,
-        RingingV2Capabilities, RingingV2CommandAck,
-        RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
-        RingingV2ContentUploadResponse, RingingV2ContentValue, RingingV2Delivery,
+        RingingCommand,
+        RingingCommandAck,
+        RingingCommandAckStatus,
+        RingingCommandState,
+        RingingCommandStatus,
+        RingingV2AskOutcome,
+        RingingV2Capabilities,
+        RingingV2CommandAck,
+        RingingV2CommandEnvelope,
+        RingingV2CommandResult,
+        RingingV2CommandStatus,
+        RingingV2ContentUploadResponse,
+        RingingV2ContentValue,
+        RingingV2Delivery,
         RingingV2DriverClaimResponse,
-        RingingV2DriverReleaseResponse, RingingV2DriverState,
-        RingingV2ExistingResult, RingingV2InteractionKind, RingingV2LeaseRenewResponse,
-        RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
-        RingingV2PendingInteraction, RingingV2PendingInteractionView,
+        RingingV2DriverReleaseResponse,
+        RingingV2DriverState,
+        RingingV2ExistingResult,
+        RingingV2InteractionKind,
+        RingingV2LeaseRenewResponse,
+        RingingV2OpenRequest,
+        RingingV2OpenResponse,
+        RingingV2PendingApprovals,
+        RingingV2PendingInteraction,
+        RingingV2PendingInteractionView,
         RingingV2PendingPermissionView,
-        RingingV2ResetReason, RingingV2ResetRequired, RingingV2StreamKey,
-        RingingV2ApprovalRespondRequest, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
+        RingingV2ResetReason,
+        RingingV2ResetRequired,
+        RingingV2StreamKey,
+        RingingV2ApprovalRespondRequest,
+        RingingV2DeviceApprovalKind,
+        RingingV2DeviceChallenge,
         RingingV2DeviceChallenges,
         qaqh_ringing::RingingV2PairTokenRequest,
         qaqh_ringing::RingingV2PairTokenResponse,
@@ -696,26 +574,14 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::FsReadParams,
         qaqh_runtime::ringing::service_methods::FsReadResult,
         qaqh_runtime::ringing::service_methods::SessionActivityParams,
-        qaqh_runtime::ringing::service_methods::SessionCreateParams,
-        qaqh_runtime::ringing::service_methods::SessionCreateResult,
         qaqh_runtime::ringing::service_methods::SessionGetActivityParams,
         qaqh_runtime::ringing::service_methods::SessionListParams,
         qaqh_runtime::ringing::service_methods::SessionMetaParams,
-        qaqh_runtime::ringing::service_methods::SessionRenameParams,
-        qaqh_runtime::ringing::service_methods::SessionSetEffortParams,
-        qaqh_runtime::ringing::service_methods::SessionSetProfileParams,
-        qaqh_runtime::ringing::service_methods::SessionSetToolModeParams,
         qaqh_runtime::ringing::service_methods::SessionToolActivity,
         qaqh_runtime::ringing::service_methods::SkillsCatalogParams,
         qaqh_runtime::ringing::service_methods::SkillsCatalogResult,
-        qaqh_runtime::ringing::service_methods::WorkspaceCreateParams,
-        qaqh_runtime::ringing::service_methods::WorkspaceDeleteParams,
-        qaqh_runtime::ringing::service_methods::WorkspaceDetachParams,
         qaqh_runtime::ringing::service_methods::WorkspaceGetParams,
         qaqh_runtime::ringing::service_methods::WorkspaceListParams,
-        qaqh_runtime::ringing::service_methods::WorkspaceMoveSessionParams,
-        qaqh_runtime::ringing::service_methods::WorkspaceRenameParams,
-        qaqh_runtime::ringing::service_methods::WorkspaceSetParams,
         qaqh_domain::SessionActivity,
         qaqh_session::WorkspaceEntry,
         qaqh_session::WorkspaceMeta,
@@ -740,11 +606,11 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_config_api::LspDto,
         qaqh_config_api::LspServerDto,
         qaqh_types::ReasoningKind,
-        // ── 统一命令面（§8.1）：封闭命令目录 + 信封 + 目标/前置条件 ──
-        qaqh_ringing::UnifiedCommand,
-        qaqh_ringing::UnifiedCommandEnvelope,
-        qaqh_ringing::UnifiedTarget,
-        qaqh_ringing::UnifiedPrecondition,
+        // ── RingingV2 唯一命令目录、信封、目标与前置条件 ──
+        qaqh_ringing::CommandTarget,
+        qaqh_ringing::CommandPrecondition,
+        qaqh_ringing::ConversationSendMessage,
+        qaqh_ringing::SessionCreateResult,
         qaqh_ringing::SessionSettingsPatch,
         qaqh_ringing::ToolsSettingPatch,
         qaqh_ringing::ProviderUpsertDto,

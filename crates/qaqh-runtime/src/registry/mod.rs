@@ -404,11 +404,7 @@ impl AgentInstance {
 /// Stable name for a command the thin actor does not implement. Returning an
 /// error instead of `Ok(())` keeps entry acceptance from lying about execution.
 fn ringing_command_name(command: &qaqh_ringing::RingingCommand) -> &'static str {
-    match command {
-        qaqh_ringing::RingingCommand::Conversation(_) => "conversation",
-        qaqh_ringing::RingingCommand::Control(_) => "control",
-        qaqh_ringing::RingingCommand::Tool(_) => "tool",
-    }
+    command.name()
 }
 
 /// Stable, grammar-valid name for legacy direct `spawn_subagent` callers.

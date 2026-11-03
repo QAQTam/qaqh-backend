@@ -87,6 +87,9 @@ pub struct SessionMeta {
     /// Number of conversation turns (one user query + its assistant/tool chain).
     #[serde(default)]
     pub turn_count: usize,
+    /// Monotonic revision for session settings writes.
+    #[serde(default)]
+    pub settings_revision: u64,
     /// Number of earliest turns compacted (skipped in LLM context).
     #[serde(default)]
     pub compact_skip: usize,
@@ -316,6 +319,7 @@ mod tests {
             model_selection: Some(ModelSelection::default()),
             requested_model_selection: Some(ModelSelection::default()),
             turn_count: 4,
+            settings_revision: 8,
             compact_skip: 5,
             compact_covered_through_msg_id: Some(9),
             mode: 1,
@@ -375,6 +379,7 @@ mod tests {
             "requested_model_selection",
             "session_id",
             "skills",
+            "settings_revision",
             // ── 运行期附加字段 ──
             "status",
             "title",
@@ -415,6 +420,7 @@ mod tests {
         // 手抄时代一个都没解的字段（grep 逐个为 0）。
         assert_eq!(back.meta.created_at, 1);
         assert_eq!(back.meta.turn_count, 4);
+        assert_eq!(back.meta.settings_revision, 8);
         assert_eq!(back.meta.tool_mode, "custom");
         // 连带的其余持久化字段同样够得着。
         assert_eq!(back.meta.compact_skip, 5);

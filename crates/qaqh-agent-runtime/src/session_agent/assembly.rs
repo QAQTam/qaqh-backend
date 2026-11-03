@@ -183,9 +183,10 @@ pub struct SpawnInput<'a> {
     pub owner: Arc<SessionOwner>,
     /// Effective config for this session (already merged with subagent overrides).
     pub config: &'a qaqh_config::Config,
-    /// Model-visible/callable tool names. Empty = no restriction
-    /// (that is `ToolManager::set_allowed(vec![])` semantics, not "no tools").
+    /// Session-level tool mode names. Empty = no session-level restriction.
     pub allowed_tools: Vec<String>,
+    /// Global configuration ceiling. `Some(empty)` means no tools.
+    pub global_allowed_tools: Option<Vec<String>>,
     pub permission_level: u8,
     pub sandbox: qaqh_workspace::tool_api::SandboxMode,
     pub workspace_root: PathBuf,
@@ -196,24 +197,44 @@ impl<'a> SpawnInput<'a> {
     pub fn for_session(
         session_id: &'a str,
         config: &'a qaqh_config::Config,
+        tool_mode: &str,
+        custom_tools: &[String],
         workspace_root: PathBuf,
         owner: Arc<SessionOwner>,
-    ) -> Self {
-        let allowed_tools = if config.tool_allowlist_enabled {
-            config.tool_allowlist.clone()
-        } else {
-            Vec::new()
-        };
-        Self {
+    ) -> Result<Self, String> {
+        Ok(Self {
             session_id,
             owner,
             config,
-            allowed_tools,
+            allowed_tools: session_tool_allowlist(tool_mode, custom_tools)?,
+            global_allowed_tools: config
+                .tool_allowlist_enabled
+                .then(|| config.tool_allowlist.clone()),
             permission_level: config.permission_level,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             workspace_root,
-        }
+        })
     }
+}
+
+/// Resolve the persisted session tool mode into its internal registration keys.
+pub fn session_tool_allowlist(
+    tool_mode: &str,
+    custom_tools: &[String],
+) -> Result<Vec<String>, String> {
+    if tool_mode.is_empty() || tool_mode == qaqh_types::tool_mode::STANDARD {
+        return Ok(Vec::new());
+    }
+    if let Some(tools) = qaqh_types::tool_mode::preset_tools(tool_mode) {
+        return Ok(tools.iter().map(|tool| (*tool).to_string()).collect());
+    }
+    if tool_mode == qaqh_types::tool_mode::CUSTOM {
+        if custom_tools.is_empty() {
+            return Err("custom tool mode requires at least one tool in custom_tools".into());
+        }
+        return Ok(custom_tools.to_vec());
+    }
+    Err(format!("unknown session tool mode {tool_mode:?}"))
 }
 
 /// Assemble one session loop: tool manager → provider spec → tool port → loop.
@@ -228,12 +249,14 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         owner,
         config,
         allowed_tools,
+        global_allowed_tools,
         permission_level,
         sandbox,
         workspace_root,
     } = input;
 
     let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
+    tool_manager.set_global_allowed(global_allowed_tools);
     tool_manager.apply_init(allowed_tools);
     let provider = provider_spec(config, tool_defs(&tool_manager));
     let policy = tool_policy(
@@ -317,11 +340,13 @@ mod tests {
         config.tool_allowlist_enabled = true;
         let restricted = {
             let owner = test_owner();
-            SpawnInput::for_session("s", &config, PathBuf::from("/w"), owner)
+            SpawnInput::for_session("s", &config, "standard", &[], PathBuf::from("/w"), owner)
+                .unwrap()
         };
+        assert!(restricted.allowed_tools.is_empty());
         assert_eq!(
-            restricted.allowed_tools,
-            vec!["read".to_string(), "exec".to_string()]
+            restricted.global_allowed_tools,
+            Some(vec!["read".into(), "exec".into()])
         );
         assert_eq!(restricted.permission_level, 2);
 
@@ -329,16 +354,32 @@ mod tests {
         config.tool_allowlist_enabled = false;
         let open = {
             let owner = test_owner();
-            SpawnInput::for_session("s", &config, PathBuf::from("/w"), owner)
+            SpawnInput::for_session("s", &config, "standard", &[], PathBuf::from("/w"), owner)
+                .unwrap()
         };
         assert!(open.allowed_tools.is_empty());
+        assert_eq!(open.global_allowed_tools, None);
+    }
+
+    #[test]
+    fn session_tool_modes_resolve_to_their_runtime_tool_sets() {
+        assert_eq!(
+            session_tool_allowlist("minimal:b", &[]).unwrap(),
+            qaqh_types::tool_mode::MINIMAL_TOOLS_B
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            session_tool_allowlist("custom", &["exec".into()]).unwrap(),
+            vec!["exec"]
+        );
+        assert!(session_tool_allowlist("custom", &[]).is_err());
     }
 
     fn test_owner() -> Arc<SessionOwner> {
         let dir = Box::leak(Box::new(tempfile::tempdir().expect("tempdir")));
-        let db = Arc::new(
-            qaqh_session::db::Db::open(dir.path().join("qaqh.db")).expect("open db"),
-        );
+        let db = Arc::new(qaqh_session::db::Db::open(dir.path().join("qaqh.db")).expect("open db"));
         Arc::new(SessionOwner::new("s", db))
     }
 }

@@ -5,8 +5,7 @@ use super::*;
 
 use crate::error::{QaqhError, QaqhResult};
 
-use qaqh_agent_runtime::session_loop::{LoopInput, PermissionAnswer};
-use qaqh_ringing_contract::fact::{ContentHash, ContentRef, InputPurpose};
+use qaqh_agent_runtime::session_loop::PermissionAnswer;
 
 impl AgentRegistry {
     /// 发送 Ringing worker 命令帧（携带 `wire` 判别字段；worker reader 按 wire 解析）。
@@ -19,12 +18,8 @@ impl AgentRegistry {
             && !metadata.agent_path.is_root()
             && matches!(
                 &env.command,
-                qaqh_ringing::RingingCommand::Conversation(
-                    qaqh_domain::ConversationCommand::ConversationSendMessage {
-                        inter_agent: None,
-                        ..
-                    }
-                )
+                qaqh_ringing::RingingCommand::ConversationSendMessage(input)
+                if input.inter_agent.is_none()
             )
         {
             return Err(format!(
@@ -39,78 +34,71 @@ impl AgentRegistry {
         // F11). Both are resolved here, before the write closure.
         let reload = matches!(
             &env.command,
-            qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::AgentReloadConfig)
+            qaqh_ringing::RingingCommand::AgentReloadConfig
         )
         .then(|| {
-            crate::agent::session_config::session_effective_config(Some(&self.owners), session_id)
-                .ok_or_else(|| format!("effective config unavailable for {session_id}"))
-                .and_then(|(config, _)| {
-                    let provider =
-                        crate::session_agent::assembly::provider_spec(&config, Vec::new());
-                    let workspace_root =
-                        super::spawn::ensure_session_workspace(&self.owners, session_id)?;
-                    let role = match self.agent_catalog.get_by_id(session_id) {
-                        Some(metadata) if !metadata.agent_path.is_root() => {
-                            crate::session_agent::assembly::subagent_sandbox()
-                        }
-                        _ => qaqh_workspace::tool_api::SandboxMode::Main,
-                    };
-                    let policy = crate::session_agent::assembly::tool_policy(
-                        workspace_root,
-                        config.permission_level,
-                        role,
-                        std::collections::HashSet::new(),
-                        config.sandbox.enabled,
-                    );
-                    Ok((provider, policy))
-                })
+            let (mut config, _) = crate::agent::session_config::session_effective_config(
+                Some(&self.owners),
+                session_id,
+            )
+            .ok_or_else(|| format!("effective config unavailable for {session_id}"))?;
+            let kind = self
+                .instances
+                .get(session_id)
+                .map(AgentInstance::kind_name)
+                .ok_or_else(|| format!("loaded agent unavailable for {session_id}"))?;
+            let (allowed_tools, global_allowed_tools, role) = match &kind {
+                AgentKind::Session => {
+                    let session = crate::session_meta::read(&self.owners, session_id)
+                        .ok_or_else(|| format!("session metadata unavailable for {session_id}"))?;
+                    let allowed = crate::session_agent::assembly::session_tool_allowlist(
+                        &session.tool_mode,
+                        &session.custom_tools,
+                    )?;
+                    (
+                        allowed,
+                        config
+                            .tool_allowlist_enabled
+                            .then(|| config.tool_allowlist.clone()),
+                        qaqh_workspace::tool_api::SandboxMode::Main,
+                    )
+                }
+                AgentKind::Subagent(spec) => {
+                    if let Some(model) = &spec.model {
+                        config.model = model.clone();
+                    }
+                    if let Some(base_url) = &spec.base_url {
+                        config.base_url = base_url.clone();
+                    }
+                    if let Some(max_tokens) = spec.max_tokens {
+                        config.max_tokens = max_tokens;
+                    }
+                    config.permission_level = spec.permission_level;
+                    (
+                        spec.tools.clone(),
+                        None,
+                        crate::session_agent::assembly::subagent_sandbox(),
+                    )
+                }
+            };
+            let provider = crate::session_agent::assembly::provider_spec(&config, Vec::new());
+            let workspace_root = super::spawn::ensure_session_workspace(&self.owners, session_id)?;
+            let policy = crate::session_agent::assembly::tool_policy(
+                workspace_root,
+                config.permission_level,
+                role,
+                std::collections::HashSet::new(),
+                config.sandbox.enabled,
+            );
+            Ok::<_, String>((provider, policy, allowed_tools, global_allowed_tools))
         });
         let write = |instance: &AgentInstance| -> QaqhResult<()> {
             let AgentTransport::Loop { loop_ } = &instance.transport;
             match &env.command {
-                qaqh_ringing::RingingCommand::Conversation(
-                    qaqh_domain::ConversationCommand::ConversationSendMessage {
-                        text,
-                        attachments,
-                        message_id,
-                        input_purpose,
-                        as_system,
-                        ..
-                    },
-                ) => {
-                    let purpose = match input_purpose {
-                        qaqh_domain::ConversationInputPurpose::TriggerTurn => {
-                            InputPurpose::TriggerTurn
-                        }
-                        qaqh_domain::ConversationInputPurpose::QueueOnly => {
-                            InputPurpose::QueueOnly
-                        }
-                        qaqh_domain::ConversationInputPurpose::Steer => InputPurpose::Steer,
-                        qaqh_domain::ConversationInputPurpose::Interject => InputPurpose::Interject,
-                    };
-                    let att_refs: Vec<ContentRef> = attachments
-                        .as_ref()
-                        .map(|list| {
-                            list.iter()
-                                .map(|r| {
-                                    ContentRef::new(ContentHash::new(r.content_id.clone()))
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    loop_
-                        .send_input(LoopInput {
-                            input_id: message_id.clone(),
-                            text: text.clone(),
-                            purpose,
-                            as_system: *as_system,
-                            attachments: att_refs,
-                        })
-                        .map_err(|e| format!("loop input error: {e}").into())
-                }
-                qaqh_ringing::RingingCommand::Conversation(
-                    qaqh_domain::ConversationCommand::ConversationCancel { turn_id },
-                ) => {
+                qaqh_ringing::RingingCommand::ConversationSendMessage(input) => loop_
+                    .send_input(input.clone())
+                    .map_err(|e| format!("loop input error: {e}").into()),
+                qaqh_ringing::RingingCommand::ConversationCancel { turn_id } => {
                     // 目标校验先行:stale/错目标的取消不预置会话级取消标记
                     // (在途工具不得被滞留的旧请求中止)。
                     let matched = loop_.cancel_turn(turn_id.as_deref());
@@ -119,12 +107,10 @@ impl AgentRegistry {
                     }
                     Ok(())
                 }
-                qaqh_ringing::RingingCommand::Control(
-                    qaqh_domain::ControlCommand::InteractionAskRespond {
-                        interaction_id,
-                        answers,
-                    },
-                ) => {
+                qaqh_ringing::RingingCommand::InteractionAskRespond {
+                    interaction_id,
+                    answers,
+                } => {
                     let ans: Vec<(String, String)> = answers
                         .iter()
                         .map(|a| (a.question_id.clone(), a.answer.clone()))
@@ -132,13 +118,11 @@ impl AgentRegistry {
                     loop_.respond_interaction(interaction_id, ans);
                     Ok(())
                 }
-                qaqh_ringing::RingingCommand::Tool(
-                    qaqh_domain::ToolCommand::ToolPermissionRespond {
-                        tool_call_id,
-                        approved,
-                        trust_folder,
-                    },
-                ) => {
+                qaqh_ringing::RingingCommand::ToolPermissionRespond {
+                    tool_call_id,
+                    approved,
+                    trust_folder,
+                } => {
                     loop_.respond_permission(
                         tool_call_id,
                         PermissionAnswer {
@@ -148,22 +132,18 @@ impl AgentRegistry {
                     );
                     Ok(())
                 }
-                qaqh_ringing::RingingCommand::Control(
-                    qaqh_domain::ControlCommand::SessionShutdown,
-                ) => {
+                qaqh_ringing::RingingCommand::SessionShutdown => {
                     loop_.abandon();
                     Ok(())
                 }
-                qaqh_ringing::RingingCommand::Control(
-                    qaqh_domain::ControlCommand::AgentReloadConfig,
-                ) => {
-                    let (provider, _policy) = reload
+                qaqh_ringing::RingingCommand::AgentReloadConfig => {
+                    let (provider, policy, allowed_tools, global_allowed_tools) = reload
                         .clone()
                         .ok_or_else(|| format!("reload config unavailable for {session_id}"))?
                         .map_err(|error| {
                             format!("reload config failed for {session_id}: {error}")
                         })?;
-                    loop_.reload_provider(provider);
+                    loop_.reload_runtime(provider, policy, allowed_tools, global_allowed_tools);
                     Ok(())
                 }
                 other => Err(format!(
@@ -181,9 +161,7 @@ impl AgentRegistry {
             // cmd_tx 的位置。
             if matches!(
                 &env.command,
-                qaqh_ringing::RingingCommand::Conversation(
-                    qaqh_domain::ConversationCommand::ConversationCancel { .. }
-                )
+                qaqh_ringing::RingingCommand::ConversationCancel { .. }
             ) {
                 self.cancel_subagent_children(session_id);
             }

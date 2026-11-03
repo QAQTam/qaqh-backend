@@ -2342,6 +2342,7 @@ dependencies = [
 name = "qaqh-domain"
 version = "2.1.20261031-1"
 dependencies = [
+ "qaqh-ringing-contract",
  "qaqh-types",
  "serde",
  "serde_json",
@@ -2574,6 +2575,7 @@ dependencies = [
  "base64 0.22.1",
  "qaqh-domain",
  "qaqh-profile",
+ "qaqh-ringing-contract",
  "qaqh-types",
  "serde",
  "serde_json",
@@ -2727,6 +2729,7 @@ dependencies = [
  "qaqh-config",
  "qaqh-domain",
  "qaqh-ringing",
+ "qaqh-ringing-contract",
  "qaqh-tool-core",
  "qaqh-workspace",
  "schemars",
