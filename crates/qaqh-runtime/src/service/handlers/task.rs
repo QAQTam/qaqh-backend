@@ -24,7 +24,11 @@ pub(crate) fn handle(service: &QaqhService, command: TaskCommand) -> QaqhResult<
                 .map_err(QaqhError::message)
         }
         TaskCommand::PlanRead(args) => {
-            let plan = read_plan(&service.owners, &args.session_id);
+            // 先解 Result 再序列化:serde 会把 `Result<T, E>` 外部标记成
+            // `{"Ok": …}`/`{"Err": …}` map,直接 to_value 会撞上
+            // `PlanReadItem[]` 描述符(真机验收 2026-11-04 实证)。
+            let plan =
+                read_plan(&service.owners, &args.session_id).map_err(QaqhError::message)?;
             QaqhError::to_value("plan", plan)
         }
     }

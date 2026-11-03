@@ -276,7 +276,9 @@ async fn dispatch(
     let operation = envelope.command.name();
 
     // 同步操作直接 completed（§8.4）：回执带 typed result 与资源 revision。
-    let outcome: Result<(serde_json::Value, Option<u64>), String> = match &envelope.command {
+    // 错误保留 QaqhError 原型——Conflict（目录/会话修订 CAS）要在收口处映射
+    // 409，不能在这里 to_string 掉变体、把并发修订伪装成 502 operation_failed。
+    let outcome: Result<(serde_json::Value, Option<u64>), qaqh_runtime::QaqhError> = match &envelope.command {
         RingingCommand::SessionCreate {
             cwd,
             title,
@@ -322,7 +324,9 @@ async fn dispatch(
             }
             match serde_json::to_value(created) {
                 Ok(result) => Ok((result, None)),
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(qaqh_runtime::QaqhError::message(format!(
+                    "serialize session.create result: {error}"
+                ))),
             }
         }
         RingingCommand::SessionSettingsPatch { patch } => {
@@ -349,27 +353,24 @@ async fn dispatch(
                         message,
                     );
                 }
-                Err(error) => Err(error.to_string()),
+                Err(error) => Err(error),
             }
         }
         RingingCommand::ProviderList { .. } => service
             .provider_catalog()
-            .map(|value| (value, None))
-            .map_err(|error| error.to_string()),
+            .map(|value| (value, None)),
         RingingCommand::ProviderUpsert { id, provider } => service
             .provider_upsert(id, provider, expected_revision_from(&envelope))
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            })
-            .map_err(|error| error.to_string()),
+            }),
         RingingCommand::ProviderDelete { id } => service
             .provider_delete(id, expected_revision_from(&envelope))
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            })
-            .map_err(|error| error.to_string()),
+            }),
         RingingCommand::ProviderModelUpsert {
             provider_id,
             model_id,
@@ -384,8 +385,7 @@ async fn dispatch(
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            })
-            .map_err(|error| error.to_string()),
+            }),
         RingingCommand::ProviderModelDelete {
             provider_id,
             model_id,
@@ -394,15 +394,13 @@ async fn dispatch(
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            })
-            .map_err(|error| error.to_string()),
+            }),
         RingingCommand::ModelSelectionSetDefault { selection } => service
             .set_default_model_selection(expected_revision_from(&envelope), selection.clone())
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            })
-            .map_err(|error| error.to_string()),
+            }),
         RingingCommand::DriverClaim {
             client_session_id,
             stale_holder,
@@ -471,8 +469,7 @@ async fn dispatch(
         | RingingCommand::DiagnosticsMemoryStart {}
         | RingingCommand::DiagnosticsMemoryStop {} => service
             .execute_ringing_command(&envelope.target, &envelope.command)
-            .map(|value| (value, None))
-            .map_err(|error| error.to_string()),
+            .map(|value| (value, None)),
         _ => unreachable!("command router selected a non-synchronous operation"),
     };
 
@@ -498,19 +495,32 @@ async fn dispatch(
                 );
             json_response(StatusCode::OK, &ack)
         }
+        Err(qaqh_runtime::QaqhError::Conflict { message }) => {
+            // D3:目录/修订 CAS 冲突是并发修订事实(409),客户端据此重读后
+            // 重试;不得伪装成 502 operation_failed(参数错误档)。
+            fail_response(
+                &state,
+                command_id,
+                StatusCode::CONFLICT,
+                "revision_conflict",
+                message,
+            )
+        }
         Err(error) => fail_response(
             &state,
             command_id,
             StatusCode::BAD_GATEWAY,
             "operation_failed",
-            error,
+            error.to_string(),
         ),
     }
 }
 
 /// driver 裁定 → 命令 result JSON(`RingingV2DriverClaim/ReleaseResponse`
 /// 同形状)。拒绝是带内业务裁定(`accepted=false` + reason),不是命令失败。
-fn driver_result(verdict: &super::driver::DriverVerdict) -> Result<(serde_json::Value, Option<u64>), String> {
+fn driver_result(
+    verdict: &super::driver::DriverVerdict,
+) -> Result<(serde_json::Value, Option<u64>), qaqh_runtime::QaqhError> {
     Ok((
         json!({
             "accepted": verdict.accepted,
