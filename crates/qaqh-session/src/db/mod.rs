@@ -5,7 +5,7 @@
 //! 失败直接返回数据库错误,不静默回退。
 
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 use rusqlite::{Connection, OpenFlags};
 use tokio::sync::oneshot;
@@ -16,6 +16,7 @@ pub mod team;
 pub mod view;
 #[cfg(test)]
 mod view_tests;
+pub mod workspace;
 
 /// SQLite ≥ 3.51.3 包含官方 WAL-reset 修复,低于该版本直接拒绝启动。
 const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
@@ -23,18 +24,29 @@ const MIN_SQLITE_VERSION: (u32, u32, u32) = (3, 51, 3);
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     #[error("create data dir {path}: {source}")]
-    CreateDir { path: PathBuf, source: std::io::Error },
+    CreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("open database {path}: {source}")]
-    Open { path: PathBuf, source: rusqlite::Error },
+    Open {
+        path: PathBuf,
+        source: rusqlite::Error,
+    },
     #[error("journal_mode returned {actual:?}, WAL not engaged")]
     WalNotEngaged { actual: Option<String> },
     #[error("synchronous is {actual}, expected FULL(2)")]
     SyncNotFull { actual: i64 },
     #[error("sqlite {found} is older than required {required:?}")]
-    SqliteTooOld { found: String, required: (u32, u32, u32) },
+    SqliteTooOld {
+        found: String,
+        required: (u32, u32, u32),
+    },
     #[error("schema version {found} is newer than supported {supported}")]
     SchemaTooNew { found: u32, supported: u32 },
-    #[error("schema version {found} is older than supported {supported}; delete the database to recreate it")]
+    #[error(
+        "schema version {found} is older than supported {supported}; delete the database to recreate it"
+    )]
     SchemaTooOld { found: u32, supported: u32 },
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
@@ -48,6 +60,8 @@ pub enum DbError {
     SessionNotFound { session_id: String },
     #[error("corrupt business row: {0}")]
     Corrupt(String),
+    #[error("workspace operation: {0}")]
+    Workspace(String),
 }
 
 struct WriteJob(Box<dyn FnOnce(&mut Connection) + Send>);
@@ -64,19 +78,26 @@ impl Db {
     pub fn open(path: impl AsRef<Path>) -> Result<Db, DbError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|source| DbError::CreateDir { path: parent.to_path_buf(), source })?;
+            std::fs::create_dir_all(parent).map_err(|source| DbError::CreateDir {
+                path: parent.to_path_buf(),
+                source,
+            })?;
         }
 
-        let mut write_conn = Connection::open(&path)
-            .map_err(|source| DbError::Open { path: path.clone(), source })?;
+        let mut write_conn = Connection::open(&path).map_err(|source| DbError::Open {
+            path: path.clone(),
+            source,
+        })?;
         configure(&mut write_conn)?;
 
         let read_conn = Connection::open_with_flags(
             &path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
-        .map_err(|source| DbError::Open { path: path.clone(), source })?;
+        .map_err(|source| DbError::Open {
+            path: path.clone(),
+            source,
+        })?;
         read_conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
         schema::initialize(&mut write_conn)?;
@@ -106,7 +127,9 @@ impl Db {
             // 调用方被取消(oneshot 接收端丢弃)时,写入结果随之丢弃;事务边界不变。
             let _ = reply_tx.send(f(conn).map_err(Into::into));
         });
-        self.write_tx.send(WriteJob(job)).map_err(|_| DbError::ExecutorStopped)?;
+        self.write_tx
+            .send(WriteJob(job))
+            .map_err(|_| DbError::ExecutorStopped)?;
         Ok(reply_rx.await.map_err(|_| DbError::ExecutorStopped)??)
     }
 
@@ -137,7 +160,9 @@ impl Db {
         let job: Box<dyn FnOnce(&mut Connection) + Send> = Box::new(move |conn| {
             let _ = reply_tx.send(f(conn).map_err(Into::into));
         });
-        self.write_tx.send(WriteJob(job)).map_err(|_| DbError::ExecutorStopped)?;
+        self.write_tx
+            .send(WriteJob(job))
+            .map_err(|_| DbError::ExecutorStopped)?;
         reply_rx.recv().map_err(|_| DbError::ExecutorStopped)?
     }
 
@@ -158,10 +183,11 @@ impl Db {
 fn configure(conn: &mut Connection) -> Result<(), DbError> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-    let journal_mode: String =
-        conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    let journal_mode: String = conn.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     if journal_mode != "wal" {
-        return Err(DbError::WalNotEngaged { actual: Some(journal_mode) });
+        return Err(DbError::WalNotEngaged {
+            actual: Some(journal_mode),
+        });
     }
 
     conn.pragma_update(None, "synchronous", "FULL")?;
@@ -175,7 +201,10 @@ fn configure(conn: &mut Connection) -> Result<(), DbError> {
     let version: String = conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
     let parsed = parse_version(&version);
     if parsed < MIN_SQLITE_VERSION {
-        return Err(DbError::SqliteTooOld { found: version, required: MIN_SQLITE_VERSION });
+        return Err(DbError::SqliteTooOld {
+            found: version,
+            required: MIN_SQLITE_VERSION,
+        });
     }
 
     Ok(())
@@ -189,9 +218,7 @@ fn parse_version(version: &str) -> (u32, u32, u32) {
     (parts[0], parts[1], parts[2])
 }
 
-fn spawn_executor(
-    mut conn: Connection,
-) -> Result<mpsc::Sender<WriteJob>, DbError> {
+fn spawn_executor(mut conn: Connection) -> Result<mpsc::Sender<WriteJob>, DbError> {
     let (tx, rx) = mpsc::channel::<WriteJob>();
     std::thread::Builder::new()
         .name("qaqh-db-writer".into())

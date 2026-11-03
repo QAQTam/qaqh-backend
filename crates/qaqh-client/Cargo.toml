@@ -10,7 +10,6 @@ bytes = "1"
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
-qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
 futures-util = "0.3"
 log = "0.4"

@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::fact::{EventId, FactSchema, LogId, SessionId};
 
-use super::task_types::{TaskId, TeamActor};
 use super::error::{TeamError, TeamResult};
+use super::task_types::{TaskId, TeamActor};
 
 pub const BOARD_FACT_SCHEMA: &str = "qaqh.board-fact/v1";
 pub const BOARD_FACT_VERSION: u16 = 1;

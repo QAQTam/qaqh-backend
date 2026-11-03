@@ -10,7 +10,6 @@ pub mod owner;
 #[cfg(test)]
 mod owner_tests;
 pub mod session_fact_v2;
-pub use grouping::{WorkspaceEntry, WorkspaceMeta, WorkspaceStore};
 pub use manager::SessionManager;
 
 /// Free-function epoch helper.

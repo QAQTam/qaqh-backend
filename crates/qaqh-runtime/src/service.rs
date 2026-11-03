@@ -79,10 +79,12 @@ impl QaqhService {
         // 本身不属于子代理工具集。
         qaqh_workspace::runtime::init_tools("daemon", &[], vec![]);
         // 业务库:SQLite WAL 单权威(报告一 §7)。打不开就停止启动,不降级。
-        let owners = Arc::new(qaqh_session::owner::OwnerDirectory::open(
-            qaqh_types::platform::data_dir().join("qaqh.db"),
-        )
-        .expect("open business database"));
+        let owners = Arc::new(
+            qaqh_session::owner::OwnerDirectory::open(
+                qaqh_types::platform::data_dir().join("qaqh.db"),
+            )
+            .expect("open business database"),
+        );
         let mut registry = AgentRegistry::new(Arc::clone(&owners));
         registry.set_max_depth(config.subagent.max_depth as usize);
         registry.set_message_quota_limits(
@@ -215,6 +217,7 @@ impl QaqhService {
         {
             match self.sessions.delete(session_id) {
                 Ok(()) => {
+                    self.remove_workspace_membership(session_id)?;
                     log::info!("[session] ephemeral session {session_id} cleaned up (auto-unload)")
                 }
                 Err(e) if e.contains("Session not found") => {}
@@ -403,7 +406,18 @@ impl QaqhService {
         causation_id: Option<&str>,
     ) -> Result<(), String> {
         let _ = self.close_session(session_id, causation_id);
-        self.sessions.delete(session_id)
+        self.sessions.delete(session_id)?;
+        self.remove_workspace_membership(session_id)
+    }
+
+    fn remove_workspace_membership(&self, session_id: &str) -> Result<(), String> {
+        let session_id = session_id.to_string();
+        self.owners
+            .db()
+            .write_blocking(move |conn| {
+                qaqh_session::db::workspace::remove_session(conn, &session_id)
+            })
+            .map_err(|error| error.to_string())
     }
 
     /// 服务面唯一入口：wire `(method, params)` 在这里解码一次，然后按领域分派。
@@ -447,7 +461,9 @@ impl QaqhService {
             | RingingCommand::WorkspaceDetach { .. } => {
                 handlers::workspace::handle_ringing(self, target, command)
             }
-            RingingCommand::SubagentSpawn { .. } => handlers::session::handle_ringing(self, command),
+            RingingCommand::SubagentSpawn { .. } => {
+                handlers::session::handle_ringing(self, command)
+            }
             RingingCommand::TodoSet { .. }
             | RingingCommand::TodoCancel { .. }
             | RingingCommand::PlanAction { .. } => {
@@ -551,13 +567,14 @@ impl QaqhService {
             return qaqh_types::SessionRunStatus::NotRunning;
         }
         let state = fallback.or_else(|| {
-            self.owners.session_run_state(session_id).ok().map(|state| {
-                match state {
+            self.owners
+                .session_run_state(session_id)
+                .ok()
+                .map(|state| match state {
                     qaqh_session::owner::SessionRunState::Running
                     | qaqh_session::owner::SessionRunState::Waiting => ActivityState::Working,
                     _ => ActivityState::Idle,
-                }
-            })
+                })
         });
         match state {
             Some(ActivityState::Starting | ActivityState::Working) => {
@@ -578,60 +595,71 @@ impl QaqhService {
     /// 返回类型化值后，**新增字段的唯一途径是改类型**：想在回包里塞个临时键，
     /// 必须先拆掉类型才行。形状锁在 `qaqh-types` 的
     /// `session_list_entry_wire_keys_are_locked`。
-    fn list_sessions(&self) -> Vec<qaqh_types::SessionListEntry> {
+    fn list_sessions(&self) -> QaqhResult<Vec<qaqh_types::SessionListEntry>> {
         let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-        let workspaces = qaqh_session::WorkspaceStore::global();
         let rows = self
             .owners
             .db()
             .read_blocking(|conn| qaqh_session::db::store::list_sessions(conn, false, 256))
-            .unwrap_or_default();
-        rows.into_iter()
-            .map(|row| {
-                let session_id = row.session_id.clone();
-                let loaded = registry.is_running(&session_id);
-                let fallback = registry
-                    .activities()
-                    .into_iter()
-                    .find(|activity| activity.session_id == session_id)
-                    .map(|activity| activity.state);
-                let status = self.session_run_status(loaded, fallback, &session_id);
-                let meta = qaqh_types::SessionMeta {
-                    session_id: session_id.clone(),
-                    title: Some(row.title).filter(|title| !title.is_empty()),
-                    cwd: row.cwd,
-                    model: row.model.unwrap_or_default(),
-                    effort: row.effort,
-                    profile: row.profile,
-                    mode: row
-                        .mode
-                        .and_then(|mode| mode.parse::<u8>().ok())
-                        .unwrap_or(0),
-                    tool_mode: row.tool_mode.unwrap_or_default(),
-                    model_selection: row.model_selection,
-                    settings_revision: row.settings_revision,
-                    turn_count: row.turn_count.max(0) as usize,
-                    archived: row.archived,
-                    ephemeral: row.ephemeral,
-                    created_at: (row.created_at_ms.max(0) as u64) / 1000,
-                    updated_at: (row.updated_at_ms.max(0) as u64) / 1000,
-                    ..SessionMeta::default()
-                };
-                let mut workspace_id = workspaces.workspace_of(&session_id);
-                // 存量自愈：若该非临时会话带有合法 cwd 且未归属任何工作区，自动纳管归入
-                if workspace_id.is_none()
-                    && !meta.ephemeral
-                    && let Some(cwd) = meta.cwd.as_deref()
-                {
-                    workspace_id = workspaces.attach_by_cwd(&session_id, cwd);
-                }
-                qaqh_types::SessionListEntry {
-                    meta,
-                    status,
-                    workspace_id,
-                }
-            })
-            .collect()
+            .map_err(QaqhError::message)?;
+        let mut workspace_ids = self
+            .owners
+            .db()
+            .read_blocking(qaqh_session::db::workspace::session_ids)
+            .map_err(QaqhError::message)?;
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            let session_id = row.session_id.clone();
+            let loaded = registry.is_running(&session_id);
+            let fallback = registry
+                .activities()
+                .into_iter()
+                .find(|activity| activity.session_id == session_id)
+                .map(|activity| activity.state);
+            let status = self.session_run_status(loaded, fallback, &session_id);
+            let meta = qaqh_types::SessionMeta {
+                session_id: session_id.clone(),
+                title: Some(row.title).filter(|title| !title.is_empty()),
+                cwd: row.cwd,
+                model: row.model.unwrap_or_default(),
+                effort: row.effort,
+                profile: row.profile,
+                mode: row
+                    .mode
+                    .and_then(|mode| mode.parse::<u8>().ok())
+                    .unwrap_or(0),
+                tool_mode: row.tool_mode.unwrap_or_default(),
+                model_selection: row.model_selection,
+                settings_revision: row.settings_revision,
+                turn_count: row.turn_count.max(0) as usize,
+                archived: row.archived,
+                ephemeral: row.ephemeral,
+                created_at: (row.created_at_ms.max(0) as u64) / 1000,
+                updated_at: (row.updated_at_ms.max(0) as u64) / 1000,
+                ..SessionMeta::default()
+            };
+            let mut workspace_id = workspace_ids.remove(&session_id);
+            if workspace_id.is_none()
+                && !meta.ephemeral
+                && let Some(cwd) = meta.cwd.as_deref()
+            {
+                let session = session_id.clone();
+                let cwd = cwd.to_string();
+                workspace_id = self
+                    .owners
+                    .db()
+                    .write_blocking(move |conn| {
+                        qaqh_session::db::workspace::attach_by_cwd(conn, &session, &cwd)
+                    })
+                    .map_err(QaqhError::message)?;
+            }
+            entries.push(qaqh_types::SessionListEntry {
+                meta,
+                status,
+                workspace_id,
+            });
+        }
+        Ok(entries)
     }
 
     /// 配置写后广播（所有 config.* / profile.* 写路径共用）。
@@ -639,8 +667,7 @@ impl QaqhService {
         // 客户端侧的「重拉提示」由前端轮询/焦点刷新兜底;worker 侧重载
         // 走 AgentReloadConfig 广播(改配置要作用到活跃 worker,含子代理)。
         let failed = match self.registry() {
-            Ok(mut registry) => registry
-                .broadcast_ringing(&RingingCommand::AgentReloadConfig),
+            Ok(mut registry) => registry.broadcast_ringing(&RingingCommand::AgentReloadConfig),
             Err(error) => {
                 log::warn!("[config] registry unavailable for reload broadcast: {error}");
                 return;
@@ -889,7 +916,6 @@ pub(crate) fn normalize_workspace_path(path: std::path::PathBuf) -> std::path::P
     path
 }
 
-
 pub(crate) mod command;
 pub(crate) mod common;
 pub(crate) mod fs_git;
@@ -899,7 +925,6 @@ pub(crate) mod plan;
 pub(crate) mod stats;
 
 use self::common::{command_id, err, release_freed_heap_memory};
-
 
 #[cfg(test)]
 mod tool_mode_tests {

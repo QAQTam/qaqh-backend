@@ -15,7 +15,7 @@ use crate::service::stats::{activity, dashboard};
 pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResult<Value> {
     match command {
         SessionCommand::SessionList(_) => {
-            QaqhError::to_value("session list", service.list_sessions())
+            QaqhError::to_value("session list", service.list_sessions()?)
         }
         SessionCommand::SessionMeta(args) => {
             let session_id = args.session_id;
@@ -34,7 +34,13 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
                 .map(|activity| activity.state);
             let entry = qaqh_types::SessionListEntry {
                 status: service.session_run_status(loaded, fallback, &meta.session_id),
-                workspace_id: qaqh_session::WorkspaceStore::global().workspace_of(&meta.session_id),
+                workspace_id: service
+                    .owners
+                    .db()
+                    .read_blocking(|conn| {
+                        qaqh_session::db::workspace::workspace_of(conn, &meta.session_id)
+                    })
+                    .map_err(QaqhError::message)?,
                 meta,
             };
             QaqhError::to_value("session meta", entry)

@@ -8,10 +8,9 @@
 //! 与 v1 通道流的差异：
 //! - **按 seed 起流**（`activate_stream` 时启动、`deactivate_stream` 时停止），
 //!   不再是三条全局流；
-//! - cursor 是 canonical `CursorToken`（`since_cursor` 查询参数），不是
-//!   `Last-Event-ID`；只有 reliable 事件推进 cursor；
-//! - `ResetRequired` 是一条独立帧，送达后服务端主动断流，客户端重连前由上层
-//!   重新 bootstrap。
+//! - 游标是当前 daemon epoch 内的事件序号（`since_cursor` 查询参数）；
+//! - 所有业务事件都在同一条流上递增序号，缺口时重新 bootstrap；
+//! - `ringing.resync_required` 帧送达后服务端主动断流，客户端重新 bootstrap。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -58,7 +57,7 @@ pub struct V2Stream {
     session_id: String,
     client: Client,
     handlers: V2StreamHandlers,
-    /// 已接受的 canonical cursor（只有 reliable 事件推进）。
+    /// 已接受的当前 epoch 事件序号。
     cursor: Option<String>,
     /// 上一次成功连接的 epoch。daemon 重启换 epoch 后 cursor 语义失效，必须归零。
     last_epoch: Option<String>,
@@ -149,7 +148,7 @@ impl V2Stream {
             .await
             .map(|state| state.server_epoch)
             .ok_or_else(|| ClientError::Negotiation("session not open".into()))?;
-        // epoch 变化 → 旧 cursor 语义失效，归零后从 snapshot 重新续传。
+        // epoch 变化 → 旧序号失效，归零后从 snapshot 重新续传。
         if self.last_epoch.as_deref() != Some(server_epoch.as_str()) {
             self.cursor = None;
             self.last_epoch = Some(server_epoch.clone());

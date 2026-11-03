@@ -2,9 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::fact::{
-    AgentNamespace, AgentPath, ContentRef, EventId, FactSchema, LogId, SessionId,
-};
+use crate::fact::{AgentNamespace, AgentPath, ContentRef, EventId, FactSchema, LogId, SessionId};
 
 use super::error::{TeamError, TeamResult};
 

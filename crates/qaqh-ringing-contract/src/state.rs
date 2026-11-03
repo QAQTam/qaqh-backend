@@ -170,8 +170,12 @@ pub struct CodeDelta {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolEffectInfo {
-    SkillActivated { name: String },
-    SkillReleased { name: String },
+    SkillActivated {
+        name: String,
+    },
+    SkillReleased {
+        name: String,
+    },
     SubagentSpawned {
         child_session_id: String,
         name: String,

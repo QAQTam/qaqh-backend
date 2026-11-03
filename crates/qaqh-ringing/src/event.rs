@@ -6,7 +6,6 @@
 use qaqh_domain::{ControlEvent, ConversationEvent, ToolEvent};
 use serde::{Deserialize, Serialize};
 
-
 /// Control 频道事件（wire 名，域类型为 `qaqh_domain::ControlEvent`）。
 pub type RingingControlEvent = ControlEvent;
 /// Conversation 频道事件。

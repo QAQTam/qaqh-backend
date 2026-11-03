@@ -3,9 +3,8 @@
 //! without importing `qaqh-ringing`, `qaqh-domain` or `qaqh-session`.
 
 use qaqh_client::{
-    ClientError, ClientV2Bootstrap, ClientV2Event, ClientV2EventEnvelope, ClientV2ResyncRequired,
-    ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent, RINGING_V2_BASE_PATH,
-    RINGING_V2_VERSION,
+    ClientError, ClientV2Bootstrap, ClientV2Event, ClientV2ResyncRequired, ClientV2SessionState,
+    ClientV2Subscription, ClientV2SubscriptionEvent, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
 };
 
 use qaqh_client::{contract_state, fact, ringing_v2};
@@ -14,7 +13,6 @@ use qaqh_client::{contract_state, fact, ringing_v2};
 fn v2_surface_is_nameable_from_the_client_root() {
     let _: Option<ClientV2Bootstrap> = None;
     let _: Option<ClientV2Event> = None;
-    let _: Option<ClientV2EventEnvelope> = None;
     let _: Option<ClientV2ResyncRequired> = None;
     let _: Option<ClientV2SessionState> = None;
     let _: Option<ClientV2Subscription> = None;
@@ -34,10 +32,6 @@ fn v2_surface_is_nameable_from_the_client_root() {
 
     assert_eq!(RINGING_V2_VERSION, 2);
     assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
-    assert_eq!(
-        serde_json::to_string(&ringing_v2::RingingV2ResetReason::SnapshotMissing).expect("json"),
-        "\"snapshot_missing\""
-    );
 }
 
 /// 壳层必须能只靠 `qaqh-client` **命名并 match** 会话事件流的 interaction /

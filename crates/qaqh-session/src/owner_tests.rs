@@ -8,7 +8,9 @@ mod tests {
 
     use tokio::sync::broadcast;
 
-    use qaqh_ringing_contract::events::{InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame};
+    use qaqh_ringing_contract::events::{
+        InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
+    };
     use qaqh_ringing_contract::fact::{
         ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionDecision,
         InteractionId, InteractionKind, ToolCallId, ToolMetrics, TurnId, TurnMode,
@@ -23,9 +25,8 @@ mod tests {
 
     fn test_owner_dir() -> (tempfile::TempDir, Arc<OwnerDirectory>) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let owners = Arc::new(
-            OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open owners db"),
-        );
+        let owners =
+            Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open owners db"));
         (dir, owners)
     }
 
@@ -160,7 +161,11 @@ mod tests {
             ));
             for chunk in ["file-a\n", "file-b\n"] {
                 match recv_event(&mut rx) {
-                    SessionEvent::ToolOutputDelta { call_id, stream, text } => {
+                    SessionEvent::ToolOutputDelta {
+                        call_id,
+                        stream,
+                        text,
+                    } => {
                         assert_eq!(call_id.as_ref(), "C1");
                         assert_eq!(stream, OutputStream::Stdout);
                         assert_eq!(text, chunk);
@@ -182,10 +187,7 @@ mod tests {
                     assert_eq!(status, ToolCallStatus::Finished);
                     assert!(output.is_some());
                     assert_eq!(metrics.expect("metrics").progress_bytes_total, 14);
-                    assert_eq!(
-                        code_delta.expect("code delta").lines_added,
-                        3
-                    );
+                    assert_eq!(code_delta.expect("code delta").lines_added, 3);
                     assert_eq!(
                         effects,
                         vec![ToolEffectInfo::SkillActivated {
@@ -226,7 +228,9 @@ mod tests {
                 .expect("resolve");
             assert!(resolved);
             match recv_event(&mut rx) {
-                SessionEvent::InteractionResolved { decision, status, .. } => {
+                SessionEvent::InteractionResolved {
+                    decision, status, ..
+                } => {
                     assert_eq!(decision, Some(InteractionDecision::Approved));
                     assert_eq!(status, InteractionEndStatus::Resolved);
                 }
@@ -266,7 +270,10 @@ mod tests {
             assert_eq!(tool.code_delta.as_ref().expect("code delta").lines_added, 3);
             assert_eq!(tool.effects.len(), 1);
             assert!(state.interactions.is_empty(), "已应答交互离开 pending 列表");
-            assert_eq!(state.activity, qaqh_ringing_contract::fact::ActivityState::Idle);
+            assert_eq!(
+                state.activity,
+                qaqh_ringing_contract::fact::ActivityState::Idle
+            );
         });
     }
 }

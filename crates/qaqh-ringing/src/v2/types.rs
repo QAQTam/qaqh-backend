@@ -4,8 +4,6 @@
 //! generic so the wire crate stays independent from session projection types;
 //! `qaqh-client` binds the payload to its typed projection model.
 
-use qaqh_domain::RingingChannel;
-use qaqh_domain::state::ControlState;
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
@@ -13,7 +11,6 @@ use ts_rs::TS;
 use crate::command::RingingCommand;
 use crate::envelope::{RingingCommandAckStatus, RingingCommandState};
 use crate::protocol::{RINGING_SCHEMA, is_safe_integer};
-use crate::v2::cursor::{CanonicalCursor, CursorToken};
 use crate::v2::{RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
 
 pub use qaqh_types::SettingValue;
@@ -334,12 +331,10 @@ pub struct RingingV2Capabilities {
     pub drive: bool,
     pub service: bool,
     pub content: bool,
-    /// 单流订阅能力（2026-09-24 冻结修订，tag
-    /// `tui-ringing-v2-frozen-2026-09-24-single-stream`）。
+    /// 单会话 SSE 流能力。
     ///
-    /// `true` = `GET /ringing/v2/sessions/{seed}/events` 是**每 seed 一条**流，
-    /// 事件带 `stream_key` 由客户端 demux；per-channel 的 `events/{channel}`
-    /// 已硬切删除（不再返回 404 兼容视图）。
+    /// `true` = `GET /ringing/v2/sessions/{seed}/events` 返回一条按序号递增的
+    /// `SessionEventFrame` 流，业务类型由帧自身携带。
     ///
     /// `#[serde(default)]`：旧 client 反序列化新响应时该字段为 `false`，
     /// 新 client 必须显式断言 `true` 才能假定单流语义。
@@ -453,237 +448,6 @@ pub struct RingingV2LeaseRenewResponse {
     pub renew_interval_ms: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum RingingV2Delivery {
-    Reliable,
-    Replaceable,
-    Ephemeral,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum RingingV2StreamKey {
-    Channel(RingingChannel),
-    Resource { kind: String, id: String },
-}
-
-/// v2 event envelope. `P` is the typed projection payload selected by the
-/// transport/client boundary.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2EventEnvelope<P> {
-    pub schema: String,
-    pub version: u32,
-    pub server_epoch: String,
-    #[serde(rename = "session_id")]
-    pub session_id: String,
-    pub event_id: String,
-    pub stream_key: RingingV2StreamKey,
-    pub delivery: RingingV2Delivery,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cursor: Option<CursorToken>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub log_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fact_seq: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub projection_index: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub revision: Option<u64>,
-    /// Command/event causal link. Interaction completion is recognized only
-    /// when this matches the submitted `command_id`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub causation_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub correlation_id: Option<String>,
-    /// Wall-clock commit time of the source fact, epoch milliseconds (C3).
-    /// Synthetic ephemeral events without a source fact omit it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ts_ms: Option<u64>,
-    pub payload: P,
-}
-
-impl<P> RingingV2EventEnvelope<P> {
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema != RINGING_SCHEMA
-            || self.version != RINGING_V2_VERSION
-            || self.server_epoch.trim().is_empty()
-            || self.session_id.trim().is_empty()
-            || self.event_id.trim().is_empty()
-            || self
-                .causation_id
-                .as_deref()
-                .is_some_and(|value| value.trim().is_empty())
-            || self
-                .correlation_id
-                .as_deref()
-                .is_some_and(|value| value.trim().is_empty())
-        {
-            return Err("invalid_v2_envelope");
-        }
-
-        match self.delivery {
-            RingingV2Delivery::Reliable => {
-                let token = self.cursor.as_ref().ok_or("missing_cursor")?;
-                let cursor = token
-                    .decode_reliable()
-                    .map_err(|_| "invalid_reliable_cursor")?;
-                if self.log_id.as_deref() != Some(cursor.log_id.as_str())
-                    || self.fact_seq != Some(cursor.fact_seq)
-                    || self.projection_index != Some(cursor.projection_index)
-                    || self.revision.is_none()
-                {
-                    return Err("reliable_cursor_mismatch");
-                }
-            }
-            RingingV2Delivery::Replaceable => {
-                if self.cursor.is_some()
-                    || self.projection_index.is_some()
-                    || self.revision.is_none()
-                {
-                    return Err("invalid_replaceable_envelope");
-                }
-            }
-            RingingV2Delivery::Ephemeral => {
-                if self.cursor.is_some()
-                    || self.log_id.is_some()
-                    || self.fact_seq.is_some()
-                    || self.projection_index.is_some()
-                    || self.revision.is_some()
-                {
-                    return Err("invalid_ephemeral_envelope");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub fn cursor_value(&self) -> Result<Option<CanonicalCursor>, &'static str> {
-        self.validate()?;
-        match self.delivery {
-            RingingV2Delivery::Reliable => self
-                .cursor
-                .as_ref()
-                .ok_or("missing_cursor")?
-                .decode_reliable()
-                .map(Some)
-                .map_err(|_| "invalid_reliable_cursor"),
-            RingingV2Delivery::Replaceable | RingingV2Delivery::Ephemeral => Ok(None),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum RingingV2ResetReason {
-    CursorExpired,
-    LogIdMismatch,
-    UnknownFact,
-    UpgradeRequired,
-    ReplayOverflow,
-    EpochMismatch,
-    CrossSession,
-    SnapshotMissing,
-    SnapshotExpired,
-    SnapshotHashMismatch,
-    StaleWriter,
-    /// 会话级内容总量 hard watermark 触发的重置原因（session-fact spec §5.6）。
-    ///
-    /// 交互正文的 pinned 准入配额是另一条写路径：超限时不入库并让客户端按
-    /// 正文 404 降级，不会把这个值当作流 reset reason。
-    ContentQuotaExceeded,
-    PerConnectionOverflow,
-    ProgressBufferOverflow,
-    ActorMailboxOverflow,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2ResetRequired {
-    pub schema: String,
-    pub version: u32,
-    pub server_epoch: String,
-    #[serde(rename = "session_id")]
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub log_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub snapshot_cursor: Option<CursorToken>,
-    pub reason: RingingV2ResetReason,
-}
-
-impl RingingV2ResetRequired {
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema != RINGING_SCHEMA
-            || self.version != RINGING_V2_VERSION
-            || self.server_epoch.trim().is_empty()
-            || self.session_id.trim().is_empty()
-        {
-            return Err("invalid_reset_required");
-        }
-        if let Some(token) = &self.snapshot_cursor {
-            let cursor = token
-                .decode_snapshot()
-                .map_err(|_| "invalid_snapshot_cursor")?;
-            if self.log_id.as_deref() != Some(cursor.log_id.as_str()) {
-                return Err("reset_log_mismatch");
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum RingingV2InteractionKind {
-    Permission,
-    Ask,
-    /// Rust 侧保留历史变体名，wire 值统一为 `plan`（与 canonical delta 的
-    /// `InteractionKind::Plan` 一致）。2026-09-24 修订前 bootstrap 会序列化成
-    /// `plan_review`，壳层必须自己映射；现在两条路径使用同一个 wire 值。
-    #[serde(rename = "plan")]
-    PlanReview,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2PendingInteraction {
-    pub interaction_id: String,
-    pub call_id: String,
-    pub turn_id: String,
-    pub kind: RingingV2InteractionKind,
-    /// modal 正文载荷（#345 / 2026-09-24 修订）。
-    ///
-    /// - `Ref { content_ref }`：正文在 content store 里，用
-    ///   `GET /ringing/v2/content/{content_ref}` 取（ask / plan / permission）；
-    /// - `Inline { text }`：正文随事件内联；
-    /// - `None`：历史事实没有可取的正文，或正文入 store 失败；客户端按
-    ///   「正文不可用」降级，不得再依赖已删除的 tool 频道快照。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub request: Option<RingingV2ContentValue>,
-}
-
-/// pending interaction 的正文载荷（#345）。
-///
-/// 与 canonical `ContentValue` 的 serde 形态一致（`kind` / `data` 判别式），
-/// 但 wire 层不依赖 session crate，因此在这里独立声明；`Unavailable` 的
-/// reason 结构不在此重复建模，按不透明 JSON 透传。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum RingingV2ContentValue {
-    Inline { text: String },
-    Ref { content_ref: String },
-    Unavailable(serde_json::Value),
-}
-
-pub type RingingV2PendingSet = Vec<RingingV2PendingInteraction>;
-
 // ── 本地壳层审批投影 / content 上传响应（B02 handler 契约收口）────────────
 //
 // `GET /ringing/v2/sessions/{id}/approvals`（admin 桌面宿主面）与
@@ -717,7 +481,7 @@ pub struct RingingV2PendingPermissionView {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2PendingInteractionView {
     pub id: String,
-    pub kind: RingingV2InteractionKind,
+    pub kind: qaqh_ringing_contract::fact::InteractionKind,
     pub details: Option<serde_json::Value>,
 }
 
@@ -730,8 +494,8 @@ pub struct RingingV2PendingApprovals {
     pub pending_interaction: Option<RingingV2PendingInteractionView>,
 }
 
-/// device 审批 challenge 的种类。**与 admin 面
-/// [`RingingV2InteractionKind`] 是两套词表**：challenge 侧 `plan` 不带
+/// device 审批 challenge 的种类。它与 admin 面的 `InteractionKind` 使用两套词表：
+/// challenge 侧 `plan` 不带
 /// `_review` 后缀、permission 记作 `tool_permission`——wire 原样保留，
 /// 不与 admin 混用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -786,82 +550,6 @@ pub struct RingingV2ContentUploadResponse {
     pub sha256: String,
     pub size: u64,
     pub truncated: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2DriverState {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub holder: Option<String>,
-    pub driver_epoch: u64,
-    pub can_claim: bool,
-}
-
-/// v2 control snapshot. Existing control fields are flattened so the type can
-/// grow additively while `interactions` and `driver` remain explicitly typed.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct RingingV2ControlState {
-    #[serde(flatten)]
-    pub base: ControlState,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub interactions: RingingV2PendingSet,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub driver: Option<RingingV2DriverState>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2ChannelSnapshot<S> {
-    pub channel: RingingChannel,
-    pub state_revision: u64,
-    pub snapshot_version: u32,
-    pub state: S,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2Bootstrap<C, V, T> {
-    pub schema: String,
-    pub version: u32,
-    pub server_epoch: String,
-    #[serde(rename = "session_id")]
-    pub session_id: String,
-    pub snapshot_cursor: CursorToken,
-    pub control: RingingV2ChannelSnapshot<C>,
-    pub conversation: RingingV2ChannelSnapshot<V>,
-    pub tool: RingingV2ChannelSnapshot<T>,
-}
-
-impl<C, V, T> RingingV2Bootstrap<C, V, T> {
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.schema != RINGING_SCHEMA
-            || self.version != RINGING_V2_VERSION
-            || self.server_epoch.trim().is_empty()
-            || self.session_id.trim().is_empty()
-        {
-            return Err("invalid_v2_bootstrap");
-        }
-        let cursor = self
-            .snapshot_cursor
-            .decode_snapshot()
-            .map_err(|_| "invalid_snapshot_cursor")?;
-        if self.control.channel != RingingChannel::Control
-            || self.conversation.channel != RingingChannel::Conversation
-            || self.tool.channel != RingingChannel::Tool
-        {
-            return Err("invalid_snapshot_channel");
-        }
-        let _ = cursor;
-        Ok(())
-    }
-
-    pub fn log_id(&self) -> Result<String, &'static str> {
-        self.snapshot_cursor
-            .decode_snapshot()
-            .map(|cursor| cursor.log_id)
-            .map_err(|_| "invalid_snapshot_cursor")
-    }
 }
 
 /// v2 command acknowledgement.
@@ -993,9 +681,7 @@ pub fn open_path() -> String {
     format!("{RINGING_V2_BASE_PATH}/clients/open")
 }
 
-/// 单流订阅路径（每 seed 一条 SSE；事件带 `stream_key`）。
-///
-/// 2026-09-24 冻结修订：per-channel 的 `events/{channel}` 已硬切删除。
+/// 单流订阅路径（每 session 一条 SSE，帧直接携带类型化事件与序号）。
 pub fn events_path(session_id: &str) -> String {
     format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/events")
 }
@@ -1003,39 +689,6 @@ pub fn events_path(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use qaqh_domain::state::{ConversationState, ToolState};
-
-    fn reliable_envelope() -> RingingV2EventEnvelope<serde_json::Value> {
-        let cursor = CanonicalCursor::new("log-1", 42, 1);
-        RingingV2EventEnvelope {
-            schema: RINGING_SCHEMA.into(),
-            version: RINGING_V2_VERSION,
-            server_epoch: "epoch-1".into(),
-            session_id: "seed-1".into(),
-            event_id: "event-1".into(),
-            stream_key: RingingV2StreamKey::Channel(RingingChannel::Control),
-            delivery: RingingV2Delivery::Reliable,
-            cursor: Some(CursorToken::encode_reliable(&cursor).expect("cursor")),
-            log_id: Some(cursor.log_id),
-            fact_seq: Some(cursor.fact_seq),
-            projection_index: Some(cursor.projection_index),
-            revision: Some(7),
-            causation_id: Some("cmd-1".into()),
-            correlation_id: None,
-            ts_ms: Some(1_789_830_000_000),
-            payload: serde_json::json!({ "kind": "control_delta" }),
-        }
-    }
-
-    #[test]
-    fn reliable_envelope_round_trips() {
-        let envelope = reliable_envelope();
-        envelope.validate().expect("valid envelope");
-        let json = serde_json::to_string(&envelope).expect("serialize");
-        let decoded: RingingV2EventEnvelope<serde_json::Value> =
-            serde_json::from_str(&json).expect("deserialize");
-        decoded.validate().expect("valid decoded envelope");
-    }
 
     #[test]
     fn session_create_round_trips_profile_and_effort() {
@@ -1113,128 +766,6 @@ mod tests {
             }
             other => panic!("unexpected command: {other:?}"),
         }
-    }
-
-    #[test]
-    fn delivery_constraints_are_enforced() {
-        let mut replaceable = reliable_envelope();
-        replaceable.delivery = RingingV2Delivery::Replaceable;
-        replaceable.cursor = None;
-        replaceable.projection_index = None;
-        replaceable.validate().expect("replaceable envelope");
-
-        let mut ephemeral = reliable_envelope();
-        ephemeral.delivery = RingingV2Delivery::Ephemeral;
-        ephemeral.cursor = None;
-        ephemeral.log_id = None;
-        ephemeral.fact_seq = None;
-        ephemeral.projection_index = None;
-        ephemeral.revision = None;
-        ephemeral.validate().expect("ephemeral envelope");
-
-        replaceable.revision = None;
-        assert_eq!(replaceable.validate(), Err("invalid_replaceable_envelope"));
-        ephemeral.fact_seq = Some(1);
-        assert_eq!(ephemeral.validate(), Err("invalid_ephemeral_envelope"));
-    }
-
-    #[test]
-    fn bootstrap_requires_the_three_frozen_channels() {
-        let bootstrap = RingingV2Bootstrap {
-            schema: RINGING_SCHEMA.into(),
-            version: RINGING_V2_VERSION,
-            server_epoch: "epoch-1".into(),
-            session_id: "seed-1".into(),
-            snapshot_cursor: CursorToken::encode_snapshot(&CanonicalCursor::snapshot("log-1", 42))
-                .expect("cursor"),
-            control: RingingV2ChannelSnapshot {
-                channel: RingingChannel::Control,
-                state_revision: 1,
-                snapshot_version: 1,
-                state: RingingV2ControlState::default(),
-            },
-            conversation: RingingV2ChannelSnapshot {
-                channel: RingingChannel::Conversation,
-                state_revision: 2,
-                snapshot_version: 1,
-                state: ConversationState::default(),
-            },
-            tool: RingingV2ChannelSnapshot {
-                channel: RingingChannel::Tool,
-                state_revision: 3,
-                snapshot_version: 1,
-                state: ToolState::default(),
-            },
-        };
-        bootstrap.validate().expect("valid bootstrap");
-        assert_eq!(bootstrap.log_id().expect("log id"), "log-1");
-    }
-
-    #[test]
-    fn bootstrap_json_matches_frozen_shape() {
-        let token = CursorToken::encode_snapshot(&CanonicalCursor::snapshot("log-1", 42))
-            .expect("snapshot cursor")
-            .into_string();
-        let value = serde_json::json!({
-            "schema": RINGING_SCHEMA,
-            "version": RINGING_V2_VERSION,
-            "server_epoch": "epoch-1",
-            "session_id": "seed-1",
-            "snapshot_cursor": token,
-            "control": {
-                "channel": "control",
-                "state_revision": 7,
-                "snapshot_version": 1,
-                "state": {
-                    "interactions": [{
-                        "interaction_id": "i1",
-                        "call_id": "c1",
-                        "turn_id": "t1",
-                        "kind": "plan"
-                    }],
-                    "driver": {
-                        "holder": null,
-                        "driver_epoch": 3,
-                        "can_claim": true
-                    }
-                }
-            },
-            "conversation": {
-                "channel": "conversation",
-                "state_revision": 19,
-                "snapshot_version": 1,
-                "state": {}
-            },
-            "tool": {
-                "channel": "tool",
-                "state_revision": 11,
-                "snapshot_version": 1,
-                "state": {}
-            }
-        });
-        let bootstrap: RingingV2Bootstrap<RingingV2ControlState, ConversationState, ToolState> =
-            serde_json::from_value(value).expect("frozen bootstrap shape");
-        bootstrap.validate().expect("valid bootstrap");
-        assert_eq!(bootstrap.control.state.interactions.len(), 1);
-        assert_eq!(
-            bootstrap.control.state.interactions[0].kind,
-            RingingV2InteractionKind::PlanReview
-        );
-        assert_eq!(
-            serde_json::to_value(bootstrap.control.state.interactions[0].kind)
-                .expect("serialize interaction kind"),
-            serde_json::json!("plan")
-        );
-        assert_eq!(
-            bootstrap
-                .control
-                .state
-                .driver
-                .as_ref()
-                .expect("driver")
-                .driver_epoch,
-            3
-        );
     }
 
     #[test]

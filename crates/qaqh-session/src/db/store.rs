@@ -3,7 +3,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 pub fn now_ms() -> i64 {
@@ -180,10 +180,7 @@ pub fn session_row_with_turn_count(
     Ok(session_row(conn, session_id)?.map(|row| (row, count)))
 }
 
-pub fn session_parent(
-    conn: &Connection,
-    session_id: &str,
-) -> rusqlite::Result<Option<String>> {
+pub fn session_parent(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
     match conn.query_row(
         "SELECT parent_session_id FROM sessions WHERE session_id = ?1",
         [session_id],
@@ -325,9 +322,7 @@ pub fn update_session_columns(
             .model_selection
             .clone()
             .map(|selection| match selection {
-                qaqh_types::SettingValue::Use { value } => {
-                    serde_json::to_string(&value).map(Some)
-                }
+                qaqh_types::SettingValue::Use { value } => serde_json::to_string(&value).map(Some),
                 qaqh_types::SettingValue::Inherit => Ok(None),
             })
             .transpose()
@@ -357,17 +352,16 @@ pub fn update_session_columns(
         sets.push("settings_revision = settings_revision + 1".to_string());
     }
     values.push(Box::new(session_id.to_string()) as Box<dyn rusqlite::ToSql>);
-    let placeholders: Vec<String> = (1..=values.len()).map(|index| format!("?{index}")).collect();
+    let placeholders: Vec<String> = (1..=values.len())
+        .map(|index| format!("?{index}"))
+        .collect();
     let session_id_placeholder = placeholders.last().expect("session id placeholder");
     let mut predicate = format!("session_id = {session_id_placeholder}");
     if let Some(expected_revision) = patch.expected_settings_revision {
         values.push(Box::new(expected_revision as i64) as Box<dyn rusqlite::ToSql>);
         predicate.push_str(&format!(" AND settings_revision = ?{}", values.len()));
     }
-    let sql = format!(
-        "UPDATE sessions SET {} WHERE {predicate}",
-        sets.join(", "),
-    );
+    let sql = format!("UPDATE sessions SET {} WHERE {predicate}", sets.join(", "),);
     conn.execute(&sql, rusqlite::params_from_iter(values))
 }
 
@@ -722,7 +716,11 @@ pub fn recent_tool_calls(
     session_id: &str,
     limit: u32,
 ) -> rusqlite::Result<Vec<ToolCallRow>> {
-    read_tool_calls_where(conn, session_id, &format!("ORDER BY started_at_ms DESC LIMIT {limit}"))
+    read_tool_calls_where(
+        conn,
+        session_id,
+        &format!("ORDER BY started_at_ms DESC LIMIT {limit}"),
+    )
 }
 
 fn read_tool_calls_where(
@@ -791,7 +789,10 @@ pub struct NewInteraction {
     pub payload_json: String,
 }
 
-pub fn create_interaction(conn: &mut Connection, interaction: &NewInteraction) -> rusqlite::Result<()> {
+pub fn create_interaction(
+    conn: &mut Connection,
+    interaction: &NewInteraction,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO interactions (interaction_id, session_id, turn_id, call_id, kind, payload_json, status, created_at_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7)",
@@ -866,7 +867,9 @@ fn map_interaction(row: &rusqlite::Row<'_>) -> rusqlite::Result<InteractionRow> 
     })
 }
 
-fn rows_from<T>(rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>) -> rusqlite::Result<Vec<T>> {
+fn rows_from<T>(
+    rows: rusqlite::MappedRows<'_, impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>>,
+) -> rusqlite::Result<Vec<T>> {
     rows.collect()
 }
 

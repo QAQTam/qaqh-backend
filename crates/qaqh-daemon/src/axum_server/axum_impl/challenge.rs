@@ -14,8 +14,9 @@ use std::time::{Duration, Instant};
 use qaqh_domain::AskAnswer;
 use qaqh_ringing::{
     RingingCommand, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
-    RingingV2InteractionKind, RingingV2PendingApprovals,
+    RingingV2PendingApprovals,
 };
+use qaqh_ringing_contract::fact::InteractionKind;
 use serde_json::{Value, json};
 
 pub const APPROVAL_TTL: Duration = Duration::from_secs(5 * 60);
@@ -40,11 +41,11 @@ impl ApprovalKind {
 
     /// admin 面的 interaction kind → challenge 种类。permission 不经本映射：
     /// admin 面的 permission 槽走 tool_call 源 id，单独签发。
-    fn from_interaction(kind: RingingV2InteractionKind) -> Option<Self> {
+    fn from_interaction(kind: InteractionKind) -> Option<Self> {
         match kind {
-            RingingV2InteractionKind::Ask => Some(Self::Ask),
-            RingingV2InteractionKind::PlanReview => Some(Self::Plan),
-            RingingV2InteractionKind::Permission => None,
+            InteractionKind::Ask => Some(Self::Ask),
+            InteractionKind::Plan => Some(Self::Plan),
+            InteractionKind::Permission => None,
         }
     }
 }
@@ -288,7 +289,7 @@ mod tests {
     }
 
     /// device 面的输入是 admin 投影 DTO（与 handler 序列化同一份类型）。
-    fn interaction_pending(id: &str, kind: RingingV2InteractionKind) -> RingingV2PendingApprovals {
+    fn interaction_pending(id: &str, kind: InteractionKind) -> RingingV2PendingApprovals {
         RingingV2PendingApprovals {
             pending_permission: None,
             pending_interaction: Some(RingingV2PendingInteractionView {
@@ -347,7 +348,7 @@ mod tests {
     #[test]
     fn consume_is_one_shot_and_scope_checked() {
         let store = ChallengeStore::default();
-        let pending = interaction_pending("int_01ABC", RingingV2InteractionKind::PlanReview);
+        let pending = interaction_pending("int_01ABC", InteractionKind::Plan);
         let views = store.issue_views("seed1", &pending).unwrap();
         let id = views[0].challenge_id.clone();
 
@@ -402,11 +403,10 @@ mod tests {
     fn pending_limit_is_enforced() {
         let store = Arc::new(ChallengeStore::default());
         for index in 0..MAX_PENDING_APPROVALS {
-            let pending =
-                interaction_pending(&format!("int_{index:028}"), RingingV2InteractionKind::Ask);
+            let pending = interaction_pending(&format!("int_{index:028}"), InteractionKind::Ask);
             assert!(store.issue_views("seed1", &pending).is_ok());
         }
-        let overflow = interaction_pending("int_overflow", RingingV2InteractionKind::Ask);
+        let overflow = interaction_pending("int_overflow", InteractionKind::Ask);
         assert_eq!(
             store.issue_views("seed1", &overflow).unwrap_err(),
             "approval_limit"

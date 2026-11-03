@@ -23,14 +23,13 @@ pub(crate) fn handle(service: &QaqhService, command: SystemCommand) -> QaqhResul
     }
 }
 
-pub(crate) fn handle_ringing(
-    service: &QaqhService,
-    command: &RingingCommand,
-) -> QaqhResult<Value> {
+pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) -> QaqhResult<Value> {
     match command {
         RingingCommand::ConfigSave { patch } => {
             let patch: qaqh_config_api::ConfigPatch = serde_json::from_value(patch.clone())
-                .map_err(|error| QaqhError::invalid(format!("invalid config.save payload: {error}")))?;
+                .map_err(|error| {
+                    QaqhError::invalid(format!("invalid config.save payload: {error}"))
+                })?;
             service.save_config(patch)?;
             load_config().map_err(QaqhError::message)
         }
@@ -72,9 +71,10 @@ pub(crate) fn handle_ringing(
             api_key.as_deref(),
         ),
         RingingCommand::ProfileSetDefault { id, name } => {
-            let id = id.as_deref().or(name.as_deref()).ok_or_else(|| {
-                QaqhError::invalid("missing 'id' or 'name' parameter")
-            })?;
+            let id = id
+                .as_deref()
+                .or(name.as_deref())
+                .ok_or_else(|| QaqhError::invalid("missing 'id' or 'name' parameter"))?;
             let path = qaqh_profile::default_profiles_path();
             let mut store = qaqh_profile::ProfilesStore::load_or_create(&path)
                 .map_err(|error| QaqhError::context("failed to load profiles", error))?;
@@ -237,6 +237,8 @@ fn create_profile(
         Ok(())
     })?;
 
-    log::info!("[profile] successfully created profile '{id}' without polluting global active config");
+    log::info!(
+        "[profile] successfully created profile '{id}' without polluting global active config"
+    );
     Ok(Value::Null)
 }

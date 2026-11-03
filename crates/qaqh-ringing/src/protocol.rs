@@ -12,4 +12,3 @@ pub const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 pub fn is_safe_integer(value: u64) -> bool {
     value <= MAX_SAFE_INTEGER
 }
-

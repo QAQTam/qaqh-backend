@@ -30,23 +30,15 @@ pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_d
 pub use endpoint::QueryRequest;
 pub use error::{ClientError, Result};
 pub use projection::sanitize_session_list;
-/// 领域状态类型（`qaqh_domain::state`）。
-///
-/// 纯 v2 之后**不再**经 v1 bootstrap 的 `state` 访问器取用：v2 bootstrap 直接返回
-/// typed 三频道快照（[`ClientV2Bootstrap`]）。这里保留导出只因为 v1 领域投影仍在
-/// runtime 内部使用，壳层不应再依赖。
-pub use qaqh_domain::state::{
-    ControlState, ConversationState, InteractionKind, LastFailure, LastRound, PendingInteraction,
-    RunningTool, ToolState,
-};
 /// 设备配对 / 设备管理的 wire 类型（`Client::issue_pairing_token` 等方法的返回值）。
 ///
 /// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
 /// 否则壳层就只能手解 JSON——那正是本客户端存在的理由要反对的事。
 pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
 pub use qaqh_ringing::{
-    CommandPrecondition, CommandTarget, ProviderUpsertDto, SecretWrite, SessionCreateResult,
-    SessionSettingsPatch, ToolsSettingPatch, RingingV2CommandEnvelope, COMMAND_CONTRACT_REVISION,
+    COMMAND_CONTRACT_REVISION, CommandPrecondition, CommandTarget, ProviderUpsertDto,
+    RingingV2CommandEnvelope, SecretWrite, SessionCreateResult, SessionSettingsPatch,
+    ToolsSettingPatch,
 };
 /// 公开字段背后的**类型名**：`ConfigDto.credential` 的取值域由
 /// `CredentialSource` 定义，`ConfigDto.wire` 与 `ConfigPatch::wire` 的规范拼写
@@ -74,22 +66,20 @@ pub use service_types::{
 };
 pub use session::RingingSession;
 pub use types::{
-    AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, Channel,
-    CommandOptions, CompactStatus, ContentRef, ControlEvent, ConversationSendMessage,
-    ConversationEvent, DashboardDocument,
-    DashboardTask, DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot, DomainError,
+    AgentLifecycleState, AskAnswer, AskMode, AskResolution, CLIENT_SESSION_HEADER, CommandOptions,
+    CompactStatus, ContentRef, ConversationSendMessage, DashboardDocument, DashboardTask,
+    DomainActivityState, DomainAskQuestion, DomainDashboardSnapshot, DomainError,
     DomainSessionState, ErrorScope, ImageBlock, InputPurpose, MAX_SAFE_INTEGER, NoticeLevel,
     PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState, RINGING_SCHEMA,
-    ReconnectReason, RingingCommand, RingingCommandAckStatus, RingingCommandState,
-    RoundDeltaKind, SessionActivity,
-    SessionListEntry, SessionMeta, SessionRunStatus, SkillInfo, SkillRuntimeInfo, SkillsStatus,
-    ToolContinuation, ToolError, ToolEvent, ToolImage, ToolModelPayload, ToolResult,
-    ToolStatus, UsageInfo, is_safe_integer,
+    ReconnectReason, RingingCommand, RingingCommandAckStatus, RingingCommandState, RoundDeltaKind,
+    SessionActivity, SessionListEntry, SessionMeta, SessionRunStatus, SkillInfo, SkillRuntimeInfo,
+    SkillsStatus, ToolContinuation, ToolError, ToolImage, ToolModelPayload, ToolResult, ToolStatus,
+    UsageInfo, is_safe_integer,
 };
 pub use v2::{
-    CLIENT_V2_END_OF_FACT, ClientV2Bootstrap, ClientV2Event, ClientV2EventEnvelope,
-    ClientV2ResyncRequired, ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent,
-    ClientV2TeamResponse, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+    ClientV2Bootstrap, ClientV2Event, ClientV2ResyncRequired, ClientV2SessionState,
+    ClientV2Subscription, ClientV2SubscriptionEvent, ClientV2TeamResponse, RINGING_V2_BASE_PATH,
+    RINGING_V2_VERSION,
 };
 /// The v2 contract exposes the session fact model under its real module
 /// names; there is no `ClientV2*` renaming layer.

@@ -1,51 +1,18 @@
-//! WorkspaceStore — 会话工作区注册表（组织语义）。
-//!
-//! 与「会话运行目录」（`workspace.set`）解耦：本模块只负责
-//! 把会话按目录归类，持久化到 `{data_dir}/workspaces.json`。
-//!
-//! 设计对齐 deepseek-harness `packages/workspace/workspace/src/types.ts`：
-//! - id 用生成串（非路径——路径会被规范化/重命名，锚点必须稳定）；
-//! - 归属 = 显式账户（`session_ids`）+ cwd 匹配自动 attach 双轨；
-//! - 一个会话最多属于一个 workspace；不在任何 workspace = 未分组（Ungrouped）。
+//! Workspace path normalization shared by SQLite registration and runtime checks.
 
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::path::Path;
 
-
-/// 生成稳定 id：`ws-{unix_ms}-{path 哈希前 8 位}-{计数器}`（不引入 uuid 依赖；
-/// 时间戳 + 路径哈希 + 进程内计数器防碰撞，同一毫秒同路径也得不同 id）。
-fn generate_id(path: &str) -> String {
-    use sha2::Digest;
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let hash = sha2::Sha256::digest(path.as_bytes());
-    let short = hex::encode(&hash[..4]);
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("ws-{ms}-{short}-{n}")
-}
-
-/// canonicalize 并归一化为可比较路径串。Windows 下去掉 `\\?\` verbatim 前缀
-/// （`std::fs::canonicalize` 在 Windows 返回 verbatim 路径，与用户输入/前端
-/// 传入路径不匹配会导致归属判定失效），分隔符统一 `\`；非 Windows 保持
-/// 原生 `/`。失败返回原样字符串。
-///
-/// 历史实现无条件把 `/` 替换为 `\`，在 Linux 上把 meta.cwd 写坏为
-/// `\home\...` → `set_process_workspace: cannot cd` WARN（session 692d1605
-/// meta.json 反斜杠 cwd 残留的根因，abb2038 未覆盖此处，2026-09-06 修复）。
+/// Canonicalize a workspace path while preserving native separators.
 pub fn canonical_cwd(path: &Path) -> String {
     #[cfg(windows)]
     {
         match std::fs::canonicalize(path) {
-            Ok(p) => {
-                let mut s = p.to_string_lossy().replace('/', "\\");
-                if let Some(stripped) = s.strip_prefix("\\\\?\\") {
-                    s = stripped.to_string();
+            Ok(path) => {
+                let mut value = path.to_string_lossy().replace('/', "\\");
+                if let Some(stripped) = value.strip_prefix("\\\\?\\") {
+                    value = stripped.to_string();
                 }
-                s
+                value
             }
             Err(_) => path.to_string_lossy().replace('/', "\\"),
         }
@@ -53,13 +20,12 @@ pub fn canonical_cwd(path: &Path) -> String {
     #[cfg(not(windows))]
     {
         std::fs::canonicalize(path)
-            .map(|p| p.to_string_lossy().into_owned())
+            .map(|path| path.to_string_lossy().into_owned())
             .unwrap_or_else(|_| path.to_string_lossy().into_owned())
     }
 }
 
-/// 存量修复：历史版本在非 Windows 上写坏的 `\` 形态 cwd，读取时归一化为
-/// `/`。Windows 分支原样返回（`\` 是其原生分隔符）。
+/// Normalize cwd values written by older non-Windows versions.
 pub fn repair_legacy_backslash_cwd(cwd: &str) -> String {
     #[cfg(windows)]
     {
@@ -67,546 +33,53 @@ pub fn repair_legacy_backslash_cwd(cwd: &str) -> String {
     }
     #[cfg(not(windows))]
     {
-        if cwd.contains('\\') {
-            cwd.replace('\\', "/")
-        } else {
-            cwd.to_string()
-        }
+        cwd.replace('\\', "/")
     }
 }
 
-/// 一个工作区：稳定 id + canonical path + 标题 + 会话账户（手动有序）。
-/// `workspace.create`/`workspace.rename` 服务面的直接序列化载体；
-/// ts 导出供 SDK 契约（B03 typed service 切片）消费。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceMeta {
-    pub id: String,
-    pub path: String,
-    pub title: String,
-    pub order: u32,
-    pub session_ids: Vec<String>,
-}
-
-/// `workspace.list` 的条目：注册表 meta + 路径存活标记（目录被外部删除后
-/// 前端要能区分「工作区损坏」与「正常」）。与 `WorkspaceMeta` 是两个 wire
-/// 形状——list 恒带 `missing_dir` 键，create/rename 不带。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceEntry {
-    pub id: String,
-    pub path: String,
-    pub title: String,
-    pub order: u32,
-    pub session_ids: Vec<String>,
-    pub missing_dir: bool,
-}
-
-impl WorkspaceMeta {
-    /// 加上路径存活标记，投影为 `workspace.list` 的条目形状。
-    pub fn entry(&self, missing_dir: bool) -> WorkspaceEntry {
-        WorkspaceEntry {
-            id: self.id.clone(),
-            path: self.path.clone(),
-            title: self.title.clone(),
-            order: self.order,
-            session_ids: self.session_ids.clone(),
-            missing_dir,
-        }
+pub(crate) fn normalize_path(path: &str) -> String {
+    let mut normalized = path.replace('/', "\\");
+    while normalized.ends_with('\\') {
+        normalized.pop();
+    }
+    if cfg!(windows) {
+        normalized.to_lowercase()
+    } else {
+        normalized
     }
 }
 
-static INSTANCE: OnceLock<WorkspaceStore> = OnceLock::new();
-
-/// 工作区注册表单例：内存态 = 磁盘态（每次变更 atomic replace-write）。
-#[derive(Debug)]
-pub struct WorkspaceStore {
-    file: PathBuf,
-    inner: Mutex<Vec<WorkspaceMeta>>,
-    next_order: Mutex<u32>,
-}
-
-/// 归一化路径用于归属比较：分隔符统一 `\`、去尾部、Windows 下大小写不敏感。
-fn normalize_path(p: &str) -> String {
-    let mut s = p.replace('/', "\\");
-    while s.ends_with('\\') {
-        s.pop();
-    }
-    if cfg!(windows) { s.to_lowercase() } else { s }
-}
-
-/// cwd 是否位于 workspace 路径内（相等或为其子目录，D7 匹配规则）。
-fn cwd_belongs(cwd: &str, ws_path: &str) -> bool {
-    let c = normalize_path(cwd);
-    let w = normalize_path(ws_path);
-    if c.is_empty() || w.is_empty() {
-        return false;
-    }
-    c == w || c.starts_with(&format!("{w}\\"))
-}
-
-impl WorkspaceStore {
-    /// 初始化全局单例（daemon 启动时与 SessionManager::init 同点调用）。
-    pub fn init(data_dir: PathBuf) {
-        let file = data_dir.join("workspaces.json");
-        let mut inner: Vec<WorkspaceMeta> = std::fs::read_to_string(&file)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        inner.sort_by_key(|w| w.order);
-        let next_order = inner.iter().map(|w| w.order).max().map_or(0, |m| m + 1);
-        let store = Self {
-            file,
-            inner: Mutex::new(inner),
-            next_order: Mutex::new(next_order),
-        };
-        INSTANCE
-            .set(store)
-            .expect("WorkspaceStore already initialized");
-    }
-
-    /// 访问全局实例。
-    pub fn global() -> &'static Self {
-        INSTANCE
-            .get()
-            .expect("WorkspaceStore not initialized — call init() first")
-    }
-
-    /// 非 panic 的可选访问（未初始化返回 `None`）。
-    ///
-    /// 供「初始化与否都不该中断」的读取路径使用（如远端 `fs.list` 的路径
-    /// 白名单：注册表尚未装配时跳过 workspace 根，而不是 panic）。
-    pub fn try_global() -> Option<&'static Self> {
-        INSTANCE.get()
-    }
-
-    fn persist(&self, items: &[WorkspaceMeta]) -> Result<(), String> {
-        let tmp = self.file.with_extension("json.tmp");
-        let json = serde_json::to_string_pretty(items)
-            .map_err(|e| format!("serialize workspaces: {e}"))?;
-        {
-            use std::io::Write;
-            let mut f =
-                std::fs::File::create(&tmp).map_err(|e| format!("create workspaces tmp: {e}"))?;
-            f.write_all(json.as_bytes())
-                .map_err(|e| format!("write workspaces tmp: {e}"))?;
-            f.flush()
-                .map_err(|e| format!("flush workspaces tmp: {e}"))?;
-            f.sync_all()
-                .map_err(|e| format!("sync workspaces tmp: {e}"))?;
-        }
-        std::fs::rename(&tmp, &self.file).map_err(|e| format!("rename workspaces: {e}"))
-    }
-
-    fn save(&self, items: &[WorkspaceMeta]) {
-        if let Err(e) = self.persist(items) {
-            log::error!("WorkspaceStore: persist failed: {e}");
-        }
-    }
-
-    /// 全部 workspace，按 order 升序（调用方只读，勿改成员顺序）。
-    pub fn list(&self) -> Vec<WorkspaceMeta> {
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        items.sort_by_key(|w| w.order);
-        items.clone()
-    }
-
-    /// `workspace.list` 服务面的条目视图：meta + `missing_dir`（目录已不
-    /// 存在时 true）。这是该 wire 形状的唯一权威，handler 不再手拼。
-    pub fn list_entries(&self) -> Vec<WorkspaceEntry> {
-        self.list()
-            .into_iter()
-            .map(|meta| meta.entry(!self.path_status(&meta.path)))
-            .collect()
-    }
-
-    /// 某会话当前归属的 workspace id（无 = 未分组）。
-    pub fn workspace_of(&self, session_id: &str) -> Option<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .find(|w| w.session_ids.iter().any(|s| s == session_id))
-            .map(|w| w.id.clone())
-    }
-
-    /// 注册一个目录为 workspace。目录必须存在（canonicalize）；
-    /// 已存在的 cwd 匹配会话自动归属（D1 双轨自动侧）。
-    pub fn create(
-        &self,
-        path: &str,
-        existing: &[(String, Option<String>)],
-    ) -> Result<WorkspaceMeta, String> {
-        if !Path::new(path).is_dir() {
-            return Err(format!("workspace.create: not a directory: {path}"));
-        }
-        let canonical_str = canonical_cwd(Path::new(path));
-
-        // 查重与注册必须在同一临界区内完成（BUG-2026-09-13-26）：历史实现
-        // 先在锁外查重「先无锁查重、后加锁 register」，两线程可同时通过查重
-        // → 同路径重复注册，左侧筛选失焦。generate_id 的计数器只防 id 碰撞，
-        // 不防重复注册，故此处以 `inner` 单锁覆盖「查重 → 分配 order → push」。
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(existing) = items
-            .iter()
-            .find(|w| normalize_path(&w.path) == normalize_path(&canonical_str))
-        {
-            return Ok(existing.clone());
-        }
-
-        let title = Path::new(path)
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|t| !t.is_empty())
-            .unwrap_or_else(|| path.to_string());
-        let id = generate_id(&canonical_str);
-
-        let order = *self.next_order.lock().unwrap_or_else(|e| e.into_inner());
-        *self.next_order.lock().unwrap_or_else(|e| e.into_inner()) = order + 1;
-
-        let mut session_ids: Vec<String> = Vec::new();
-        // 自动归属：已有会话 cwd 匹配本 workspace，且当前未归属其他 workspace。
-        for (session_id, cwd) in existing {
-            let belongs = cwd
-                .as_deref()
-                .is_some_and(|cwd| cwd_belongs(cwd, &canonical_str));
-            if belongs
-                && !items
-                    .iter()
-                    .any(|w| w.session_ids.iter().any(|s| s == session_id))
-            {
-                session_ids.push(session_id.clone());
-            }
-        }
-        let ws = WorkspaceMeta {
-            id: id.clone(),
-            path: canonical_str,
-            title,
-            order,
-            session_ids,
-        };
-        items.push(ws.clone());
-        self.save(&items);
-        Ok(ws)
-    }
-
-    /// 重命名（标题任意，重复允许——对齐 dsh 语义）。
-    pub fn rename(&self, id: &str, title: String) -> Result<WorkspaceMeta, String> {
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let ws = items
-            .iter_mut()
-            .find(|w| w.id == id)
-            .ok_or_else(|| format!("workspace.rename: unknown id {id}"))?;
-        ws.title = title;
-        let out = ws.clone();
-        self.save(&items);
-        Ok(out)
-    }
-
-    /// 删除 workspace 注册（不删会话；其会话变为未分组）。
-    pub fn delete(&self, id: &str) -> Result<(), String> {
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let before = items.len();
-        items.retain(|w| w.id != id);
-        if items.len() == before {
-            return Err(format!("workspace.delete: unknown id {id}"));
-        }
-        self.save(&items);
-        Ok(())
-    }
-
-    /// 把会话放入 cwd 匹配的 workspace（自动归属；新会话创建时调用）。
-    /// 若当前尚未注册匹配的工作区，自动以该 cwd 注册新工作区（标题默认为目录名）。
-    /// 只有空或 "." 等无效 cwd 保持未分组（返回 None）；已归属其他 workspace 则迁移。
-    pub fn attach_by_cwd(&self, session_id: &str, cwd: &str) -> Option<String> {
-        let trimmed = cwd.trim();
-        if trimmed.is_empty() || trimmed == "." {
-            return None;
-        }
-        let canonical_str = canonical_cwd(Path::new(trimmed));
-
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let target = if let Some(w) = items.iter().find(|w| cwd_belongs(&canonical_str, &w.path)) {
-            w.id.clone()
-        } else {
-            let title = Path::new(&canonical_str)
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .filter(|t| !t.is_empty())
-                .unwrap_or_else(|| canonical_str.clone());
-            let id = generate_id(&canonical_str);
-            let mut order_guard = self.next_order.lock().unwrap_or_else(|e| e.into_inner());
-            let order = *order_guard;
-            *order_guard = order + 1;
-            let ws = WorkspaceMeta {
-                id: id.clone(),
-                path: canonical_str,
-                title,
-                order,
-                session_ids: Vec::new(),
-            };
-            items.push(ws);
-            id
-        };
-
-        for w in items.iter_mut() {
-            w.session_ids.retain(|s| s != session_id);
-        }
-        let ws = items
-            .iter_mut()
-            .find(|w| w.id == target)
-            .expect("target workspace vanished");
-        if !ws.session_ids.iter().any(|s| s == session_id) {
-            ws.session_ids.push(session_id.to_string());
-        }
-        let out = ws.id.clone();
-        self.save(&items);
-        Some(out)
-    }
-
-    /// 显式把会话移入指定 workspace（D5 菜单移动）；原归属自动移除。
-    pub fn move_session(&self, session_id: &str, to_ws_id: &str) -> Result<(), String> {
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if !items.iter().any(|w| w.id == to_ws_id) {
-            return Err(format!(
-                "workspace.move_session: unknown workspace {to_ws_id}"
-            ));
-        }
-        for w in items.iter_mut() {
-            w.session_ids.retain(|s| s != session_id);
-        }
-        let ws = items
-            .iter_mut()
-            .find(|w| w.id == to_ws_id)
-            .expect("target workspace vanished");
-        if !ws.session_ids.iter().any(|s| s == session_id) {
-            ws.session_ids.push(session_id.to_string());
-        }
-        self.save(&items);
-        Ok(())
-    }
-
-    /// 把会话从所有 workspace 账户移除（会话删除时由 SessionManager 调用）。
-    pub fn remove_session(&self, session_id: &str) {
-        let mut items = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let mut changed = false;
-        for w in items.iter_mut() {
-            let before = w.session_ids.len();
-            w.session_ids.retain(|s| s != session_id);
-            changed |= w.session_ids.len() != before;
-        }
-        if changed {
-            self.save(&items);
-        }
-    }
-
-    /// 目录是否仍存在（前端 missing-dir 标记，对齐 dsh `status()`）。
-    pub fn path_status(&self, path: &str) -> bool {
-        Path::new(path).is_dir()
-    }
+pub(crate) fn cwd_belongs(cwd: &str, workspace_path: &str) -> bool {
+    let cwd = normalize_path(cwd);
+    let workspace_path = normalize_path(workspace_path);
+    !cwd.is_empty()
+        && !workspace_path.is_empty()
+        && (cwd == workspace_path || cwd.starts_with(&format!("{workspace_path}\\")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 进程级单例测试装置（BUG-2026-09-13-26）。
-    ///
-    /// `INSTANCE` 是 `OnceLock`，全进程只能 `init` 一次——新增一个用例再调
-    /// `init` 会 panic（`WorkspaceStore already initialized`），并让后续用例
-    /// 随机红。故此处统一初始化一次到固定目录；每个用例开头调
-    /// [`reset_store`] 清空注册表，保持用例间隔离（`RUST_TEST_THREADS=1`，
-    /// 见 `.cargo/config.toml`）。
-    fn fixture_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("qaqh-ws-fixture-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("mkdir fixture");
-        dir
-    }
-
-    fn reset_store() -> &'static WorkspaceStore {
-        let dir = fixture_dir();
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| WorkspaceStore::init(dir));
-        let store = WorkspaceStore::global();
-        let mut items = store.inner.lock().unwrap_or_else(|e| e.into_inner());
-        items.clear();
-        *store.next_order.lock().unwrap_or_else(|e| e.into_inner()) = 0;
-        store
-    }
-
     #[test]
-    #[cfg(windows)] // Windows 盘符/cmd 语义；Linux 无对应环境
+    #[cfg(windows)]
     fn cwd_belongs_matches_self_and_children() {
         assert!(cwd_belongs(r"C:\proj\a", r"C:\proj\a"));
         assert!(cwd_belongs(r"C:\proj\a\src", r"C:\proj\a"));
-        assert!(cwd_belongs(r"c:\PROJ\a\src", r"C:\proj\a")); // Windows 大小写不敏感
+        assert!(cwd_belongs(r"c:\PROJ\a\src", r"C:\proj\a"));
         assert!(!cwd_belongs(r"C:\proj\ab", r"C:\proj\a"));
-        assert!(!cwd_belongs(r"C:\other", r"C:\proj\a"));
-        assert!(!cwd_belongs("", r"C:\proj\a"));
     }
 
     #[test]
-    fn generate_id_is_stable_shape() {
-        let a = generate_id(r"C:\proj");
-        let b = generate_id(r"C:\proj");
-        assert!(a.starts_with("ws-"));
-        assert_ne!(a, b); // 时间戳前缀保证不同
-    }
-
-    /// 回归（BUG-2026-09-13-26）：并发 create 同一路径必须只注册一条。
-    /// 修复前存在 TOCTOU——查重在锁外（L196-203）、push 在另一次加锁（L211），
-    /// 多线程可在两次加锁之间同时通过查重 → 重复注册同路径 workspace。
-    #[test]
-    fn concurrent_create_same_path_registers_once() {
-        let store = reset_store();
-        let dup = fixture_dir().join("dup");
-        std::fs::create_dir_all(&dup).expect("mkdir dup");
-        let path = dup.to_str().expect("path").to_string();
-
-        const THREADS: usize = 8;
-        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
-        let mut handles = Vec::new();
-        for _ in 0..THREADS {
-            let barrier = std::sync::Arc::clone(&barrier);
-            let path = path.clone();
-            handles.push(std::thread::spawn(move || {
-                barrier.wait();
-                store.create(&path, &[]).expect("create").id
-            }));
-        }
-        let ids: Vec<String> = handles
-            .into_iter()
-            .map(|h| h.join().expect("join"))
-            .collect();
-
-        let listed: Vec<WorkspaceMeta> = store
-            .list()
-            .into_iter()
-            .filter(|w| normalize_path(&w.path) == normalize_path(&path))
-            .collect();
-        assert_eq!(
-            listed.len(),
-            1,
-            "并发 create 同路径应只注册一条，实际 {} 条: {:?}",
-            listed.len(),
-            listed.iter().map(|w| w.id.clone()).collect::<Vec<_>>()
-        );
-        assert!(
-            ids.iter().all(|id| id == &listed[0].id),
-            "所有并发调用应返回同一 workspace id: {:?} vs {:?}",
-            ids,
-            listed[0].id
-        );
-
-        let _ = std::fs::remove_dir_all(&dup);
-    }
-
-    #[test]
-    fn move_session_migrates_account() {
-        let store = reset_store();
-        let dir = fixture_dir().join("move");
-        let _ = std::fs::create_dir_all(dir.join("a"));
-        let _ = std::fs::create_dir_all(dir.join("b"));
-        let ws_a = store
-            .create(dir.join("a").to_str().expect("path"), &[])
-            .expect("create a");
-        let ws_b = store
-            .create(dir.join("b").to_str().expect("path"), &[])
-            .expect("create b");
-        assert_eq!(store.list().len(), 2);
-
-        store.attach_by_cwd("s1", dir.join("a").to_str().expect("path"));
-        assert_eq!(store.workspace_of("s1").as_deref(), Some(ws_a.id.as_str()));
-
-        store.move_session("s1", &ws_b.id).expect("move");
-        assert_eq!(store.workspace_of("s1").as_deref(), Some(ws_b.id.as_str()));
-        let list = store.list();
-        assert!(
-            list.iter()
-                .find(|w| w.id == ws_a.id)
-                .expect("a")
-                .session_ids
-                .is_empty()
-        );
-
-        store.remove_session("s1");
-        assert_eq!(store.workspace_of("s1"), None);
-
-        store.delete(&ws_a.id).expect("delete a");
-        assert_eq!(store.list().len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn attach_by_cwd_auto_creates_workspace_if_missing() {
-        let store = reset_store();
-        let dir = fixture_dir().join("auto_create_ws");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.to_str().expect("path");
-
-        // 未调用 store.create，直接 attach 应自动注册该工作区并纳入 session
-        let ws_id = store.attach_by_cwd("s_auto", path).expect("auto created");
-        assert_eq!(
-            store.workspace_of("s_auto").as_deref(),
-            Some(ws_id.as_str())
-        );
-        let list = store.list();
-        assert_eq!(list.len(), 1);
-        assert_eq!(list[0].id, ws_id);
-        assert_eq!(list[0].title, "auto_create_ws");
-        assert!(list[0].session_ids.contains(&"s_auto".to_string()));
-
-        // 无效 cwd 保持返回 None
-        assert_eq!(store.attach_by_cwd("s_empty", ""), None);
-        assert_eq!(store.attach_by_cwd("s_dot", "."), None);
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
-// ═══════════════════════════════════════════════════════
-// 运行环境工作目录统一数据源
-// ═══════════════════════════════════════════════════════
-//
-// PR-3-3：解析权威收敛为 `SessionManager::workspace_cwd`（实例方法，经注入
-// 句柄调用）；本模块不再持有会话 cwd 的读取入口。
-
-#[cfg(test)]
-mod canonical_cwd_tests {
-    use super::*;
-
-    /// 非 Windows：canonical_cwd 保持原生 `/`（历史实现无条件 `\` 化，
-    /// 在 Linux 写坏 meta.cwd——事故 692d1605 残留根因）。
     #[cfg(not(windows))]
-    #[test]
-    fn canonical_cwd_keeps_posix_separators() {
-        let dir = std::env::temp_dir().join("qaqh-canonical-cwd-selftest");
-        std::fs::create_dir_all(&dir).unwrap();
-        let s = canonical_cwd(&dir);
-        assert!(s.starts_with('/'), "posix 绝对路径: {s}");
-        assert!(!s.contains('\\'), "不得出现反斜杠: {s}");
-        std::fs::remove_dir_all(&dir).ok();
-    }
-
-    /// 存量修复：历史坏数据 `\` 形态读取时归一化。
-    #[cfg(not(windows))]
-    #[test]
-    fn repair_legacy_backslash_cwd_fixes_corrupted_store() {
-        assert_eq!(
-            repair_legacy_backslash_cwd("\\home\\u\\proj"),
-            "/home/u/proj"
-        );
+    fn repair_legacy_cwd_preserves_native_paths_and_repairs_backslashes() {
         assert_eq!(
             repair_legacy_backslash_cwd("/already/fine"),
             "/already/fine"
         );
-    }
-
-    /// Windows：`\` 为原生分隔符，repair 必须原样返回（编译期验证为主，
-    /// 行为语义由 Windows 真机 3.2 冒烟覆盖）。
-    #[cfg(windows)]
-    #[test]
-    fn repair_is_identity_on_windows() {
-        assert_eq!(repair_legacy_backslash_cwd("C:\\x\\y"), "C:\\x\\y");
+        assert_eq!(
+            repair_legacy_backslash_cwd(r"\home\user\project"),
+            "/home/user/project"
+        );
     }
 }

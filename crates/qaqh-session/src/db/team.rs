@@ -4,7 +4,7 @@
 //! 闭包内组合。状态迁移在 SQL 的 WHERE 条件里收口:`rows_affected == 0` 即
 //! 违反前置状态,直接报错,不做静默降级。
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 
 pub const TASK_OPEN: &str = "open";
 pub const TASK_CLAIMED: &str = "claimed";
@@ -95,10 +95,7 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTaskRow> {
     })
 }
 
-fn attach_task_children(
-    conn: &Connection,
-    tasks: &mut [TeamTaskRow],
-) -> rusqlite::Result<()> {
+fn attach_task_children(conn: &Connection, tasks: &mut [TeamTaskRow]) -> rusqlite::Result<()> {
     for task in tasks {
         let mut stmt = conn.prepare(
             "SELECT depends_on FROM team_task_dependencies WHERE task_id = ?1 ORDER BY rowid",
@@ -235,9 +232,7 @@ pub fn task_release(
         )
         .map_err(|error| error.to_string())?;
     if changed == 0 {
-        return Err(format!(
-            "task {task_id} is not claimed by {owner_path}"
-        ));
+        return Err(format!("task {task_id} is not claimed by {owner_path}"));
     }
     Ok(())
 }
@@ -265,7 +260,9 @@ pub fn task_add_dependency(
 ) -> Result<(), String> {
     let state = task_state_of(conn, root_session_id, task_id)?;
     if is_terminal_state(&state) {
-        return Err(format!("task {task_id} is terminal; cannot add dependencies"));
+        return Err(format!(
+            "task {task_id} is terminal; cannot add dependencies"
+        ));
     }
     task_state_of(conn, root_session_id, depends_on)?;
     let dup: i64 = conn
@@ -337,7 +334,9 @@ pub fn task_attach_artifact(
 ) -> Result<(), String> {
     let state = task_state_of(conn, root_session_id, task_id)?;
     if is_terminal_state(&state) {
-        return Err(format!("task {task_id} is terminal; cannot attach artifacts"));
+        return Err(format!(
+            "task {task_id} is terminal; cannot attach artifacts"
+        ));
     }
     conn.execute(
         "INSERT INTO team_task_artifacts (task_id, content_id, media_type, added_at_ms)
@@ -438,11 +437,19 @@ pub fn task_close(
         .execute(
             "UPDATE team_tasks SET state = ?4, updated_at_ms = ?5
              WHERE task_id = ?1 AND root_session_id = ?2 AND state = ?3",
-            params![task_id, root_session_id, TASK_COMPLETED, TASK_CLOSED, now_ms],
+            params![
+                task_id,
+                root_session_id,
+                TASK_COMPLETED,
+                TASK_CLOSED,
+                now_ms
+            ],
         )
         .map_err(|error| error.to_string())?;
     if changed == 0 {
-        return Err(format!("task {task_id} is not completed; close requires Completed"));
+        return Err(format!(
+            "task {task_id} is not completed; close requires Completed"
+        ));
     }
     Ok(())
 }
@@ -518,10 +525,7 @@ pub struct BoardSubscriptionRow {
     pub updated_at_ms: i64,
 }
 
-pub fn board_channel_insert(
-    conn: &Connection,
-    channel: &BoardChannelRow,
-) -> rusqlite::Result<()> {
+pub fn board_channel_insert(conn: &Connection, channel: &BoardChannelRow) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO board_channels (channel_id, root_session_id, name, topic, created_by, created_at_ms)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",

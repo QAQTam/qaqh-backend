@@ -2,10 +2,7 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-/// Ringing 协议族的频道。
-///
-/// 每个频道拥有独立的可靠事件流、snapshot、cursor 与消费预算
-/// （Control / Conversation / Tool 物理隔离）。
+/// Internal classification used by domain projections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -19,8 +16,7 @@ pub enum RingingChannel {
 }
 
 impl RingingChannel {
-    /// 频道名（v2 单流事件里的 `stream_key.channel` 取值；v1 的
-    /// `/ringing/v1/events/{channel}` 路由已删除）。
+    /// Stable label for legacy domain projection records.
     pub fn as_str(self) -> &'static str {
         match self {
             RingingChannel::Control => "control",

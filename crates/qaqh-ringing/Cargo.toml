@@ -6,7 +6,6 @@ license.workspace = true
 description = "Ringing 线协议层（Wire）：envelope/ack/batch/snapshot/content ref/worker frame/能力协商"
 
 [dependencies]
-base64 = "0.22"
 qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-profile = { path = "../qaqh-profile" }

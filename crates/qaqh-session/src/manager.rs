@@ -32,8 +32,6 @@ impl SessionManager {
             claimed_sessions: Mutex::new(HashSet::new()),
             sessions_dir,
         };
-        // Workspace 注册表与 session 存储同根(组织语义,与运行环境 workspace 解耦)。
-        crate::grouping::WorkspaceStore::init(data_dir);
         INSTANCE
             .set(Arc::new(mgr))
             .expect("SessionManager already initialized");
@@ -49,18 +47,6 @@ impl SessionManager {
             session_locks: Mutex::new(HashMap::new()),
             claimed_sessions: Mutex::new(HashSet::new()),
         }
-    }
-
-    /// 进程级依赖初始化(workspace 账户 / 会话目录),供测试与嵌入方调用。
-    #[doc(hidden)]
-    pub fn init_for_test(data_dir: PathBuf) {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        let sessions_dir = data_dir.join("sessions");
-        let _ = std::fs::create_dir_all(&sessions_dir);
-        ONCE.call_once(|| {
-            let _ = std::fs::create_dir_all(&data_dir);
-            crate::grouping::WorkspaceStore::init(data_dir)
-        });
     }
 
     #[doc(hidden)]
@@ -95,7 +81,6 @@ impl SessionManager {
                 scratch.display()
             );
         }
-        crate::grouping::WorkspaceStore::global().remove_session(session_id);
         self.session_locks
             .lock()
             .unwrap_or_else(|e| e.into_inner())

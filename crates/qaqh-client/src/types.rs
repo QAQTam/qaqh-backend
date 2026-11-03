@@ -17,21 +17,19 @@ use serde::{Deserialize, Serialize};
 // `qaqh_domain::SessionState` 是会话生命周期状态，两者毫无关系。
 pub use qaqh_domain::{
     ActivityState as DomainActivityState, AgentLifecycleState, AskAnswer, AskMode,
-    AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef,
-    ControlEvent, ConversationEvent, DashboardDocument,
-    DashboardSnapshot as DomainDashboardSnapshot,
-    DashboardTask, DomainError, ErrorScope, NoticeLevel, PermissionCategory,
-    PermissionRisk, PlanReviewItem, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
-    SessionActivity, SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus,
-    ToolEvent,
+    AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef, DashboardDocument,
+    DashboardSnapshot as DomainDashboardSnapshot, DashboardTask, DomainError, ErrorScope,
+    NoticeLevel, PermissionCategory, PermissionRisk, PlanReviewItem, ProviderToolState,
+    RoundDeltaKind, SessionActivity, SessionState as DomainSessionState, SkillInfo,
+    SkillRuntimeInfo, SkillsStatus,
+};
+pub use qaqh_ringing::{
+    CLIENT_SESSION_HEADER, CommandPrecondition, CommandTarget, ConversationSendMessage,
+    MAX_SAFE_INTEGER, RINGING_SCHEMA, RingingCommand, RingingCommandAckStatus, RingingCommandState,
+    RingingV2CommandEnvelope, is_safe_integer,
 };
 pub use qaqh_ringing_contract::commands::ImageBlock;
 pub use qaqh_ringing_contract::fact::InputPurpose;
-pub use qaqh_ringing::{
-    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, ConversationSendMessage,
-    RingingCommand, RingingV2CommandEnvelope, CommandTarget, CommandPrecondition,
-    RingingCommandAckStatus, RingingCommandState, is_safe_integer,
-};
 pub use qaqh_types::{
     SessionListEntry, SessionMeta, SessionRunStatus, ToolContinuation, ToolError, ToolImage,
     ToolModelPayload, ToolResult, ToolStatus, UsageInfo,
