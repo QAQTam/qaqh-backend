@@ -37,6 +37,10 @@ mod tests {
                         profile: None,
                         mode: None,
                         tool_mode: None,
+                        model_selection: None,
+                        custom_tools: None,
+                        skills: None,
+                        frozen_annotation: None,
                         ephemeral: false,
                     },
                 )?;

@@ -48,8 +48,8 @@ impl PairingTable {
         self.purge();
         let token = format!(
             "{}{}",
-            qaqh_session::canonical::generate_ulid(),
-            qaqh_session::canonical::generate_ulid()
+            qaqh_ringing_contract::ulid::generate_ulid(),
+            qaqh_ringing_contract::ulid::generate_ulid()
         );
         let digest = device_registry::token_digest(&token);
         self.grants.insert(

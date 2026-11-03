@@ -26,6 +26,8 @@ pub use qaqh_ringing::{
 pub use qaqh_ringing as ringing;
 pub use qaqh_ringing::v2 as ringing_v2;
 pub use qaqh_session::session_fact_v2 as fact;
+pub use qaqh_ringing_contract::events as contract_events;
+pub use qaqh_ringing_contract::state as contract_state;
 
 /// Typed v2 SSE 帧:类型化 `SessionEventFrame`(seq + 业务事件)。
 pub type ClientV2Event = SessionEventFrame;
@@ -282,7 +284,7 @@ impl Client {
         let state = self.require_v2_session().await?;
         let command_id = options
             .command_id
-            .unwrap_or_else(qaqh_session::canonical::generate_ulid);
+            .unwrap_or_else(qaqh_ringing_contract::ulid::generate_ulid);
         let client_session_id = state.client_session_id.clone();
         let mut payload =
             RingingV2CommandEnvelope::new(command_id.clone(), state.client_instance_id, command)

@@ -452,7 +452,7 @@ pub(crate) async fn handle_approval_respond_v2(
         .instance_for_session(&caller)
         .unwrap_or_default();
     let envelope = RingingV2CommandEnvelope::new(
-        qaqh_session::canonical::generate_ulid(),
+        qaqh_ringing_contract::ulid::generate_ulid(),
         instance_key,
         command,
     )

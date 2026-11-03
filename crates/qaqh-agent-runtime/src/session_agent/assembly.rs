@@ -160,16 +160,6 @@ pub fn tool_policy(
     }
 }
 
-/// Budget used by every writer of one session directory. Readers and writers
-/// must agree, or a reopen would refuse a history the writer accepted.
-pub fn default_context_budget() -> qaqh_session::context_projection::ContextBudget {
-    qaqh_session::context_projection::ContextBudget {
-        max_messages: 4096,
-        max_payload_bytes: 64 * 1024 * 1024,
-        max_checkpoint_bytes: 16 * 1024 * 1024,
-    }
-}
-
 /// Enabled tool definitions for the session's tool manager.
 pub fn tool_defs(manager: &qaqh_workspace::ToolManager) -> Vec<qaqh_types::ToolDef> {
     manager.filtered_defs()

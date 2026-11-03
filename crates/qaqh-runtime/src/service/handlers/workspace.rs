@@ -23,7 +23,7 @@ pub(crate) fn handle(service: &QaqhService, command: WorkspaceCommand) -> QaqhRe
             QaqhError::to_value("workspace entries", entries)
         }
         WorkspaceCommand::WorkspaceGet(args) => {
-            Ok(json!(workspace(&service.sessions, &args.session_id)))
+            Ok(json!(workspace(&service.owners, &args.session_id)))
         }
         WorkspaceCommand::WorkspaceSet(args) => {
             // 空 path 防护：canonical_cwd("") = "" 会把 meta.cwd 清空，
@@ -53,7 +53,14 @@ pub(crate) fn handle(service: &QaqhService, command: WorkspaceCommand) -> QaqhRe
         }
         WorkspaceCommand::WorkspaceCreate(args) => {
             let store = qaqh_session::WorkspaceStore::global();
-            let existing = service.sessions.list();
+            let existing: Vec<(String, Option<String>)> = service
+                .owners
+                .db()
+                .read_blocking(|conn| qaqh_session::db::store::list_sessions(conn, false, 256))
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| (row.session_id, row.cwd))
+                .collect();
             let created = store
                 .create(&args.path, &existing)
                 .map_err(QaqhError::message)?;
@@ -84,12 +91,12 @@ pub(crate) fn handle(service: &QaqhService, command: WorkspaceCommand) -> QaqhRe
         // 远端文件浏览（临时跨端模式）：路径一律是 daemon 侧绝对路径，
         // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
         WorkspaceCommand::FsList(args) => list_remote_directory(
-            &service.sessions,
+            &service.owners,
             &args.path,
             args.scope_session_id.as_deref(),
         ),
         WorkspaceCommand::FsRead(args) => read_remote_file(
-            &service.sessions,
+            &service.owners,
             &args.path,
             args.max_bytes.unwrap_or(512 * 1024),
             args.scope_session_id.as_deref(),

@@ -56,8 +56,8 @@ fn probe_output_missing_program_is_none() {
     assert!(probe_output(command, Duration::from_millis(200)).is_none());
 }
 
-/// spawn/reopen 循环不动已提交的会话基线:业务行在 SQLite,循环实例
-/// 重建对既有数据零写入。
+/// spawn/reopen 循环不动已登记的业务基线:业务行在 SQLite,循环实例重建
+/// 对既有数据零写入(不重复插行、血缘保持)。
 #[tokio::test]
 async fn spawn_and_reopen_preserves_the_session_baseline() {
     let root = tempfile::tempdir().expect("tempdir");
@@ -65,25 +65,14 @@ async fn spawn_and_reopen_preserves_the_session_baseline() {
         root.path().join("sessions"),
         root.path().join(".active_session"),
     ));
-    let identity = sessions.allocate_session(None).expect("allocate");
-    let session_id = identity.session_id.as_str().to_string();
-    let dir = sessions.session_path_dir(&session_id);
-    crate::service::materialize_canonical_session_in(&dir, "/tmp", "test-model", None, false)
-        .expect("materialize");
-    let journal_before =
-        std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("baseline journal");
-    let mut registry = AgentRegistry::new(sessions, test_owner_dir());
+    let session_id = sessions.allocate_session().expect("allocate");
+    let mut registry = AgentRegistry::new(test_owner_dir());
     for _ in 0..2 {
         registry
             .spawn_new(&session_id)
             .expect("spawn existing baseline");
         registry.close(&session_id);
     }
-    assert_eq!(
-        std::fs::read(dir.join("committed-batches/batches.jsonl")).expect("journal"),
-        journal_before,
-        "spawning and reopening must preserve the committed baseline"
-    );
     // 业务库:会话行已登记(幂等),且未被 spawn 重复插入。
     let parent = registry
         .owners
@@ -108,15 +97,12 @@ fn list_agents_reports_recorded_outcome_and_residency() {
         root_dir.join("sessions"),
         root_dir.join(".active_session"),
     ));
-    let root_identity = sessions
-        .allocate_session(None)
-        .expect("allocate root session");
-    let root = root_identity.session_id.as_str().to_string();
+    let root = sessions.allocate_session().expect("allocate root session");
     let child = SessionId::new("0198f1a0-0000-7000-8000-000000000011");
     let child_path = AgentPath::parse_absolute("/root/review").expect("child path");
     let now = unix_ms();
 
-    let mut registry = AgentRegistry::new(sessions.clone(), test_owner_dir());
+    let mut registry = AgentRegistry::new(test_owner_dir());
     registry
         .register_root_agent(&root, now)
         .expect("register root metadata");
@@ -163,12 +149,7 @@ fn list_agents_reports_recorded_outcome_and_residency() {
 /// 消息配额:in-flight 与累计 outbound 双闸,按 root/author 隔离。
 #[test]
 fn message_quota_rejects_in_flight_and_outbound_over_limit() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
-        temp.path().join("sessions"),
-        temp.path().join("active.json"),
-    ));
-    let mut registry = AgentRegistry::new(sessions, test_owner_dir());
+    let mut registry = AgentRegistry::new(test_owner_dir());
     registry.set_message_quota_limits(2, 3);
 
     assert!(
