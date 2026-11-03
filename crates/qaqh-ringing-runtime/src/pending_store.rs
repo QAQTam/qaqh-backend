@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use qaqh_ringing::{
     RingingCommandState, RingingCommandStatus, RingingV2CommandResult, RingingV2CommandStatus,
-    RingingV2ExistingResult,
+    RingingV2ExistingResult, RingingV2SyncResult,
 };
 
 /// Retention metadata for `PendingCommandStore::new()` and persistent stores.
@@ -113,6 +113,9 @@ struct CommandReceipt {
     /// 终态的 typed payload（ask/plan 等）。ACK 丢失后重放 command_id 或
     /// 轮询 command_status 时返回，客户端不必再靠 code/message 猜结果。
     result: Option<RingingV2CommandResult>,
+    /// 同步命令的完整结果回放（B05）：result/operation/revision 原样保存，
+    /// 重放与 status 查询恢复首次执行承诺的原结果；引擎类命令为 None。
+    sync_result: Option<RingingV2SyncResult>,
     /// 上次冻结告警时刻（epoch ms，仅内存不持久化）：同一 receipt 的重复
     /// 告警按间隔限频，避免周期巡检刷屏。
     last_stale_warn_ms: Option<u64>,
@@ -126,6 +129,7 @@ pub struct ExistingCommandReceipt {
     pub terminal_event_id: Option<String>,
     pub error_code: Option<String>,
     pub result: Option<RingingV2CommandResult>,
+    pub sync_result: Option<RingingV2SyncResult>,
 }
 
 impl ExistingCommandReceipt {
@@ -135,6 +139,7 @@ impl ExistingCommandReceipt {
             terminal_event_id: self.terminal_event_id,
             error_code: self.error_code,
             result: self.result,
+            sync_result: self.sync_result,
         }
     }
 }
@@ -152,6 +157,8 @@ struct PersistedCommandReceipt {
     error_code: Option<String>,
     #[serde(default)]
     result: Option<RingingV2CommandResult>,
+    #[serde(default)]
+    sync_result: Option<RingingV2SyncResult>,
 }
 
 impl PendingCommandStore {
@@ -219,6 +226,7 @@ impl PendingCommandStore {
                     terminal_event_id: receipt.terminal_event_id,
                     error_code: receipt.error_code,
                     result: receipt.result,
+                    sync_result: receipt.sync_result,
                     last_stale_warn_ms: None,
                 },
             );
@@ -246,6 +254,7 @@ impl PendingCommandStore {
                             terminal_event_id: receipt.terminal_event_id.clone(),
                             error_code: receipt.error_code.clone(),
                             result: receipt.result.clone(),
+                            sync_result: receipt.sync_result.clone(),
                         },
                     )
                 })
@@ -314,6 +323,7 @@ impl PendingCommandStore {
                 terminal_event_id: None,
                 error_code: None,
                 result: None,
+                sync_result: None,
                 last_stale_warn_ms: None,
             },
         );
@@ -375,6 +385,24 @@ impl PendingCommandStore {
             receipt.terminal_event_id = event_id;
             receipt.error_code = error_code;
             receipt.result = result;
+            self.persist();
+        }
+    }
+
+    /// 同步命令终态（B05）：完整 result/operation/revision 落 receipt，
+    /// ACK 丢失后重放原 command_id 或轮询 status 都能恢复原结果。
+    /// `succeeded` 且不调用此方法 = 引擎类命令（无同步结果，不伪造）。
+    pub fn mark_terminal_sync(
+        &mut self,
+        command_id: &str,
+        sync_result: RingingV2SyncResult,
+    ) {
+        if let Some(receipt) = self.accepted.get_mut(command_id) {
+            receipt.state = RingingCommandState::Succeeded;
+            receipt.terminal_event_id = None;
+            receipt.error_code = None;
+            receipt.result = None;
+            receipt.sync_result = Some(sync_result);
             self.persist();
         }
     }
@@ -478,6 +506,7 @@ impl PendingCommandStore {
                 terminal_event_id: receipt.terminal_event_id.clone(),
                 error_code: receipt.error_code.clone(),
                 result: receipt.result.clone(),
+                sync_result: receipt.sync_result.clone(),
             })
         })
     }
@@ -497,6 +526,7 @@ impl PendingCommandStore {
                 terminal_event_id: receipt.terminal_event_id.clone(),
                 error_code: receipt.error_code.clone(),
                 result: receipt.result.clone(),
+                sync_result: receipt.sync_result.clone(),
             })
         })
     }

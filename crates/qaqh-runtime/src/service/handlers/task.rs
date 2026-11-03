@@ -18,7 +18,9 @@ pub(crate) fn handle(service: &QaqhService, command: TaskCommand) -> QaqhResult<
             qaqh_workspace::todo::todo_status_value(&args.session_id).map_err(QaqhError::message)
         }
         TaskCommand::TodoList(args) => {
-            qaqh_workspace::todo::todo_list_value_for(&args.session_id, &args.tool_args())
+            // B08:service 查询走纯快照 DTO(无工具信封键),status 词表与
+            // todo 工具一致。
+            qaqh_workspace::todo::todo_list_snapshot_value(&args.session_id, args.status.as_deref())
                 .map_err(QaqhError::message)
         }
         TaskCommand::PlanRead(args) => {

@@ -175,6 +175,169 @@ pub struct WorkspaceGetParams {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct WorkspaceListParams {}
 
+// ── B08:此前 untyped 的 8 个方法的权威 DTO ─────────────────────────────
+
+/// `config.load` 无参数；params 恒为 `{}`。结果为 `qaqh_config_api::ConfigDto`
+/// (camelCase wire,与 `config.save` 的读形状同源)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ConfigLoadParams {}
+
+/// `diagnostics.memory.snapshot` 参数:`after_sequence` 之后的相位增量,
+/// 缺省全量。结果为 `qaqh_memwatch::MemorySnapshot`。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct DiagnosticsMemorySnapshotParams {
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub after_sequence: Option<u64>,
+}
+
+/// `profile.list` 无参数;结果为 legacy profiles 目录的摘要读模型。
+/// 该目录的持久化 schema 是 `qaqh_types::PersistentProfiles`(ProfileConfig),
+/// 与新 provider 目录(providers.toml)分属不同文件、不同 revision 体系
+/// (契约裁定 D3);default 指针在 config,不在本文件。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ProfileListParams {}
+
+/// `profile.list` 结果:名字 → 摘要(非敏感;api_key 只有 set 标记)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ProfileListSnapshot {
+    pub profiles: std::collections::BTreeMap<String, qaqh_config_api::ProfileSummaryDto>,
+}
+
+/// `session.dashboard` 定位单条会话。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionDashboardParams {
+    pub session_id: String,
+}
+
+/// `session.dashboard` 的单条任务卡(来自 todo 状态投影)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionDashboardTask {
+    pub id: String,
+    pub subject: String,
+    pub description: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+/// `session.dashboard` 结果:任务卡 + 最近编辑文件(去重截断,最近优先)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionDashboard {
+    pub tasks: Vec<SessionDashboardTask>,
+    pub recent_edits: Vec<String>,
+}
+
+/// `skills.list_tools` 无参数;结果为在册工具名字符串数组。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SkillsListToolsParams {}
+
+/// `plan.read` 定位单条会话;结果为 `PlanReadItem[]`(无计划文件 = 空数组)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct PlanReadParams {
+    pub session_id: String,
+}
+
+/// `plan.read` 的单条条目;`status` 是规范枚举(pending/approved/rejected/
+/// question),不再使用旧 "✓/-/?" 字形(契约裁定 D9)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct PlanReadItem {
+    pub id: String,
+    pub title: String,
+    pub status: PlanItemStatusView,
+    pub comment: String,
+    pub actions: Vec<String>,
+}
+
+/// plan 条目状态的公开词表。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum PlanItemStatusView {
+    Pending,
+    Approved,
+    Rejected,
+    Question,
+}
+
+/// `todo.list` 参数:`session_id` + 与 todo 工具同词表的可选 status 过滤。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct TodoListParams {
+    pub session_id: String,
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub status: Option<String>,
+}
+
+/// `todo.list` 结果条目(status 为 todo 词表字符串)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct TodoItemSnapshot {
+    pub id: String,
+    pub title: String,
+    pub description: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<String>,
+}
+
+/// `todo.list` 结果的计数投影。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct TodoCountsSnapshot {
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+    pub cancelled: usize,
+    pub total: usize,
+}
+
+/// `todo.list` 结果(items + 当前项 + 计数;service 面不再注入旧信封的
+/// `timeis`/`status` 键——那是工具信封的遗留,不属于查询结果契约)。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct TodoListSnapshot {
+    pub items: Vec<TodoItemSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_id: Option<String>,
+    pub counts: TodoCountsSnapshot,
+}
+
+/// `todo.status` 参数。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct TodoStatusParams {
+    pub session_id: String,
+}
+
+/// `todo.status` 结果;会话无 todo 文件时整个 result 为 `null`。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct TodoStatusSnapshot {
+    pub mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_title: Option<String>,
+    pub pending: usize,
+    pub in_progress: usize,
+    pub completed: usize,
+    pub cancelled: usize,
+    pub total: usize,
+    pub items: Vec<TodoItemSnapshot>,
+}
+
 /// A typed descriptor links the method key, the exact wire DTOs and the
 /// authorization metadata. Only methods present here are yet exposed as typed
 /// ServiceMap calls; the remaining legacy RPCs stay explicitly untyped/pending.
@@ -221,6 +384,14 @@ validators! {
         validate_skills_catalog_params => SkillsCatalogParams,
         validate_workspace_get_params => WorkspaceGetParams,
         validate_workspace_list_params => WorkspaceListParams,
+        validate_config_load_params => ConfigLoadParams,
+        validate_diagnostics_memory_snapshot_params => DiagnosticsMemorySnapshotParams,
+        validate_profile_list_params => ProfileListParams,
+        validate_session_dashboard_params => SessionDashboardParams,
+        validate_skills_list_tools_params => SkillsListToolsParams,
+        validate_todo_list_params => TodoListParams,
+        validate_todo_status_params => TodoStatusParams,
+        validate_plan_read_params => PlanReadParams,
         ;
     result:
         validate_string_result => String,
@@ -232,6 +403,14 @@ validators! {
         validate_session_get_activity_result => Vec<SessionToolActivity>,
         validate_skills_catalog_result => SkillsCatalogResult,
         validate_workspace_list_result => Vec<qaqh_ringing_contract::WorkspaceEntry>,
+        validate_config_dto_result => qaqh_config_api::ConfigDto,
+        validate_memory_snapshot_result => qaqh_memwatch::MemorySnapshot,
+        validate_profile_document_result => ProfileListSnapshot,
+        validate_session_dashboard_result => SessionDashboard,
+        validate_string_list_result => Vec<String>,
+        validate_todo_list_result => TodoListSnapshot,
+        validate_todo_status_result => Option<TodoStatusSnapshot>,
+        validate_plan_read_result => Vec<PlanReadItem>,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -361,6 +540,106 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_workspace_list_params,
         validate_result: validate_workspace_list_result,
+    },
+    TypedMethodInfo {
+        method: "config.load",
+        params_type: "ConfigLoadParams",
+        // ConfigDto(camelCase)与 config.save 的读形状同源。
+        result_type: "ConfigDto",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_config_load_params,
+        validate_result: validate_config_dto_result,
+    },
+    TypedMethodInfo {
+        method: "profile.list",
+        params_type: "ProfileListParams",
+        // legacy profiles 目录摘要(裁定 D3):持久化 schema 是
+        // PersistentProfiles,与新 provider 目录分立。
+        result_type: "ProfileListSnapshot",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_profile_list_params,
+        validate_result: validate_profile_document_result,
+    },
+    TypedMethodInfo {
+        method: "session.dashboard",
+        params_type: "SessionDashboardParams",
+        result_type: "SessionDashboard",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_dashboard_params,
+        validate_result: validate_session_dashboard_result,
+    },
+    TypedMethodInfo {
+        method: "skills.list_tools",
+        params_type: "SkillsListToolsParams",
+        result_type: "string[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: false,
+        },
+        validate_params: validate_skills_list_tools_params,
+        validate_result: validate_string_list_result,
+    },
+    TypedMethodInfo {
+        method: "todo.list",
+        params_type: "TodoListParams",
+        result_type: "TodoListSnapshot",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_todo_list_params,
+        validate_result: validate_todo_list_result,
+    },
+    TypedMethodInfo {
+        method: "todo.status",
+        params_type: "TodoStatusParams",
+        // 会话无 todo 文件时整个 result 为 null(不是缺键)。
+        result_type: "TodoStatusSnapshot?",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_todo_status_params,
+        validate_result: validate_todo_status_result,
+    },
+    TypedMethodInfo {
+        method: "plan.read",
+        params_type: "PlanReadParams",
+        result_type: "PlanReadItem[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_plan_read_params,
+        validate_result: validate_plan_read_result,
+    },
+    TypedMethodInfo {
+        method: "diagnostics.memory.snapshot",
+        params_type: "DiagnosticsMemorySnapshotParams",
+        result_type: "MemorySnapshot",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: true,
+        },
+        validate_params: validate_diagnostics_memory_snapshot_params,
+        validate_result: validate_memory_snapshot_result,
     },
 ];
 

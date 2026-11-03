@@ -42,6 +42,7 @@ pub mod command;
 pub mod commands;
 pub mod content;
 pub mod control;
+pub mod driver;
 pub mod pairing;
 pub mod service_api;
 pub(crate) mod test_hooks;
@@ -88,6 +89,8 @@ pub struct AppState {
     pub tls_fingerprint: Option<String>,
     /// 服务端一次性审批 challenge（device 身份走不透明 id，canonical id 不出 daemon）。
     pub challenges: Arc<challenge::ChallengeStore>,
+    /// driver 席位（内存，per-session 单席位；holder 为 lease id，不跨重启）。
+    pub drivers: Arc<driver::DriverSeats>,
     pub epoch: String,
     pub shutdown: tokio::sync::watch::Sender<bool>,
     pub(crate) test_hooks: Arc<test_hooks::TestHooks>,
@@ -108,56 +111,60 @@ async fn log_http_errors(req: Request, next: Next) -> Response {
 }
 
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    // Ringing v2 面从契约路由表注册(B02 漂移闸):表驱动保证「表里的每条路由
+    // 都有 handler」——新路径只加表不加 arm 会启动即 panic;反过来 handler arm
+    // 里的路径字符串以表为准,不得自造。
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/activity", get(activity))
-        .route("/ringing/v2/clients/open", post(handle_open_v2))
-        .route("/ringing/v2/leases/renew", post(handle_renew_v2))
-        .route(
-            "/ringing/v2/sessions/{session_id}/bootstrap",
-            get(handle_bootstrap_v2),
-        )
-        .route(
-            "/ringing/v2/sessions/{session_id}/team",
-            get(handle_team_snapshot_v2),
-        )
-        .route(
-            "/ringing/v2/sessions/{session_id}/events",
-            get(handle_events_v2),
-        )
-        .route("/ringing/v2/commands/{id}", get(handle_command_status_v2))
-        .route("/ringing/v2/commands", post(commands::handle_command))
-        .route(
-            "/ringing/v2/sessions/{session_id}/approvals",
-            get(handle_pending_approvals_v2),
-        )
-        .route(
-            "/ringing/v2/sessions/{session_id}/approvals/respond",
-            post(handle_approval_respond_v2),
-        )
-        .route("/ringing/v2/content/{content_id}", get(handle_content_get))
-        .route("/ringing/v2/content", post(handle_content_upload))
-        .route("/ringing/v2/service/{method}", post(handle_service))
-        .route(
-            "/ringing/v2/pairing/tokens",
-            post(pairing::handle_pairing_tokens),
-        )
-        .route("/ringing/v2/pair", post(pairing::handle_pair))
-        .route("/ringing/v2/devices", get(pairing::handle_devices))
-        .route(
-            "/ringing/v2/exec-sessions",
-            get(v2::handle_exec_sessions_list),
-        )
-        .route(
-            "/ringing/v2/exec-sessions/{id}/kill",
-            post(v2::handle_exec_session_kill),
-        )
-        .route(
-            "/ringing/v2/devices/{device_id}/revoke",
-            post(pairing::handle_device_revoke),
-        )
         .route("/control/v1/stop", post(handle_stop))
-        .route("/control/v1/stop-if-idle", post(handle_stop_if_idle))
+        .route("/control/v1/stop-if-idle", post(handle_stop_if_idle));
+    for (method, path) in qaqh_ringing::RINGING_V2_HTTP_ROUTES {
+        router = match (*method, *path) {
+            ("POST", "/ringing/v2/clients/open") => router.route(path, post(handle_open_v2)),
+            ("POST", "/ringing/v2/leases/renew") => router.route(path, post(handle_renew_v2)),
+            ("GET", "/ringing/v2/sessions/{session_id}/bootstrap") => {
+                router.route(path, get(handle_bootstrap_v2))
+            }
+            ("GET", "/ringing/v2/sessions/{session_id}/team") => {
+                router.route(path, get(handle_team_snapshot_v2))
+            }
+            ("GET", "/ringing/v2/sessions/{session_id}/events") => {
+                router.route(path, get(handle_events_v2))
+            }
+            ("POST", "/ringing/v2/commands") => router.route(path, post(commands::handle_command)),
+            ("GET", "/ringing/v2/commands/{command_id}") => {
+                router.route(path, get(handle_command_status_v2))
+            }
+            ("GET", "/ringing/v2/sessions/{session_id}/approvals") => {
+                router.route(path, get(handle_pending_approvals_v2))
+            }
+            ("POST", "/ringing/v2/sessions/{session_id}/approvals/respond") => {
+                router.route(path, post(handle_approval_respond_v2))
+            }
+            ("POST", "/ringing/v2/content") => router.route(path, post(handle_content_upload)),
+            ("GET", "/ringing/v2/content/{content_id}") => {
+                router.route(path, get(handle_content_get))
+            }
+            ("POST", "/ringing/v2/service/{method}") => router.route(path, post(handle_service)),
+            ("POST", "/ringing/v2/pairing/tokens") => {
+                router.route(path, post(pairing::handle_pairing_tokens))
+            }
+            ("POST", "/ringing/v2/pair") => router.route(path, post(pairing::handle_pair)),
+            ("GET", "/ringing/v2/devices") => router.route(path, get(pairing::handle_devices)),
+            ("POST", "/ringing/v2/devices/{device_id}/revoke") => {
+                router.route(path, post(pairing::handle_device_revoke))
+            }
+            ("GET", "/ringing/v2/exec-sessions") => {
+                router.route(path, get(v2::handle_exec_sessions_list))
+            }
+            ("POST", "/ringing/v2/exec-sessions/{id}/kill") => {
+                router.route(path, post(v2::handle_exec_session_kill))
+            }
+            other => panic!("contract route without a registered handler: {other:?}"),
+        };
+    }
+    router
         .fallback(not_found)
         // 内层：单次 Bearer 解析（S0 收口，取代逐 handler 手检）。
         .layer(axum::middleware::from_fn_with_state(

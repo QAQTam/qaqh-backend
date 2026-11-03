@@ -88,20 +88,34 @@ impl SessionOwner {
         self.events.subscribe()
     }
 
-    /// 当前事件水位:快照必须携带,客户端据此衔接 SSE。
+    /// 当前事件水位:即下一个将分配的 seq(exclusive);快照必须携带,客户端
+    /// 据此衔接 SSE(`seq < 水位` 跳过,`seq >= 水位` 处理)。
     pub fn current_seq(&self) -> u64 {
         self.next_seq.load(Ordering::Relaxed)
     }
 
     /// SessionState 快照:业务表直查 + 内存水位。
+    ///
+    /// 定序纪律:**先取水位,再读库**。业务写路径一律"先落库、后 emit",
+    /// 因此若事件在水位读取前发出,其落库必然更早 → 效果已在快照(客户端跳帧
+    /// 正确);事件在水位读取后发出 → 帧 seq ≥ 水位 → 客户端必然处理,不丢。
+    /// 残余重叠(效果已在快照又收到同帧)由客户端按 block_id/id 合并吸收。
+    /// 反序(先读库后取水位)会在"落库与 emit 之间"留出静默丢帧窗口——B01。
     pub async fn snapshot(&self) -> Result<SessionState, DbError> {
+        let watermark = self.current_seq();
         let session_id = self.session_id.clone();
         let mut state = self
             .db
             .read(move |conn| view::load_session_state(conn, &session_id))
             .await?;
-        state.seq = self.current_seq();
+        state.seq = watermark;
         Ok(state)
+    }
+
+    /// 外部生产者的公共事件出口:非 owner 内部状态的变化(如 driver 席位)
+    /// 经此进入唯一单流定序,seq 与业务事件同源单调。
+    pub fn publish(&self, event: SessionEvent) {
+        emit(&self.events, &self.next_seq, event);
     }
 
     /// 开回合:turn 行 + TurnStarted/ActivityChanged 事件。
@@ -269,26 +283,40 @@ impl SessionOwner {
     // ---- 流式展示(同步 API:provider 阻塞线程直接调用;不落库) ----
 
     /// 模型文本流式片段:同一 block_id 的后续事件替换已展示内容。
-    pub fn message_delta(&self, turn_id: &TurnId, block_id: &BlockId, text: &str) {
+    pub fn message_delta(
+        &self,
+        turn_id: &TurnId,
+        block_id: &BlockId,
+        block_kind: qaqh_ringing_contract::fact::AssistantBlockKind,
+        text: &str,
+    ) {
         emit(
             &self.events,
             &self.next_seq,
             SessionEvent::MessageDelta {
                 turn_id: turn_id.clone(),
                 block_id: block_id.clone(),
+                block_kind,
                 text: text.to_string(),
             },
         );
     }
 
     /// 工具参数流式片段(仅展示;不代表参数已合法或工具已执行)。
-    pub fn tool_arguments_delta(&self, turn_id: &TurnId, call_id: &ToolCallId, text: &str) {
+    pub fn tool_arguments_delta(
+        &self,
+        turn_id: &TurnId,
+        call_id: &ToolCallId,
+        tool_name: &str,
+        text: &str,
+    ) {
         emit(
             &self.events,
             &self.next_seq,
             SessionEvent::ToolArgumentsDelta {
                 turn_id: turn_id.clone(),
                 call_id: call_id.clone(),
+                tool_name: tool_name.to_string(),
                 text: text.to_string(),
             },
         );
@@ -296,14 +324,20 @@ impl SessionOwner {
 
     // ---- 工具声明(回合循环侧;port 侧 lifecycle 接管 running 之后) ----
 
-    /// 模型声明工具调用:declared 行落库(无事件;快照可见)。
+    /// 模型声明工具调用:declared 行落库 + ToolDeclared 事件(实时订阅者
+    /// 据此获得工具身份与最终参数,与 bootstrap `tools` 视图同形状)。
     pub async fn declare_tool_call(
         &self,
         call_id: &ToolCallId,
         turn_id: &TurnId,
         tool_name: &str,
-        args_json: Option<String>,
+        args: Option<serde_json::Value>,
     ) -> Result<(), DbError> {
+        let args_json = args
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| DbError::Corrupt(format!("tool call {call_id} args: {error}")))?;
         let upsert = store::ToolCallUpsert {
             call_id: call_id.as_ref().to_string(),
             session_id: self.session_id.clone(),
@@ -314,7 +348,44 @@ impl SessionOwner {
         };
         self.db
             .write(move |conn| store::upsert_tool_call(conn, &upsert))
-            .await
+            .await?;
+        emit(
+            &self.events,
+            &self.next_seq,
+            SessionEvent::ToolDeclared {
+                call_id: call_id.clone(),
+                turn_id: turn_id.clone(),
+                tool_name: tool_name.to_string(),
+                args,
+            },
+        );
+        Ok(())
+    }
+
+    /// 会话标题变更:业务行落库 + SessionMetaChanged 事件(rename 的唯一写口)。
+    pub async fn set_title(&self, title: &str) -> Result<(), DbError> {
+        let owned = self.session_id.clone();
+        let row_title = title.to_string();
+        let event_title = (!title.is_empty()).then(|| title.to_string());
+        self.db
+            .write(move |conn| {
+                store::update_session_columns(
+                    conn,
+                    &owned,
+                    &store::SessionColumnPatch {
+                        title: Some(row_title),
+                        ..Default::default()
+                    },
+                )
+                .map(|_| ())
+            })
+            .await?;
+        emit(
+            &self.events,
+            &self.next_seq,
+            SessionEvent::SessionMetaChanged { title: event_title },
+        );
+        Ok(())
     }
 
     /// 权限交互挂起:declared → awaiting_permission(快照可见,无事件)。
@@ -657,7 +728,7 @@ impl OwnerPump {
                     call_id: call_id.clone(),
                     session_id: self.session_id.clone(),
                     turn_id,
-                    tool_name,
+                    tool_name: tool_name.clone(),
                     args_json,
                     status: "running",
                 };
@@ -670,6 +741,7 @@ impl OwnerPump {
                 }
                 self.emit(SessionEvent::ToolStarted {
                     call_id: ToolCallId::new(call_id),
+                    tool_name,
                 });
             }
             OwnerMsg::Output {

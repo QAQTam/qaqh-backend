@@ -7,7 +7,7 @@ use qaqh_ringing::{
     RingingV2CommandResult, RingingV2CommandStatus, RingingV2DeviceWire, RingingV2DevicesResponse,
     RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2ExistingResult,
     RingingV2LeaseRenewResponse, RingingV2PairRequest, RingingV2PairResponse,
-    RingingV2PairTokenRequest, RingingV2PairTokenResponse,
+    RingingV2PairTokenRequest, RingingV2PairTokenResponse, RingingV2SyncResult,
 };
 
 pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -78,6 +78,7 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 terminal_event_id: Some("event-fixture".into()),
                 error_code: None,
                 result: Some(result.clone()),
+                sync_result: None,
             },
         )?;
         super::write_fixture(
@@ -96,6 +97,49 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             },
         )?;
     }
+    // B05:同步命令结果的 receipt 回放样本(session.create 形状)。
+    super::write_fixture(
+        stage,
+        "command-status-sync-result.json",
+        &RingingV2CommandStatus {
+            command_id: "cmd-fixture-create".into(),
+            state: RingingCommandState::Succeeded,
+            payload_fingerprint: "synthetic-fingerprint".into(),
+            terminal_event_id: None,
+            error_code: None,
+            result: None,
+            sync_result: Some(RingingV2SyncResult {
+                operation: "session.create".into(),
+                result: serde_json::json!({ "session_id": "0199a0f0-0000-7000-8000-000000000001" }),
+                revision: None,
+            }),
+        },
+    )?;
+    super::write_fixture(
+        stage,
+        "command-ack-sync-replay.json",
+        &RingingV2CommandAck {
+            command_id: "cmd-fixture-create".into(),
+            status: RingingCommandAckStatus::Accepted,
+            code: None,
+            message: Some("duplicate command_id (already recorded)".into()),
+            retry_after_ms: None,
+            existing: Some(RingingV2ExistingResult::CommandReceipt {
+                state: RingingCommandState::Succeeded,
+                terminal_event_id: None,
+                error_code: None,
+                result: None,
+                sync_result: Some(RingingV2SyncResult {
+                    operation: "session.create".into(),
+                    result: serde_json::json!({ "session_id": "0199a0f0-0000-7000-8000-000000000001" }),
+                    revision: None,
+                }),
+            }),
+            result: None,
+            operation: None,
+            revision: None,
+        },
+    )?;
     super::write_fixture(
         stage,
         "pair-token-params.json",

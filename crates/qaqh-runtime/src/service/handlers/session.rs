@@ -53,7 +53,12 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             activity(&service.owners, &args.session_id).map_err(QaqhError::message)
         }
         SessionCommand::SessionDashboard(args) => {
-            dashboard(&args.session_id).map_err(QaqhError::message)
+            // B08 权威 DTO:typed 结构直出,序列化即 wire 形状。
+            dashboard(&args.session_id)
+                .and_then(|dashboard| {
+                    serde_json::to_value(dashboard).map_err(|error| error.to_string())
+                })
+                .map_err(QaqhError::message)
         }
         SessionCommand::SkillsListTools(_) => {
             Ok(json!(qaqh_workspace::runtime::process_all_tool_names()))

@@ -176,6 +176,7 @@ fn lost_ack_status_and_replay_preserve_each_known_outcome() {
                 terminal_event_id: status.terminal_event_id,
                 error_code: status.error_code,
                 result: status.result,
+                sync_result: status.sync_result,
             }
         );
         assert!(
@@ -387,4 +388,89 @@ fn best_effort_persistence_does_not_promise_durable_ack() {
         PendingCommandStore::open_persistent_at(&path),
         Err(ReceiptLoadError::Read(_))
     ));
+}
+
+// ── B05:同步命令结果的保存与重放 ─────────────────────────────────────────
+
+use qaqh_ringing::RingingV2SyncResult;
+
+fn sync_sample() -> RingingV2SyncResult {
+    RingingV2SyncResult {
+        operation: "session.create".into(),
+        result: serde_json::json!({ "session_id": "0199a0f0-0000-7000-8000-000000000001" }),
+        revision: None,
+    }
+}
+
+#[test]
+fn lost_sync_ack_restores_original_result_via_replay_and_status() {
+    let mut store = PendingCommandStore::new();
+    assert!(reserve(&mut store));
+    let sample = sync_sample();
+    store.mark_terminal_sync(COMMAND, sample.clone());
+
+    // 同 ID 同指纹重放:不新建执行,existing 携带原 result/operation/revision。
+    assert!(!reserve(&mut store), "replay must not re-execute");
+    let replay = store.existing_receipt_for_session(COMMAND, OWNER).unwrap();
+    assert_eq!(replay.state, RingingCommandState::Succeeded);
+    assert_eq!(
+        replay.sync_result.as_ref(),
+        Some(&sample),
+        "重放必须恢复首次执行的完整同步结果"
+    );
+    match replay.into_existing() {
+        RingingV2ExistingResult::CommandReceipt { sync_result, .. } => {
+            assert_eq!(sync_result.as_ref(), Some(&sample));
+        }
+        other => panic!("expected command receipt, got {other:?}"),
+    }
+
+    // status 轮询同样恢复原结果。
+    let status = store.v2_status_for_session(COMMAND, OWNER).unwrap();
+    assert_eq!(status.sync_result.as_ref(), Some(&sample));
+}
+
+#[test]
+fn engine_succeeded_without_sync_result_is_not_fabricated() {
+    let mut store = PendingCommandStore::new();
+    assert!(reserve(&mut store));
+    store.mark_terminal(COMMAND, RingingCommandState::Succeeded, None, None);
+    let status = store.v2_status_for_session(COMMAND, OWNER).unwrap();
+    assert_eq!(
+        status.sync_result, None,
+        "引擎类命令 succeeded 不得伪装出同步结果"
+    );
+    let replay = store.existing_receipt_for_session(COMMAND, OWNER).unwrap();
+    assert_eq!(replay.sync_result, None);
+}
+
+#[test]
+fn sync_result_survives_persistence_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("receipts.json");
+    let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
+    assert!(reserve(&mut store));
+    store.mark_terminal_sync(COMMAND, sync_sample());
+    drop(store);
+
+    let reloaded = PendingCommandStore::open_persistent_at(&path).unwrap();
+    let status = reloaded.v2_status_for_session(COMMAND, OWNER).unwrap();
+    assert_eq!(
+        status.sync_result.map(|s| s.operation),
+        Some("session.create".into()),
+        "best-effort 持久化必须带回同步结果"
+    );
+}
+
+#[test]
+fn conflicting_payload_still_rejected_after_sync_terminal() {
+    let mut store = PendingCommandStore::new();
+    assert!(reserve(&mut store));
+    store.mark_terminal_sync(COMMAND, sync_sample());
+    assert!(
+        store
+            .record_fingerprint_for_session(COMMAND, "different-payload", OWNER)
+            .is_err(),
+        "同 ID 不同 payload 在终态后仍被指纹守卫拒绝"
+    );
 }
