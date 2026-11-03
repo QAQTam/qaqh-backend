@@ -24,7 +24,6 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-pub mod activity;
 pub mod agent;
 pub mod progress;
 pub mod provider_job;
@@ -35,5 +34,4 @@ pub mod session_loop;
 mod session_loop_tests;
 pub mod tool_job;
 
-pub use activity::SessionActivityTracker;
 pub use progress::{AttemptBlocks, ProgressSink, ProgressStream};

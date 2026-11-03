@@ -9,15 +9,9 @@
 //! quota reservations for backgrounded or unstopped work, and telling the truth
 //! about whether anything started.
 
-use qaqh_agentloop_core::{DispatchEvidence, mailbox::FrameSize};
 use qaqh_ringing_contract::fact::{ToolError, ToolMetrics};
 use qaqh_ringing_contract::state::{CodeDelta, ToolCallStatus, ToolEffectInfo};
-use qaqh_session::{
-    canonical::sha256_content_hash,
-    owner::{ToolLifecycle, ToolRun, ToolTerminal},
-    session_commit::{CommittedExecution, FenceReason},
-    session_fact_v2::{FactPayload, SideEffectClass, ToolTerminalStatus},
-};
+use qaqh_session::owner::{ToolLifecycle, ToolRun, ToolTerminal};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -75,24 +69,6 @@ pub trait ToolPort: Send + Sync + 'static {
     ) -> Result<ToolOutput, ToolFailure>;
 }
 
-#[derive(Debug, Clone)]
-pub struct ToolOutcome {
-    pub evidence: DispatchEvidence,
-    pub terminal: Option<ToolTerminalStatus>,
-    pub output: Vec<u8>,
-    /// The executor kept external work alive (backgrounded process / unstopped
-    /// task). The invocation is settled, the side effect is not.
-    pub backgrounded: bool,
-    pub error: Option<String>,
-}
-
-impl FrameSize for ToolOutcome {
-    fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>()
-            .saturating_add(self.output.len())
-            .saturating_add(self.error.as_ref().map_or(0, String::capacity))
-    }
-}
 
 /// Policy snapshot re-evaluated immediately before dispatching a tool handler.
 ///
@@ -138,6 +114,13 @@ impl ToolPolicySnapshot {
             .with_trusted_roots(std::iter::once(dir.clone()));
         self.trusted_dirs.insert(dir);
     }
+}
+
+/// 小写 hex sha256(工具参数/请求身份摘要的公共原语)。
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(bytes);
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Single-use user approval bound to one exact `(call_id, execution_id, args_hash, workspace)`.
@@ -233,7 +216,7 @@ impl WorkspaceToolPort {
     ///
     /// Tool intents must pin the real policy, not a fixed placeholder string:
     /// the ledger and the executor then agree on what the command ran under.
-    pub fn sandbox_spec_hash(&self) -> qaqh_session::session_fact_v2::ContentHash {
+    pub fn sandbox_spec_hash(&self) -> String {
         let spec = self
             .policy
             .read()
@@ -241,7 +224,7 @@ impl WorkspaceToolPort {
             .sandbox_spec
             .clone();
         let bytes = serde_json::to_vec(&spec).unwrap_or_default();
-        sha256_content_hash(&bytes)
+        sha256_hex(&bytes)
     }
 
     /// Install a single-use approval grant for one specific `execution_id`.
@@ -416,7 +399,7 @@ impl WorkspaceToolPort {
         }
         let args_value: serde_json::Value = serde_json::from_slice(&request.args)
             .map_err(|e| ToolFailure::NotStarted(format!("invalid tool JSON arguments: {e}")))?;
-        let args_hash = sha256_content_hash(&request.args).0;
+        let args_hash = sha256_hex(&request.args);
 
         let policy = self
             .policy
@@ -501,7 +484,7 @@ impl WorkspaceToolPort {
 
     /// Content hash of the exact bytes a grant is bound to.
     pub fn args_hash(args: &[u8]) -> String {
-        sha256_content_hash(args).0
+        sha256_hex(args)
     }
 }
 
@@ -931,119 +914,4 @@ fn code_delta_of(
         files_deleted: delta.files_deleted,
         file: delta.file.clone(),
     })
-}
-
-pub async fn run<P: ToolPort>(
-    port: Arc<P>,
-    tool_name: String,
-    effect: CommittedExecution,
-    mut cancel: tokio::sync::watch::Receiver<bool>,
-) -> ToolOutcome {
-    let parts = match effect.into_parts() {
-        Ok(parts) => parts,
-        Err(reason) => return fenced(reason),
-    };
-    let FactPayload::ToolIntent(intent) = parts.fact.payload else {
-        return fenced(FenceReason::UnsupportedIntent);
-    };
-    let Some(args) = parts.tool_args else {
-        // Nothing was launched: the intent has no verified arguments.
-        return not_started("tool intent has no committed arguments");
-    };
-    let request = ToolRequest {
-        execution_id: intent.execution_id.as_str().to_owned(),
-        call_id: intent.call_id.as_str().to_owned(),
-        tool_name,
-        read_only: intent.side_effect_class == SideEffectClass::ReadOnly,
-        args,
-    };
-    let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));
-    let flag = cancelled.clone();
-    let mut job = tokio::task::spawn_blocking(move || classify(port.execute(&request, flag)));
-    loop {
-        tokio::select! {
-            result = &mut job => return joined(result),
-            changed = cancel.changed() => {
-                if changed.is_err() || *cancel.borrow() {
-                    cancelled.store(true, Ordering::Release);
-                    break;
-                }
-            }
-        }
-    }
-    // Never drop a running blocking handle and claim the tool stopped.
-    joined(job.await)
-}
-
-fn joined(result: Result<ToolOutcome, tokio::task::JoinError>) -> ToolOutcome {
-    match result {
-        Ok(outcome) => outcome,
-        Err(error) => ToolOutcome {
-            evidence: DispatchEvidence::StartedUnknown,
-            terminal: None,
-            output: Vec::new(),
-            backgrounded: false,
-            error: Some(
-                format!("tool worker join failed: {error}")
-                    .chars()
-                    .take(512)
-                    .collect(),
-            ),
-        },
-    }
-}
-
-fn classify(result: Result<ToolOutput, ToolFailure>) -> ToolOutcome {
-    match result {
-        Ok(output) if output.backgrounded => ToolOutcome {
-            evidence: DispatchEvidence::StartedUnknown,
-            terminal: Some(ToolTerminalStatus::Backgrounded),
-            output: output.output,
-            backgrounded: true,
-            error: None,
-        },
-        Ok(output) => ToolOutcome {
-            evidence: DispatchEvidence::StartedTerminal,
-            terminal: Some(ToolTerminalStatus::Succeeded),
-            output: output.output,
-            backgrounded: false,
-            error: None,
-        },
-        Err(ToolFailure::NotStarted(reason)) => not_started(&reason),
-        Err(ToolFailure::Denied(reason)) => ToolOutcome {
-            evidence: DispatchEvidence::NotStarted,
-            terminal: Some(ToolTerminalStatus::Denied),
-            output: Vec::new(),
-            backgrounded: false,
-            error: Some(reason.chars().take(512).collect()),
-        },
-        Err(ToolFailure::TerminalError { message, output }) => ToolOutcome {
-            evidence: DispatchEvidence::StartedTerminal,
-            terminal: Some(ToolTerminalStatus::Failed),
-            output,
-            backgrounded: false,
-            error: Some(message.chars().take(512).collect()),
-        },
-        Err(ToolFailure::AfterStart(reason)) => ToolOutcome {
-            evidence: DispatchEvidence::StartedUnknown,
-            terminal: None,
-            output: Vec::new(),
-            backgrounded: false,
-            error: Some(reason.chars().take(512).collect()),
-        },
-    }
-}
-
-fn fenced(reason: FenceReason) -> ToolOutcome {
-    not_started(&format!("capability fenced before start: {reason}"))
-}
-
-fn not_started(message: &str) -> ToolOutcome {
-    ToolOutcome {
-        evidence: DispatchEvidence::NotStarted,
-        terminal: None,
-        output: Vec::new(),
-        backgrounded: false,
-        error: Some(message.chars().take(512).collect()),
-    }
 }

@@ -42,13 +42,13 @@ impl AgentRegistry {
             qaqh_ringing::RingingCommand::Control(qaqh_domain::ControlCommand::AgentReloadConfig)
         )
         .then(|| {
-            crate::agent::session_config::session_effective_config(Some(&self.sessions), session_id)
+            crate::agent::session_config::session_effective_config(Some(&self.owners), session_id)
                 .ok_or_else(|| format!("effective config unavailable for {session_id}"))
                 .and_then(|(config, _)| {
                     let provider =
                         crate::session_agent::assembly::provider_spec(&config, Vec::new());
                     let workspace_root =
-                        super::spawn::ensure_session_workspace(&self.sessions, session_id)?;
+                        super::spawn::ensure_session_workspace(&self.owners, session_id)?;
                     let role = match self.agent_catalog.get_by_id(session_id) {
                         Some(metadata) if !metadata.agent_path.is_root() => {
                             crate::session_agent::assembly::subagent_sandbox()
@@ -195,14 +195,11 @@ impl AgentRegistry {
             .map(AgentInstance::kind_name)
             .unwrap_or(AgentKind::Session);
         let parent = self.supervisor.parent_of(session_id);
-        let parent_cancel = parent
-            .as_ref()
-            .and_then(|parent| self.cancel_for_session(parent));
         self.close(session_id);
         match kind {
             AgentKind::Session => self.get_or_spawn(session_id)?,
             AgentKind::Subagent(spec) => {
-                self.spawn_subagent_inprocess(session_id, spec, parent_cancel)?;
+                self.spawn_subagent_inprocess(session_id, spec)?;
                 if let Some(parent) = parent {
                     self.link_subagent(&parent, session_id)?;
                 }

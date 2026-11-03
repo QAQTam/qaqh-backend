@@ -5,7 +5,22 @@ use super::*;
 
 use crate::error::{QaqhError, QaqhResult};
 
-/// Resolve and materialize the directory a session's tools run in.
+/// 会话绑定的 cwd(业务库 `sessions.cwd`),空串/`.` 视为未绑定。
+pub(crate) fn session_cwd(
+    owners: &qaqh_session::owner::OwnerDirectory,
+    session_id: &str,
+) -> Option<String> {
+    let owned = session_id.to_string();
+    owners
+        .db()
+        .read_blocking(move |conn| qaqh_session::db::store::session_row(conn, &owned))
+        .ok()
+        .flatten()
+        .and_then(|row| row.cwd)
+        .filter(|cwd| !cwd.is_empty() && cwd != ".")
+}
+
+/// Resolve the directory a session's tools run in.
 ///
 /// A session without a bound workspace gets the default session workspace,
 /// created on demand. That exact path is what the model is told about, what the
@@ -14,12 +29,10 @@ use crate::error::{QaqhError, QaqhResult};
 /// A workspace the user picked must already exist; creating an empty directory
 /// with the same name would silently hide a vanished project.
 pub(crate) fn ensure_session_workspace(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
 ) -> Result<std::path::PathBuf, String> {
-    let bound = sessions
-        .workspace_cwd(session_id)
-        .filter(|cwd| !cwd.is_empty() && cwd != ".");
+    let bound = session_cwd(owners, session_id);
     match bound {
         Some(cwd) => {
             let path = std::path::PathBuf::from(cwd);
@@ -196,8 +209,7 @@ impl AgentRegistry {
             .into());
         }
 
-        let child_dir = self.sessions.session_path_dir(session_id);
-        // Explicit request first: the child genesis fact must carry the path
+        // Explicit request first: the child business row must carry the path
         // the caller named, not a value inferred from parent metadata.
         let requested = options
             .workspace
@@ -223,15 +235,8 @@ impl AgentRegistry {
                 }
                 path.to_string_lossy().into_owned()
             }
-            None => self
-                .sessions
-                .workspace_cwd(session_id)
-                .filter(|cwd| !cwd.is_empty() && cwd != ".")
-                .or_else(|| {
-                    self.sessions
-                        .workspace_cwd(parent_session_id)
-                        .filter(|cwd| !cwd.is_empty() && cwd != ".")
-                })
+            None => session_cwd(&self.owners, session_id)
+                .or_else(|| session_cwd(&self.owners, parent_session_id))
                 .unwrap_or_else(|| {
                     // 父子会话都没有工作区：落默认工作根（与
                     // `load_session_workspace` 同源），绝不兜底进程 cwd——
@@ -241,19 +246,39 @@ impl AgentRegistry {
                         .into_owned()
                 }),
         };
-        // 业务权威先行:子会话行落 SQLite(血缘 = 父会话)。
+        // 业务权威先行:子会话行落 SQLite(血缘 = 父会话, cwd 一并落库)。
         self.owners
             .ensure_session(session_id, Some(parent_session_id), options.ephemeral)
             .map_err(|error| {
                 format!("ensure child business session row for {session_id}: {error}")
             })?;
-        crate::service::materialize_canonical_session_in(
-            &child_dir,
-            &cwd,
-            options.model.unwrap_or("unknown"),
-            None,
-            options.ephemeral,
-        )?;
+        self.owners
+            .db()
+            .write_blocking({
+                let owned = session_id.to_string();
+                move |conn| {
+                    qaqh_session::db::store::update_session_columns(
+                        conn,
+                        &owned,
+                        &qaqh_session::db::store::SessionColumnPatch {
+                            title: None,
+                            cwd: Some(cwd),
+                            model: None,
+                            effort: None,
+                            profile: None,
+                            mode: None,
+                            tool_mode: None,
+                            model_selection: None,
+                            custom_tools: None,
+                            skills: None,
+                            frozen_annotation: None,
+                            archived: None,
+                            ephemeral: None,
+                        },
+                    )
+                }
+            })
+            .map_err(|error| format!("persist child cwd for {session_id}: {error}"))?;
 
         let identity = Some((parent.clone(), child_path.clone()));
         self.spawn_subagent_internal(
@@ -304,7 +329,9 @@ impl AgentRegistry {
             return Err(format!("agent already running for {session_id}").into());
         }
         if !ephemeral {
-            self.sessions.set_ephemeral(session_id, false);
+            self.owners
+                .set_ephemeral(session_id, false)
+                .map_err(|error| format!("persist subagent persistence for {session_id}: {error}"))?;
         }
         let root_session = if parent_session.is_empty() {
             session_id.to_string()
@@ -314,7 +341,6 @@ impl AgentRegistry {
         // Durable reservation must exist before the child actor can perform
         // any side effect.
         let reservation = self.reserve_spawn(&root_session, session_id)?;
-        let parent_cancel = self.cancel_for_session(parent_session);
         if let Err(error) = self.spawn_subagent_inprocess(
             session_id,
             SubagentSpawnSpec {
@@ -324,7 +350,6 @@ impl AgentRegistry {
                 max_tokens,
                 permission_level,
             },
-            parent_cancel,
         ) {
             let _ = self.release_spawn(
                 &root_session,
@@ -385,7 +410,6 @@ impl AgentRegistry {
         &mut self,
         session_id: &str,
         spec: SubagentSpawnSpec,
-        _parent_cancel: Option<crate::agent::types::CancelToken>,
     ) -> QaqhResult<()> {
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}").into());
@@ -395,7 +419,7 @@ impl AgentRegistry {
 
         let (mut agent_config, _session_profile) =
             crate::agent::session_config::session_effective_config(
-                Some(&self.sessions),
+                Some(&self.owners),
                 session_id,
             )
             .unwrap_or_default();
@@ -409,7 +433,7 @@ impl AgentRegistry {
             agent_config.max_tokens = max_tokens;
         }
 
-        let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
+        let ws_dir = ensure_session_workspace(&self.owners, session_id)?;
         let owner = self.owners.get_or_create(session_id);
         let loop_ = crate::session_agent::assembly::assemble(
             crate::session_agent::assembly::SpawnInput {
@@ -471,12 +495,12 @@ impl AgentRegistry {
 
         let (agent_config, _session_profile) =
             crate::agent::session_config::session_effective_config(
-                Some(&self.sessions),
+                Some(&self.owners),
                 session_id,
             )
             .unwrap_or_default();
 
-        let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
+        let ws_dir = ensure_session_workspace(&self.owners, session_id)?;
         let owner = self.owners.get_or_create(session_id);
         let loop_ = crate::session_agent::assembly::assemble(
             crate::session_agent::assembly::SpawnInput::for_session(
@@ -554,9 +578,10 @@ impl AgentRegistry {
         if self.instances.contains_key(session_id) {
             return Ok(());
         }
-        self.sessions.set_ephemeral(session_id, false);
-        let parent_cancel = self.cancel_for_session(parent_id);
-        self.spawn_subagent_inprocess(session_id, spec, parent_cancel)?;
+        self.owners
+            .set_ephemeral(session_id, false)
+            .map_err(|error| format!("persist reload persistence for {session_id}: {error}"))?;
+        self.spawn_subagent_inprocess(session_id, spec)?;
         if let Err(error) = self.link_subagent(parent_id, session_id) {
             self.close(session_id);
             return Err(format!(
@@ -578,13 +603,6 @@ impl AgentRegistry {
     /// T-1-4：父会话当前登记的子代理 seed（排序后返回，便于日志与测试）。
     pub(super) fn children_of(&self, parent: &str) -> Vec<String> {
         self.supervisor.children_of(parent)
-    }
-
-    pub(super) fn cancel_for_session(
-        &self,
-        _session_id: &str,
-    ) -> Option<crate::agent::types::CancelToken> {
-        None
     }
 
     /// T-1-4 测试/运维只读视图：父会话登记的子代理 seed。

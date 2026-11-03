@@ -8,7 +8,6 @@ description = "GUI-independent QAQ-Harness daemon application runtime"
 [dependencies]
 qaqh-agent-runtime = { path = "../qaqh-agent-runtime" }
 qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
-qaqh-agentloop-core = { path = "../qaqh-agentloop-core" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-config-api = { path = "../qaqh-config-api" }
 qaqh-domain = { path = "../qaqh-domain" }

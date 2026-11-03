@@ -95,7 +95,7 @@ fn envelope(client_session: &str, command: serde_json::Value) -> serde_json::Val
         "schema": qaqh_ringing::RINGING_SCHEMA,
         "version": qaqh_ringing::RINGING_V2_VERSION,
         "channel": "control",
-        "command_id": qaqh_session::canonical::generate_ulid(),
+        "command_id": qaqh_ringing_contract::ulid::generate_ulid(),
         "client_instance_id": "inst",
         "client_session_id": client_session,
         "session_id": SEED,

@@ -21,14 +21,12 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
-pub mod agent_graph;
 pub mod attachment;
 pub mod content_store;
 pub mod device_registry;
 pub mod hub;
 pub mod lease_store;
 pub mod pending_store;
-pub mod v2;
 
 pub use attachment::hydrate_attachment_previews;
 pub use content_store::CONTENT_STORE_THRESHOLD_BYTES;
@@ -36,6 +34,3 @@ pub use device_registry::{DeviceRecord, DeviceRegistry, Scope};
 pub use hub::RingingHub;
 pub use lease_store::RingingLeaseStore;
 pub use pending_store::{ExistingCommandReceipt, PendingCommandStore};
-pub use v2::{
-    V2BootstrapSnapshot, V2Envelope, V2HubError, V2ProjectionHub, V2StreamItem, V2Subscription,
-};

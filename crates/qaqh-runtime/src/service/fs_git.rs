@@ -31,7 +31,7 @@ use crate::error::{QaqhError, QaqhResult};
 /// 数据根承载会话/配置目录，其下的 daemon 自身管理面（`config.toml`、
 /// `profiles.toml`、`secrets.toml`、`daemon.json`）仍由
 /// [`is_self_administration_path`] 单独拦掉；会话数据不再保护。
-pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<PathBuf> {
+pub(crate) fn allowed_roots(owners: &qaqh_session::owner::OwnerDirectory) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     // 数据根（会话/配置目录）。
     roots.push(qaqh_types::platform::data_dir());
@@ -44,10 +44,14 @@ pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<Path
             }
         }
     }
-    // 会话工作区：meta.cwd（覆盖未注册为 UI workspace 的会话）。旧版在非
+    // 会话工作区：业务行 cwd（覆盖未注册为 UI workspace 的会话）。旧版在非
     // Windows 上写坏的 `\` 形态 cwd 读取时归一化，避免合法工作区被漏判。
-    for meta in sessions.list() {
-        if let Some(cwd) = meta.cwd.as_deref().filter(|c| !c.is_empty()) {
+    for row in owners
+        .db()
+        .read_blocking(|conn| qaqh_session::db::store::list_sessions(conn, false, 256))
+        .unwrap_or_default()
+    {
+        if let Some(cwd) = row.cwd.as_deref().filter(|c| !c.is_empty() && *c != ".") {
             roots.push(PathBuf::from(
                 qaqh_session::grouping::repair_legacy_backslash_cwd(cwd),
             ));
@@ -64,7 +68,7 @@ pub(crate) fn allowed_roots(sessions: &qaqh_session::SessionManager) -> Vec<Path
 ///   `resolve_target_path` 解析、`..` 逃逸由 `normalize_lexically` 吃掉；
 /// - 任一根命中即放行；无一命中返回 `false`（fail-closed）。
 fn path_allowed(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     path: &Path,
     scope_session: Option<&str>,
 ) -> bool {
@@ -73,10 +77,7 @@ fn path_allowed(
     }
     let normalized = normalize_lexically(&resolve_target_path(path.to_path_buf()));
     if let Some(session_id) = scope_session {
-        let Some(cwd) = sessions
-            .workspace_cwd(session_id)
-            .filter(|cwd| !cwd.is_empty())
-        else {
+        let Some(cwd) = crate::registry::spawn::session_cwd(owners, session_id) else {
             return false;
         };
         let scoped_root = normalize_lexically(&resolve_target_path(PathBuf::from(
@@ -86,7 +87,7 @@ fn path_allowed(
             return false;
         }
     }
-    allowed_roots(sessions).iter().any(|root| {
+    allowed_roots(owners).iter().any(|root| {
         let root = normalize_lexically(&resolve_target_path(root.clone()));
         path_within_dir(&normalized, &root)
     })
@@ -104,7 +105,7 @@ fn forbidden(kind: &str, path: &str) -> QaqhError {
 ///
 /// 路径必须落在 [`allowed_roots`]（会话工作区根 + 数据根）内。
 pub(crate) fn list_remote_directory(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     path: &str,
     scope_session: Option<&str>,
 ) -> QaqhResult<Value> {
@@ -112,7 +113,7 @@ pub(crate) fn list_remote_directory(
     if !is_absolute_like(path) {
         return Err(QaqhError::invalid("fs.list requires an absolute path"));
     }
-    if !path_allowed(sessions, dir, scope_session) {
+    if !path_allowed(owners, dir, scope_session) {
         return Err(forbidden("fs.list", path));
     }
     let mut entries: Vec<Value> = Vec::new();
@@ -179,7 +180,7 @@ pub(crate) fn list_remote_directory(
 ///
 /// 路径必须落在 [`allowed_roots`]（会话工作区根 + 数据根）内。
 pub(crate) fn read_remote_file(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     path: &str,
     max_bytes: u64,
     scope_session: Option<&str>,
@@ -188,7 +189,7 @@ pub(crate) fn read_remote_file(
     if !is_absolute_like(path) {
         return Err(QaqhError::invalid("fs.read requires an absolute path"));
     }
-    if !path_allowed(sessions, file_path, scope_session) {
+    if !path_allowed(owners, file_path, scope_session) {
         return Err(forbidden("fs.read", path));
     }
     let meta = std::fs::metadata(file_path).map_err(|source| QaqhError::Io {
@@ -223,19 +224,19 @@ pub(crate) fn read_remote_file(
     }))
 }
 
-pub(crate) fn workspace(sessions: &qaqh_session::SessionManager, session_id: &str) -> String {
+pub(crate) fn workspace(owners: &qaqh_session::owner::OwnerDirectory, session_id: &str) -> String {
     if session_id.is_empty() {
         return String::new();
     }
-    // 统一数据源：meta.cwd（workspace.txt 退役，读取侧惰性迁移）。
-    sessions.workspace_cwd(session_id).unwrap_or_default()
+    // 统一数据源：业务行 cwd（workspace.txt 退役）。
+    crate::registry::spawn::session_cwd(owners, session_id).unwrap_or_default()
 }
 
 pub(crate) fn qaqh_dir(
-    sessions: &qaqh_session::SessionManager,
+    owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
 ) -> std::path::PathBuf {
-    let workspace = workspace(sessions, session_id);
+    let workspace = workspace(owners, session_id);
     if workspace.is_empty() || workspace == "." {
         qaqh_types::platform::data_dir().join("workspace")
     } else {

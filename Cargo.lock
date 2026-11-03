@@ -2204,7 +2204,6 @@ name = "qaqh-agent-runtime"
 version = "2.1.20261031-1"
 dependencies = [
  "log",
- "qaqh-agentloop-core",
  "qaqh-config",
  "qaqh-domain",
  "qaqh-dsaccount",
@@ -2226,13 +2225,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tiny_http",
- "tokio",
-]
-
-[[package]]
-name = "qaqh-agentloop-core"
-version = "2.1.20261031-1"
-dependencies = [
  "tokio",
 ]
 
@@ -2627,7 +2619,6 @@ dependencies = [
  "log",
  "os_pipe",
  "qaqh-agent-runtime",
- "qaqh-agentloop-core",
  "qaqh-client",
  "qaqh-config",
  "qaqh-config-api",
@@ -2682,7 +2673,6 @@ version = "2.1.20261031-1"
 dependencies = [
  "hex",
  "log",
- "qaqh-agentloop-core",
  "qaqh-domain",
  "qaqh-profile",
  "qaqh-ringing",
