@@ -975,11 +975,7 @@ pub enum SideEffectClass {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(
-    feature = "ts",
-    derive(TS),
-    ts(export, export_to = "qaqh/", rename = "SessionActivityState")
-)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub enum ActivityState {
     #[default]
     Idle,
@@ -1101,9 +1097,7 @@ pub enum SubagentTerminalStatus {
     TimedOut,
 }
 
-/// Context compaction terminal status. Wire values mirror
-/// `qaqh_domain::CompactStatus`; declared here because the v2 delta vocabulary
-/// is self-contained and carries the TS export.
+/// Context compaction terminal status in the public delta vocabulary.
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

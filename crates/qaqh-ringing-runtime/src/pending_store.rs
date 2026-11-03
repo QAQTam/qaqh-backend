@@ -12,7 +12,6 @@ use qaqh_ringing::{
     RingingV2ExistingResult,
 };
 
-
 /// Retention metadata for `PendingCommandStore::new()` and persistent stores.
 ///
 /// This is a bounded reconciliation cache, not an execution ledger. Missing
@@ -351,7 +350,6 @@ impl PendingCommandStore {
             self.persist();
         }
     }
-
 
     pub fn mark_terminal(
         &mut self,

@@ -1,14 +1,14 @@
 //! axum_impl::content — see parent module docs.
 
+use super::v2::api_error_response;
 use super::*;
 use axum::body::Body;
 use axum::http::HeaderValue;
 
 /// `GET /ringing/v2/content/{content_id}`。
 ///
-/// **不带 seed 参数**：先按 id 取条目，再用条目自己的 `seed` 校验调用方归属
-/// （客户端可能同时 attach 多个 seed，所以不能反推）。未命中一律 404——不泄漏
-/// 「存在但不属于你」。
+/// **不带 seed 参数**：按内容 ID 查询关联会话，检查调用方是否持有其中一个会话的 lease。
+/// 没有关联内容返回 404；内容存在但调用方无权访问时返回 403。
 pub(crate) async fn handle_content_get(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -20,27 +20,31 @@ pub(crate) async fn handle_content_get(
     if content_id.is_empty() {
         return (StatusCode::BAD_REQUEST, "missing content_id").into_response();
     }
-    // canonical `ContentRef` 用 `sha256:<hex>`（schema 校验强制），content store 的
-    // 条目 id 是裸 hex（`sha256_hex`）；两种形态都接受，统一归一后查 store。
+    // canonical `ContentRef` 用 `sha256:<hex>`；上传响应使用裸 hex。
     let store_id = content_id
         .strip_prefix("sha256:")
         .unwrap_or(content_id.as_str());
-    let entry = state.hub.get_content_any(store_id);
-    let Some(entry) = entry else {
-        // CLEAN-3（T1.4）：ContentStore 只是 wire 传输缓存（有 TTL、有上限），
-        // fact 引用的正文本体在每会话持久 blob 里。缓存未命中回落 blob——
-        // 归属校验改为「存在一个调用方拥有的会话，其 blobs/ 内有该文件」，
-        // 找不到同样 404，不泄漏存在性。
-        return serve_session_blob(&state, &headers, &session_id, store_id);
+    let owners = match state.hub.content_sessions(store_id) {
+        Ok(owners) => owners,
+        Err(error) => {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "content_unavailable",
+                &format!("content lookup failed: {error}"),
+            );
+        }
     };
-    let owns = {
+    if owners.is_empty() {
+        return (StatusCode::NOT_FOUND, "content not found").into_response();
+    }
+    let owner_session = {
         let leases = state.leases.lock().unwrap_or_else(|e| e.into_inner());
-        entry
-            .owners
+        owners
             .iter()
-            .any(|owner| leases.owns_session(&session_id, owner))
+            .find(|owner| leases.owns_session(&session_id, owner))
+            .cloned()
     };
-    if !owns {
+    let Some(owner_session) = owner_session else {
         return (
             StatusCode::FORBIDDEN,
             [(header::CONTENT_TYPE, "application/json")],
@@ -48,55 +52,19 @@ pub(crate) async fn handle_content_get(
                 .to_vec(),
         )
             .into_response();
-    }
-    serve_content_bytes(&headers, &entry.media_type, entry.bytes)
-}
-
-/// ContentStore 未命中时的持久 blob 回落（CLEAN-3 T1.4）。
-///
-/// 遍历数据根下各会话的 `blobs/<hex>`，**仅当存在一个调用方拥有的会话**
-/// 持有该文件时返回 200；否则 404，与既有语义一致（不泄漏存在性）。
-/// blob 不存 media type：合法 UTF-8 回 `text/plain`，其余 `octet-stream`。
-fn serve_session_blob(
-    state: &AppState,
-    headers: &HeaderMap,
-    client_session_id: &str,
-    store_id: &str,
-) -> Response {
-    let hex = store_id.to_ascii_lowercase();
-    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
-    }
-    let sessions_root = qaqh_types::platform::sessions_dir();
-    let Ok(entries) = std::fs::read_dir(&sessions_root) else {
-        log::warn!(
-            "[content] blob fallback: sessions dir unreadable: {}",
-            sessions_root.display()
-        );
-        return (StatusCode::NOT_FOUND, "content not found or expired").into_response();
     };
-    let listed: Vec<_> = entries.flatten().collect();
-    for candidate in listed {
-        let seed = candidate.file_name().to_string_lossy().to_string();
-        let owns = state
-            .leases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .owns_session(client_session_id, &seed);
-        if !owns {
-            continue;
+    let entry = match state.hub.get_content(&owner_session, store_id) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return (StatusCode::NOT_FOUND, "content not found").into_response(),
+        Err(error) => {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "content_unavailable",
+                &format!("content read failed: {error}"),
+            );
         }
-        let blob_path = candidate.path().join("blobs").join(&hex);
-        let Ok(bytes) = std::fs::read(&blob_path) else {
-            continue;
-        };
-        let media_type = match std::str::from_utf8(&bytes) {
-            Ok(_) => "text/plain; charset=utf-8",
-            Err(_) => "application/octet-stream",
-        };
-        return serve_content_bytes(headers, media_type, bytes);
-    }
-    (StatusCode::NOT_FOUND, "content not found or expired").into_response()
+    };
+    serve_content_bytes(&headers, &entry.media_type, entry.bytes)
 }
 
 /// 统一的正文出站面：media_type 出站校验 + RFC 9110 单区间 Range。
@@ -281,15 +249,26 @@ pub(crate) async fn handle_content_upload(
         )
             .into_response();
     }
-    let content_id = state
+    let content_size = content.len() as u64;
+    let content_id = match state
         .hub
-        .put_content(&session_id, &media_type, content.clone(), false);
+        .put_content(&session_id, &media_type, content, false)
+    {
+        Ok(content_id) => content_id,
+        Err(error) => {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "content_unavailable",
+                &format!("content write failed: {error}"),
+            );
+        }
+    };
     // `content_id` 即内容摘要；响应形状由 `RingingV2ContentUploadResponse` 锁定。
     let response = qaqh_ringing::RingingV2ContentUploadResponse {
         content_id: content_id.clone(),
         media_type,
         sha256: content_id,
-        size: content.len() as u64,
+        size: content_size,
         truncated: false,
     };
     (

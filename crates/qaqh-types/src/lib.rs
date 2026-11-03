@@ -8,6 +8,7 @@
 // ── Sub-module declarations (each file = one logical group) ──
 
 pub mod api_types;
+pub mod code_delta;
 pub mod config;
 pub mod context_usage;
 pub mod discovery;
@@ -32,6 +33,7 @@ pub mod token;
 // ── Re-exports: flat public API ──
 
 pub use api_types::UsageInfo;
+pub use code_delta::CodeDeltaRecord;
 pub use config::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig, PersistentProfiles,

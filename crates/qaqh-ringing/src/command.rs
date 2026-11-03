@@ -1,10 +1,9 @@
 //! RingingV2 的唯一业务命令目录。
 
-use qaqh_domain::ContentRef;
 use qaqh_ringing_contract::commands::{
     AskAnswer, ImageBlock, InterAgentEnvelope, SubagentTerminalNotification,
 };
-use qaqh_ringing_contract::fact::InputPurpose;
+use qaqh_ringing_contract::fact::{ContentRef, InputPurpose};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;

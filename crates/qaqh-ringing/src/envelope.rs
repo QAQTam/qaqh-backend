@@ -1,15 +1,14 @@
 //! Ringing envelope：命令 ack 与命令状态。
 //!
-//! 阶段 3d（hub-fact-bus）：v1 事件信封 `RingingEventEnvelope`、事件批次
-//! `RingingEventBatch` 与 v1 命令信封 `RingingCommandEnvelope` 已删除——事件面
-//! 由 v2 typed projection envelope（`v2` 模块）承担，本文件只保留命令 ack/状态契约。
+//! The session event stream is defined by `SessionEventFrame` in
+//! `qaqh-ringing-contract`; this module only owns command acknowledgements and status.
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
 /// 命令确认：accepted 仅代表校验通过并进入正确 actor/worker，
-/// 业务完成必须通过 `causation_id = command_id` 的可靠事件返回。
+/// 业务完成 is reported on the session event stream with the command causation id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]

@@ -1,11 +1,11 @@
 //! Public API compile checks for native shells.
 //!
 //! Shells must be able to name every value they construct through the
-//! `qaqh-client` root without reaching into `qaqh-domain` directly.
+//! `qaqh-client` root without reaching into storage or transport crates.
 
 use qaqh_client::{
-    CommandPrecondition, CommandTarget, InputPurpose, RingingCommand,
-    RingingV2CommandEnvelope, SessionSettingsPatch,
+    CommandPrecondition, CommandTarget, InputPurpose, RingingCommand, RingingV2CommandEnvelope,
+    SessionSettingsPatch,
 };
 
 #[test]

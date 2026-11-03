@@ -12,7 +12,7 @@ use qaqh_ringing::{
     RINGING_V2_VERSION, RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2PairRequest,
     RingingV2PairResponse, RingingV2PairTokenRequest, RingingV2PairTokenResponse,
 };
-use qaqh_runtime::ringing::{Scope, device_registry};
+use qaqh_ringing_runtime::{Scope, device_registry};
 
 /// 配对令牌 TTL（一次性）。
 const PAIRING_TOKEN_TTL_MS: u64 = 120_000;

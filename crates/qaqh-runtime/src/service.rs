@@ -1,13 +1,14 @@
 use std::sync::{Arc, Mutex};
 
-use qaqh_domain::ActivityState;
 use qaqh_ringing::{CommandTarget, RingingCommand, RingingWorkerCommandEnvelope};
+use qaqh_ringing_contract::SessionActivityState as ActivityState;
 use qaqh_types::SessionMeta;
 use serde_json::Value;
 
+use crate::AgentRegistry;
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::command::Command;
-use crate::{AgentRegistry, RingingHub};
+use qaqh_ringing_runtime::RingingHub;
 
 #[derive(Clone)]
 pub struct QaqhService {
@@ -225,26 +226,20 @@ impl QaqhService {
             }
         }
         // 阶段 3b：SessionStateChanged{Closed} 的 v1 广播已删（A1：wire 零消费方）。
-        self.release_session_resident_state(session_id);
+        self.release_session_process_state(session_id);
         qaqh_memwatch::global().mark_session_unloaded(session_id);
         release_freed_heap_memory();
         Ok(())
     }
 
-    /// D-1：会话关闭后的 per-seed 常驻内存清理（修复 IMAGE_REGISTRY 与 hub
-    /// channels 的 per-seed 残留——诊断结论②③）。必须在 worker join 之后、
-    /// 终态（Closed）发布之后调用，顺序不可换：join 前 reset/forget 会让
-    /// 仍在运行的 worker 继续写回脏状态；终态发布前 forget 会让 publish
-    /// 触发 lazy-load，把刚丢弃的状态原样重建回来，清理变成空操作。
-    /// forget 之后该 seed 的 hub 态与 daemon 重启后的空态同构；磁盘索引
-    /// 保留，下次访问走既有 lazy-load 重放路径（UI 历史不丢）。
-    fn release_session_resident_state(&self, session_id: &str) {
+    /// Clear process-local image and worker registrations after the worker joins.
+    fn release_session_process_state(&self, session_id: &str) {
         // 图片注册表按 seed 键控存 base64（read_image 的上传缓存）。resume
         // 路径（state/lifecycle.rs）会从持久化消息历史重建，关闭期清空
         // 不破坏 image_index 语义。
         qaqh_workspace::read_image::reset_images(session_id);
         if let Some(hub) = self.hub.get() {
-            hub.forget_session(session_id);
+            hub.mark_worker_dead(session_id);
         }
     }
 
@@ -263,7 +258,7 @@ impl QaqhService {
         let unloaded = registry.unload_idle_sessions(idle_secs);
         // 阶段 3b：Closed 广播已删（A1）。
         for session_id in &unloaded {
-            self.release_session_resident_state(session_id);
+            self.release_session_process_state(session_id);
             qaqh_memwatch::global().mark_session_unloaded(session_id);
         }
         if !unloaded.is_empty() {
@@ -354,7 +349,7 @@ impl QaqhService {
         self.close_session(session_id, causation_id)?;
         let _ = self.write_meta(
             session_id,
-            qaqh_session::session_fact_v2::SessionMetadataPatch {
+            qaqh_ringing_contract::fact::SessionMetadataPatch {
                 archived: Some(true),
                 ..Default::default()
             },
@@ -379,7 +374,7 @@ impl QaqhService {
         self.write_title(
             session_id,
             title,
-            qaqh_session::session_fact_v2::TitleSource::User,
+            qaqh_ringing_contract::fact::TitleSource::User,
         )
     }
 
@@ -388,7 +383,7 @@ impl QaqhService {
     pub fn unarchive_session(&self, session_id: &str) -> Result<(), String> {
         let _ = self.write_meta(
             session_id,
-            qaqh_session::session_fact_v2::SessionMetadataPatch {
+            qaqh_ringing_contract::fact::SessionMetadataPatch {
                 archived: Some(false),
                 ..Default::default()
             },
@@ -501,7 +496,7 @@ impl QaqhService {
     /// 只读活动快照（/activity 观测端点，冻结事故 P0）：逐会话活动状态 +
     /// 是否有活跃工作。单次加锁保证 flag 与列表一致；僵尸会话（如
     /// 2026-09-02 的 running 冻结）可直接从外部探测，不再依赖人肉轮询。
-    pub fn activity_snapshot(&self) -> (bool, Vec<qaqh_domain::SessionActivity>) {
+    pub fn activity_snapshot(&self) -> (bool, Vec<qaqh_ringing_contract::SessionActivity>) {
         let activities = self
             .registry
             .lock()
@@ -520,7 +515,7 @@ impl QaqhService {
     pub(crate) fn write_meta(
         &self,
         session_id: &str,
-        patch: qaqh_session::session_fact_v2::SessionMetadataPatch,
+        patch: qaqh_ringing_contract::fact::SessionMetadataPatch,
     ) -> Result<(), String> {
         crate::session_meta::patch(&self.owners, session_id, patch)
     }
@@ -530,7 +525,7 @@ impl QaqhService {
         &self,
         session_id: &str,
         title: &str,
-        source: qaqh_session::session_fact_v2::TitleSource,
+        source: qaqh_ringing_contract::fact::TitleSource,
     ) -> Result<(), String> {
         crate::session_meta::set_title(&self.owners, session_id, title, source)
     }

@@ -6,7 +6,6 @@ license.workspace = true
 description = "Ringing daemon transport/projection/queue layer (split out of qaqh-runtime)"
 
 [dependencies]
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }

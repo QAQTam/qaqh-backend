@@ -8,9 +8,9 @@ build = "build.rs"
 
 [dependencies]
 qaqh-config = { path = "../qaqh-config" }
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
+qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-runtime = { path = "../qaqh-runtime" }
 qaqh-skills = { path = "../qaqh-skills" }
@@ -44,10 +44,6 @@ winresource = "0.1"
 # 运行期依赖由 qaqh-runtime 传递，故只登记在 dev。
 qaqh-siwc = { path = "../qaqh-siwc" }
 tempfile = "3"
-
-[features]
-default = ["memory"]
-memory = ["qaqh-runtime/memory"]
 
 [lints]
 workspace = true

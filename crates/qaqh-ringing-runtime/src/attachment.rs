@@ -6,8 +6,8 @@ use crate::RingingHub;
 
 /// Hydrate `ConversationSendMessage` attachment references into inline previews.
 ///
-/// Takes `attachments` out of the command, resolves each `content_id` via
-/// `hub.get_content(seed, ...)`, validates sha256/media_type, and prepends
+/// Takes `attachments` out of the command, resolves each hash via
+/// `hub.get_content(session_id, ...)`, validates the stored sha256, and prepends
 /// `[Files]` previews to `text`. No-op for non-conversation commands or empty
 /// attachments.
 pub fn hydrate_attachment_previews(
@@ -15,8 +15,7 @@ pub fn hydrate_attachment_previews(
     session_id: &str,
     command: &mut qaqh_ringing::RingingCommand,
 ) -> Result<(), String> {
-    let qaqh_ringing::RingingCommand::ConversationSendMessage(input) = command
-    else {
+    let qaqh_ringing::RingingCommand::ConversationSendMessage(input) = command else {
         return Ok(());
     };
     let Some(references) = input.attachments.take() else {
@@ -27,10 +26,13 @@ pub fn hydrate_attachment_previews(
     }
     let mut parts = vec!["[Files]".to_string()];
     for reference in references {
+        let content_ref = reference.hash().as_str();
+        let content_id = content_ref.strip_prefix("sha256:").unwrap_or(content_ref);
         let entry = hub
-            .get_content(session_id, &reference.content_id)
+            .get_content(session_id, content_id)
+            .map_err(|error| error.to_string())?
             .ok_or_else(|| "attachment_not_found".to_string())?;
-        if entry.sha256 != reference.sha256 || entry.media_type != reference.media_type {
+        if entry.sha256 != content_id {
             return Err("attachment_mismatch".into());
         }
         let preview = String::from_utf8_lossy(&entry.bytes)
@@ -43,7 +45,7 @@ pub fn hydrate_attachment_previews(
             .collect::<String>();
         parts.push(format!(
             "\n{} ({}):\n{}",
-            reference.content_id, reference.media_type, preview
+            content_id, entry.media_type, preview
         ));
     }
     parts.push(format!("\n\n[Message]\n{}", input.text));

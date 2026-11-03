@@ -1,8 +1,6 @@
 //! Ringing v2 wire contract.
 //!
-//! v2 is additive and uses a separate base path and version constant. The
-//! crate root retains the live command/snapshot/worker envelopes; the v1
-//! event bus and its wire types were removed in hub-fact-bus stages 3.2/3d.
+//! RingingV2 command and transport wire types on the versioned base path.
 
 mod types;
 
@@ -16,8 +14,8 @@ pub use types::{
     RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PairRequest,
     RingingV2PairResponse, RingingV2PairTokenRequest, RingingV2PairTokenResponse,
     RingingV2PendingApprovals, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
-    SecretWrite, SessionCreateResult, SessionSettingsPatch, SettingValue, ToolsSettingPatch,
-    events_path, open_path,
+    RingingV2ResyncRequired, SecretWrite, SessionCreateResult, SessionSettingsPatch, SettingValue,
+    ToolsSettingPatch, events_path, open_path,
 };
 
 /// Ringing v2 wire version.

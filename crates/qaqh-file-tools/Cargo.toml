@@ -10,7 +10,6 @@ qaqh-types = { path = "../qaqh-types" }
 qaqh-permission = { path = "../qaqh-permission" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
 qaqh-skills = { path = "../qaqh-skills" }
-qaqh-domain = { path = "../qaqh-domain" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"

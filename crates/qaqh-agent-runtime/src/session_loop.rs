@@ -17,9 +17,8 @@ use qaqh_ringing::ConversationSendMessage;
 use qaqh_ringing_contract::events::InteractionEndStatus;
 use qaqh_ringing_contract::fact::AssistantBlockKind;
 use qaqh_ringing_contract::fact::{
-    ActorKind, ActorRef, BlockId, ContentHash, ContentRef, ContentValue, InputPurpose,
-    InteractionChoice, InteractionDecision, InteractionId, InteractionKind, InterruptReason,
-    ToolCallId, TurnId,
+    ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionChoice,
+    InteractionDecision, InteractionId, InteractionKind, InterruptReason, ToolCallId, TurnId,
 };
 use qaqh_ringing_contract::state::{InteractionView, TimelineEntry, ToolCallStatus, TurnOutcome};
 use qaqh_ringing_contract::ulid::generate_ulid;
@@ -34,7 +33,7 @@ use crate::tool_job::{
     ToolAdmission, ToolApprovalGrant, ToolFailure, ToolOutput, ToolPort, ToolRequest,
     WorkspaceToolPort,
 };
-use qaqh_session::session_fact_v2::ProviderFinish;
+use qaqh_ringing_contract::fact::ProviderFinish;
 
 /// 权限交互的应答。
 #[derive(Debug, Clone, Copy)]
@@ -343,7 +342,7 @@ impl SessionLoop {
                 .as_ref()
                 .into_iter()
                 .flatten()
-                .map(|reference| ContentRef::new(ContentHash::new(reference.content_id.clone())))
+                .cloned()
                 .collect(),
             images: input.images.clone(),
             inter_agent: input.inter_agent.clone(),

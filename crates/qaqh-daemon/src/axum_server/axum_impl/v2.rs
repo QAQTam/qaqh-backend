@@ -18,7 +18,7 @@ use super::*;
 
 // bootstrap 的 state 是 qaqh_ringing_contract 的 SessionState(与 qaqh-client、
 // TS 契约导出共用同一份定义);本文件只做业务库→wire 的装配。
-use qaqh_ringing_contract::{TEAM_SCHEMA, TeamResponse as ClientV2TeamResponse};
+use qaqh_ringing_contract::{TEAM_SCHEMA, TeamResponse};
 
 #[derive(Deserialize)]
 pub struct V2EventsQuery {
@@ -75,8 +75,6 @@ pub(crate) async fn handle_open_v2(
         capabilities: RingingV2Capabilities {
             subscribe: true,
             interact: true,
-            // 席位机制已移除；字段保留至 v3 wire 清理。
-            drive: false,
             service: true,
             content: true,
             single_stream: true,
@@ -275,7 +273,7 @@ pub(crate) async fn handle_team_snapshot_v2(
             return api_error_response(StatusCode::BAD_REQUEST, "board_unavailable", &error);
         }
     };
-    let response = ClientV2TeamResponse {
+    let response = TeamResponse {
         schema: TEAM_SCHEMA.to_owned(),
         session_id,
         team,
@@ -319,9 +317,6 @@ pub(crate) async fn handle_pending_approvals_v2(
     if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
         return response;
     }
-    if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
-        return response;
-    }
     let owner = state.service.owners().get_or_create(&session_id);
     let snapshot = match owner.snapshot().await {
         Ok(snapshot) => snapshot,
@@ -336,15 +331,27 @@ pub(crate) async fn handle_pending_approvals_v2(
     let interactions = &snapshot.interactions;
     let pending = |interaction: &&InteractionView| interaction.resolution.is_none();
 
-    let pending_permission = interactions
+    let permission = interactions
         .iter()
         .filter(pending)
-        .find(|interaction| interaction.kind == InteractionKind::Permission)
-        .and_then(|interaction| pending_permission_view(&state, interaction));
+        .find(|interaction| interaction.kind == InteractionKind::Permission);
+    let pending_permission = match permission {
+        Some(interaction) => match pending_permission_view(&state, &session_id, interaction) {
+            Ok(view) => view,
+            Err(error) => {
+                return api_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "content_unavailable",
+                    &format!("pending interaction content for {session_id}: {error}"),
+                );
+            }
+        },
+        None => None,
+    };
     // 引擎的模态优先级是 plan 先于 ask（PlanReview 挂起期间 ask 尚不可应答），
     // 而同一挂起内 fact 的落盘序是 ask 在 plan 之前——选取必须按引擎优先级
     // 而非 fact 顺序，否则 ask 卡会遮住真正可应答的 plan 卡。
-    let pending_interaction = interactions
+    let interaction = interactions
         .iter()
         .filter(pending)
         .find(|interaction| interaction.kind == InteractionKind::Plan)
@@ -353,14 +360,29 @@ pub(crate) async fn handle_pending_approvals_v2(
                 .iter()
                 .filter(pending)
                 .find(|interaction| interaction.kind == InteractionKind::Ask)
-        })
-        .map(|interaction| RingingV2PendingInteractionView {
-            id: interaction.interaction_id.as_str().to_string(),
-            kind: interaction.kind,
-            // 与 permission 的 `details_unavailable` 同语义：正文取不到时
-            // 仍保留可答复的 id/kind，details 降级为 null。
-            details: interaction_body_value(&state, &interaction.request),
         });
+    let pending_interaction = match interaction {
+        Some(interaction) => {
+            let details = match interaction_body_value(&state, &session_id, &interaction.request) {
+                Ok(details) => details,
+                Err(error) => {
+                    return api_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "content_unavailable",
+                        &format!("pending interaction content for {session_id}: {error}"),
+                    );
+                }
+            };
+            Some(RingingV2PendingInteractionView {
+                id: interaction.interaction_id.as_str().to_string(),
+                kind: interaction.kind,
+                // 与 permission 的 `details_unavailable` 同语义：正文取不到时
+                // 仍保留可答复的 id/kind，details 降级为 null。
+                details,
+            })
+        }
+        None => None,
+    };
 
     // wire 形状（键恒在、空槽为 null）由 `RingingV2PendingApprovals` DTO 锁定；
     // device 面从这里序列化后派发 opaque challenge（形状刻意不与 admin 混用）。
@@ -463,12 +485,19 @@ pub(crate) async fn handle_approval_respond_v2(
 /// 展示，不能让待审批项从 UI 上消失。
 fn pending_permission_view(
     state: &AppState,
+    session_id: &str,
     interaction: &InteractionView,
-) -> Option<RingingV2PendingPermissionView> {
-    let tool_call_id = interaction.call_id.as_ref()?.as_str().to_string();
-    let body = interaction_body_value(state, &interaction.request);
+) -> Result<Option<RingingV2PendingPermissionView>, qaqh_session::db::DbError> {
+    let Some(tool_call_id) = interaction
+        .call_id
+        .as_ref()
+        .map(|call_id| call_id.as_str().to_string())
+    else {
+        return Ok(None);
+    };
+    let body = interaction_body_value(state, session_id, &interaction.request)?;
     let field = |name: &str| body.as_ref().and_then(|b| b.get(name)).cloned();
-    Some(RingingV2PendingPermissionView {
+    Ok(Some(RingingV2PendingPermissionView {
         tool_call_id,
         tool_name: field("tool_name"),
         action_summary: field("action_summary"),
@@ -479,21 +508,27 @@ fn pending_permission_view(
         risk: field("risk"),
         consequence: field("consequence"),
         details_unavailable: body.is_none(),
-    })
+    }))
 }
 
-/// 解析 interaction `request` 的正文 JSON（Inline 直接解，Ref 走 content store）。
-fn interaction_body_value(state: &AppState, request: &ContentValue) -> Option<serde_json::Value> {
+/// Parse an interaction body from inline JSON or its session-scoped SQLite content row.
+fn interaction_body_value(
+    state: &AppState,
+    session_id: &str,
+    request: &ContentValue,
+) -> Result<Option<serde_json::Value>, qaqh_session::db::DbError> {
     match request {
-        ContentValue::Inline { text } => serde_json::from_str(text).ok(),
+        ContentValue::Inline { text } => Ok(serde_json::from_str(text).ok()),
         ContentValue::Ref { content_ref } => {
-            // canonical ref 是 `sha256:<hex>`，content store 的 id 是裸 hex。
+            // canonical ref 是 `sha256:<hex>`，SQLite content id 是裸 hex。
             let store_id = content_ref.hash().as_str();
             let store_id = store_id.strip_prefix("sha256:").unwrap_or(store_id);
-            let entry = state.hub.get_content_any(store_id)?;
-            serde_json::from_slice(&entry.bytes).ok()
+            let Some(entry) = state.hub.get_content(session_id, store_id)? else {
+                return Ok(None);
+            };
+            Ok(serde_json::from_slice(&entry.bytes).ok())
         }
-        ContentValue::Unavailable(_) => None,
+        ContentValue::Unavailable(_) => Ok(None),
     }
 }
 
@@ -769,7 +804,7 @@ pub(super) fn existing_v2_receipt(
     state: &AppState,
     headers: &HeaderMap,
     command_id: &str,
-) -> Option<qaqh_runtime::ringing::ExistingCommandReceipt> {
+) -> Option<qaqh_ringing_runtime::ExistingCommandReceipt> {
     let session_id = get_session_id(headers)?;
     // §5：按稳定身份键查回执——换连接（重开 lease）后仍能对账原命令。
     let owner_key = state

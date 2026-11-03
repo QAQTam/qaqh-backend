@@ -14,8 +14,8 @@ mod tests {
 
     use crate::provider_job::ProviderRequestSpec;
     use crate::session_loop::SessionLoop;
-    use qaqh_ringing::ConversationSendMessage;
     use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
+    use qaqh_ringing::ConversationSendMessage;
 
     const CHAT_SSE: &str = concat!(
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello from loop\"},\"finish_reason\":null}]}\n\n",
@@ -31,11 +31,9 @@ mod tests {
 
     fn spawn_sse(server: tiny_http::Server) {
         std::thread::spawn(move || {
-            let header = tiny_http::Header::from_bytes(
-                &b"Content-Type"[..],
-                &b"text/event-stream"[..],
-            )
-            .expect("header");
+            let header =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                    .expect("header");
             for request in server.incoming_requests() {
                 let _ = request.respond(
                     tiny_http::Response::from_string(CHAT_SSE).with_header(header.clone()),
@@ -46,10 +44,12 @@ mod tests {
 
     async fn test_loop(
         dir: &std::path::Path,
-    ) -> (Arc<SessionLoop>, Arc<OwnerDirectory>, tokio::sync::broadcast::Receiver<SessionEventFrame>) {
-        let owners = Arc::new(
-            OwnerDirectory::open(dir.join("qaqh.db")).expect("open owners db"),
-        );
+    ) -> (
+        Arc<SessionLoop>,
+        Arc<OwnerDirectory>,
+        tokio::sync::broadcast::Receiver<SessionEventFrame>,
+    ) {
+        let owners = Arc::new(OwnerDirectory::open(dir.join("qaqh.db")).expect("open owners db"));
         let owner = owners
             .create_session(store::NewSession {
                 session_id: "SES-LOOP".into(),
@@ -81,7 +81,11 @@ mod tests {
             None,
             owner.lifecycle(),
         ));
-        let (_, base_url) = { let (server, addr) = sse_server(); spawn_sse(server); ((), addr) };
+        let (_, base_url) = {
+            let (server, addr) = sse_server();
+            spawn_sse(server);
+            ((), addr)
+        };
         let provider = qaqh_gate::ProviderConfig::chat(
             &base_url,
             "sk-test",
@@ -129,7 +133,10 @@ mod tests {
         // 事件流:TurnStarted → ActivityChanged → TimelineAppended(input)
         // → MessageDelta(流式)→ TimelineAppended(assistant seal)
         // → TurnEnded → ActivityChanged。
-        assert!(matches!(recv_event(&mut rx).await, SessionEvent::TurnStarted { .. }));
+        assert!(matches!(
+            recv_event(&mut rx).await,
+            SessionEvent::TurnStarted { .. }
+        ));
         assert!(matches!(
             recv_event(&mut rx).await,
             SessionEvent::ActivityChanged { .. }
@@ -252,7 +259,13 @@ mod tests {
 
         let owner = owners.get_or_create("SES-LOOP");
         for _ in 0..100 {
-            if !owner.snapshot().await.expect("snapshot").timeline.is_empty() {
+            if !owner
+                .snapshot()
+                .await
+                .expect("snapshot")
+                .timeline
+                .is_empty()
+            {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

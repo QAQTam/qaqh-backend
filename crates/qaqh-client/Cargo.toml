@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 bytes = "1"
-qaqh-domain = { path = "../qaqh-domain" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-types = { path = "../qaqh-types" }

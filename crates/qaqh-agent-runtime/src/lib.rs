@@ -12,12 +12,12 @@
 //! ```
 //!
 //! 对外暴露给 `qaqh-runtime` 的只有：`CancelToken` / `WorkerLiveness` /
-//! `session_effective_config` / `canonical_interaction_id` / `Assembly`
+//! `session_effective_config` / `Assembly`
 //! （provider 装配）/ `WorkspaceToolPort` / `QuotaSnapshot` / `SessionAgent`。
 //!
 //! ## 布局
 //!
-//! - `agent/`：会话有效配置、系统提示词、worker 存活、取消令牌、canonical id
+//! - `agent/`：会话有效配置、系统提示词、worker 存活与取消令牌
 //! - `session_agent/`：驱动循环（`SessionAgent` / `AgentHandle` / `AgentHost`）
 //! - `provider_job` / `tool_job`：模型请求与工具执行的作业封装
 //! - `quota_ledger` / `activity`：配额账本与活动追踪

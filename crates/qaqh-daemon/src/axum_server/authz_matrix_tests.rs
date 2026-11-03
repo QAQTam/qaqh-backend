@@ -15,7 +15,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
-use qaqh_runtime::ringing::Scope;
+use qaqh_ringing_runtime::Scope;
 use tower::util::ServiceExt; // oneshot
 
 const ADMIN: &str = "test-token";

@@ -16,7 +16,10 @@ pub mod ulid;
 pub mod workspace;
 
 pub use events::{SessionEvent, SessionEventFrame};
-pub use state::{CodeDelta, SessionBootstrap, SessionState, ToolEffectInfo};
+pub use state::{
+    CodeDelta, SessionActivity, SessionActivityState, SessionBootstrap, SessionState,
+    ToolEffectInfo,
+};
 pub use team::{TaskBoardSnapshot, TeamBoardSnapshot, TeamSnapshot};
 pub use workspace::{WorkspaceEntry, WorkspaceMeta};
 
