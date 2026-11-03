@@ -3,10 +3,9 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use qaqh_domain::{ActivityState, ControlCommand, RingingChannel};
+use qaqh_domain::{ActivityState, ControlCommand};
 use qaqh_ringing::{RingingCommand, RingingWorkerCommandEnvelope};
 use qaqh_session::{
-    actor::ConnectionId,
     canonical::{CanonicalSessionIdentity, generate_ulid},
     session_commit::SessionCommit,
     session_fact_v2::{
@@ -18,13 +17,14 @@ use serde_json::Value;
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::command::Command;
-use crate::{AgentRegistry, RingingHub, ringing::V2ProjectionHub};
+use crate::{AgentRegistry, RingingHub};
 
 #[derive(Clone)]
 pub struct QaqhService {
     pub(crate) registry: Arc<Mutex<AgentRegistry>>,
     pub(crate) hub: std::sync::OnceLock<Arc<RingingHub>>,
-    pub(crate) v2_hub: std::sync::OnceLock<Arc<V2ProjectionHub>>,
+    /// 会话 owner 目录:SQLite 业务权威 + 每会话事件单流。
+    pub(crate) owners: Arc<qaqh_session::owner::OwnerDirectory>,
     /// 会话存储句柄（PR-3-1 注入化：daemon main 装配点 init 后注入，
     /// service 内不再触达会话单例的全局访问器）。
     pub(crate) sessions: Arc<qaqh_session::SessionManager>,
@@ -108,7 +108,7 @@ impl QaqhService {
         Self {
             registry: Arc::new(Mutex::new(registry)),
             hub: std::sync::OnceLock::new(),
-            v2_hub: std::sync::OnceLock::new(),
+            owners,
             sessions,
             task_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
             board_stores: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -194,14 +194,9 @@ impl QaqhService {
             .set_message_quota_limits(in_flight_per_pair, outbound_per_sender);
     }
 
-    /// Attach the canonical V2 projection hub used for runtime residency
-    /// overlays and ephemeral `TeamDelta` publication.
-    pub fn attach_v2_projection(&self, hub: Arc<V2ProjectionHub>) {
-        let _ = self.v2_hub.set(hub.clone());
-        self.registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .attach_v2_projection(hub);
+    /// 会话 owner 目录(业务库 + 事件单流的唯一入口)。
+    pub fn owners(&self) -> &Arc<qaqh_session::owner::OwnerDirectory> {
+        &self.owners
     }
 
     /// 转发 Ringing 命令到 agent worker（wire 判别后由 worker reader 解析）。
@@ -214,38 +209,6 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .send_ringing(session_id, env)
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn subscribe_channel(
-        &self,
-        session_id: &str,
-        connection_id: &ConnectionId,
-        channel: RingingChannel,
-    ) -> Result<bool, String> {
-        self.registry()?
-            .subscribe_channel(session_id, connection_id.clone(), channel)
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn unsubscribe_channel(
-        &self,
-        session_id: &str,
-        connection_id: &ConnectionId,
-        channel: RingingChannel,
-    ) -> Result<bool, String> {
-        self.registry()?
-            .unsubscribe_channel(session_id, connection_id.clone(), channel)
-            .map_err(|error| error.to_string())
-    }
-
-    pub fn connection_closed(
-        &self,
-        session_id: &str,
-        connection_id: &ConnectionId,
-    ) -> Result<usize, String> {
-        self.registry()?
-            .connection_closed(session_id, connection_id.clone())
             .map_err(|error| error.to_string())
     }
 
@@ -334,12 +297,6 @@ impl QaqhService {
             }
         }
         if let Some(hub) = self.hub.get() {
-            for component in hub.memory_components() {
-                component_count += 1;
-                monitor.update_component(component);
-            }
-        }
-        if let Some(hub) = self.v2_hub.get() {
             for component in hub.memory_components() {
                 component_count += 1;
                 monitor.update_component(component);
@@ -566,32 +523,9 @@ impl QaqhService {
         Ok(Value::Null)
     }
 
-    /// Ask the session actor to publish a canonical resource fact after an
-    /// off-actor workspace mutation. The RPC has already persisted its file, so
-    /// a missing/unreachable worker (idle session, subagent race) only costs
-    /// the notification — never fail the mutation for it.
-    pub(crate) fn publish_resource_changed_best_effort(
-        &self,
-        session_id: &str,
-        resource_kind: &str,
-    ) {
-        let command = RingingCommand::Control(ControlCommand::PublishResourceChanged {
-            resource_kind: resource_kind.to_string(),
-        });
-        let env = RingingWorkerCommandEnvelope::new(session_id.to_string(), command_id(), command);
-        if let Err(error) = self.send_ringing_command(session_id, &env) {
-            log::debug!(
-                "[todo] resource fact publication skipped for {session_id} (no worker): {error}"
-            );
-        }
-    }
-
-    /// 统一运行状态（2026-10-06 归一裁决）：未加载 → `not_running`（不读投影、
-    /// 不做任何合成）；已加载 → 优先 canonical fact 投影（持久可重放，重启后
-    /// 语义可重建），投影不可读时退回 live tracker 的六态映射。
-    /// 注意此处**有意只对已加载会话**调 `projected_run_status`——hub 首次访问
-    /// 一个会话会把整个 fact log 从磁盘重放，`session.list` 对未加载会话逐条
-    /// 调用等于全库重放。
+    /// `session.list` 条目的运行状态归一:
+    /// 未加载 → `not_running`;已加载 → 循环侧活动状态(Working/WaitingUser
+    /// 映射)或 owner 业务库直读。
     fn session_run_status(
         &self,
         loaded: bool,
@@ -601,23 +535,22 @@ impl QaqhService {
         if !loaded {
             return qaqh_types::SessionRunStatus::NotRunning;
         }
-        if let Some(hub) = self.v2_hub.get() {
-            let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
-            match hub.projected_run_status(&session_dir, session_id) {
-                Ok(status) => return status,
-                Err(error) => log::warn!(
-                    "[session] run status projection fallback for {session_id}: {error:?}"
-                ),
-            }
-        }
-        match fallback {
+        let state = fallback.or_else(|| {
+            self.owners.session_run_state(session_id).ok().map(|state| {
+                match state {
+                    qaqh_session::owner::SessionRunState::Running
+                    | qaqh_session::owner::SessionRunState::Waiting => ActivityState::Working,
+                    _ => ActivityState::Idle,
+                }
+            })
+        });
+        match state {
             Some(ActivityState::Starting | ActivityState::Working) => {
                 qaqh_types::SessionRunStatus::Working
             }
-            // 投影不可读时无法细分等待类别；loop 仍在回合中途，归 working。
+            // 挂起交互属于回合中的等待,归 working。
             Some(ActivityState::WaitingUser) => qaqh_types::SessionRunStatus::Working,
             Some(ActivityState::Failed) => qaqh_types::SessionRunStatus::Error,
-            Some(ActivityState::Disconnected) => qaqh_types::SessionRunStatus::NotRunning,
             _ => qaqh_types::SessionRunStatus::Idle,
         }
     }
@@ -664,16 +597,8 @@ impl QaqhService {
 
     /// 配置写后广播（所有 config.* / profile.* 写路径共用）。
     fn notify_config_changed(&self) {
-        // v2：给驻留会话发一条 config_changed 信号（客户端据此重拉 config.load）。
-        // 在此之前前端只能靠自建广播 + 15s/焦点轮询兜底。
-        if let Some(hub) = self.v2_hub.get() {
-            match hub.publish_config_changed() {
-                Ok(published) => log::debug!("[config] v2 config_changed → {published} session(s)"),
-                Err(error) => log::warn!("[config] v2 config_changed broadcast failed: {error:?}"),
-            }
-        }
-        // worker 侧重载仍走 AgentReloadConfig 广播（改配置要作用到活跃 worker，
-        // 含子代理）。客户端侧的「重拉提示」已由上方的 v2 config_changed 承担。
+        // 客户端侧的「重拉提示」由前端轮询/焦点刷新兜底;worker 侧重载
+        // 走 AgentReloadConfig 广播(改配置要作用到活跃 worker,含子代理)。
         let failed = match self.registry() {
             Ok(mut registry) => registry
                 .broadcast_ringing(&RingingCommand::Control(ControlCommand::AgentReloadConfig)),

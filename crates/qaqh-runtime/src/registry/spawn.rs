@@ -5,96 +5,6 @@ use super::*;
 
 use crate::error::{QaqhError, QaqhResult};
 
-/// Forwards in-flight generation updates to the Ringing v2 conversation stream.
-///
-/// The hub keeps only the latest value per block identity, so a slow or
-/// disconnected client sees the current snapshot instead of a token backlog.
-/// Publishing is best-effort: a missing or closed session must never fail a
-/// generation that is otherwise fine.
-struct V2ProgressSink {
-    hub: Arc<V2ProjectionHub>,
-    session_dir: std::path::PathBuf,
-    session_id: String,
-}
-
-impl V2ProgressSink {
-    fn new(hub: &Arc<V2ProjectionHub>, session_dir: &std::path::Path, session_id: &str) -> Self {
-        Self {
-            hub: Arc::clone(hub),
-            session_dir: session_dir.to_path_buf(),
-            session_id: session_id.to_string(),
-        }
-    }
-}
-
-impl qaqh_agent_runtime::progress::ProgressSink for V2ProgressSink {
-    fn assistant_block(&self, update: qaqh_agent_runtime::progress::AssistantProgress<'_>) {
-        let kind = match update.kind {
-            qaqh_agent_runtime::progress::ProgressBlockKind::Reasoning => {
-                qaqh_session::session_fact_v2::AssistantBlockKind::Reasoning
-            }
-            qaqh_agent_runtime::progress::ProgressBlockKind::Answer => {
-                qaqh_session::session_fact_v2::AssistantBlockKind::Answer
-            }
-        };
-        if let Err(error) = self.hub.publish_assistant_progress(
-            &self.session_dir,
-            &self.session_id,
-            update.turn_id,
-            update.block_id,
-            kind,
-            update.model,
-            update.text,
-        ) {
-            log::debug!(
-                "[progress] assistant block publish failed for {}: {error}",
-                self.session_id
-            );
-        }
-    }
-
-    fn tool_input(&self, update: qaqh_agent_runtime::progress::ToolInputProgress<'_>) {
-        if let Err(error) = self.hub.publish_tool_input_progress(
-            &self.session_dir,
-            &self.session_id,
-            update.turn_id,
-            update.call_id,
-            update.tool_name,
-            update.args,
-        ) {
-            log::debug!(
-                "[progress] tool input publish failed for {}: {error}",
-                self.session_id
-            );
-        }
-    }
-
-    fn attempt_finished(&self, _turn_id: &str, block_ids: &[String], call_ids: &[String]) {
-        for block_id in block_ids {
-            if let Err(error) =
-                self.hub
-                    .clear_assistant_progress(&self.session_dir, &self.session_id, block_id)
-            {
-                log::debug!(
-                    "[progress] block cleanup failed for {}: {error}",
-                    self.session_id
-                );
-            }
-        }
-        for call_id in call_ids {
-            if let Err(error) =
-                self.hub
-                    .clear_tool_input_progress(&self.session_dir, &self.session_id, call_id)
-            {
-                log::debug!(
-                    "[progress] tool input cleanup failed for {}: {error}",
-                    self.session_id
-                );
-            }
-        }
-    }
-}
-
 /// Resolve and materialize the directory a session's tools run in.
 ///
 /// A session without a bound workspace gets the default session workspace,
@@ -149,11 +59,11 @@ impl AgentRegistry {
         session_id: &str,
         created_at_ms: i64,
     ) -> QaqhResult<AgentMetadata> {
-        let session_dir = self.sessions.session_path_dir(session_id);
-        let identity = CanonicalSessionIdentity::open_or_create(&session_dir)
-            .map_err(|error| format!("open canonical identity for root {session_id}: {error}"))?;
+        self.owners
+            .ensure_session(session_id, None, false)
+            .map_err(|error| format!("ensure business session row for {session_id}: {error}"))?;
         self.agent_catalog
-            .register_root_with_alias(identity.session_id, Some(session_id), created_at_ms)
+            .register_root_with_alias(SessionId::new(session_id.to_string()), Some(session_id), created_at_ms)
             .map_err(|error| error.into())
     }
 
@@ -230,16 +140,11 @@ impl AgentRegistry {
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
         if parent_session.is_empty() {
-            let child_dir = self.sessions.session_path_dir(session_id);
-            let child_identity =
-                CanonicalSessionIdentity::open_or_create(&child_dir).map_err(|error| {
-                    format!("open child canonical identity for {session_id}: {error}")
-                })?;
             return self.spawn_subagent_internal(
                 session_id,
                 &parent_session,
                 None,
-                child_identity.session_id,
+                SessionId::new(session_id.to_string()),
                 options,
             );
         }
@@ -291,14 +196,7 @@ impl AgentRegistry {
             .into());
         }
 
-        let parent_dir = self.sessions.session_path_dir(parent_session_id);
-        let parent_identity =
-            CanonicalSessionIdentity::open_or_create(&parent_dir).map_err(|error| {
-                format!("open parent canonical identity for {parent_session_id}: {error}")
-            })?;
         let child_dir = self.sessions.session_path_dir(session_id);
-        let child_identity = CanonicalSessionIdentity::open_or_create(&child_dir)
-            .map_err(|error| format!("open child canonical identity for {session_id}: {error}"))?;
         // Explicit request first: the child genesis fact must carry the path
         // the caller named, not a value inferred from parent metadata.
         let requested = options
@@ -343,12 +241,18 @@ impl AgentRegistry {
                         .into_owned()
                 }),
         };
+        // 业务权威先行:子会话行落 SQLite(血缘 = 父会话)。
+        self.owners
+            .ensure_session(session_id, Some(parent_session_id), options.ephemeral)
+            .map_err(|error| {
+                format!("ensure child business session row for {session_id}: {error}")
+            })?;
         crate::service::materialize_canonical_session_in(
             &child_dir,
             &cwd,
             options.model.unwrap_or("unknown"),
-            Some(parent_identity.session_id.clone()),
-            true,
+            None,
+            options.ephemeral,
         )?;
 
         let identity = Some((parent.clone(), child_path.clone()));
@@ -356,11 +260,11 @@ impl AgentRegistry {
             session_id,
             parent_session_id,
             identity,
-            child_identity.session_id.clone(),
+            SessionId::new(session_id.to_string()),
             options,
         )?;
         Ok(SpawnedSubagentInfo {
-            child_session_id: child_identity.session_id,
+            child_session_id: SessionId::new(session_id.to_string()),
             parent_agent_path: parent.agent_path,
             child_agent_path: child_path,
         })
@@ -463,7 +367,6 @@ impl AgentRegistry {
                 );
                 return Err(error.into());
             }
-            self.publish_agent_residency(child_session_id.as_str());
         }
         if let Err(error) = self.commit_spawn(&root_session, &reservation.reservation_id) {
             self.agent_catalog.remove(child_session_id.as_str());
@@ -489,9 +392,7 @@ impl AgentRegistry {
         }
         self.last_spawn
             .insert(session_id.to_string(), std::time::Instant::now());
-        let (activity_generation, _) = self.activity.begin(session_id);
 
-        let session_dir = self.sessions.session_path_dir(session_id);
         let (mut agent_config, _session_profile) =
             crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
@@ -509,53 +410,33 @@ impl AgentRegistry {
         }
 
         let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
-        let lifecycle = self.owners.get_or_create(session_id).lifecycle();
-        let prepared =
-            crate::session_agent::assembly::assemble(crate::session_agent::assembly::SpawnInput {
+        let owner = self.owners.get_or_create(session_id);
+        let loop_ = crate::session_agent::assembly::assemble(
+            crate::session_agent::assembly::SpawnInput {
                 session_id,
-                session_dir: &session_dir,
+                owner,
                 config: &agent_config,
                 allowed_tools: spec.tools.clone(),
                 permission_level: spec.permission_level,
                 sandbox: crate::session_agent::assembly::subagent_sandbox(),
                 workspace_root: ws_dir,
-                lifecycle,
-            })?;
+            },
+        )?;
 
-        let (handle, task) = crate::session_agent::AgentHost::spawn_with_activity(
-            session_id.to_string(),
-            prepared.commit,
-            prepared.provider,
-            prepared.port,
-            Some(crate::session_agent::ActivityTap {
-                tracker: self.activity.clone(),
-                generation: activity_generation,
-            }),
-            self.v2_hub.as_ref().map(|hub| {
-                Arc::new(V2ProgressSink::new(hub, &session_dir, session_id))
-                    as Arc<dyn qaqh_agent_runtime::progress::ProgressSink>
-            }),
-        )
-        .map_err(|e| format!("spawn thin subagent for {session_id}: {e}"))?;
-        let handle =
-            handle.with_memory(Arc::new(crate::session_agent::SessionAgentMemory::default()));
         self.instances.insert(
             session_id.to_string(),
             AgentInstance {
                 session_id: session_id.to_string(),
-                transport: AgentTransport::ThinAgent { handle, task },
-                kind: AgentKind::Subagent(spec),
-                subscription_actor: SessionActor::new(16),
-                liveness: None,
-                reader: None,
-                thread: None,
+                transport: AgentTransport::Loop { loop_ },
+                kind: AgentKind::Subagent(spec.clone()),
             },
         );
+        self.spawn_configs.insert(session_id.to_string(), spec);
         self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
         if let Some(hub) = self.hub.as_ref() {
             hub.mark_worker_live(session_id);
         }
-        log::info!("[subagent] spawned thin SessionAgent async task for subagent={session_id}");
+        log::info!("[subagent] spawned session loop for subagent={session_id}");
         Ok(())
     }
 
@@ -583,9 +464,11 @@ impl AgentRegistry {
         }
         self.last_spawn
             .insert(session_id.to_string(), std::time::Instant::now());
-        let (activity_generation, _) = self.activity.begin(session_id);
+        // 业务权威登记:根会话行不存在则补默认行(create_new 直 spawn 的路径)。
+        self.owners
+            .ensure_session(session_id, None, false)
+            .map_err(|error| format!("ensure business session row for {session_id}: {error}"))?;
 
-        let session_dir = self.sessions.session_path_dir(session_id);
         let (agent_config, _session_profile) =
             crate::agent::session_config::session_effective_config(
                 Some(&self.sessions),
@@ -594,55 +477,33 @@ impl AgentRegistry {
             .unwrap_or_default();
 
         let ws_dir = ensure_session_workspace(&self.sessions, session_id)?;
-        let lifecycle = self.owners.get_or_create(session_id).lifecycle();
-        let prepared = crate::session_agent::assembly::assemble(
+        let owner = self.owners.get_or_create(session_id);
+        let loop_ = crate::session_agent::assembly::assemble(
             crate::session_agent::assembly::SpawnInput::for_session(
                 session_id,
-                &session_dir,
                 &agent_config,
                 ws_dir,
-                lifecycle,
+                owner,
             ),
         )?;
 
-        let (handle, task) = crate::session_agent::AgentHost::spawn_with_activity(
-            session_id.to_string(),
-            prepared.commit,
-            prepared.provider,
-            prepared.port,
-            Some(crate::session_agent::ActivityTap {
-                tracker: self.activity.clone(),
-                generation: activity_generation,
-            }),
-            self.v2_hub.as_ref().map(|hub| {
-                Arc::new(V2ProgressSink::new(hub, &session_dir, session_id))
-                    as Arc<dyn qaqh_agent_runtime::progress::ProgressSink>
-            }),
-        )
-        .map_err(|e| format!("spawn thin agent for {session_id}: {e}"))?;
-        let handle =
-            handle.with_memory(Arc::new(crate::session_agent::SessionAgentMemory::default()));
         self.instances.insert(
             session_id.to_string(),
             AgentInstance {
                 session_id: session_id.to_string(),
-                transport: AgentTransport::ThinAgent { handle, task },
+                transport: AgentTransport::Loop { loop_ },
                 kind: AgentKind::Session,
-                subscription_actor: SessionActor::new(16),
-                liveness: None,
-                reader: None,
-                thread: None,
             },
         );
         self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
-        log::info!("[session] spawned thin SessionAgent async task for session={session_id}");
+        log::info!("[session] spawned session loop for session={session_id}");
         Ok(())
     }
 
     /// Materialize the delivery target without turning a logical child into a
     /// root session. Roots use the ordinary get-or-spawn path; children reload
-    /// only through a loaded immediate parent and reuse the durable spawn
-    /// config recorded in the parent's canonical `SubagentSpawned` fact.
+    /// only through a loaded immediate parent and reuse the spawn config
+    /// recorded by the registry at spawn time.
     pub(super) fn ensure_loaded_for_command(&mut self, session_id: &str) -> QaqhResult<()> {
         if self.instances.contains_key(session_id) {
             return Ok(());
@@ -674,38 +535,28 @@ impl AgentRegistry {
             )
             .into());
         }
-        let (config, _) = self.subagent_spawn_config(parent.agent_id.as_str(), session_id)?;
-        self.reload_subagent_internal(session_id, parent.agent_id.as_str(), config)
+        let spec = self
+            .spawn_configs
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!("child agent {session_id} has no recorded spawn config to reload")
+            })?;
+        self.reload_subagent_internal(session_id, parent.agent_id.as_str(), spec)
     }
 
     pub(super) fn reload_subagent_internal(
         &mut self,
         session_id: &str,
         parent_id: &str,
-        config: SubagentSpawnConfig,
+        spec: SubagentSpawnSpec,
     ) -> QaqhResult<()> {
         if self.instances.contains_key(session_id) {
             return Ok(());
         }
-        if !config.ephemeral {
-            self.sessions.set_ephemeral(session_id, false);
-        }
+        self.sessions.set_ephemeral(session_id, false);
         let parent_cancel = self.cancel_for_session(parent_id);
-        self.spawn_subagent_inprocess(
-            session_id,
-            SubagentSpawnSpec {
-                tools: config.tools,
-                model: config.model,
-                base_url: config.base_url,
-                max_tokens: config.max_tokens,
-                // reload 路径无父会话上下文，回落全局 config（fail-closed 1）。
-                permission_level: qaqh_config::Config::load()
-                    .ok()
-                    .map(|cfg| cfg.permission_level)
-                    .unwrap_or(1),
-            },
-            parent_cancel,
-        )?;
+        self.spawn_subagent_inprocess(session_id, spec, parent_cancel)?;
         if let Err(error) = self.link_subagent(parent_id, session_id) {
             self.close(session_id);
             return Err(format!(

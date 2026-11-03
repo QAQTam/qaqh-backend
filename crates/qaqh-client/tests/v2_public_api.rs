@@ -3,27 +3,19 @@
 //! without importing `qaqh-ringing`, `qaqh-domain` or `qaqh-session`.
 
 use qaqh_client::{
-    ClientError, ClientV2Bootstrap, ClientV2ControlState, ClientV2ConversationState, ClientV2Event,
-    ClientV2EventEnvelope, ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent,
-    ClientV2TeamResponse, ClientV2ToolState, RINGING_V2_BASE_PATH, RINGING_V2_VERSION,
+    ClientError, ClientV2Bootstrap, ClientV2Event, ClientV2EventEnvelope, ClientV2ResyncRequired,
+    ClientV2SessionState, ClientV2Subscription, ClientV2SubscriptionEvent, RINGING_V2_BASE_PATH,
+    RINGING_V2_VERSION,
 };
 
-use qaqh_client::{fact, ringing, ringing_v2, session_projection, team};
+use qaqh_client::{fact, ringing_v2};
 
 #[test]
 fn v2_surface_is_nameable_from_the_client_root() {
-    let cursor = ringing::CanonicalCursor::snapshot("log-1", 7);
-    let token = ringing::CursorToken::encode_snapshot(&cursor).expect("cursor token");
-    assert_eq!(token.decode_snapshot().expect("decoded cursor"), cursor);
-
     let _: Option<ClientV2Bootstrap> = None;
-    let _: Option<ClientV2ControlState> = None;
-    let _: Option<ClientV2ConversationState> = None;
-    let _: Option<ClientV2ToolState> = None;
     let _: Option<ClientV2Event> = None;
     let _: Option<ClientV2EventEnvelope> = None;
-    let _: Option<fact::ProjectionPayload> = None;
-    let _: Option<ringing_v2::RingingV2ResetRequired> = None;
+    let _: Option<ClientV2ResyncRequired> = None;
     let _: Option<ClientV2SessionState> = None;
     let _: Option<ClientV2Subscription> = None;
     let _: Option<ClientV2SubscriptionEvent> = None;
@@ -159,89 +151,6 @@ fn control_delta_interaction_branches_are_matchable_from_the_client_root() {
         panic!("expected control_delta, got {expired:?}");
     };
     assert_eq!(classify(delta), "expired");
-}
-
-/// Phase 4（roster / inbox）：壳层必须能只靠 `qaqh-client` **命名并 match**
-/// Team projection。
-/// `TeamSnapshot/TeamDelta` 是 TUI/WinUI 的唯一 roster/inbox 投影
-/// ，而壳层不能依赖 `qaqh-session`
-/// （静态门禁 G1）。只导出 `fact::ProjectionPayload` 不够——match 枚举变体必须写出
-/// 枚举名，所以这些类型必须从 client 根导出。
-#[test]
-fn team_projection_is_consumable_from_the_client_root() {
-    // 快照面：`Client::team_v2` 的返回类型 + roster / inbox / board 各层类型。
-    let _: Option<ClientV2TeamResponse> = None;
-    let _: Option<session_projection::TeamSnapshot> = None;
-    let _: Option<fact::TeamAgentSnapshot> = None;
-    let _: Option<fact::TeamAgentStatus> = None;
-    let _: Option<fact::TeamAgentResidency> = None;
-    let _: Option<fact::TeamInboxSummary> = None;
-    let _: Option<team::TaskBoardSnapshot> = None;
-    let _: Option<fact::TeamTaskSnapshot> = None;
-    let _: Option<fact::TeamBoardSnapshot> = None;
-
-    fn classify(delta: &fact::TeamDelta) -> &'static str {
-        match delta {
-            fact::TeamDelta::AgentJoined { agent, .. } => {
-                let _: &fact::TeamAgentSnapshot = agent;
-                // roster 以 AgentPath 为主、nickname 为辅。
-                let _: &str = agent.agent_path.as_str();
-                let _: &Option<String> = &agent.nickname;
-                "joined"
-            }
-            fact::TeamDelta::AgentStatusChanged { status, .. } => {
-                let _: &fact::TeamAgentStatus = status;
-                "status"
-            }
-            fact::TeamDelta::AgentResidencyChanged { residency, .. } => {
-                // unloaded 是 residency，不是 status；前端不能画成 deleted。
-                let _: &fact::TeamAgentResidency = residency;
-                "residency"
-            }
-            fact::TeamDelta::AgentMessageQueued { message, .. } => {
-                let _: &fact::TeamInboxSummary = message;
-                let _: &str = message.author.as_str();
-                let _: &str = message.recipient.as_str();
-                let _: &Option<String> = &message.task_id;
-                let _: fact::InterAgentDelivery = message.delivery;
-                "queued"
-            }
-            fact::TeamDelta::AgentMessageDelivered { message_id, .. } => {
-                let _: &str = message_id.as_str();
-                "delivered"
-            }
-            fact::TeamDelta::AgentInterrupted { .. } => "interrupted",
-            fact::TeamDelta::AgentCompleted { status, .. } => {
-                let _: &fact::TeamAgentStatus = status;
-                "completed"
-            }
-            fact::TeamDelta::TaskChanged { task, .. } => {
-                let _: &fact::TeamTaskSnapshot = task;
-                "task"
-            }
-            fact::TeamDelta::BoardChanged { board, .. } => {
-                let _: &fact::TeamBoardSnapshot = board;
-                "board"
-            }
-        }
-    }
-
-    let payload: fact::ProjectionPayload = serde_json::from_value(serde_json::json!({
-        "kind": "team_delta",
-        "data": {
-            "kind": "agent_residency_changed",
-            "data": {
-                "revision": 9,
-                "agent_id": "0199a0f0-0000-7000-8000-000000000002",
-                "residency": "unloaded"
-            }
-        }
-    }))
-    .expect("decode team_delta payload");
-    let fact::ProjectionPayload::TeamDelta(delta) = &payload else {
-        panic!("expected team_delta, got {payload:?}");
-    };
-    assert_eq!(classify(delta), "residency");
 }
 
 #[test]

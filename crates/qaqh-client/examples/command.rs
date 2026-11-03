@@ -146,10 +146,10 @@ fn main() {
         on_liveness: std::sync::Arc::new(|| {}),
         on_v2_event: Arc::new(|session_id, event| {
             println!(
-                "[event] seed={session_id} id={} delivery={:?}",
-                event.event_id, event.delivery
+                "[event] seed={session_id} seq={}",
+                event.seq
             );
-            if let Ok(v) = serde_json::to_value(&event.payload) {
+            if let Ok(v) = serde_json::to_value(&event.event) {
                 let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
                 println!("[event]   kind={kind}");
             }

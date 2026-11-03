@@ -1,50 +1,26 @@
 //! Ringing v2 HTTP/SSE endpoints.
 //!
-//! The first cut exposes the canonical read path:
-//! `open -> bootstrap -> since_cursor subscribe -> replay -> live`.
+//! 读取面:`open -> bootstrap(SessionState) -> since_cursor subscribe -> live`。
+//! 状态与事件都出自会话 owner(SQLite 业务表 + 单流 seq 广播)。
 
 use qaqh_ringing::{
     RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommandAckStatus, RingingV2ApprovalRespondRequest,
-    RingingV2AskOutcome, RingingV2Bootstrap, RingingV2Capabilities, RingingV2ChannelSnapshot,
-    RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
-    RingingV2DeviceChallenges, RingingV2DriverState, RingingV2ExistingResult,
+    RingingV2AskOutcome, RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope,
+    RingingV2CommandResult, RingingV2DeviceChallenges, RingingV2ExistingResult,
     RingingV2InteractionKind, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
-    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteraction,
-    RingingV2PendingInteractionView, RingingV2PendingPermissionView,
+    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteractionView,
+    RingingV2PendingPermissionView,
 };
-use qaqh_runtime::ringing::V2StreamItem;
-use qaqh_session::projection::{ControlInteractionState, ConversationSnapshot};
-use qaqh_session::{ClientV2ControlState as V2ControlState, ClientV2ToolState as V2ToolState};
-use qaqh_session::session_fact_v2::{ContentValue, InteractionDecision, InteractionKind};
+use qaqh_ringing_contract::fact::{ContentValue, InteractionDecision, InteractionKind};
+use qaqh_ringing_contract::state::{InteractionView, SessionBootstrap};
 use serde::Serialize;
 
 use super::*;
 
-// bootstrap 的具体 state 组合契约在 qaqh_ringing_contract（与 qaqh-client、
-// TS 契约导出共用同一份定义）；本文件只做 canonical→wire 的映射。
-use qaqh_ringing_contract::{
-    TeamResponse as ClientV2TeamResponse,
-    TEAM_SCHEMA,
-};
+// bootstrap 的 state 是 qaqh_ringing_contract 的 SessionState(与 qaqh-client、
+// TS 契约导出共用同一份定义);本文件只做业务库→wire 的装配。
+use qaqh_ringing_contract::{TeamResponse as ClientV2TeamResponse, TEAM_SCHEMA};
 
-/// canonical `ContentValue` → wire 形态（#345）。
-///
-/// 两侧 serde 判别式一致（`kind` / `data`）；`Unavailable` 的 reason 结构按
-/// 不透明 JSON 透传，不在 wire 层重复建模。
-fn wire_content_value(
-    value: &qaqh_session::session_fact_v2::ContentValue,
-) -> RingingV2ContentValue {
-    use qaqh_session::session_fact_v2::ContentValue;
-    match value {
-        ContentValue::Inline { text } => RingingV2ContentValue::Inline { text: text.clone() },
-        ContentValue::Ref { content_ref } => RingingV2ContentValue::Ref {
-            content_ref: content_ref.hash().as_str().to_string(),
-        },
-        ContentValue::Unavailable(reason) => RingingV2ContentValue::Unavailable(
-            serde_json::to_value(reason).unwrap_or(serde_json::Value::Null),
-        ),
-    }
-}
 
 #[derive(Deserialize)]
 pub struct V2EventsQuery {
@@ -138,6 +114,33 @@ pub(crate) async fn handle_renew_v2(State(state): State<AppState>, headers: Head
     )
 }
 
+
+/// 业务会话存在性:不建 owner(避免为不存在的会话泄漏泵线程)。
+async fn require_business_session(
+    owners: &qaqh_session::owner::OwnerDirectory,
+    session_id: &str,
+) -> Result<(), Response> {
+    let owned = session_id.to_string();
+    let exists = owners
+        .db()
+        .read_blocking(move |conn| qaqh_session::db::store::session_exists(conn, &owned))
+        .map_err(|error| {
+            api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_unavailable",
+                &format!("business lookup failed: {error}"),
+            )
+        })?;
+    if !exists {
+        return Err(api_error_response(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "business session row not found",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn handle_bootstrap_v2(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -154,104 +157,35 @@ pub(crate) async fn handle_bootstrap_v2(
             "missing seed",
         );
     }
-    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
-    let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
-        Ok(bootstrap) => bootstrap,
+    if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
+        return response;
+    }
+    let owner = state.service.owners().get_or_create(&session_id);
+    let snapshot = match owner.snapshot().await {
+        Ok(snapshot) => snapshot,
         Err(error) => {
-            return v2_hub_error_response(error);
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_unavailable",
+                &format!("business state for {session_id}: {error}"),
+            );
         }
     };
-    let control_snapshot = &bootstrap.projections.control;
-    let interactions = control_snapshot
-        .interactions
-        .iter()
-        .filter(|interaction| {
-            interaction.resolution.is_none() && interaction.expired_reason.is_none()
-        })
-        .map(|interaction| RingingV2PendingInteraction {
-            interaction_id: interaction.interaction_id.as_str().to_string(),
-            call_id: interaction
-                .call_id
-                .as_ref()
-                .map(|call_id| call_id.as_str().to_string())
-                .unwrap_or_default(),
-            turn_id: interaction
-                .turn_id
-                .as_ref()
-                .map(|turn_id| turn_id.as_str().to_string())
-                .unwrap_or_default(),
-            kind: match interaction.kind {
-                InteractionKind::Permission => RingingV2InteractionKind::Permission,
-                InteractionKind::Ask => RingingV2InteractionKind::Ask,
-                InteractionKind::Plan => RingingV2InteractionKind::PlanReview,
-            },
-            // #345 / 2026-09-24 修订：ask / plan / permission 的 modal 正文
-            // 都走 content store（ref 指向正文）。permission 在旧实现里靠
-            // tool 频道快照 / timeline 卡兜底；纯 v2 单流下该快照已不存在，
-            // 因此也必须暴露 canonical 正文 ref。
-            request: Some(wire_content_value(&interaction.request)),
-        })
-        .collect();
-    // 全会话 driver 席位已移除（2026-10-23 审查 §1）：字段保留以兼容已导出
-    // wire 契约，恒为 vacant；随 v3 wire 清理批删除。
-    let driver = Some(RingingV2DriverState {
-        can_claim: true,
-        holder: None,
-        driver_epoch: 0,
-    });
-    let control = V2ControlState {
-        session_id: control_snapshot.session_id.clone(),
-        activity: control_snapshot.activity,
-        current_turn_id: control_snapshot.current_turn_id.clone(),
-        current_call_id: control_snapshot.current_call_id.clone(),
-        round: control_snapshot.round.clone(),
-        tools: control_snapshot.tools.clone(),
-        subagents: control_snapshot.subagents.clone(),
-        last_recovery: control_snapshot.last_recovery,
-        revision: control_snapshot.revision,
-        last_fact_seq: control_snapshot.last_fact_seq,
-        interactions,
-        driver,
+    let response = SessionBootstrap {
+        schema: RINGING_SCHEMA.into(),
+        version: RINGING_V2_VERSION,
+        server_epoch: state.epoch.clone(),
+        session_id: session_id.clone(),
+        state: snapshot,
     };
-    let conversation = bootstrap.projections.conversation.clone();
-    let tool = V2ToolState {
-        tools: control_snapshot.tools.clone(),
-    };
-    let tool_revision = control_snapshot.revision;
-    let response: RingingV2Bootstrap<V2ControlState, ConversationSnapshot, V2ToolState> =
-        RingingV2Bootstrap {
-            schema: RINGING_SCHEMA.into(),
-            version: RINGING_V2_VERSION,
-            server_epoch: bootstrap.server_epoch,
-            session_id: bootstrap.session_id,
-            snapshot_cursor: bootstrap.snapshot_cursor,
-            control: RingingV2ChannelSnapshot {
-                channel: RingingChannel::Control,
-                state_revision: control.revision,
-                snapshot_version: 1,
-                state: control,
-            },
-            conversation: RingingV2ChannelSnapshot {
-                channel: RingingChannel::Conversation,
-                state_revision: conversation.revision,
-                snapshot_version: 1,
-                state: conversation,
-            },
-            tool: RingingV2ChannelSnapshot {
-                channel: RingingChannel::Tool,
-                state_revision: tool_revision,
-                snapshot_version: 1,
-                state: tool,
-            },
-        };
     json_response(StatusCode::OK, &response)
 }
 
 /// `GET /ringing/v2/sessions/{seed}/team` — team roster + task/message board snapshots.
 ///
-/// Team agents are rebuilt from the session canonical log; tasks and board
-/// entries come from the root tree's separate team aggregates. Deltas are
-/// delivered on the per-seed single stream as `ProjectionPayload::TeamDelta`.
+/// 花名册由业务库血缘重建:根会话 + `sessions.parent_session_id` 直指的子代理,
+/// 状态读各自的业务行;任务板/留言板仍来自 team aggregates。增量在
+/// SSE 单流上由 `SessionEvent` 承载。
 pub(crate) async fn handle_team_snapshot_v2(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -268,10 +202,67 @@ pub(crate) async fn handle_team_snapshot_v2(
             "missing seed",
         );
     }
-    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
-    let team = match state.v2_hub.bootstrap(&session_dir, &session_id) {
-        Ok(bootstrap) => bootstrap.projections.team,
-        Err(error) => return v2_hub_error_response(error),
+    let owners = state.service.owners();
+    let children = match owners.session_children(&session_id) {
+        Ok(children) => children,
+        Err(error) => {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "team_unavailable",
+                &format!("business children for {session_id}: {error}"),
+            );
+        }
+    };
+    let root_path = qaqh_ringing_contract::fact::AgentPath::root();
+    let mut agents = vec![qaqh_ringing_contract::team::TeamAgentSnapshot {
+        agent_id: qaqh_ringing_contract::fact::SessionId::new(session_id.clone()),
+        agent_path: root_path.clone(),
+        nickname: None,
+        role: None,
+        status: qaqh_ringing_contract::team::TeamAgentStatus::Running,
+        residency: qaqh_ringing_contract::team::TeamAgentResidency::Loaded,
+        parent_agent_path: None,
+        current_task_id: None,
+    }];
+    for child in &children {
+        let status = match owners.session_run_state(child) {
+            Ok(qaqh_session::owner::SessionRunState::Running) => {
+                qaqh_ringing_contract::team::TeamAgentStatus::Running
+            }
+            Ok(qaqh_session::owner::SessionRunState::Waiting) => {
+                qaqh_ringing_contract::team::TeamAgentStatus::WaitingUser
+            }
+            Ok(qaqh_session::owner::SessionRunState::Idle) => {
+                qaqh_ringing_contract::team::TeamAgentStatus::Running
+            }
+            Ok(qaqh_session::owner::SessionRunState::NeverStarted) => {
+                qaqh_ringing_contract::team::TeamAgentStatus::PendingInit
+            }
+            Err(_) => qaqh_ringing_contract::team::TeamAgentStatus::PendingInit,
+        };
+        let path = root_path.child(child).unwrap_or_else(|_| {
+            // 血缘 id 不满足 path 段规则时按原样平铺;花名册展示不因
+            // 命名规则失败而缺席。
+            qaqh_ringing_contract::fact::AgentPath::parse_absolute(&format!("/root/{child}"))
+                .unwrap_or(root_path.clone())
+        });
+        agents.push(qaqh_ringing_contract::team::TeamAgentSnapshot {
+            agent_id: qaqh_ringing_contract::fact::SessionId::new(child.clone()),
+            agent_path: path.clone(),
+            nickname: None,
+            role: None,
+            status,
+            residency: qaqh_ringing_contract::team::TeamAgentResidency::Unloaded,
+            parent_agent_path: Some(root_path.clone()),
+            current_task_id: None,
+        });
+    }
+    let team = qaqh_ringing_contract::team::TeamSnapshot {
+        root_session_id: Some(qaqh_ringing_contract::fact::SessionId::new(session_id.clone())),
+        agents,
+        unread_messages: Vec::new(),
+        revision: 0,
+        last_fact_seq: 0,
     };
     let tasks = match state.service.task_board_snapshot(&session_id) {
         Ok(snapshot) => snapshot,
@@ -326,15 +317,25 @@ pub(crate) async fn handle_pending_approvals_v2(
             "missing seed",
         );
     }
-    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
-    let bootstrap = match state.v2_hub.bootstrap(&session_dir, &session_id) {
-        Ok(bootstrap) => bootstrap,
-        Err(error) => return v2_hub_error_response(error),
+    if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
+        return response;
+    }
+    if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
+        return response;
+    }
+    let owner = state.service.owners().get_or_create(&session_id);
+    let snapshot = match owner.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_unavailable",
+                &format!("business state for {session_id}: {error}"),
+            );
+        }
     };
-    let interactions = &bootstrap.projections.control.interactions;
-    let pending = |interaction: &&ControlInteractionState| {
-        interaction.resolution.is_none() && interaction.expired_reason.is_none()
-    };
+    let interactions = &snapshot.interactions;
+    let pending = |interaction: &&InteractionView| interaction.resolution.is_none();
 
     let pending_permission = interactions
         .iter()
@@ -468,7 +469,7 @@ pub(crate) async fn handle_approval_respond_v2(
 /// 展示，不能让待审批项从 UI 上消失。
 fn pending_permission_view(
     state: &AppState,
-    interaction: &ControlInteractionState,
+    interaction: &InteractionView,
 ) -> Option<RingingV2PendingPermissionView> {
     let tool_call_id = interaction.call_id.as_ref()?.as_str().to_string();
     let body = interaction_body_value(state, &interaction.request);
@@ -502,10 +503,11 @@ fn interaction_body_value(state: &AppState, request: &ContentValue) -> Option<se
     }
 }
 
-/// 每 seed 一条 SSE（2026-09-24 冻结修订）。
+/// 每 seed 一条 SSE(报告二 §5)。
 ///
-/// 事件带 `stream_key`，客户端自行 demux；per-channel 的 `events/{channel}`
-/// 已硬切删除。reset 在单流上只发一次。
+/// 帧载荷是类型化 `SessionEventFrame`,`id: {epoch}:{seq}` 即同步游标。
+/// owner 广播无回放尾:`since_cursor` 落后于当前水位即下发
+/// `ringing.resync_required` 要求客户端重新 bootstrap;lagged 同理。
 pub(crate) async fn handle_events_v2(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -524,31 +526,54 @@ pub(crate) async fn handle_events_v2(
             "missing seed",
         );
     }
-    let cursor = query
-        .since_cursor
-        .as_deref()
-        .map(qaqh_ringing::CursorToken::from_opaque);
-    let session_dir = qaqh_types::platform::sessions_dir().join(&session_id);
-    let mut subscription = match state
-        .v2_hub
-        .subscribe(&session_dir, &session_id, cursor.as_ref())
-    {
-        Ok(subscription) => subscription,
-        Err(error) => return v2_hub_error_response(error),
+    // 游标格式 `{epoch}:{seq}`;epoch 不匹配或不可解析一律按无游标处理
+    // (客户端拿 live 流,重叠由自身幂等消费吸收)。
+    if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
+        return response;
+    }
+    let since_seq = query.since_cursor.as_deref().and_then(|cursor| {
+        // 全形 `{epoch}:{seq}`;裸 seq 视为当前 epoch 的水位。
+        if let Some((cursor_epoch, seq)) = cursor.rsplit_once(':') {
+            (cursor_epoch == state.epoch)
+                .then_some(())
+                .and_then(|_| seq.parse::<u64>().ok())
+        } else {
+            cursor.parse::<u64>().ok()
+        }
+    });
+    let owner = state.service.owners().get_or_create(&session_id);
+    let mut subscription = owner.subscribe();
+    // 快照水位:游标落后于水位 = 订阅窗口外有缺口 → resync;游标 ≥ 水位
+    // (或无游标)= live 直推。
+    let needs_resync = match owner.snapshot().await {
+        Ok(snapshot) => since_seq.is_some_and(|since| since < snapshot.seq),
+        Err(_) => true,
     };
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
-    // 设备吊销（`revoke_device` 摘 lease）必须**杀掉在途 SSE**（spec §6）：订阅本身
-    // 与 lease 生命周期无关，故循环内每个事件前复查租约存活；失效即下发终止帧并
+    // 设备吊销(`revoke_device` 摘 lease)必须**杀掉在途 SSE**(spec §6):订阅本身
+    // 与 lease 生命周期无关,故循环内每个事件前复查租约存活;失效即下发终止帧并
     // 断流。与 `sse.rs::handle_timeline_events` 的逐事件存活检查同款。
     let leases = state.leases.clone();
     let stream_session = session_id.clone();
-    // B：诊断内存快照直接混进这条会话流，但**只对 admin 订阅者**追加——非 admin
-    // 连 ticker 都不建，越权面为零。帧用独立 event 名 `diagnostics.memory`，旧客户端
-    // 按名 demux 不受影响；采集开关仍由 `diagnostics.memory.start/stop` 控制。
+    let stream_epoch = state.epoch.clone();
+    // B:诊断内存快照直接混进这条会话流,但**只对 admin 订阅者**追加——非 admin
+    // 连 ticker 都不建,越权面为零。帧用独立 event 名 `diagnostics.memory`;采集
+    // 开关仍由 `diagnostics.memory.start/stop` 控制。
     let diagnostics_service = state.service.clone();
     let diagnostics_admin = identity.is_admin();
     tokio::spawn(async move {
+        if needs_resync {
+            let data = serde_json::json!({
+                "session_id": stream_session,
+                "reason": "cursor_gap",
+            });
+            let frame = Event::default()
+                .event("ringing.resync_required")
+                .data(data.to_string());
+            let _ = tx.send(Ok(frame)).await;
+            return;
+        }
         let mut diagnostics_tick = diagnostics_admin.then(|| {
             let mut interval = tokio::time::interval(MEMORY_PUSH_INTERVAL);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -559,7 +584,7 @@ pub(crate) async fn handle_events_v2(
         }
         let mut diagnostics_cursor: Option<u64> = None;
         loop {
-            // 取消安全：`next()` 只 await 在 broadcast `recv()` 上，select 丢弃
+            // 取消安全:`next()` 只 await 在 broadcast `recv()` 上,select 丢弃
             // 另一个分支不会丢事件。非 admin 时 ticker 分支永久 pending。
             let tick = async {
                 match diagnostics_tick.as_mut() {
@@ -570,7 +595,7 @@ pub(crate) async fn handle_events_v2(
                 }
             };
             let item = tokio::select! {
-                item = subscription.next() => Some(item),
+                item = subscription.recv() => Some(item),
                 _ = tick => None,
             };
             match item {
@@ -590,7 +615,7 @@ pub(crate) async fn handle_events_v2(
                         }
                     }
                 }
-                Some(V2StreamItem::Event(event)) => {
+                Some(Ok(frame_event)) => {
                     if !leases
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
@@ -611,21 +636,28 @@ pub(crate) async fn handle_events_v2(
                         break;
                     }
                     let data =
-                        serde_json::to_string(event.as_ref()).unwrap_or_else(|_| "{}".into());
+                        serde_json::to_string(&frame_event).unwrap_or_else(|_| "{}".into());
                     let frame = Event::default()
-                        .id(format!("v2:{}:{}", event.server_epoch, event.event_id))
+                        .id(format!("{}:{}", stream_epoch, frame_event.seq))
                         .event("ringing.event")
                         .data(data);
                     if tx.send(Ok(frame)).await.is_err() {
                         break;
                     }
                 }
-                Some(V2StreamItem::Reset(reset)) => {
-                    let data = serde_json::to_string(&reset).unwrap_or_else(|_| "{}".into());
-                    let frame = Event::default().event("ringing.reset_required").data(data);
+                // lagged:缺口出现,要求客户端重新同步。
+                Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                    let data = serde_json::json!({
+                        "session_id": stream_session,
+                        "reason": "stream_lagged",
+                    });
+                    let frame = Event::default()
+                        .event("ringing.resync_required")
+                        .data(data.to_string());
                     let _ = tx.send(Ok(frame)).await;
                     break;
                 }
+                Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
             }
         }
     });
@@ -717,13 +749,13 @@ pub(crate) async fn handle_command_v2(
             },
         );
     }
-    // First-answer-wins: if the canonical control projection already carries a
-    // structured verdict for the targeted interaction, answer synchronously
-    // with the winning result instead of dispatching a command the worker can
-    // only reject with a bare `interaction_already_resolved`.
+    // First-answer-wins: if the owner snapshot already carries a structured
+    // verdict for the targeted interaction, answer synchronously with the
+    // winning result instead of dispatching a command the loop can only
+    // ignore.
     if require_v2_lease(&state, &headers).is_some()
         && let Some(session_id) = envelope.session_id.as_deref()
-        && let Some(existing) = resolved_interaction_existing(&state, session_id, &envelope.command)
+        && let Some(existing) = resolved_interaction_existing(&state, session_id, &envelope.command).await
     {
         return json_response(
             StatusCode::OK,
@@ -773,17 +805,15 @@ fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<Interact
 /// Structured verdict of an already-resolved interaction, if the canonical
 /// control projection has one. Legacy facts carry no verdict → `None`, and the
 /// command falls through to the worker's existing rejection path.
-fn resolved_interaction_existing(
+async fn resolved_interaction_existing(
     state: &AppState,
     session_id: &str,
     command: &qaqh_ringing::RingingCommand,
 ) -> Option<RingingV2ExistingResult> {
     let target = interaction_target(command)?;
-    let session_dir = qaqh_types::platform::sessions_dir().join(session_id);
-    let interactions = state
-        .v2_hub
-        .control_interactions(&session_dir, session_id)
-        .ok()?;
+    let owner = state.service.owners().get_or_create(session_id);
+    let snapshot = owner.snapshot().await.ok()?;
+    let interactions = snapshot.interactions;
     let interaction = match target {
         InteractionTarget::InteractionId(id) => interactions
             .iter()
@@ -795,11 +825,11 @@ fn resolved_interaction_existing(
                 .is_some_and(|call_id| call_id.as_str() == id)
         }),
     }?;
-    let verdict = interaction.resolution.as_ref()?.verdict?;
+    let decision = interaction.resolution.as_ref()?.decision;
     let result = command_result_for(
         interaction.kind,
         interaction.interaction_id.as_str(),
-        verdict,
+        decision,
     )?;
     Some(RingingV2ExistingResult::InteractionResolved { result })
 }
@@ -983,34 +1013,6 @@ fn require_lease_on_session(
         return Err(forbidden_not_owner(session_id));
     }
     Ok(caller)
-}
-
-fn v2_hub_error_response(error: qaqh_runtime::ringing::V2HubError) -> Response {
-    match error {
-        qaqh_runtime::ringing::V2HubError::SessionMissing(_) => api_error_response(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "canonical session log not found",
-        ),
-        qaqh_runtime::ringing::V2HubError::SnapshotMissing(_) => api_error_response(
-            StatusCode::CONFLICT,
-            "snapshot_missing",
-            "canonical snapshot cursor is unavailable",
-        ),
-        qaqh_runtime::ringing::V2HubError::InvalidCursor(message) => {
-            api_error_response(StatusCode::BAD_REQUEST, "cursor_expired", &message)
-        }
-        qaqh_runtime::ringing::V2HubError::Canonical(message) => api_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "canonical_error",
-            &message,
-        ),
-        qaqh_runtime::ringing::V2HubError::InvalidEvent(message) => api_error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "invalid_projection_event",
-            &message,
-        ),
-    }
 }
 
 pub(crate) fn api_error_response(status: StatusCode, code: &str, message: &str) -> Response {

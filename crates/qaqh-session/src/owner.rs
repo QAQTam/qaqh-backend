@@ -756,4 +756,62 @@ impl OwnerDirectory {
             .await?;
         Ok(self.get_or_create(&session_id))
     }
+
+    /// Spawn 期登记(同步):行不存在则插入默认行,已存在则不动(幂等)。
+    /// 根会话与子代理共用;子代理用 `parent_session_id` 落血缘,
+    /// 已有血缘时不覆盖。
+    pub fn ensure_session(
+        &self,
+        session_id: &str,
+        parent_session_id: Option<&str>,
+        ephemeral: bool,
+    ) -> Result<(), DbError> {
+        let session_id = session_id.to_string();
+        let parent = parent_session_id.map(str::to_string);
+        self.db.write_blocking(move |conn| {
+            store::ensure_session(conn, &session_id, parent.as_deref(), ephemeral)
+        })
+    }
+
+    /// 会话血缘(spawn 诊断/列表用)。
+    pub fn session_parent(&self, session_id: &str) -> Result<Option<String>, DbError> {
+        let session_id = session_id.to_string();
+        self.db
+            .read_blocking(move |conn| store::session_parent(conn, &session_id))
+    }
+
+    /// 直接子会话(team 花名册用)。
+    pub fn session_children(&self, parent_session_id: &str) -> Result<Vec<String>, DbError> {
+        let parent = parent_session_id.to_string();
+        self.db
+            .read_blocking(move |conn| store::child_session_ids(conn, &parent))
+    }
+
+    /// 运行状态读取(列表/诊断用,不建 owner):活动回合 = Running,
+    /// 挂起交互 = Waiting,有回合历史 = Idle,从未开过回合 = NeverStarted。
+    pub fn session_run_state(&self, session_id: &str) -> Result<SessionRunState, DbError> {
+        let session_id = session_id.to_string();
+        self.db.read_blocking(move |conn| {
+            if store::active_turn_id(conn, &session_id)?.is_some() {
+                return Ok::<_, rusqlite::Error>(SessionRunState::Running);
+            }
+            if !store::pending_interactions(conn, &session_id)?.is_empty() {
+                return Ok(SessionRunState::Waiting);
+            }
+            if store::turn_count(conn, &session_id)? > 0 {
+                Ok(SessionRunState::Idle)
+            } else {
+                Ok(SessionRunState::NeverStarted)
+            }
+        })
+    }
+}
+
+/// [`OwnerDirectory::session_run_state`] 的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRunState {
+    Running,
+    Waiting,
+    Idle,
+    NeverStarted,
 }

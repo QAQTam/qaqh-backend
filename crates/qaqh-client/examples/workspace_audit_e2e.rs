@@ -36,7 +36,7 @@ fn main() {
     let handlers = ClientHandlers {
         on_liveness: Arc::new(|| {}),
         on_v2_event: Arc::new(|session_id, event| {
-            if let Ok(v) = serde_json::to_value(&event.payload) {
+            if let Ok(v) = serde_json::to_value(&event.event) {
                 let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
                 println!("[event] seed={session_id} kind={kind}");
             }
