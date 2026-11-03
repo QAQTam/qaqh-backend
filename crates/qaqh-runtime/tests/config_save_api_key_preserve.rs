@@ -37,7 +37,12 @@ fn empty_or_masked_api_key_keeps_existing_secret() {
 
     // 1) initial save with a real key
     service
-        .handle("config.save", &json!({ "apiKey": "sk-1", "model": "m1" }))
+        .execute_ringing_command(
+            &qaqh_ringing::CommandTarget::Global,
+            &qaqh_ringing::RingingCommand::ConfigSave {
+                patch: json!({ "apiKey": "sk-1", "model": "m1" }),
+            },
+        )
         .expect("save with key");
 
     let cfg = qaqh_config::Config::load().expect("reload");
@@ -46,7 +51,12 @@ fn empty_or_masked_api_key_keeps_existing_secret() {
 
     // 2) empty apiKey must preserve the existing key
     service
-        .handle("config.save", &json!({ "apiKey": "" }))
+        .execute_ringing_command(
+            &qaqh_ringing::CommandTarget::Global,
+            &qaqh_ringing::RingingCommand::ConfigSave {
+                patch: json!({ "apiKey": "" }),
+            },
+        )
         .expect("save with empty apiKey");
     let cfg = qaqh_config::Config::load().expect("reload");
     assert_eq!(cfg.api_key, "sk-1", "empty apiKey must not delete the key");
@@ -54,14 +64,24 @@ fn empty_or_masked_api_key_keeps_existing_secret() {
 
     // 3) masked placeholder must preserve the existing key
     service
-        .handle("config.save", &json!({ "apiKey": "****" }))
+        .execute_ringing_command(
+            &qaqh_ringing::CommandTarget::Global,
+            &qaqh_ringing::RingingCommand::ConfigSave {
+                patch: json!({ "apiKey": "****" }),
+            },
+        )
         .expect("save with masked apiKey");
     let cfg = qaqh_config::Config::load().expect("reload");
     assert_eq!(cfg.api_key, "sk-1", "masked apiKey must not delete the key");
 
     // 4) a real new key still updates
     service
-        .handle("config.save", &json!({ "apiKey": "sk-2" }))
+        .execute_ringing_command(
+            &qaqh_ringing::CommandTarget::Global,
+            &qaqh_ringing::RingingCommand::ConfigSave {
+                patch: json!({ "apiKey": "sk-2" }),
+            },
+        )
         .expect("save with new key");
     let cfg = qaqh_config::Config::load().expect("reload");
     assert_eq!(cfg.api_key, "sk-2", "new apiKey must replace");

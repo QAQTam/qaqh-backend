@@ -69,7 +69,6 @@ pub trait ToolPort: Send + Sync + 'static {
     ) -> Result<ToolOutput, ToolFailure>;
 }
 
-
 /// Policy snapshot re-evaluated immediately before dispatching a tool handler.
 ///
 /// The OS sandbox spec is part of the snapshot, not re-derived at dispatch:
@@ -190,6 +189,22 @@ impl WorkspaceToolPort {
             .policy
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
+    }
+
+    /// Replace the per-session and global tool filters, returning the catalog
+    /// that the model may use after both filters are applied.
+    pub fn update_tool_allowlists(
+        &self,
+        allowed_tools: Vec<String>,
+        global_allowed_tools: Option<Vec<String>>,
+    ) -> Vec<qaqh_types::ToolDef> {
+        let mut manager = self
+            .manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        manager.set_global_allowed(global_allowed_tools);
+        manager.apply_init(allowed_tools);
+        manager.filtered_defs()
     }
 
     /// Workspace root the current policy dispatches against.
@@ -517,52 +532,10 @@ impl ToolPort for WorkspaceToolPort {
             }
         };
 
-        let authorized = match qaqh_workspace::admit_with_context(
-            invocation,
-            &context,
-            &policy.trusted_dirs,
-        ) {
-            qaqh_workspace::Admission::Authorized(call) => call,
-            qaqh_workspace::Admission::Denied(reason) => {
-                self.lifecycle.settled(
-                    &request.call_id,
-                    &request.tool_name,
-                    args_json.clone(),
-                    failed_terminal("permission_denied", &reason, None, None),
-                );
-                return Err(ToolFailure::Denied(reason));
-            }
-            qaqh_workspace::Admission::ApprovalRequired(challenge) => {
-                let grant = match self
-                    .approvals
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .remove(&request.execution_id)
-                {
-                    Some(grant) => grant,
-                    None => {
-                        let reason = format!(
-                            "permission approval required or revoked for {}",
-                            request.tool_name
-                        );
-                        self.lifecycle.settled(
-                            &request.call_id,
-                            &request.tool_name,
-                            args_json.clone(),
-                            failed_terminal("permission_denied", &reason, None, None),
-                        );
-                        return Err(ToolFailure::Denied(reason));
-                    }
-                };
-                let normalized_ws =
-                    qaqh_workspace::resolve_target_path(policy.workspace_root.clone());
-                let grant_ws = qaqh_workspace::resolve_target_path(grant.workspace_root);
-                if grant.call_id != request.call_id
-                    || grant.execution_id != request.execution_id
-                    || grant.args_hash != args_hash
-                    || grant_ws != normalized_ws
-                {
-                    let reason = "approval grant does not match execution identity, arguments, or workspace".to_string();
+        let authorized =
+            match qaqh_workspace::admit_with_context(invocation, &context, &policy.trusted_dirs) {
+                qaqh_workspace::Admission::Authorized(call) => call,
+                qaqh_workspace::Admission::Denied(reason) => {
                     self.lifecycle.settled(
                         &request.call_id,
                         &request.tool_name,
@@ -571,10 +544,39 @@ impl ToolPort for WorkspaceToolPort {
                     );
                     return Err(ToolFailure::Denied(reason));
                 }
-                match challenge.approve(true) {
-                    Ok(call) => call,
-                    Err(err) => {
-                        let reason = format!("approval challenge rejected: {err:?}");
+                qaqh_workspace::Admission::ApprovalRequired(challenge) => {
+                    let grant = match self
+                        .approvals
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .remove(&request.execution_id)
+                    {
+                        Some(grant) => grant,
+                        None => {
+                            let reason = format!(
+                                "permission approval required or revoked for {}",
+                                request.tool_name
+                            );
+                            self.lifecycle.settled(
+                                &request.call_id,
+                                &request.tool_name,
+                                args_json.clone(),
+                                failed_terminal("permission_denied", &reason, None, None),
+                            );
+                            return Err(ToolFailure::Denied(reason));
+                        }
+                    };
+                    let normalized_ws =
+                        qaqh_workspace::resolve_target_path(policy.workspace_root.clone());
+                    let grant_ws = qaqh_workspace::resolve_target_path(grant.workspace_root);
+                    if grant.call_id != request.call_id
+                        || grant.execution_id != request.execution_id
+                        || grant.args_hash != args_hash
+                        || grant_ws != normalized_ws
+                    {
+                        let reason =
+                        "approval grant does not match execution identity, arguments, or workspace"
+                            .to_string();
                         self.lifecycle.settled(
                             &request.call_id,
                             &request.tool_name,
@@ -583,9 +585,21 @@ impl ToolPort for WorkspaceToolPort {
                         );
                         return Err(ToolFailure::Denied(reason));
                     }
+                    match challenge.approve(true) {
+                        Ok(call) => call,
+                        Err(err) => {
+                            let reason = format!("approval challenge rejected: {err:?}");
+                            self.lifecycle.settled(
+                                &request.call_id,
+                                &request.tool_name,
+                                args_json.clone(),
+                                failed_terminal("permission_denied", &reason, None, None),
+                            );
+                            return Err(ToolFailure::Denied(reason));
+                        }
+                    }
                 }
-            }
-        };
+            };
 
         if cancel.load(Ordering::Acquire) {
             self.lifecycle.settled(
@@ -904,9 +918,7 @@ fn effect_infos(result: &qaqh_workspace::execution::ToolExecResult) -> Vec<ToolE
         .collect()
 }
 
-fn code_delta_of(
-    result: &qaqh_workspace::execution::ToolExecResult,
-) -> Option<CodeDelta> {
+fn code_delta_of(result: &qaqh_workspace::execution::ToolExecResult) -> Option<CodeDelta> {
     result.code_delta.as_ref().map(|delta| CodeDelta {
         lines_added: delta.lines_added,
         lines_removed: delta.lines_removed,

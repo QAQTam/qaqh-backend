@@ -4,8 +4,8 @@
 //! 状态与事件都出自会话 owner(SQLite 业务表 + 单流 seq 广播)。
 
 use qaqh_ringing::{
-    RINGING_SCHEMA, RINGING_V2_VERSION, RingingCommandAckStatus, RingingV2ApprovalRespondRequest,
-    RingingV2AskOutcome, RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope,
+    RINGING_SCHEMA, RINGING_V2_VERSION, RingingV2ApprovalRespondRequest,
+    RingingV2AskOutcome, RingingV2Capabilities, RingingV2CommandEnvelope,
     RingingV2CommandResult, RingingV2DeviceChallenges, RingingV2ExistingResult,
     RingingV2InteractionKind, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
     RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteractionView,
@@ -438,10 +438,10 @@ pub(crate) async fn handle_approval_respond_v2(
     };
     // §9.5 远程 `trust_folder` 默认拒：非 admin 提交的永久扩界降级为单次放行。
     if !identity.is_admin()
-        && let qaqh_ringing::RingingCommand::Tool(qaqh_domain::ToolCommand::ToolPermissionRespond {
+        && let qaqh_ringing::RingingCommand::ToolPermissionRespond {
             trust_folder,
             ..
-        }) = &mut command
+        } = &mut command
     {
         *trust_folder = false;
     }
@@ -453,11 +453,12 @@ pub(crate) async fn handle_approval_respond_v2(
         .unwrap_or_default();
     let envelope = RingingV2CommandEnvelope::new(
         qaqh_ringing_contract::ulid::generate_ulid(),
-        instance_key,
+        qaqh_ringing::CommandTarget::Session {
+            session_id: session_id.clone(),
+        },
         command,
     )
-    .with_client_session_id(caller)
-    .with_session_id(&session_id);
+    .with_client_identity(instance_key, caller);
     let (status, ack) = execute_command(&state, &headers, &identity, envelope).await;
     json_response(status, &ack)
 }
@@ -667,117 +668,6 @@ pub(crate) async fn handle_events_v2(
         .into_response()
 }
 
-pub(crate) async fn handle_command_v2(
-    State(state): State<AppState>,
-    Extension(identity): Extension<Identity>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    body: Bytes,
-) -> Response {
-    // scope 按命令分级，在 `execute_command` 内裁决（`SessionAttach` 仅需 view），
-    // 故此处不设路由级 scope 门。
-    let envelope: RingingV2CommandEnvelope = match serde_json::from_slice(&body) {
-        Ok(envelope) => envelope,
-        Err(error) => {
-            return api_error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_body",
-                &format!("invalid v2 command envelope: {error}"),
-            );
-        }
-    };
-    if let Err(code) = envelope.validate() {
-        return api_error_response(StatusCode::BAD_REQUEST, code, "invalid v2 command envelope");
-    }
-    if envelope.channel.as_str() != id {
-        return api_error_response(
-            StatusCode::BAD_REQUEST,
-            "channel_mismatch",
-            "path channel does not match v2 command envelope",
-        );
-    }
-    // Idempotent replay: a command_id already inside the receipt TTL must not
-    // re-enter the worker. v2 answers with the recorded terminal outcome
-    // (including the typed payload) instead of the v1 "already accepted"
-    // message, so a client that lost the first ACK can reconcile directly.
-    let fingerprint = command_fingerprint(
-        envelope.channel,
-        envelope.session_id.as_deref(),
-        envelope.expected_revision,
-        &envelope.command,
-    );
-    if let Some(existing) = existing_v2_receipt(&state, &headers, &envelope.command_id) {
-        if existing.payload_fingerprint != fingerprint {
-            return json_response(
-                StatusCode::CONFLICT,
-                &RingingV2CommandAck {
-                    command_id: envelope.command_id.clone(),
-                    status: RingingCommandAckStatus::Rejected,
-                    code: Some("duplicate_command_mismatch".into()),
-                    message: Some("command_id was already used with another payload".into()),
-                    retry_after_ms: None,
-                    existing: None,
-                    result: None,
-                    operation: None,
-                    revision: None,
-                },
-            );
-        }
-        let message = match existing.state {
-            qaqh_ringing::RingingCommandState::Succeeded => {
-                "duplicate command_id (already completed)"
-            }
-            qaqh_ringing::RingingCommandState::Failed => "duplicate command_id (already failed)",
-            qaqh_ringing::RingingCommandState::Rejected => {
-                "duplicate command_id (already rejected)"
-            }
-            qaqh_ringing::RingingCommandState::Accepted
-            | qaqh_ringing::RingingCommandState::Running => "duplicate command_id (in flight)",
-        };
-        return json_response(
-            StatusCode::OK,
-            &RingingV2CommandAck {
-                command_id: envelope.command_id.clone(),
-                status: RingingCommandAckStatus::Accepted,
-                code: None,
-                message: Some(message.into()),
-                retry_after_ms: None,
-                existing: Some(existing.into_existing()),
-                result: None,
-                operation: None,
-                revision: None,
-            },
-        );
-    }
-    // First-answer-wins: if the owner snapshot already carries a structured
-    // verdict for the targeted interaction, answer synchronously with the
-    // winning result instead of dispatching a command the loop can only
-    // ignore.
-    if require_v2_lease(&state, &headers).is_some()
-        && let Some(session_id) = envelope.session_id.as_deref()
-        && let Some(existing) = resolved_interaction_existing(&state, session_id, &envelope.command).await
-    {
-        return json_response(
-            StatusCode::OK,
-            &RingingV2CommandAck {
-                command_id: envelope.command_id.clone(),
-                status: RingingCommandAckStatus::Rejected,
-                code: Some("interaction_already_resolved".into()),
-                message: Some("interaction was already resolved".into()),
-                retry_after_ms: None,
-                existing: Some(existing),
-                result: None,
-                operation: None,
-                revision: None,
-            },
-        );
-    }
-    // 进程内命令入口直调（spec 阶段 1.2）：v2 信封直接进引擎，
-    // 不再序列化成 v1 信封 JSON 绕已无路由的 v1 handler。
-    let (status, ack) = execute_command(&state, &headers, &identity, envelope).await;
-    json_response(status, &ack)
-}
-
 /// Interaction addressed by an interaction-resolution command.
 enum InteractionTarget<'a> {
     /// ask / plan commands carry the canonical `int_...` interaction id.
@@ -787,17 +677,16 @@ enum InteractionTarget<'a> {
 }
 
 fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<InteractionTarget<'_>> {
-    use qaqh_domain::{ControlCommand, ToolCommand};
     match command {
-        qaqh_ringing::RingingCommand::Tool(ToolCommand::ToolPermissionRespond {
+        qaqh_ringing::RingingCommand::ToolPermissionRespond {
             tool_call_id,
             ..
-        }) => Some(InteractionTarget::CallId(tool_call_id)),
-        qaqh_ringing::RingingCommand::Control(
-            ControlCommand::InteractionAskRespond { interaction_id, .. }
-            | ControlCommand::InteractionAskDismiss { interaction_id }
-            | ControlCommand::PlanReviewRespond { interaction_id, .. },
-        ) => Some(InteractionTarget::InteractionId(interaction_id)),
+        } => Some(InteractionTarget::CallId(tool_call_id)),
+        qaqh_ringing::RingingCommand::InteractionAskRespond { interaction_id, .. }
+        | qaqh_ringing::RingingCommand::InteractionAskDismiss { interaction_id }
+        | qaqh_ringing::RingingCommand::PlanReviewRespond { interaction_id, .. } => {
+            Some(InteractionTarget::InteractionId(interaction_id))
+        }
         _ => None,
     }
 }
@@ -805,7 +694,7 @@ fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<Interact
 /// Structured verdict of an already-resolved interaction, if the canonical
 /// control projection has one. Legacy facts carry no verdict → `None`, and the
 /// command falls through to the worker's existing rejection path.
-async fn resolved_interaction_existing(
+pub(super) async fn resolved_interaction_existing(
     state: &AppState,
     session_id: &str,
     command: &qaqh_ringing::RingingCommand,
@@ -885,7 +774,7 @@ fn command_result_for(
 ///
 /// Returns `None` when the header is absent/inactive, so the caller falls
 /// through to the shared command path and its canonical error response.
-fn existing_v2_receipt(
+pub(super) fn existing_v2_receipt(
     state: &AppState,
     headers: &HeaderMap,
     command_id: &str,

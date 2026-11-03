@@ -2,7 +2,7 @@
 //!
 //! ## 为什么需要这一层
 //!
-//! [`QueryRequest`](crate::QueryRequest) / [`ActionRequest`](crate::ActionRequest) 是
+//! [`QueryRequest`](crate::QueryRequest) 是只读服务查询的
 //! **封闭枚举**：方法名在 `into_parts` 里逐条映射，好处是拼错即编译错误。代价是
 //! 「daemon 已经有、客户端还没加变体」的方法**一个都调不到**——`siwc.*`（8）与
 //! `dsaccount.*`（10）整整 18 个账号面方法就是这样：daemon 侧方法表、admin 档位、

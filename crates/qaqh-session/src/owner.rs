@@ -801,6 +801,8 @@ impl OwnerDirectory {
                     frozen_annotation: None,
                     archived: None,
                     ephemeral: Some(ephemeral),
+                    expected_settings_revision: None,
+                    increment_settings_revision: false,
                 },
             )
             .map(|_| ())

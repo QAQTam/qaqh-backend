@@ -39,17 +39,6 @@ pub(crate) fn get_session_id(headers: &HeaderMap) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-pub(crate) fn session_close_session(
-    close_session: &str,
-    envelope_session: &Option<String>,
-) -> String {
-    if !close_session.is_empty() {
-        close_session.to_string()
-    } else {
-        envelope_session.clone().unwrap_or_default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

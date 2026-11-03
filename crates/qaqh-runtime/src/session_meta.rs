@@ -1,8 +1,7 @@
 //! Session metadata reads/writes over the SQLite business row.
 //!
-//! 列(cwd/model/effort/profile/mode/tool_mode/archived/ephemeral)在
-//! `sessions` 表;skills/custom_tools/frozen_annotation/usage 暂无业务列,
-//! 这些字段随旧 meta 存储退役不再对外承诺。
+//! SessionMeta 字段从 `sessions` 业务行读取;设置写入在同一个 SQLite 串行写边界
+//! 递增 settings_revision,并支持调用者提供的 CAS 前置条件。
 
 use qaqh_session::session_fact_v2::{SessionMetadataPatch, TitleSource};
 use qaqh_types::SessionMeta;
@@ -34,6 +33,7 @@ pub(crate) fn read(
             .unwrap_or(0),
         tool_mode: row.tool_mode.unwrap_or_default(),
         model_selection: row.model_selection,
+        settings_revision: row.settings_revision,
         custom_tools: row.custom_tools,
         skills: row.skills.unwrap_or_default(),
         frozen_annotation: row.frozen_annotation,
@@ -52,6 +52,45 @@ pub(crate) fn patch(
     session_id: &str,
     patch: SessionMetadataPatch,
 ) -> Result<(), String> {
+    patch_columns(owners, session_id, patch, None)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn patch_with_settings_revision(
+    owners: &qaqh_session::owner::OwnerDirectory,
+    session_id: &str,
+    patch: SessionMetadataPatch,
+    expected_revision: u64,
+) -> Result<u64, MetadataPatchError> {
+    patch_columns(owners, session_id, patch, Some(expected_revision))
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum MetadataPatchError {
+    #[error("session {session_id} not found")]
+    NotFound { session_id: String },
+    #[error("settings revision conflict: expected {expected}, current {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
+    #[error("{0}")]
+    Storage(String),
+}
+
+fn patch_columns(
+    owners: &qaqh_session::owner::OwnerDirectory,
+    session_id: &str,
+    patch: SessionMetadataPatch,
+    expected_revision: Option<u64>,
+) -> Result<u64, MetadataPatchError> {
+    let increment_settings_revision = patch.model.is_some()
+        || patch.effort.is_some()
+        || patch.profile.is_some()
+        || patch.mode.is_some()
+        || patch.tool_mode.is_some()
+        || patch.model_selection.is_some()
+        || patch.custom_tools.is_some()
+        || patch.skills.is_some()
+        || patch.frozen_annotation.is_some();
     let columns = qaqh_session::db::store::SessionColumnPatch {
         title: None,
         cwd: patch.cwd.clone(),
@@ -66,15 +105,28 @@ pub(crate) fn patch(
         frozen_annotation: patch.frozen_annotation.clone(),
         archived: patch.archived,
         ephemeral: patch.ephemeral,
+        expected_settings_revision: expected_revision,
+        increment_settings_revision,
     };
     let owned = session_id.to_string();
-    owners
+    let (changed, current) = owners
         .db()
         .write_blocking(move |conn| {
-            qaqh_session::db::store::update_session_columns(conn, &owned, &columns)
+            let changed = qaqh_session::db::store::update_session_columns(conn, &owned, &columns)?;
+            let current = qaqh_session::db::store::session_settings_revision(conn, &owned)?;
+            Ok::<_, qaqh_session::db::DbError>((changed, current))
         })
-        .map_err(|error| format!("business session update for {session_id}: {error}"))?;
-    Ok(())
+        .map_err(|error| MetadataPatchError::Storage(format!("business session update for {session_id}: {error}")))?;
+    if changed == 0 {
+        let Some(actual) = current else {
+            return Err(MetadataPatchError::NotFound { session_id: session_id.to_string() });
+        };
+        if let Some(expected) = expected_revision {
+            return Err(MetadataPatchError::RevisionConflict { expected, actual });
+        }
+        return Err(MetadataPatchError::NotFound { session_id: session_id.to_string() });
+    }
+    current.ok_or_else(|| MetadataPatchError::NotFound { session_id: session_id.to_string() })
 }
 
 /// Commit a title change to the business row.

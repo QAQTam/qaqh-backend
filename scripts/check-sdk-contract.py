@@ -77,7 +77,7 @@ def main() -> None:
             compiler = shutil.which("tsc")
             if compiler is None:
                 raise SystemExit("TypeScript verification requested but tsc is not installed; no implicit install is performed")
-            (Path(temp) / "consumer.ts").write_text('''import type { RingingV2OpenRequest, RingingV2CommandEnvelope, RingingV2CommandStatus, ClientV2Bootstrap, ClientV2ControlState, RingingV2PendingApprovals, RingingV2ContentUploadResponse } from "./contract/index";
+            (Path(temp) / "consumer.ts").write_text('''import type { RingingV2OpenRequest, RingingV2CommandEnvelope, RingingV2CommandStatus, RingingCommand, CommandTarget, CommandPrecondition, SessionBootstrap, SessionState, RingingV2PendingApprovals, RingingV2ContentUploadResponse } from "./contract/index";
 import type { ServiceMap } from "./contract/service-map";
 import { serviceMetadata } from "./contract/service-map";
 const open: RingingV2OpenRequest = { schema: "qaqh.Ringing", version: 2, client_instance_id: "synthetic" };
@@ -86,19 +86,20 @@ const kind: "read" = serviceMetadata["daemon.version"].kind;
 const siwcParams: ServiceMap["siwc.sign_in.status"]["params"] = { flow_id: "synthetic" };
 const siwcResult: ServiceMap["siwc.status"]["result"] = { status: "connected", sharing: true, profiles: 1, usageUrl: "https://example.invalid", apiBase: "https://example.invalid/v1" };
 const adminOnly: true = serviceMetadata["dsaccount.verify"].admin_only;
-const driver: ClientV2ControlState["driver"] = { holder: null, driver_epoch: 1, can_claim: true };
-const bootstrapDriver: ClientV2Bootstrap["control"]["state"]["driver"] = driver;
+const driver: NonNullable<SessionState["driver"]> = { holder: null, epoch: 1 };
+const bootstrapDriver: SessionBootstrap["state"]["driver"] = driver;
 const approvals: RingingV2PendingApprovals = { pending_permission: null, pending_interaction: null };
 const upload: RingingV2ContentUploadResponse["truncated"] = false;
+const settingsCommand: RingingV2CommandEnvelope = { schema: "qaqh.Ringing", version: 2, contract_revision: "ringing-commands-6", command_id: "cmd-settings", client_instance_id: "instance", client_session_id: "lease", target: { kind: "session", session_id: "ses-synthetic" }, command: { type: "session.settings.patch", patch: { profile: "reviewer", effort: "high" } }, preconditions: [{ kind: "settings_revision", revision: 3 }] };
+const sessionTarget: CommandTarget = settingsCommand.target;
+const settingsPrecondition: CommandPrecondition = settingsCommand.preconditions![0];
 const activityParams: ServiceMap["session.activity"]["params"] = {};
 const activityEntry: ServiceMap["session.activity"]["result"][number] = { session_id: "synthetic", state: "working", turn_id: "turn-1", seq: 1, updated_at: 1 };
 const activityNoTurn: ServiceMap["session.activity"]["result"][number] = { session_id: "synthetic", state: "idle", seq: 1, updated_at: 1 };
-const setToolMode: ServiceMap["session.set_tool_mode"]["params"] = { session_id: "synthetic", tool_mode: "custom", custom_tools: ["fs_read"] };
-const setProfile: ServiceMap["session.set_profile"]["params"] = { session_id: "synthetic", name: "" };
 const workspaceEntry: ServiceMap["workspace.list"]["result"][number] = { id: "ws-1", path: "/synthetic/workspace", title: "workspace", order: 0, session_ids: ["0199a0f0-0000-7000-8000-000000000001"], missing_dir: false };
-const workspaceCreate: ServiceMap["workspace.create"]["result"] = { id: "ws-1", path: "/synthetic/workspace", title: "workspace", order: 0, session_ids: [] };
+const workspaceCreate: RingingCommand = { type: "workspace.create", path: "/synthetic/workspace" };
 const workspaceUnbound: ServiceMap["workspace.get"]["result"] = "";
-void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload, activityParams, activityEntry, activityNoTurn, setToolMode, setProfile, workspaceEntry, workspaceCreate, workspaceUnbound];
+void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload, sessionTarget, settingsPrecondition, settingsCommand, activityParams, activityEntry, activityNoTurn, workspaceEntry, workspaceCreate, workspaceUnbound];
 type Command = RingingV2CommandEnvelope;
 type Status = RingingV2CommandStatus;
 // @ts-expect-error unknown methods must not have a catch-all signature
@@ -113,14 +114,12 @@ const badStatus: ServiceMap["siwc.status"]["result"] = { status: "maybe", sharin
 const badApprovals: RingingV2PendingApprovals = {};
 // @ts-expect-error activity state is a closed enum
 const badActivityState: ServiceMap["session.activity"]["result"] = [{ session_id: "s", state: "paused", seq: 1, updated_at: 1 }];
-// @ts-expect-error custom_tools entries must be strings
-const badTools: ServiceMap["session.set_tool_mode"]["params"] = { session_id: "s", tool_mode: "custom", custom_tools: [1] };
 // @ts-expect-error session.get_activity requires session_id
 const missingSession: ServiceMap["session.get_activity"]["params"] = {};
 // @ts-expect-error workspace list entries must carry missing_dir
 const badWorkspaceEntry: ServiceMap["workspace.list"]["result"] = [{ id: "ws-1", path: "/s", title: "t", order: 0, session_ids: [] }];
-// @ts-expect-error workspace.move_session requires workspace_id
-const missingWorkspace: ServiceMap["workspace.move_session"]["params"] = { session_id: "s" };
+// @ts-expect-error workspace.move_session requires workspace_id in the command contract
+const missingWorkspace: RingingCommand = { type: "workspace.move_session" };
 ''')
             config = {"compilerOptions": {"strict": True, "noEmit": True, "target": "ES2022", "module": "ESNext", "moduleResolution": "Bundler", "skipLibCheck": False}, "include": ["contract/**/*.ts", "consumer.ts"]}
             (Path(temp) / "tsconfig.json").write_text(json.dumps(config))

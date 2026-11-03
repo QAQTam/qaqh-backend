@@ -17,16 +17,19 @@ use serde::{Deserialize, Serialize};
 // `qaqh_domain::SessionState` 是会话生命周期状态，两者毫无关系。
 pub use qaqh_domain::{
     ActivityState as DomainActivityState, AgentLifecycleState, AskAnswer, AskMode,
-    AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef, ControlCommand,
-    ControlEvent, ConversationCommand, ConversationEvent, ConversationInputPurpose,
-    ConversationMode, DashboardDocument, DashboardSnapshot as DomainDashboardSnapshot,
-    DashboardTask, DomainError, ErrorScope, ImageBlock, NoticeLevel, PermissionCategory,
+    AskQuestion as DomainAskQuestion, AskResolution, CompactStatus, ContentRef,
+    ControlEvent, ConversationEvent, DashboardDocument,
+    DashboardSnapshot as DomainDashboardSnapshot,
+    DashboardTask, DomainError, ErrorScope, NoticeLevel, PermissionCategory,
     PermissionRisk, PlanReviewItem, ProviderToolState, RingingChannel as Channel, RoundDeltaKind,
     SessionActivity, SessionState as DomainSessionState, SkillInfo, SkillRuntimeInfo, SkillsStatus,
-    ToolCommand, ToolEvent,
+    ToolEvent,
 };
+pub use qaqh_ringing_contract::commands::ImageBlock;
+pub use qaqh_ringing_contract::fact::InputPurpose;
 pub use qaqh_ringing::{
-    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, RingingCommand,
+    CLIENT_SESSION_HEADER, MAX_SAFE_INTEGER, RINGING_SCHEMA, ConversationSendMessage,
+    RingingCommand, RingingV2CommandEnvelope, CommandTarget, CommandPrecondition,
     RingingCommandAckStatus, RingingCommandState, is_safe_integer,
 };
 pub use qaqh_types::{
@@ -59,11 +62,7 @@ pub struct SseFrame {
 #[derive(Debug, Clone, Default)]
 pub struct CommandOptions {
     pub command_id: Option<String>,
-    pub expected_revision: Option<u64>,
-    /// Driver seat epoch the caller holds. `None` opts out of the v2
-    /// `stale_driver_epoch` guard (required for interaction answers, which are
-    /// not driver-gated).
-    pub driver_epoch: Option<u64>,
+    pub preconditions: Vec<CommandPrecondition>,
 }
 
 #[cfg(test)]

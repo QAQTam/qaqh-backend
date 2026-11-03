@@ -36,7 +36,7 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         (
             "command.submit",
             "POST",
-            "/ringing/v2/commands/{channel}",
+            "/ringing/v2/commands",
             "command-dependent",
             true,
             vec!["RingingV2CommandEnvelope", "RingingV2CommandAck"],

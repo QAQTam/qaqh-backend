@@ -17,6 +17,75 @@ mod tests {
     }
 
     #[test]
+    fn settings_revision_is_checked_with_the_session_write() {
+        let db = test_db();
+        db.write_blocking(|conn| {
+            store::create_session(
+                conn,
+                &store::NewSession {
+                    session_id: "SES-CAS".into(),
+                    parent_session_id: None,
+                    title: "CAS".into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    effort: None,
+                    profile: None,
+                    mode: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                },
+            )
+        })
+        .expect("create session");
+
+        let changed = db
+            .write_blocking(|conn| {
+                store::update_session_columns(
+                    conn,
+                    "SES-CAS",
+                    &store::SessionColumnPatch {
+                        tool_mode: Some("minimal".into()),
+                        archived: Some(true),
+                        expected_settings_revision: Some(0),
+                        increment_settings_revision: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .expect("first settings write");
+        assert_eq!(changed, 1);
+
+        let stale = db
+            .write_blocking(|conn| {
+                store::update_session_columns(
+                    conn,
+                    "SES-CAS",
+                    &store::SessionColumnPatch {
+                        tool_mode: Some("standard".into()),
+                        expected_settings_revision: Some(0),
+                        increment_settings_revision: true,
+                        ..Default::default()
+                    },
+                )
+            })
+            .expect("stale write is a conflict, not a database error");
+        assert_eq!(stale, 0);
+
+        let row = db
+            .read_blocking(|conn| store::session_row(conn, "SES-CAS"))
+            .expect("read session")
+            .expect("session exists");
+        assert_eq!(row.tool_mode.as_deref(), Some("minimal"));
+        assert!(row.archived);
+        assert_eq!(row.settings_revision, 1);
+    }
+
+    #[test]
     fn write_then_read_round_trips_session_state() {
         let rt = runtime();
         rt.block_on(async {
@@ -58,6 +127,9 @@ mod tests {
                         purpose: Default::default(),
                         content: ContentValue::Inline { text: "你好".into() },
                         attachments: vec![],
+                        images: vec![],
+                        inter_agent: None,
+                        subagent_terminal: None,
                         actor: qaqh_ringing_contract::fact::ActorRef {
                             kind: qaqh_ringing_contract::fact::ActorKind::User,
                             id: "user".into(),

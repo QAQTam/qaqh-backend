@@ -215,14 +215,14 @@ impl SubagentHost for QaqhService {
         };
         let input_purpose = match request.delivery {
             qaqh_domain::InterAgentDelivery::Queue => {
-                qaqh_domain::ConversationInputPurpose::QueueOnly
+                qaqh_ringing_contract::fact::InputPurpose::QueueOnly
             }
             qaqh_domain::InterAgentDelivery::Trigger => {
-                qaqh_domain::ConversationInputPurpose::TriggerTurn
+                qaqh_ringing_contract::fact::InputPurpose::TriggerTurn
             }
-            qaqh_domain::InterAgentDelivery::Steer => qaqh_domain::ConversationInputPurpose::Steer,
+            qaqh_domain::InterAgentDelivery::Steer => qaqh_ringing_contract::fact::InputPurpose::Steer,
             qaqh_domain::InterAgentDelivery::Interject => {
-                qaqh_domain::ConversationInputPurpose::Interject
+                qaqh_ringing_contract::fact::InputPurpose::Interject
             }
             qaqh_domain::InterAgentDelivery::Interrupt => unreachable!(),
         };
@@ -257,17 +257,17 @@ impl SubagentHost for QaqhService {
         }
         self.send_ringing(
             target.agent_id.as_str(),
-            qaqh_ringing::RingingCommand::Conversation(
-                qaqh_domain::ConversationCommand::ConversationSendMessage {
-                    text: request.text.to_string(),
-                    images: vec![],
-                    attachments: None,
-                    message_id: Some(message_id.clone()),
-                    input_purpose,
-                    as_system: false,
-                    inter_agent: Some(envelope),
-                    subagent_terminal: None,
-                },
+            qaqh_ringing::RingingCommand::ConversationSendMessage(
+                    qaqh_ringing::ConversationSendMessage {
+                        text: request.text.to_string(),
+                        images: vec![],
+                        attachments: None,
+                        message_id: Some(message_id.clone()),
+                        input_purpose,
+                        as_system: false,
+                        inter_agent: Some(envelope),
+                        subagent_terminal: None,
+                    },
             ),
         )?;
         Ok(SentAgentMessage {
@@ -365,9 +365,7 @@ impl SubagentHost for QaqhService {
         let env = RingingWorkerCommandEnvelope::new(
             target_id,
             command_id,
-            qaqh_ringing::RingingCommand::Conversation(
-                qaqh_domain::ConversationCommand::ConversationCancel { turn_id: None },
-            ),
+            qaqh_ringing::RingingCommand::ConversationCancel { turn_id: None },
         );
         registry.send_ringing(target_id, &env)?;
         Ok(InterruptedAgent {

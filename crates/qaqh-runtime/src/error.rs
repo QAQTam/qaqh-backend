@@ -36,7 +36,10 @@ pub enum QaqhError {
     #[error("{message}")]
     Invalid { message: String },
 
-    /// 带上下文的失败：`{context}: {message}`（例如 `session.new: allocate session failed: …`）。
+    #[error("{message}")]
+    Conflict { message: String },
+
+    /// 带上下文的失败：`{context}: {message}`（例如 `session.create: allocate session failed: …`）。
     #[error("{context}: {message}")]
     Context {
         context: &'static str,

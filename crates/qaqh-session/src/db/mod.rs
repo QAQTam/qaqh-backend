@@ -34,6 +34,8 @@ pub enum DbError {
     SqliteTooOld { found: String, required: (u32, u32, u32) },
     #[error("schema version {found} is newer than supported {supported}")]
     SchemaTooNew { found: u32, supported: u32 },
+    #[error("schema version {found} is older than supported {supported}; delete the database to recreate it")]
+    SchemaTooOld { found: u32, supported: u32 },
     #[error(transparent)]
     Sql(#[from] rusqlite::Error),
     #[error(transparent)]

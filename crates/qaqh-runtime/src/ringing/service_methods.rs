@@ -4,7 +4,7 @@
 //! 双端点已合并于此，其 slash/dot 双别名容忍一并拆除：单一规范形态
 //! `module.method`，一个方法一个条目，`Read` = 无副作用查询，`Write` = 变更操作。
 //!
-//! 会话生命周期（`session.new`/`session.resume`/`skills.activate`/`todo.cancel`/
+//! 会话生命周期（`session.create`/`session.resume`/`skills.activate`/`todo.cancel`/
 //! `plan.action` 等命令语义方法）刻意不在表中——会话命令只走三频道
 //! command envelope（开发标准 N5），服务面仅承载非会话 RPC。
 
@@ -35,13 +35,6 @@ pub struct MethodInfo {
 
 /// Wire params for the typed service-method slice. Optional TS derive is used
 /// only by the contract exporter; serde stays the runtime authority.
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct SessionRenameParams {
-    pub session_id: String,
-    pub title: String,
-}
-
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct DaemonVersionParams {}
@@ -171,59 +164,6 @@ pub struct SkillsCatalogResult {
     pub diagnostics: Vec<SkillCatalogDiagnostic>,
 }
 
-/// `session.set_profile` 只改单会话的 profile 选择：`name` 空串 = 清除
-/// 选择、回到跟随全局 `active_profile`；非空必须是已配置的 profile 名。
-/// 语义校验（名字是否存在）在 handler，DTO 只钉 wire 形状。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct SessionSetProfileParams {
-    pub session_id: String,
-    pub name: String,
-}
-
-/// `session.set_effort` 只改单会话的思考强度：`effort` 空串 = 清除选择。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct SessionSetEffortParams {
-    pub session_id: String,
-    pub effort: String,
-}
-
-/// `session.create` 原子创建新会话（直接返回 session_id）。
-#[derive(Debug, Clone, Serialize, serde::Deserialize, Default)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct SessionCreateParams {
-    #[serde(default)]
-    pub cwd: Option<String>,
-    #[serde(default)]
-    pub profile: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub mode: Option<u8>,
-}
-
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct SessionCreateResult {
-    pub session_id: String,
-}
-
-/// `session.set_tool_mode` 的工具模式预设：`tool_mode` ∈
-/// standard|minimal|custom（handler 校验取值）；`custom` 必须携带至少
-/// 一个 `custom_tools` 条目，其余模式省略该键。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct SessionSetToolModeParams {
-    pub session_id: String,
-    pub tool_mode: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "ts", ts(optional))]
-    pub custom_tools: Option<Vec<String>>,
-}
-
 /// `workspace.get` 定位单条会话；result 为其工作区 cwd（未绑定为空串）。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -236,53 +176,6 @@ pub struct WorkspaceGetParams {
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct WorkspaceListParams {}
-
-/// `workspace.set` 绑定会话工作区（写 meta.cwd 并定向重载）；空 path 在
-/// handler 被拒绝。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceSetParams {
-    pub session_id: String,
-    pub path: String,
-}
-
-/// `workspace.create` 注册目录为工作区；目录必须存在（handler canonicalize
-/// 并查重，重复注册幂等返回既有条目）。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceCreateParams {
-    pub path: String,
-}
-
-/// `workspace.rename` 只改标题（重复允许）；`id` 必须已注册。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceRenameParams {
-    pub id: String,
-    pub title: String,
-}
-
-/// `workspace.delete` 注销工作区（会话目录与磁盘不动）；`id` 必须已注册。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceDeleteParams {
-    pub id: String,
-}
-
-/// `workspace.move_session` 把会话划入工作区（单归属：先从原工作区摘除）。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceMoveSessionParams {
-    pub session_id: String,
-    pub workspace_id: String,
-}
-
-/// `workspace.detach` 把会话从其所属工作区摘除（未归属时幂等成功）。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct WorkspaceDetachParams {
-    pub session_id: String,
-}
 
 /// A typed descriptor links the method key, the exact wire DTOs and the
 /// authorization metadata. Only methods present here are yet exposed as typed
@@ -321,39 +214,26 @@ macro_rules! validators {
 validators! {
     params:
         validate_daemon_version_params => DaemonVersionParams,
-        validate_session_rename_params => SessionRenameParams,
         validate_fs_list_params => FsListParams,
         validate_fs_read_params => FsReadParams,
         validate_session_list_params => SessionListParams,
         validate_session_meta_params => SessionMetaParams,
         validate_session_activity_params => SessionActivityParams,
         validate_session_get_activity_params => SessionGetActivityParams,
-        validate_session_set_profile_params => SessionSetProfileParams,
-        validate_session_set_effort_params => SessionSetEffortParams,
-        validate_session_create_params => SessionCreateParams,
         validate_skills_catalog_params => SkillsCatalogParams,
-        validate_session_set_tool_mode_params => SessionSetToolModeParams,
         validate_workspace_get_params => WorkspaceGetParams,
         validate_workspace_list_params => WorkspaceListParams,
-        validate_workspace_set_params => WorkspaceSetParams,
-        validate_workspace_create_params => WorkspaceCreateParams,
-        validate_workspace_rename_params => WorkspaceRenameParams,
-        validate_workspace_delete_params => WorkspaceDeleteParams,
-        validate_workspace_move_session_params => WorkspaceMoveSessionParams,
-        validate_workspace_detach_params => WorkspaceDetachParams;
+        ;
     result:
         validate_string_result => String,
-        validate_null_result => Option<()>,
         validate_fs_list_result => Vec<FsEntry>,
         validate_fs_read_result => FsReadResult,
         validate_session_list_result => Vec<qaqh_types::SessionListEntry>,
         validate_session_meta_result => Option<qaqh_types::SessionListEntry>,
         validate_session_activity_result => Vec<qaqh_domain::SessionActivity>,
         validate_session_get_activity_result => Vec<SessionToolActivity>,
-        validate_session_create_result => SessionCreateResult,
         validate_skills_catalog_result => SkillsCatalogResult,
         validate_workspace_list_result => Vec<qaqh_session::WorkspaceEntry>,
-        validate_workspace_meta_result => qaqh_session::WorkspaceMeta,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -368,18 +248,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_daemon_version_params,
         validate_result: validate_string_result,
-    },
-    TypedMethodInfo {
-        method: "session.rename",
-        params_type: "SessionRenameParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: true,
-            admin_only: false,
-        },
-        validate_params: validate_session_rename_params,
-        validate_result: validate_null_result,
     },
     TypedMethodInfo {
         method: "skills.catalog",
@@ -471,54 +339,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         validate_result: validate_session_get_activity_result,
     },
     TypedMethodInfo {
-        method: "session.set_profile",
-        params_type: "SessionSetProfileParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: true,
-            admin_only: false,
-        },
-        validate_params: validate_session_set_profile_params,
-        validate_result: validate_null_result,
-    },
-    TypedMethodInfo {
-        method: "session.set_effort",
-        params_type: "SessionSetEffortParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: true,
-            admin_only: false,
-        },
-        validate_params: validate_session_set_effort_params,
-        validate_result: validate_null_result,
-    },
-    TypedMethodInfo {
-        method: "session.create",
-        params_type: "SessionCreateParams",
-        result_type: "SessionCreateResult",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: false,
-            admin_only: false,
-        },
-        validate_params: validate_session_create_params,
-        validate_result: validate_session_create_result,
-    },
-    TypedMethodInfo {
-        method: "session.set_tool_mode",
-        params_type: "SessionSetToolModeParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: true,
-            admin_only: false,
-        },
-        validate_params: validate_session_set_tool_mode_params,
-        validate_result: validate_null_result,
-    },
-    TypedMethodInfo {
         method: "workspace.get",
         params_type: "WorkspaceGetParams",
         // 未绑定工作区的会话返回空串（不是 null）。
@@ -543,79 +363,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_workspace_list_params,
         validate_result: validate_workspace_list_result,
-    },
-    TypedMethodInfo {
-        method: "workspace.set",
-        params_type: "WorkspaceSetParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: true,
-            admin_only: false,
-        },
-        validate_params: validate_workspace_set_params,
-        validate_result: validate_null_result,
-    },
-    TypedMethodInfo {
-        method: "workspace.create",
-        params_type: "WorkspaceCreateParams",
-        // 重复注册幂等返回既有条目；形状同 WorkspaceMeta（无 missing_dir）。
-        result_type: "WorkspaceMeta",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: false,
-            admin_only: false,
-        },
-        validate_params: validate_workspace_create_params,
-        validate_result: validate_workspace_meta_result,
-    },
-    TypedMethodInfo {
-        method: "workspace.rename",
-        params_type: "WorkspaceRenameParams",
-        result_type: "WorkspaceMeta",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: false,
-            admin_only: false,
-        },
-        validate_params: validate_workspace_rename_params,
-        validate_result: validate_workspace_meta_result,
-    },
-    TypedMethodInfo {
-        method: "workspace.delete",
-        params_type: "WorkspaceDeleteParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: false,
-            admin_only: false,
-        },
-        validate_params: validate_workspace_delete_params,
-        validate_result: validate_null_result,
-    },
-    TypedMethodInfo {
-        method: "workspace.move_session",
-        params_type: "WorkspaceMoveSessionParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: true,
-            admin_only: false,
-        },
-        validate_params: validate_workspace_move_session_params,
-        validate_result: validate_null_result,
-    },
-    TypedMethodInfo {
-        method: "workspace.detach",
-        params_type: "WorkspaceDetachParams",
-        result_type: "null",
-        info: MethodInfo {
-            kind: MethodKind::Write,
-            requires_session: true,
-            admin_only: false,
-        },
-        validate_params: validate_workspace_detach_params,
-        validate_result: validate_null_result,
     },
 ];
 
@@ -690,20 +437,10 @@ const READ_SEEDED: MethodInfo = MethodInfo {
     requires_session: true,
     admin_only: false,
 };
-const WRITE: MethodInfo = MethodInfo {
-    kind: MethodKind::Write,
-    requires_session: false,
-    admin_only: false,
-};
 const WRITE_ADMIN: MethodInfo = MethodInfo {
     kind: MethodKind::Write,
     requires_session: false,
     admin_only: true,
-};
-const WRITE_SEEDED: MethodInfo = MethodInfo {
-    kind: MethodKind::Write,
-    requires_session: true,
-    admin_only: false,
 };
 
 /// 方法表**本体**（单一真源）。
@@ -722,37 +459,15 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("session.activity", READ),
     ("session.dashboard", READ_SEEDED),
     ("session.get_activity", READ_SEEDED),
-    // 会话级 profile 选择：写 meta.profile 并定向重载该会话（不动全局）。
-    ("session.set_profile", WRITE_SEEDED),
-    ("session.set_effort", WRITE_SEEDED),
-    ("session.create", WRITE),
-    // 用户重命名会话标题（方案B）：写 meta.title 并广播 TitleChanged(user)。
-    ("session.rename", WRITE_SEEDED),
     // workspace
     ("workspace.get", READ_SEEDED),
     ("workspace.list", READ),
-    ("workspace.set", WRITE_SEEDED),
-    ("workspace.create", WRITE),
-    ("workspace.rename", WRITE),
-    ("workspace.delete", WRITE),
-    ("workspace.move_session", WRITE_SEEDED),
-    ("workspace.detach", WRITE_SEEDED),
     // fs
     ("fs.list", READ),
     ("fs.read", READ),
     // config / profile
     ("config.load", READ),
-    ("config.save", WRITE),
-    ("config.set_permission_level", WRITE),
-    ("profile.apply", WRITE),
-    ("profile.save_current", WRITE),
-    ("profile.delete", WRITE),
-    ("profile.create", WRITE),
-    ("profile.update", WRITE),
-    ("profile.set_default", WRITE),
     ("profile.list", READ),
-    ("provider.upsert", WRITE),
-    ("provider.delete", WRITE),
     // Sign in with ChatGPT（套餐用量）。**全部 admin_only**：配对出来的设备
     // （view/interact）绝不得触发登录 / 切账户 / 登出——那等于让远端设备把
     // 新账户接进用户机器并改写本机凭据。方法名的单一真源在 qaqh_siwc::methods。
@@ -780,21 +495,14 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     // skills
     ("skills.catalog", READ),
     ("skills.list_tools", READ),
-    ("skills.operation", WRITE),
-    ("skills.reload", WRITE),
     // todo / plan / stats
     ("todo.status", READ_SEEDED),
     // todo CLI 路线（daemon HTTP 直访；与 LLM 工具分发表共用 exec 核心）
     ("todo.list", READ_SEEDED),
-    ("todo.set", WRITE_SEEDED),
     ("plan.read", READ_SEEDED),
     // Process-wide memory view is intentionally admin-scope only.
     ("diagnostics.memory.snapshot", READ_ADMIN),
-    ("diagnostics.memory.start", WRITE_ADMIN),
-    ("diagnostics.memory.stop", WRITE_ADMIN),
-    // subagent / tool mode
-    ("subagent.spawn", WRITE),
-    ("session.set_tool_mode", WRITE_SEEDED),
+    // subagent
 ];
 
 /// 方法表：未列出的名字返回 `None`（HTTP 404）。
@@ -953,21 +661,6 @@ mod tests {
 
     #[test]
     fn typed_method_params_fail_before_runtime_dispatch() {
-        assert!(
-            validate_typed_params(
-                "session.rename",
-                &serde_json::json!({"session_id": "s1", "title": 4})
-            )
-            .is_err()
-        );
-        assert_eq!(
-            validate_typed_params(
-                "session.rename",
-                &serde_json::json!({"session_id": "s1", "title": "new title"})
-            )
-            .expect("valid params"),
-            true
-        );
         assert_eq!(
             validate_typed_params("session.list", &serde_json::json!({})).expect("typed"),
             true
@@ -988,41 +681,6 @@ mod tests {
             validate_typed_params("session.get_activity", &serde_json::json!({})).is_err(),
             "session.get_activity 必须带 session_id"
         );
-        // set_profile 的空 name 是合法 wire（清除选择）；语义在 handler。
-        assert!(
-            validate_typed_params(
-                "session.set_profile",
-                &serde_json::json!({"session_id": "s1", "name": ""})
-            )
-            .expect("empty name clears the selection")
-        );
-        assert!(
-            validate_typed_params(
-                "session.set_tool_mode",
-                &serde_json::json!({
-                    "session_id": "s1",
-                    "tool_mode": "custom",
-                    "custom_tools": ["fs_read"]
-                })
-            )
-            .expect("custom mode with tools")
-        );
-        assert!(
-            validate_typed_params(
-                "session.set_tool_mode",
-                &serde_json::json!({"session_id": "s1", "tool_mode": "custom", "custom_tools": "fs_read"})
-            )
-            .is_err(),
-            "custom_tools 必须是字符串数组"
-        );
-        assert!(
-            validate_typed_params(
-                "session.set_tool_mode",
-                &serde_json::json!({"session_id": "s1"})
-            )
-            .is_err(),
-            "tool_mode 必填"
-        );
         assert!(
             validate_typed_params("workspace.list", &serde_json::json!({}))
                 .expect("list takes no params")
@@ -1032,24 +690,8 @@ mod tests {
             "workspace.get 必须带 session_id"
         );
         assert!(
-            validate_typed_params("workspace.create", &serde_json::json!({"path": "/tmp"}))
-                .expect("create takes a path")
-        );
-        assert!(
-            validate_typed_params("workspace.create", &serde_json::json!({})).is_err(),
-            "workspace.create 必须带 path"
-        );
-        assert!(
-            validate_typed_params("workspace.rename", &serde_json::json!({"id": "ws-1"})).is_err(),
-            "workspace.rename 必须带 title"
-        );
-        assert!(
-            validate_typed_params(
-                "workspace.move_session",
-                &serde_json::json!({"session_id": "s1"})
-            )
-            .is_err(),
-            "workspace.move_session 必须带 workspace_id"
+            !validate_typed_params("workspace.create", &serde_json::json!({"path": "/tmp"}))
+                .expect("not a service query")
         );
         assert!(
             validate_typed_params(
@@ -1081,7 +723,6 @@ mod tests {
                 .expect("valid result")
         );
         assert!(validate_typed_result("daemon.version", &serde_json::json!({})).is_err());
-        assert!(validate_typed_result("session.rename", &Value::Null).expect("null result"));
         assert!(
             validate_typed_result("session.list", &serde_json::json!([])).expect("typed result")
         );
@@ -1145,14 +786,6 @@ mod tests {
             "summary/finished_at_ms/args 必填，status 是闭集枚举"
         );
         assert!(
-            validate_typed_result("session.set_profile", &Value::Null)
-                .expect("write result is null")
-        );
-        assert!(
-            validate_typed_result("session.set_tool_mode", &Value::Null)
-                .expect("write result is null")
-        );
-        assert!(
             validate_typed_result(
                 "workspace.list",
                 &serde_json::json!([{
@@ -1179,19 +812,6 @@ mod tests {
             )
             .is_err(),
             "missing_dir 是 list 条目的必备键（与 create/rename 形状区分）"
-        );
-        assert!(
-            validate_typed_result(
-                "workspace.create",
-                &serde_json::json!({
-                    "id": "ws-1",
-                    "path": "/synthetic/workspace",
-                    "title": "workspace",
-                    "order": 0,
-                    "session_ids": []
-                })
-            )
-            .expect("create returns a bare WorkspaceMeta")
         );
         assert!(
             validate_typed_result("workspace.get", &serde_json::json!(""))
@@ -1320,26 +940,21 @@ mod tests {
     }
 
     #[test]
-    fn todo_cli_methods_are_registered() {
-        let set = lookup("todo.set").expect("todo.set registered");
-        assert_eq!(set.kind, MethodKind::Write);
-        assert!(set.requires_session, "todo.set 必须携带 seed 并做归属校验");
+    fn todo_mutations_are_commands_and_queries_stay_read_only() {
         let list = lookup("todo.list").expect("todo.list registered");
         assert_eq!(list.kind, MethodKind::Read);
         assert!(list.requires_session);
-        assert!(lookup("todo.set ").is_none(), "方法名不容尾随空格");
-
-        for method in [
-            "workspace.set",
-            "workspace.move_session",
-            "workspace.detach",
+        for method in ["todo.set", "todo.cancel", "workspace.set", "subagent.spawn"] {
+            assert!(lookup(method).is_none(), "{method} uses RingingV2 commands");
+        }
+        for removed in [
+            "session.set_profile",
+            "session.set_effort",
             "session.set_tool_mode",
         ] {
-            let info = lookup(method).unwrap_or_else(|| panic!("{method} registered"));
-            assert_eq!(info.kind, MethodKind::Write, "{method}");
             assert!(
-                info.requires_session,
-                "{method} must require seed ownership"
+                lookup(removed).is_none(),
+                "{removed} moved to RingingCommand"
             );
         }
     }
@@ -1373,16 +988,18 @@ mod tests {
 
     /// 产出边界：`workspace.list` 的条目必须能被 `WorkspaceEntry` 吃下且
     /// 往返逐键相同；目录存活标记真实参与计算（存在 → `missing_dir=false`）。
-    /// `workspace.create` 的结果同时被 descriptor 校验为裸 `WorkspaceMeta`。
+    /// WorkspaceStore remains the authoritative workspace directory.
     #[test]
     fn workspace_list_entries_are_typed_at_the_boundary() {
         let dir = tempfile::tempdir().expect("workspace dir");
-        let created = dispatch(
-            service(),
-            "workspace.create",
-            &serde_json::json!({"path": dir.path().to_string_lossy()}),
-        )
-        .expect("create workspace");
+        let created = service()
+            .execute_ringing_command(
+                &qaqh_ringing::CommandTarget::Global,
+                &qaqh_ringing::RingingCommand::WorkspaceCreate {
+                    path: dir.path().to_string_lossy().into_owned(),
+                },
+            )
+            .expect("create workspace");
         let wire = dispatch(service(), "workspace.list", &serde_json::json!({})).expect("list");
         let entries: Vec<qaqh_session::WorkspaceEntry> =
             serde_json::from_value(wire.clone()).expect("条目必须能被权威类型解析");
@@ -1418,6 +1035,7 @@ mod tests {
     fn lifecycle_methods_are_deliberately_absent() {
         // 会话生命周期只走 command envelope（N5），服务面不收。
         assert!(lookup("session.new").is_none());
+        assert!(lookup("session.create").is_none());
         assert!(lookup("session.resume").is_none());
         assert!(lookup("skills.activate").is_none());
         assert!(lookup("todo.cancel").is_none());
