@@ -19,12 +19,14 @@ pub mod service;
 pub mod service_types;
 pub mod session;
 mod sse_decoder;
+mod tls_pin;
 pub mod types;
 pub mod v2;
 pub mod v2_stream;
 
 pub use client::{
-    Client, ClientHandlers, ClientOptions, PairScope, RemoteEndpoint, StopStatus, runtime_handle,
+    Client, ClientHandlers, ClientOptions, PairScope, RemoteEndpoint, StopStatus, pair_remote,
+    runtime_handle,
 };
 pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_discovery};
 pub use endpoint::QueryRequest;
@@ -35,7 +37,11 @@ pub use qaqh_ringing::RingingV2ResyncRequired;
 ///
 /// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
 /// 否则壳层就只能手解 JSON——那正是本客户端存在的理由要反对的事。
-pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
+pub use qaqh_ringing::v2::{
+    RingingV2ApprovalRespondRequest, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
+    RingingV2DeviceChallenges, RingingV2DeviceWire, RingingV2PairResponse,
+    RingingV2PairTokenResponse,
+};
 pub use qaqh_ringing::{
     COMMAND_CONTRACT_REVISION, CommandPrecondition, CommandTarget, ProviderUpsertDto,
     RingingV2CommandEnvelope, SESSION_CONTRACT_REVISION, SecretWrite, SessionCreateResult,
