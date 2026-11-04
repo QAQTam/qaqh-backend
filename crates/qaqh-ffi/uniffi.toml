@@ -1,0 +1,4 @@
+# per-crate UniFFI 配置(build.rs/scaffolding 模式与 --library 模式经 BindgenPaths 发现)
+[bindings.kotlin]
+package_name = "com.qaqh.harness.core.ffi"
+generate_immutable_records = true
