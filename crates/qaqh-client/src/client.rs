@@ -20,9 +20,10 @@ use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
 use qaqh_ringing::v2::{
     RingingV2CommandAck, RingingV2CommandStatus, RingingV2ContentUploadResponse,
-    RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2PairTokenRequest,
-    RingingV2PairTokenResponse,
+    RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2PairRequest, RingingV2PairResponse,
+    RingingV2PairTokenRequest, RingingV2PairTokenResponse,
 };
+use qaqh_ringing::RINGING_V2_BASE_PATH;
 use qaqh_ringing_contract::fact::ContentHash;
 
 /// `reqwest` 以 `rustls-no-provider` 特征编译（换掉 `rustls` 是为绕开 OHOS 上
@@ -38,6 +39,69 @@ pub(crate) fn ensure_crypto_provider() {
     ONCE.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
+}
+
+/// 统一的 HTTP 客户端构建：`tls_fp` 给出时注入指纹 pin verifier（见
+/// [`crate::tls_pin`]），否则走 rustls 默认系统信任。两条路径都先安装
+/// crypto provider（`rustls-no-provider` 的硬契约）。
+pub(crate) fn build_http_client(tls_fp: Option<&str>) -> Result<reqwest::Client> {
+    ensure_crypto_provider();
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5));
+    if let Some(fp) = tls_fp {
+        let expected = crate::tls_pin::parse_fingerprint(fp).ok_or_else(|| {
+            ClientError::Protocol(format!(
+                "invalid tls fingerprint (want 64 hex chars, sha256 optional prefix): {fp}"
+            ))
+        })?;
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_protocol_versions(rustls::ALL_VERSIONS)
+            .map_err(|error| ClientError::Protocol(format!("tls versions: {error}")))?
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(
+                crate::tls_pin::PinnedServerCertVerifier::new(expected, provider),
+            ))
+            .with_no_client_auth();
+        builder = builder.tls_backend_preconfigured(config);
+    }
+    Ok(builder.build()?)
+}
+
+/// 手机侧配对：消费一次性 `pairing_token` 换 `device_token`。
+///
+/// `POST /ringing/v2/pair` 是免鉴权端点，不依赖 lease、也不需要先建
+/// [`Client`]——但复用同一套 HTTP/TLS 构建（含指纹 pin）。`device_token`
+/// 明文仅在响应里出现一次，调用方负责立即入库。
+pub async fn pair_remote(
+    base_url: &str,
+    pairing_token: &str,
+    device_name: &str,
+    platform: &str,
+    tls_fp: Option<&str>,
+) -> Result<RingingV2PairResponse> {
+    let base = base_url.trim_end_matches('/').to_string();
+    if !(base.starts_with("http://") || base.starts_with("https://")) {
+        return Err(ClientError::Discovery(format!(
+            "pair base_url must start with http:// or https://: {base}"
+        )));
+    }
+    let http = build_http_client(tls_fp)?;
+    let path = format!("{RINGING_V2_BASE_PATH}/pair");
+    let request = RingingV2PairRequest {
+        pairing_token: pairing_token.to_string(),
+        device_name: device_name.to_string(),
+        platform: platform.to_string(),
+    };
+    let response = http
+        .post(format!("{base}{path}"))
+        .json(&request)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(crate::v2::api_error(response, &path).await);
+    }
+    Ok(response.json().await?)
 }
 
 /// Callbacks delivered on the client's background tasks.
@@ -79,6 +143,12 @@ pub struct RemoteEndpoint {
     pub base_url: String,
     /// daemon `--server` 模式下的 Bearer token。
     pub token: String,
+    /// 自签证书指纹 pin（`sha256:<hex>` 或裸 hex，整张 DER 的 sha256，与
+    /// daemon `tls_fp` 实现语义一致，见 [`crate::tls_pin`]）。
+    ///
+    /// `Some` 时注入自定义 rustls verifier（信任锚 = 指纹）；`None` 走系统
+    /// 信任——LAN 自签证书会握手失败。移动端 QR 配对载荷自带该指纹。
+    pub tls_fp: Option<String>,
 }
 
 pub struct ClientOptions {
@@ -239,10 +309,8 @@ impl Client {
             }
         };
 
-        ensure_crypto_provider();
-        let http = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
-            .build()?;
+        let http =
+            build_http_client(options.remote.as_ref().and_then(|r| r.tls_fp.as_deref()))?;
         let session = Arc::new(RingingSession::new(
             base_url.clone(),
             token.clone(),

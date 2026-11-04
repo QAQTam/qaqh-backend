@@ -7,9 +7,10 @@ use std::fmt;
 use bytes::Bytes;
 use futures_util::stream::{BoxStream, StreamExt};
 use qaqh_ringing::{
-    CommandTarget, RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope,
-    RingingV2CommandStatus, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
-    RingingV2OpenResponse, RingingV2ResyncRequired,
+    CommandTarget, RingingV2ApprovalRespondRequest, RingingV2Capabilities, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandStatus, RingingV2DeviceChallenges,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse,
+    RingingV2ResyncRequired,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
@@ -228,6 +229,56 @@ impl Client {
         Ok(response.json().await?)
     }
 
+    /// device 身份 `GET /ringing/v2/sessions/{seed}/approvals`：不透明
+    /// challenge 列表（一次性 `challenge_id`，canonical id 不出 daemon）。
+    ///
+    /// 与 [`Self::pending_approvals`]（admin 面，裸 JSON）刻意不同形：
+    /// device 面是一手 DTO（`RingingV2DeviceChallenges`），移动端直接消费。
+    pub async fn device_challenges(&self, session_id: &str) -> Result<RingingV2DeviceChallenges> {
+        let state = self.require_v2_session().await?;
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/approvals");
+        let response = self
+            .inner
+            .http
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(api_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
+    /// device 侧审批应答：`POST /ringing/v2/sessions/{seed}/approvals/respond`。
+    ///
+    /// daemon 一次性消费 challenge → 映射回 canonical 命令 → 执行，返回命令
+    /// ack（Accepted / Rejected）。`challenge_id` 过期或不符会被 403 拒绝
+    /// （`Api{code}`），调用方应重新拉 [`Self::device_challenges`]。
+    pub async fn respond_device_approval(
+        &self,
+        session_id: &str,
+        request: RingingV2ApprovalRespondRequest,
+    ) -> Result<RingingV2CommandAck> {
+        let state = self.require_v2_session().await?;
+        let path =
+            format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/approvals/respond");
+        let response = self
+            .inner
+            .http
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .header("X-QAQH-Client-Session-Id", &state.client_session_id)
+            .json(&request)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(api_error(response, &path).await);
+        }
+        Ok(response.json().await?)
+    }
+
     /// Open the typed v2 per-session SSE subscription. Each frame carries one
     /// monotonically increasing sequence and a typed session event.
     pub async fn subscribe_v2(
@@ -409,7 +460,7 @@ struct ApiErrorBody {
     message: Option<String>,
 }
 
-async fn api_error(response: reqwest::Response, path: &str) -> ClientError {
+pub(crate) async fn api_error(response: reqwest::Response, path: &str) -> ClientError {
     let status = response.status().as_u16();
     let body = response.text().await.unwrap_or_default();
     if let Ok(parsed) = serde_json::from_str::<ApiErrorBody>(&body)

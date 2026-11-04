@@ -2237,6 +2237,7 @@ dependencies = [
  "qaqh-ringing",
  "qaqh-ringing-contract",
  "qaqh-types",
+ "rcgen",
  "reqwest",
  "rustls",
  "serde",
