@@ -367,17 +367,28 @@ fn exec_empty_old_str_is_rejected() {
     let result = exec_edit(&json!({"file_path": "a.txt", "old_string": "", "new_string": "b"}));
     assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("must be non-empty"));
-    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    let hint = result
+        .error
+        .as_ref()
+        .unwrap()
+        .hint
+        .as_deref()
+        .unwrap_or_default();
     assert!(hint.contains("write"), "hint: {hint}");
 }
 
 #[test]
 fn exec_identical_old_and_new_is_rejected() {
-    let result =
-        exec_edit(&json!({"file_path": "a.txt", "old_string": "a", "new_string": "a"}));
+    let result = exec_edit(&json!({"file_path": "a.txt", "old_string": "a", "new_string": "a"}));
     assert_eq!(code(&result), "parse_error");
     assert!(result.model_text().contains("identical"));
-    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    let hint = result
+        .error
+        .as_ref()
+        .unwrap()
+        .hint
+        .as_deref()
+        .unwrap_or_default();
     assert!(hint.contains("No-op"), "hint: {hint}");
 }
 
@@ -387,7 +398,13 @@ fn exec_missing_file_does_not_create() {
     let path = dir.path().join("ghost.txt").to_string_lossy().to_string();
     let result = call(&path, "a", "b");
     assert_eq!(code(&result), "file_not_found");
-    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    let hint = result
+        .error
+        .as_ref()
+        .unwrap()
+        .hint
+        .as_deref()
+        .unwrap_or_default();
     assert!(hint.contains("write"), "hint: {hint}");
     assert!(!std::path::Path::new(&path).exists());
 }
@@ -399,7 +416,13 @@ fn exec_binary_file_is_rejected() {
     std::fs::write(&path, [0u8, 159, 146, 150]).unwrap();
     let result = call(&path.to_string_lossy(), "a", "b");
     assert_eq!(code(&result), "not_utf8_text");
-    let hint = result.error.as_ref().unwrap().hint.as_deref().unwrap_or_default();
+    let hint = result
+        .error
+        .as_ref()
+        .unwrap()
+        .hint
+        .as_deref()
+        .unwrap_or_default();
     assert!(hint.contains("UTF-8"), "hint: {hint}");
 }
 

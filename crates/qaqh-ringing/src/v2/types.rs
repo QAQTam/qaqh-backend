@@ -14,7 +14,8 @@ use crate::v2::{RINGING_V2_BASE_PATH, RINGING_V2_VERSION};
 
 pub use qaqh_types::SettingValue;
 
-/// 命令信封中的唯一目标位置。
+/// 命令信封中的唯一目标位置。执行会话目标携带强类型 `ExecSessionId`;
+/// 整数 registry ID 与系统 PID 不是操作凭据。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -22,7 +23,7 @@ pub enum CommandTarget {
     Global,
     Session { session_id: String },
     Workspace { workspace_id: String },
-    ExecSession { id: String },
+    ExecSession { id: qaqh_types::ExecSessionId },
 }
 
 /// 资源 revision 与 driver epoch 由命令信封携带。
@@ -35,7 +36,12 @@ pub enum CommandPrecondition {
 }
 
 /// 命令目录代际。字段和语义变更需显式升级。
-pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-6";
+pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-7";
+
+/// 会话读模型/事件词表契约代际(spec §11)。管理事件与读模型的破坏性变化;
+/// open 与 bootstrap 均携带,客户端必须严格校验。首个显式修订 = ringing-session-2,
+/// 当前无该字段的读模型视为隐式第 1 代。
+pub const SESSION_CONTRACT_REVISION: &str = "ringing-session-2";
 
 /// RingingV2 唯一公共命令信封。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +130,11 @@ impl RingingV2CommandEnvelope {
         {
             return Err("target_mismatch");
         }
+        if self.command.requires_exec_session_target()
+            && !matches!(self.target, CommandTarget::ExecSession { .. })
+        {
+            return Err("target_mismatch");
+        }
         if self.command.is_global_operation() && !matches!(self.target, CommandTarget::Global) {
             return Err("target_mismatch");
         }
@@ -199,6 +210,14 @@ impl RingingCommand {
 
     pub fn requires_settings_revision(&self) -> bool {
         matches!(self, Self::SessionSettingsPatch { .. })
+    }
+
+    /// 执行会话统一控制命令只接受 ExecSession target(spec §6.2)。
+    pub fn requires_exec_session_target(&self) -> bool {
+        matches!(
+            self,
+            Self::ExecSessionInterrupt {} | Self::ExecSessionTerminate {}
+        )
     }
 
     pub fn requires_config_revision(&self) -> bool {
@@ -297,6 +316,11 @@ pub struct RingingV2OpenRequest {
     pub schema: String,
     pub version: u32,
     pub client_instance_id: String,
+    /// 客户端预期的命令目录代际(spec §11):服务端在分配 lease 前校验;
+    /// 缺字段/不匹配的旧客户端在 open 阶段即失败,不进入半兼容消费。
+    pub command_contract_revision: String,
+    /// 客户端预期的读模型/事件词表代际;同样 open 阶段预检。
+    pub session_contract_revision: String,
 }
 
 impl RingingV2OpenRequest {
@@ -305,10 +329,12 @@ impl RingingV2OpenRequest {
             schema: RINGING_SCHEMA.to_string(),
             version: RINGING_V2_VERSION,
             client_instance_id: client_instance_id.into(),
+            command_contract_revision: COMMAND_CONTRACT_REVISION.to_string(),
+            session_contract_revision: SESSION_CONTRACT_REVISION.to_string(),
         }
     }
 
-    /// Schema/version gate mirroring the daemon open handler's
+    /// Schema/version/revision gate mirroring the daemon open handler's
     /// `UPGRADE_REQUIRED` rejection; diagnostics-only `client_instance_id`
     /// must still be non-empty.
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -317,6 +343,11 @@ impl RingingV2OpenRequest {
             || self.client_instance_id.trim().is_empty()
         {
             return Err("invalid_open_request");
+        }
+        if self.command_contract_revision != COMMAND_CONTRACT_REVISION
+            || self.session_contract_revision != SESSION_CONTRACT_REVISION
+        {
+            return Err("unsupported_contract_revision");
         }
         Ok(())
     }
@@ -353,6 +384,9 @@ pub struct RingingV2OpenResponse {
     /// 命令目录代际(B07):客户端在发送命令前校验;不匹配即给出可读错误,
     /// 而不是等到命令被 `unsupported_contract_revision` 拒绝才发现不兼容。
     pub command_contract_revision: String,
+    /// 会话读模型/事件词表代际(`SESSION_CONTRACT_REVISION`):事件与
+    /// bootstrap 形状由此管理;客户端严格校验,不匹配即拒绝连接。
+    pub session_contract_revision: String,
 }
 
 impl RingingV2OpenResponse {
@@ -362,12 +396,15 @@ impl RingingV2OpenResponse {
             || self.client_session_id.trim().is_empty()
             || self.server_epoch.trim().is_empty()
             || self.command_contract_revision.trim().is_empty()
+            || self.session_contract_revision.trim().is_empty()
             || !is_safe_integer(self.lease_ttl_ms)
             || !is_safe_integer(self.renew_interval_ms)
         {
             return Err("invalid_open_response");
         }
-        if self.command_contract_revision != COMMAND_CONTRACT_REVISION {
+        if self.command_contract_revision != COMMAND_CONTRACT_REVISION
+            || self.session_contract_revision != SESSION_CONTRACT_REVISION
+        {
             return Err("unsupported_contract_revision");
         }
         Ok(())

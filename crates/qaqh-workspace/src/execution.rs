@@ -18,6 +18,10 @@ pub struct ToolExecResult {
     pub meta: crate::ToolExecMeta,
     pub code_delta: Option<qaqh_types::CodeDeltaRecord>,
     pub skill_effects: Vec<crate::ToolEffect>,
+    /// 契约终态(spec §4.2):typed 执行器(执行会话类工具)直接给出
+    /// completed/yielded/failed 等事实;None 时按 success/error 派生。
+    /// 不再从模型正文 JSON 推断任何状态。
+    pub outcome: Option<qaqh_types::ToolCallOutcome>,
 }
 
 /// Consume an authorization proof and dispatch the bound handler.
@@ -78,6 +82,7 @@ pub fn execute_authorized(
         cancellation,
         progress: None,
         exec_progress: None,
+        exec_host: None,
         official_web: None,
         source: ToolCallSource::Model,
     };
@@ -229,6 +234,7 @@ pub fn execute_authorized_with_context(
             );
             let canonical = crate::ToolResult::error(report.content.clone());
             return ToolExecResult {
+                outcome: None,
                 content: report.content,
                 success: report.success,
                 result: canonical,
@@ -343,11 +349,12 @@ pub fn execute_authorized_with_context(
     let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         prepared.executor.clone().execute(exec_ctx, args.clone())
     }));
-    let (mut tool_result, skill_effects) = {
+    let (mut tool_result, skill_effects, call_outcome) = {
         match execution {
             Ok(Ok(outcome)) => {
                 let effects = outcome.effects.clone();
-                (outcome.to_tool_result(), effects)
+                let call_outcome = outcome.call_outcome.clone();
+                (outcome.to_tool_result(), effects, call_outcome)
             }
             Ok(Err(fatal)) => {
                 log::error!(
@@ -359,6 +366,7 @@ pub fn execute_authorized_with_context(
                 (
                     crate::ToolResult::error_with("tool_fatal", "internal tool error", false, None),
                     Vec::new(),
+                    None,
                 )
             }
             Err(_) => {
@@ -374,6 +382,7 @@ pub fn execute_authorized_with_context(
                         Some("inspect the target state before retrying".into()),
                     ),
                     Vec::new(),
+                    None,
                 )
             }
         }
@@ -454,6 +463,7 @@ pub fn execute_authorized_with_context(
                 meta: report.meta,
                 code_delta,
                 skill_effects,
+                outcome: call_outcome,
             };
             if let Err(e) = crate::audit::append_audit(&audit_entry) {
                 log::error!("audit: append failed for {name}: {e}");
@@ -614,6 +624,7 @@ pub fn execute_with_context(
                 cancellation,
                 progress: None,
                 exec_progress: None,
+                exec_host: None,
                 official_web: None,
                 source: ToolCallSource::Model,
             };
@@ -709,6 +720,7 @@ fn failure(name: &str, error: crate::ToolError) -> ToolExecResult {
         },
         code_delta: None,
         skill_effects: Vec::new(),
+        outcome: None,
     }
 }
 
@@ -846,12 +858,13 @@ mod tests {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
         let authorized = match crate::authorization::authorize_call_with_context(
-            "exec",
-            &serde_json::json!({ "command": "printf hello; sleep 0.4; printf world" }),
+            "exec_command",
+            &serde_json::json!({ "cmd": "printf hello; sleep 0.4; printf world" }),
             &context,
         ) {
             crate::authorization::Admission::Authorized(authorized) => authorized,
@@ -1113,6 +1126,7 @@ mod tests {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
@@ -1167,6 +1181,7 @@ mod tests {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };
@@ -1471,7 +1486,7 @@ mod tests {
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
-        // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec", "process", "todo_update",
+        // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec_command", "write_stdin", "todo_update",
         // "todo_write"]`，见 `crate::PLAN_BLOCKED`）中：PLAN 模式下仍放行，阻断只发生在名单内工具。
         //
         // 注意：`test_write` 是 Destructive + Write 的文件型工具，P0-2 之后

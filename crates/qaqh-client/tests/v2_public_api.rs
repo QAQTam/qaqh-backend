@@ -8,7 +8,7 @@ use qaqh_client::{
     SessionEventFrame,
 };
 
-use qaqh_client::{contract_state, fact, ringing_v2};
+use qaqh_client::{fact, ringing_v2};
 
 #[test]
 fn v2_surface_is_nameable_from_the_client_root() {
@@ -33,6 +33,7 @@ fn v2_surface_is_nameable_from_the_client_root() {
 
     assert_eq!(RINGING_V2_VERSION, 2);
     assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
+    assert_eq!(qaqh_client::SESSION_CONTRACT_REVISION, "ringing-session-2");
 }
 
 /// 壳层必须能只靠 `qaqh-client` **命名并 match** 会话事件流的 interaction /
@@ -58,13 +59,13 @@ fn session_event_interaction_branches_are_matchable_from_the_client_root() {
             }
             SessionEvent::ToolFinished {
                 call_id,
-                status,
-                error,
+                outcome,
+                exec_session_id,
                 ..
             } => {
                 let _: &fact::ToolCallId = call_id;
-                let _: &contract_state::ToolCallStatus = status;
-                let _: &Option<fact::ToolError> = error;
+                let _: &fact::ToolCallOutcome = outcome;
+                let _: &Option<fact::ExecSessionId> = exec_session_id;
                 "tool"
             }
             _ => "other",
@@ -90,10 +91,10 @@ fn session_event_interaction_branches_are_matchable_from_the_client_root() {
         "seq": 4,
         "type": "tool_finished",
         "call_id": "call_1",
-        "status": "finished",
+        "outcome": {"kind": "completed"},
+        "exec_session_id": null,
         "output": null,
         "output_truncated": false,
-        "error": null,
         "metrics": null
     }))
     .expect("decode tool_finished frame");

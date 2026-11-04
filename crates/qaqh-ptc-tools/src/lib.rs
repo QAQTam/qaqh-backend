@@ -451,6 +451,7 @@ mod tests {
             cancellation: qaqh_tool_core::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: qaqh_tool_core::ToolCallSource::Model,
         }

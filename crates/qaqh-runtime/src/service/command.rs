@@ -37,7 +37,9 @@ impl Command {
                 Ok(Self::System(decode(method, params)?))
             }
             "workspace" | "fs" => Ok(Self::Workspace(decode(method, params)?)),
-            "session" | "skills" | "subagent" => Ok(Self::Session(decode(method, params)?)),
+            "session" | "exec_session" | "skills" | "subagent" => {
+                Ok(Self::Session(decode(method, params)?))
+            }
             "todo" | "plan" => Ok(Self::Task(decode(method, params)?)),
             _ => Err(QaqhError::UnknownMethod {
                 method: method.to_string(),
@@ -141,6 +143,10 @@ pub enum SessionCommand {
     SessionGetActivity(SessionGetActivityArgs),
     #[serde(rename = "session.dashboard")]
     SessionDashboard(SessionDashboardArgs),
+    #[serde(rename = "exec_session.list")]
+    ExecSessionList(ExecSessionListArgs),
+    #[serde(rename = "session.turn")]
+    SessionTurn(SessionTurnArgs),
     #[serde(rename = "skills.catalog")]
     SkillsCatalog(SkillsCatalogArgs),
     #[serde(rename = "skills.list_tools")]
@@ -151,6 +157,8 @@ pub type SessionListArgs = crate::ringing::service_methods::SessionListParams;
 pub type SessionMetaArgs = crate::ringing::service_methods::SessionMetaParams;
 pub type SessionActivityArgs = crate::ringing::service_methods::SessionActivityParams;
 pub type SessionGetActivityArgs = crate::ringing::service_methods::SessionGetActivityParams;
+pub type ExecSessionListArgs = crate::ringing::service_methods::ExecSessionListParams;
+pub type SessionTurnArgs = crate::ringing::service_methods::SessionTurnParams;
 
 #[derive(Debug, Deserialize)]
 pub struct SessionDashboardArgs {

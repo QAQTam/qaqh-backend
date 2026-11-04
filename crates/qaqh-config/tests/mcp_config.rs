@@ -148,7 +148,10 @@ fn rejects_illegal_server_name() {
 fn rejects_missing_transport() {
     let err = load_toml("notransport", "[mcp.servers.x1]\nargs = [\"-y\"]\n")
         .expect_err("缺 command 且缺 url 应被拒绝");
-    assert!(err.to_string().contains("缺少 transport"), "实际错误: {err}");
+    assert!(
+        err.to_string().contains("缺少 transport"),
+        "实际错误: {err}"
+    );
 }
 
 #[test]
@@ -168,7 +171,10 @@ fn rejects_bad_url_scheme() {
         "[mcp.servers.x1]\nurl = \"ftp://mcp.example.com\"\n",
     )
     .expect_err("非 http(s) url 应被拒绝");
-    assert!(err.to_string().contains("http:// 或 https://"), "实际错误: {err}");
+    assert!(
+        err.to_string().contains("http:// 或 https://"),
+        "实际错误: {err}"
+    );
 }
 
 #[test]

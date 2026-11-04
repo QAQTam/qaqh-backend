@@ -206,13 +206,14 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "constants.ts",
         &format!(
-            "export const RINGING_SCHEMA = {:?} as const;\nexport const RINGING_V2_VERSION = {} as const;\nexport const RINGING_V2_BASE_PATH = {:?} as const;\nexport const CLIENT_SESSION_HEADER = {:?} as const;\nexport const MAX_SAFE_INTEGER = {} as const;\nexport const COMMAND_CONTRACT_REVISION = {:?} as const;\n",
+            "export const RINGING_SCHEMA = {:?} as const;\nexport const RINGING_V2_VERSION = {} as const;\nexport const RINGING_V2_BASE_PATH = {:?} as const;\nexport const CLIENT_SESSION_HEADER = {:?} as const;\nexport const MAX_SAFE_INTEGER = {} as const;\nexport const COMMAND_CONTRACT_REVISION = {:?} as const;\nexport const SESSION_CONTRACT_REVISION = {:?} as const;\n",
             qaqh_ringing::RINGING_SCHEMA,
             qaqh_ringing::RINGING_V2_VERSION,
             qaqh_ringing::RINGING_V2_BASE_PATH,
             qaqh_ringing::CLIENT_SESSION_HEADER,
             qaqh_ringing::MAX_SAFE_INTEGER,
             qaqh_ringing::COMMAND_CONTRACT_REVISION,
+            qaqh_ringing::SESSION_CONTRACT_REVISION,
         ),
     )?;
     write_service_map(stage)?;
@@ -230,11 +231,12 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
-        ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams, FsEntry,
-        FsListParams, FsReadParams, FsReadResult, PlanReadItem, PlanReadParams, PlanItemStatusView,
-        ProfileListParams, ProfileListSnapshot, SessionActivityParams, SessionDashboard,
-        SessionDashboardParams, SessionDashboardTask, SessionGetActivityParams, SessionListParams,
-        SessionMetaParams, SessionToolActivity, SkillCatalogDiagnostic, SkillCatalogEntry,
+        ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
+        ExecSessionListParams, ExecSessionListResult, FsEntry, FsListParams, FsReadParams,
+        FsReadResult, PlanItemStatusView, PlanReadItem, PlanReadParams, ProfileListParams,
+        ProfileListSnapshot, SessionActivityParams, SessionDashboard, SessionDashboardParams,
+        SessionDashboardTask, SessionGetActivityParams, SessionListParams, SessionMetaParams,
+        SessionToolActivity, SessionTurnParams, SkillCatalogDiagnostic, SkillCatalogEntry,
         SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoCountsSnapshot,
         TodoItemSnapshot, TodoListParams, TodoListSnapshot, TodoStatusParams, TodoStatusSnapshot,
         WorkspaceGetParams, WorkspaceListParams,
@@ -298,6 +300,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         capabilities,
         // B07:握手即携带命令目录代际。
         command_contract_revision: qaqh_ringing::COMMAND_CONTRACT_REVISION.to_owned(),
+        session_contract_revision: qaqh_ringing::SESSION_CONTRACT_REVISION.to_owned(),
     };
     open_response
         .validate()
@@ -385,7 +388,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "service-session-activity-result.json",
         &vec![qaqh_ringing_contract::SessionActivity {
             session_id: "session-fixture".to_owned(),
-            state: qaqh_ringing_contract::SessionActivityState::Working,
+            state: qaqh_ringing_contract::SessionActivityState::Running,
             turn_id: Some("turn-fixture-1".to_owned()),
             seq: 3,
             updated_at: 1_759_000_060_000,
@@ -465,7 +468,11 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         &vec![workspace_entry_fixture()],
     )?;
     // ── B08:此前 untyped 的 8 个方法的代表性 fixtures ──
-    write_fixture(stage, "service-config-load-params.json", &ConfigLoadParams {})?;
+    write_fixture(
+        stage,
+        "service-config-load-params.json",
+        &ConfigLoadParams {},
+    )?;
     write_fixture(
         stage,
         "service-config-load-result.json",
@@ -518,6 +525,33 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }],
             recent_edits: vec!["/synthetic/workspace/src/main.rs".to_owned()],
         },
+    )?;
+    write_fixture(
+        stage,
+        "service-exec_session-list-params.json",
+        &ExecSessionListParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-exec_session-list-result.json",
+        &ExecSessionListResult {
+            sessions: Vec::new(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-turn-params.json",
+        &SessionTurnParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            turn_id: "turn-fixture-1".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-session-turn-result.json",
+        &Option::<qaqh_ringing_contract::SessionTurnSnapshot>::None,
     )?;
     write_fixture(
         stage,
@@ -743,8 +777,24 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         RingingV2SyncResult,
         qaqh_ringing_contract::SessionBootstrap,
         qaqh_ringing_contract::SessionState,
+        qaqh_ringing_contract::SessionTurnSnapshot,
         qaqh_ringing_contract::SessionEvent,
         qaqh_ringing_contract::SessionEventFrame,
+        qaqh_ringing_contract::ToolCallState,
+        qaqh_ringing_contract::TurnPhase,
+        qaqh_ringing_contract::ExecSessionView,
+        qaqh_ringing_contract::ExecSessionState,
+        qaqh_ringing_contract::ExecSessionOutcome,
+        qaqh_ringing_contract::ExecStopReason,
+        qaqh_ringing_contract::ExecCancelReason,
+        qaqh_ringing_contract::ExecInterruptReason,
+        qaqh_types::ExecSessionId,
+        qaqh_ringing_contract::fact::ContentHash,
+        qaqh_types::SessionContentRef,
+        qaqh_types::SessionToolError,
+        qaqh_types::ToolCallOutcome,
+        qaqh_types::ToolCancellationReason,
+        qaqh_types::ToolInterruptionReason,
         qaqh_ringing_contract::TeamResponse,
         qaqh_ringing_runtime::pending_store::ReceiptPolicy,
         qaqh_runtime::ringing::service_methods::DaemonVersionParams,
@@ -754,6 +804,9 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::FsReadResult,
         qaqh_runtime::ringing::service_methods::SessionActivityParams,
         qaqh_runtime::ringing::service_methods::SessionGetActivityParams,
+        qaqh_runtime::ringing::service_methods::ExecSessionListParams,
+        qaqh_runtime::ringing::service_methods::ExecSessionListResult,
+        qaqh_runtime::ringing::service_methods::SessionTurnParams,
         qaqh_runtime::ringing::service_methods::SessionListParams,
         qaqh_runtime::ringing::service_methods::SessionMetaParams,
         qaqh_runtime::ringing::service_methods::SessionToolActivity,

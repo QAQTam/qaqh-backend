@@ -9,7 +9,6 @@ use crate::apply_patch_engine::seek_sequence::seek_sequence;
 use crate::apply_patch_engine::text_file::Replacement;
 use crate::apply_patch_engine::text_file::SourceFile;
 
-
 pub struct AppliedPatch {
     pub original_contents: String,
     pub new_contents: String,
@@ -56,8 +55,12 @@ fn compute_replacements(
         // If a chunk has a `change_context`, we use seek_sequence to find it, then
         // adjust our `line_index` to continue from there.
         if let Some(ctx_line) = &chunk.change_context {
-            if let Some(idx) = seek_sequence(original_lines, std::slice::from_ref(ctx_line), line_index, /*eof*/ false)
-            {
+            if let Some(idx) = seek_sequence(
+                original_lines,
+                std::slice::from_ref(ctx_line),
+                line_index,
+                /*eof*/ false,
+            ) {
                 line_index = idx + 1;
             } else {
                 return Err(EngineError::Compute(format!(

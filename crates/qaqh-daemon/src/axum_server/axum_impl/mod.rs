@@ -155,12 +155,6 @@ pub fn build_router(state: AppState) -> Router {
             ("POST", "/ringing/v2/devices/{device_id}/revoke") => {
                 router.route(path, post(pairing::handle_device_revoke))
             }
-            ("GET", "/ringing/v2/exec-sessions") => {
-                router.route(path, get(v2::handle_exec_sessions_list))
-            }
-            ("POST", "/ringing/v2/exec-sessions/{id}/kill") => {
-                router.route(path, post(v2::handle_exec_session_kill))
-            }
             other => panic!("contract route without a registered handler: {other:?}"),
         };
     }

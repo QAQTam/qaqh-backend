@@ -187,6 +187,7 @@ impl AgentRegistry {
         match self.owners.session_run_state(agent.agent_id.as_str()) {
             Ok(qaqh_session::owner::SessionRunState::Running) => Ok(ListedAgentStatus::Running),
             Ok(qaqh_session::owner::SessionRunState::Waiting) => Ok(ListedAgentStatus::WaitingUser),
+            Ok(qaqh_session::owner::SessionRunState::Cancelling) => Ok(ListedAgentStatus::Running),
             Ok(qaqh_session::owner::SessionRunState::Idle) => Ok(ListedAgentStatus::Running),
             Ok(qaqh_session::owner::SessionRunState::NeverStarted) => {
                 Ok(ListedAgentStatus::PendingInit)
@@ -270,7 +271,13 @@ impl AgentRegistry {
         } else {
             match loop_.activity_state() {
                 qaqh_ringing_contract::fact::ActivityState::Running => {
-                    qaqh_ringing_contract::SessionActivityState::Working
+                    qaqh_ringing_contract::SessionActivityState::Running
+                }
+                qaqh_ringing_contract::fact::ActivityState::WaitingUser => {
+                    qaqh_ringing_contract::SessionActivityState::WaitingUser
+                }
+                qaqh_ringing_contract::fact::ActivityState::Cancelling => {
+                    qaqh_ringing_contract::SessionActivityState::Cancelling
                 }
                 _ => qaqh_ringing_contract::SessionActivityState::Idle,
             }

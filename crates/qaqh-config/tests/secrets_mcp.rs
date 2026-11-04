@@ -165,7 +165,10 @@ fn interpolate_replaces_all_and_never_leaks_on_miss() {
     );
     // 缺失：Err 含名字、不含值。
     let err = interpolate_secret_placeholders("${secret:missing}", resolve).unwrap_err();
-    assert!(err.to_string().contains("missing"), "报错应指明 secret 名：{err}");
+    assert!(
+        err.to_string().contains("missing"),
+        "报错应指明 secret 名：{err}"
+    );
     assert!(!err.contains("v-1"), "已解析值不能进报错");
 }
 
@@ -189,10 +192,14 @@ fn load_fails_fast_on_missing_secret_ref() {
     std::fs::write(dir.join("config.toml"), CONFIG_WITH_PLACEHOLDER).expect("write config");
 
     let err = load_config(&dir).expect_err("未注册引用应 fail-fast");
-    assert!(err.to_string().contains("demo_key"),
+    assert!(
+        err.to_string().contains("demo_key"),
         "报错应指明缺失的 secret 名：{err}"
     );
-    assert!(err.to_string().contains("已注册"), "报错应列出已注册名单提示");
+    assert!(
+        err.to_string().contains("已注册"),
+        "报错应列出已注册名单提示"
+    );
 
     // 注册后 load 成功。
     store_at(&dir)
@@ -261,7 +268,10 @@ env = { KEY = "${secret:Bad Name}" }
     )
     .expect("write");
     let err = load_config(&dir).expect_err("残缺占位符应 fail-fast");
-    assert!(err.to_string().contains("非法"), "应提示占位符名非法：{err}");
+    assert!(
+        err.to_string().contains("非法"),
+        "应提示占位符名非法：{err}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

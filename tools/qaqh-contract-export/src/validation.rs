@@ -118,13 +118,14 @@ pub(super) fn validate(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
             .map(|_| "/ringing/v2/service/{method}")
             .unwrap_or(path);
         if path.starts_with("/ringing/v2/") && !path.contains('+') {
-            let known = qaqh_ringing::RINGING_V2_HTTP_ROUTES.iter().any(
-                |(route_method, route_path)| {
-                    *route_path == path
-                        && (method == *route_method
-                            || method.split(" + ").any(|part| part.trim() == *route_method))
-                },
-            );
+            let known =
+                qaqh_ringing::RINGING_V2_HTTP_ROUTES
+                    .iter()
+                    .any(|(route_method, route_path)| {
+                        *route_path == path
+                            && (method == *route_method
+                                || method.split(" + ").any(|part| part.trim() == *route_method))
+                    });
             if !known {
                 return Err(format!(
                     "coverage capability {id} declares route {method} {path} that is not in RINGING_V2_HTTP_ROUTES"

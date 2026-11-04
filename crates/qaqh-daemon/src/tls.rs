@@ -56,7 +56,10 @@ fn build_material(cert_pem: &str, key_pem: &str) -> Result<TlsMaterial, String> 
 /// iPAddress SAN，原生端（ArkTS HTTP / 系统信任链）才会做标准主机名校验而不用
 /// 关校验。rcgen 会把形如 IP 的字符串解析成 IpAddress 类型的 SAN。
 /// SAN 变化 = 证书轮换 = 全部已配对设备重新扫码（与模块头一致）。
-pub fn load_or_generate(data_dir: &Path, subject_alt_names: &[String]) -> Result<TlsMaterial, String> {
+pub fn load_or_generate(
+    data_dir: &Path,
+    subject_alt_names: &[String],
+) -> Result<TlsMaterial, String> {
     let dir = data_dir.join("tls");
     std::fs::create_dir_all(&dir).map_err(|error| format!("create tls dir: {error}"))?;
     let cert_path = dir.join("cert.pem");

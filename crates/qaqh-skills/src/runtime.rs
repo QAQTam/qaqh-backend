@@ -950,8 +950,12 @@ mod tests {
         let envelope = manager.snapshot_for_context().envelope;
         assert!(envelope.contains("qaqh-core"));
         assert!(envelope.contains("QAQH Core"));
-        assert!(manager.session_state().entries.iter().any(|entry| {
-            entry.name == "qaqh-core" && entry.source == "bundled"
-        }));
+        assert!(
+            manager
+                .session_state()
+                .entries
+                .iter()
+                .any(|entry| { entry.name == "qaqh-core" && entry.source == "bundled" })
+        );
     }
 }

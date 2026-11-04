@@ -1,7 +1,6 @@
 //! 4-tier content matching: exact → rstrip → trim → Unicode-normalised.
 //! Ported from OpenAI `codex-rs/apply-patch` (Apache-2.0).
 
-
 /// Find `pattern` inside `lines` starting at `start`.
 ///
 /// - `eof`: anchor the search at the end of the file (the hunk was marked
@@ -107,7 +106,7 @@ fn normalise(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::seek_sequence;
-    
+
     fn to_vec(strings: &[&str]) -> Vec<String> {
         strings.iter().map(ToString::to_string).collect()
     }
@@ -116,30 +115,21 @@ mod tests {
     fn exact_match_finds_sequence() {
         let lines = to_vec(&["foo", "bar", "baz"]);
         let pattern = to_vec(&["bar", "baz"]);
-        assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false),
-            Some(1)
-        );
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(1));
     }
 
     #[test]
     fn rstrip_match_ignores_trailing_whitespace() {
         let lines = to_vec(&["foo   ", "bar\t\t"]);
         let pattern = to_vec(&["foo", "bar"]);
-        assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false),
-            Some(0)
-        );
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
     }
 
     #[test]
     fn trim_match_ignores_leading_and_trailing_whitespace() {
         let lines = to_vec(&["    foo   ", "   bar\t"]);
         let pattern = to_vec(&["foo", "bar"]);
-        assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false),
-            Some(0)
-        );
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
     }
 
     #[test]
@@ -147,10 +137,7 @@ mod tests {
         let lines = to_vec(&["just one line"]);
         let pattern = to_vec(&["too", "many", "lines"]);
         // Should not panic – must return None when pattern cannot possibly fit.
-        assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false),
-            None
-        );
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), None);
     }
 
     #[test]
@@ -158,9 +145,6 @@ mod tests {
         // File contains U+2014 (em dash); patch was authored with ASCII '-'.
         let lines = to_vec(&["let x = a — b;"]);
         let pattern = to_vec(&["let x = a - b;"]);
-        assert_eq!(
-            seek_sequence(&lines, &pattern, 0, false),
-            Some(0)
-        );
+        assert_eq!(seek_sequence(&lines, &pattern, 0, false), Some(0));
     }
 }

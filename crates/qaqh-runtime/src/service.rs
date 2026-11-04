@@ -505,7 +505,7 @@ impl QaqhService {
         let has_active_work = activities.iter().any(|activity| {
             matches!(
                 activity.state,
-                ActivityState::Starting | ActivityState::Working | ActivityState::WaitingUser
+                ActivityState::Running | ActivityState::WaitingUser | ActivityState::Cancelling
             )
         });
         (has_active_work, activities)
@@ -541,6 +541,53 @@ impl QaqhService {
             .map_err(|e| format!("registry lock: {e}"))
     }
 
+    pub fn exec_session_owner(
+        &self,
+        id: &qaqh_types::ExecSessionId,
+    ) -> Result<Option<String>, String> {
+        if let Some(owner_session_id) = self.registry()?.exec_sessions().owner_session_id(id) {
+            return Ok(Some(owner_session_id));
+        }
+        let id = id.as_str().to_string();
+        self.owners
+            .db()
+            .read_blocking(move |conn| {
+                qaqh_session::db::store::exec_session_by_id(conn, &id)
+                    .map(|row| row.map(|row| row.session_id))
+            })
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn stop_exec_session(
+        &self,
+        owner_session_id: &str,
+        id: &qaqh_types::ExecSessionId,
+        reason: qaqh_ringing_contract::state::ExecStopReason,
+    ) -> Result<&'static str, String> {
+        let manager = self.registry()?.exec_sessions();
+        let result = manager.stop(owner_session_id, id, reason);
+        if result != qaqh_agent_runtime::ExecSessionStopResult::NotFound {
+            return Ok(match result {
+                qaqh_agent_runtime::ExecSessionStopResult::StopRequested => "stop_requested",
+                qaqh_agent_runtime::ExecSessionStopResult::AlreadyFinished => "already_finished",
+                qaqh_agent_runtime::ExecSessionStopResult::NotFound => unreachable!(),
+            });
+        }
+        let id = id.as_str().to_string();
+        let persisted = self
+            .owners
+            .db()
+            .read_blocking(move |conn| {
+                qaqh_session::db::store::exec_session_by_id(conn, &id).map(|row| row.is_some())
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(if persisted {
+            "already_finished"
+        } else {
+            "not_found"
+        })
+    }
+
     /// 构造 Ringing worker 命令信封并转发给 agent（legacy Ui2Agent 帧已拆除）。
     fn send_ringing_cmd(&self, session_id: String, command: RingingCommand) -> QaqhResult<Value> {
         let env = RingingWorkerCommandEnvelope::new(session_id.clone(), command_id(), command);
@@ -566,18 +613,18 @@ impl QaqhService {
                 .session_run_state(session_id)
                 .ok()
                 .map(|state| match state {
-                    qaqh_session::owner::SessionRunState::Running
-                    | qaqh_session::owner::SessionRunState::Waiting => ActivityState::Working,
+                    qaqh_session::owner::SessionRunState::Running => ActivityState::Running,
+                    qaqh_session::owner::SessionRunState::Waiting => ActivityState::WaitingUser,
+                    qaqh_session::owner::SessionRunState::Cancelling => ActivityState::Cancelling,
                     _ => ActivityState::Idle,
                 })
         });
+        // 统一词表(spec §4.4):session 列表与 activity 同一计算入口;
+        // 失败/中断记录在回合 outcome,不再用 Error/Canceled 活动状态替代。
         match state {
-            Some(ActivityState::Starting | ActivityState::Working) => {
-                qaqh_types::SessionRunStatus::Working
-            }
-            // 挂起交互属于回合中的等待,归 working。
-            Some(ActivityState::WaitingUser) => qaqh_types::SessionRunStatus::Working,
-            Some(ActivityState::Failed) => qaqh_types::SessionRunStatus::Error,
+            Some(ActivityState::Running) => qaqh_types::SessionRunStatus::Running,
+            Some(ActivityState::WaitingUser) => qaqh_types::SessionRunStatus::WaitingUser,
+            Some(ActivityState::Cancelling) => qaqh_types::SessionRunStatus::Cancelling,
             _ => qaqh_types::SessionRunStatus::Idle,
         }
     }
@@ -633,8 +680,13 @@ impl QaqhService {
                 updated_at: (row.updated_at_ms.max(0) as u64) / 1000,
                 ..SessionMeta::default()
             };
-            let mut workspace_id = workspace_ids.remove(&session_id);
+            let stored_workspace_id = workspace_ids.remove(&session_id);
+            let managed_cwd = meta.cwd.as_deref().is_some_and(|cwd| {
+                qaqh_types::platform::is_managed_session_workspace(std::path::Path::new(cwd))
+            });
+            let mut workspace_id = if managed_cwd { None } else { stored_workspace_id };
             if workspace_id.is_none()
+                && !managed_cwd
                 && !meta.ephemeral
                 && let Some(cwd) = meta.cwd.as_deref()
             {

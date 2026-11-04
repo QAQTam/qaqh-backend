@@ -59,7 +59,7 @@ endpoint = "openai"
 [subagent]
 max_tokens = 128000
 timeout_secs = 120
-default_tools = ["file", "exec"]
+default_tools = ["file", "exec", "process"]
 
 [workspace]
 mode = "local"
@@ -78,7 +78,11 @@ fn base_url_preset_only_when_empty() {
     assert_eq!(cfg.max_tokens, 324000);
     assert_eq!(
         cfg.subagent.default_tools,
-        vec!["read".to_string(), "exec".to_string()],
+        vec![
+            "read".to_string(),
+            "exec_command".to_string(),
+            "write_stdin".to_string()
+        ],
         "存量配置的旧工具名 file 必须迁移为 read"
     );
 
@@ -178,7 +182,7 @@ max_tokens = 16384
 base_url = "{CUSTOM_URL}"
 max_tokens = 128000
 timeout_secs = 120
-default_tools = ["file", "exec"]
+default_tools = ["file", "exec", "process"]
 "#
         ),
     );
@@ -186,7 +190,11 @@ default_tools = ["file", "exec"]
     assert_eq!(cfg.subagent.base_url, CUSTOM_URL);
     assert_eq!(
         cfg.subagent.default_tools,
-        vec!["read".to_string(), "exec".to_string()],
+        vec![
+            "read".to_string(),
+            "exec_command".to_string(),
+            "write_stdin".to_string()
+        ],
         "存量配置的旧工具名 file 必须迁移为 read"
     );
 

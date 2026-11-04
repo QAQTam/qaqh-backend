@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use qaqh_pty::{SessionKind, SessionSpec, kill_session_group, spawn_pty, spawn_pipe, wait_session};
+use qaqh_pty::{SessionKind, SessionSpec, kill_session_group, spawn_pipe, spawn_pty, wait_session};
 
 /// 看门狗：任何测试卡死时按组杀掉 `pid` 并让测试失败，避免单线程测试池
 /// （workspace `RUST_TEST_THREADS=1`）整体挂起。
@@ -50,7 +50,10 @@ impl Drop for Watchdog {
 fn minimal_env() -> Vec<(String, String)> {
     vec![
         ("PATH".into(), "/usr/bin:/bin".into()),
-        ("HOME".into(), std::env::temp_dir().to_string_lossy().into_owned()),
+        (
+            "HOME".into(),
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        ),
     ]
 }
 
@@ -73,7 +76,10 @@ fn pipe_backend_captures_output_and_exit_code() {
     let exit = wait_session(&mut session).expect("wait");
     assert_eq!(exit.code, Some(0));
     assert!(output.contains("pipe-out"), "merged output: {output}");
-    assert!(output.contains("pipe-err"), "stderr must merge in: {output}");
+    assert!(
+        output.contains("pipe-err"),
+        "stderr must merge in: {output}"
+    );
 }
 
 #[test]
@@ -89,7 +95,10 @@ fn pty_backend_allocates_a_tty() {
 
     assert_eq!(session.kind, SessionKind::Pty);
     let mut output = String::new();
-    session.reader.read_to_string(&mut output).expect("read pty");
+    session
+        .reader
+        .read_to_string(&mut output)
+        .expect("read pty");
     let exit = wait_session(&mut session).expect("wait");
     assert_eq!(exit.code, Some(0));
     assert!(output.contains("TTY-OK"), "pty output: {output}");
@@ -106,7 +115,10 @@ fn pty_child_is_session_leader() {
     // portable-pty 在 Unix 上以 setsid 建立 PTY 子进程 → PID == PGID。
     // SAFETY: getpgid(2) 只读取进程表，无指针参与。
     let pgid = unsafe { libc::getpgid(session.pid as libc::pid_t) };
-    assert_eq!(pgid, session.pid as libc::pid_t, "PTY child must be a session leader");
+    assert_eq!(
+        pgid, session.pid as libc::pid_t,
+        "PTY child must be a session leader"
+    );
 
     kill_session_group(&mut session).expect("kill group");
     let exit = wait_session(&mut session).expect("wait after kill");
@@ -130,7 +142,10 @@ fn pty_stdin_roundtrip_with_eot() {
     session.writer.flush().expect("flush");
 
     let mut output = String::new();
-    session.reader.read_to_string(&mut output).expect("read until EOF");
+    session
+        .reader
+        .read_to_string(&mut output)
+        .expect("read until EOF");
     let exit = wait_session(&mut session).expect("wait");
     assert_eq!(exit.code, Some(0));
     assert!(output.contains("hello-pty"), "echoed output: {output}");
@@ -139,11 +154,7 @@ fn pty_stdin_roundtrip_with_eot() {
 
 #[test]
 fn pipe_kill_group_terminates_descendants() {
-    let mut spec = SessionSpec::new(vec![
-        "sh".into(),
-        "-c".into(),
-        "sleep 30 & wait".into(),
-    ]);
+    let mut spec = SessionSpec::new(vec!["sh".into(), "-c".into(), "sleep 30 & wait".into()]);
     spec.env = minimal_env();
     let mut session = spawn_pipe(&spec).expect("spawn pipe");
     let watchdog = Watchdog::arm("kill group", session.pid);

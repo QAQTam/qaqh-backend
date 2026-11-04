@@ -337,7 +337,7 @@ pub struct ToolCall {
 /// The function details within a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionCall {
-    /// Name of the tool to invoke (e.g. "read", "exec").
+    /// Name of the tool to invoke (e.g. "read", "exec_command").
     pub name: String,
     /// JSON-encoded arguments string.
     pub arguments: String,

@@ -453,6 +453,7 @@ impl AgentRegistry {
                 permission_level: spec.permission_level,
                 sandbox: qaqh_agent_runtime::session_agent::assembly::subagent_sandbox(),
                 workspace_root: ws_dir,
+                exec_sessions: self.exec_sessions(),
             },
         )?;
 
@@ -521,6 +522,7 @@ impl AgentRegistry {
                 &session.custom_tools,
                 ws_dir,
                 owner,
+                self.exec_sessions(),
             )?,
         )?;
 

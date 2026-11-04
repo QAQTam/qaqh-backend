@@ -1,30 +1,31 @@
 //! 会话 owner:单个会话的业务顺序与生命周期唯一决定者(架构报告一 §12.5-2)。
 //!
-//! - 所有持久化写经 [`Db`] 的串行写执行器落业务表;
-//! - 所有业务变化以带 `seq` 的 [`SessionEventFrame`] 广播(单流 SSE 的唯一来源);
+//! - **所有业务写与事件广播只在 owner 泵线程发生**(spec §6.3):状态变更
+//!   先提交、再发布,seq 分配单点化,不存在多线程 fetch_add 后分别广播;
+//! - 异步入口把"提交+发布"打包成请求闭包投递进泵,oneshot 等待回执;
 //! - 执行路径经 [`ToolLifecycle`] 非阻塞上报工具生命周期与结构化效果;
-//!   实时输出走有界有损通道,绝不让工具执行等慢消费者。
+//!   实时输出直接进入同一业务队列,SSE 广播有界,绝不让工具执行等慢 UI。
 //!
-//! owner 自身是一个同步泵线程:不依赖 tokio 上下文,daemon、CLI、测试同构。
+//! owner 自身是一个同步泵线程:不依赖 tokio 运行时上下文,daemon、CLI、
+//! 测试同构(oneshot 回执两端均支持阻塞/异步等待)。
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use qaqh_ringing_contract::events::{
-    InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
+    ExecOutputSource, InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
 };
 use qaqh_ringing_contract::fact::{
-    BlockId, ContentValue, InteractionDecision, InteractionId, ToolCallId, ToolError, ToolMetrics,
-    TurnId, TurnMode,
+    BlockId, ContentValue, InputId, InteractionDecision, InteractionId, ToolCallId,
+    ToolCallOutcome, ToolMetrics, TurnId, TurnMode,
 };
 use qaqh_ringing_contract::state::{
-    CodeDelta, InteractionView, SessionState, TimelineEntry, ToolCallStatus, ToolEffectInfo,
-    TurnOutcome,
+    CodeDelta, ExecSessionView, InteractionView, SessionState, TimelineEntry, ToolCallState,
+    ToolEffectInfo, TurnOutcome, TurnPhase,
 };
 use qaqh_tool_core::{
-    ExecOutputStream, ExecProgressEvent, ExecProgressSender, ExecProgressTotals,
-    bounded_exec_progress_channel,
+    EXEC_PROGRESS_CHANNEL_CAPACITY, ExecOutputStream, ExecProgressSender, ExecProgressTotals,
 };
 
 use crate::db::{Db, DbError, store, view};
@@ -32,7 +33,39 @@ use crate::db::{Db, DbError, store, view};
 /// 每会话 SSE 事件缓冲;落后客户端经快照 + `seq` 水位重新同步(报告一 §194)。
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
-/// 会话 owner:回合、timeline、工具生命周期与交互的业务顺序决定者。
+/// 泵请求:提交 + 发布打包在闭包里,由泵线程串行执行。
+/// 返回 `Err` 时回执给调用方;闭包内部必须保证"先落库、后 emit"。
+type OwnerRequest = Box<dyn FnOnce(&OwnerPump) -> Result<(), DbError> + Send>;
+
+enum OwnerMsg {
+    Request(OwnerRequest),
+    Output {
+        call_id: String,
+        stream: OutputStream,
+        text: String,
+        queued: Arc<std::sync::atomic::AtomicUsize>,
+    },
+    Settle(Box<ToolSettlement>),
+    /// 执行会话建立/迁移(spec §6.1:exec_session_started/state_changed)。
+    ExecSessionUpsert(Box<ExecSessionView>),
+    /// 执行会话输出增量(采集端已定序;owner 只做事件分配)。
+    ExecSessionOutput {
+        exec_session_id: String,
+        start_offset: u64,
+        end_offset: u64,
+        source: ExecOutputSource,
+        text: String,
+        next_offset: u64,
+        output_preview: String,
+        preview_start_offset: u64,
+        capture_omitted_bytes: u64,
+        stream_dropped_bytes: u64,
+    },
+    /// 执行会话终态:一次性落库 + exec_session_finished(spec §8.2)。
+    ExecSessionSettle(Box<ExecSessionSettlement>),
+}
+
+/// 会话 owner:回合、timeline、工具生命周期、执行会话与交互的业务顺序决定者。
 pub struct SessionOwner {
     session_id: String,
     db: Arc<Db>,
@@ -96,11 +129,11 @@ impl SessionOwner {
 
     /// SessionState 快照:业务表直查 + 内存水位。
     ///
-    /// 定序纪律:**先取水位,再读库**。业务写路径一律"先落库、后 emit",
-    /// 因此若事件在水位读取前发出,其落库必然更早 → 效果已在快照(客户端跳帧
-    /// 正确);事件在水位读取后发出 → 帧 seq ≥ 水位 → 客户端必然处理,不丢。
-    /// 残余重叠(效果已在快照又收到同帧)由客户端按 block_id/id 合并吸收。
-    /// 反序(先读库后取水位)会在"落库与 emit 之间"留出静默丢帧窗口——B01。
+    /// 定序纪律:**先取水位,再读库**。业务写路径一律"先落库、后 emit"且二者
+    /// 在泵线程原子完成,因此快照读到的效果要么已提交且水位已含其事件,
+    /// 要么事件 seq ≥ 水位由客户端处理,不丢。残余重叠由客户端按
+    /// block_id/id 合并吸收。反序(先读库后取水位)会在"落库与 emit 之间"
+    /// 留出静默丢帧窗口——B01。
     pub async fn snapshot(&self) -> Result<SessionState, DbError> {
         let watermark = self.current_seq();
         let session_id = self.session_id.clone();
@@ -115,10 +148,13 @@ impl SessionOwner {
     /// 外部生产者的公共事件出口:非 owner 内部状态的变化(如 driver 席位)
     /// 经此进入唯一单流定序,seq 与业务事件同源单调。
     pub fn publish(&self, event: SessionEvent) {
-        emit(&self.events, &self.next_seq, event);
+        self.send_request(move |pump| {
+            pump.emit(event);
+            Ok(())
+        });
     }
 
-    /// 开回合:turn 行 + TurnStarted/ActivityChanged 事件。
+    /// 开回合:turn 行(phase=running)+ TurnStarted/TurnPhaseChanged/ActivityChanged。
     pub async fn start_turn(
         &self,
         turn_id: &str,
@@ -126,46 +162,58 @@ impl SessionOwner {
         mode: Option<TurnMode>,
     ) -> Result<(), DbError> {
         let turn_id = turn_id.to_string();
-        let turn_for_event = turn_id.clone();
-        let session_id = self.session_id.clone();
-        let input_id_for_row = input_id.clone();
         let mode_json = mode
             .map(|mode| serde_json::to_string(&mode))
             .transpose()
             .map_err(|error| DbError::Corrupt(format!("turn {turn_id} mode: {error}")))?;
-        self.db
-            .write(move |conn| {
+        let session_id = self.session_id.clone();
+        let input_id_for_row = input_id.clone();
+        self.submit_request(move |pump| {
+            let row_turn_id = turn_id.clone();
+            pump.db.write_blocking(move |conn| {
                 store::start_turn(
                     conn,
-                    &turn_id,
+                    &row_turn_id,
                     &session_id,
                     input_id_for_row.as_deref(),
                     mode_json.as_deref(),
                 )
-            })
-            .await?;
-        let turn = TurnId::new(turn_for_event);
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::TurnStarted {
+            })?;
+            let turn = TurnId::new(turn_id.clone());
+            pump.emit(SessionEvent::TurnStarted {
                 turn_id: turn.clone(),
-                input_id: input_id.map(qaqh_ringing_contract::fact::InputId::new),
+                input_id: input_id.map(InputId::new),
                 mode,
-            },
-        );
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::ActivityChanged {
+            });
+            pump.emit(SessionEvent::TurnPhaseChanged {
+                turn_id: turn.clone(),
+                phase: TurnPhase::Running,
+            });
+            pump.emit(SessionEvent::ActivityChanged {
                 activity: qaqh_ringing_contract::fact::ActivityState::Running,
                 current_turn_id: Some(turn),
-            },
-        );
-        Ok(())
+            });
+            Ok(())
+        })
+        .await
     }
 
-    /// 回合终态:TurnEnded + ActivityChanged(Idle)。
+    /// 回合非终态 phase 迁移:turns.phase 落库 + TurnPhaseChanged/ActivityChanged。
+    pub async fn set_turn_phase(&self, turn_id: &str, phase: TurnPhase) -> Result<(), DbError> {
+        let turn_id = turn_id.to_string();
+        self.submit_request(move |pump| set_turn_phase_in_pump(pump, turn_id, phase))
+            .await
+    }
+
+    /// 同步入队回合 phase 迁移;用于 cancel 先于唤醒工具/交互等待排入 owner 泵。
+    pub fn queue_turn_phase(&self, turn_id: &str, phase: TurnPhase) {
+        let turn_id = turn_id.to_string();
+        self.send_request(move |pump| set_turn_phase_in_pump(pump, turn_id, phase));
+    }
+
+    /// 回合终态:TurnEnded + ActivityChanged(Idle);phase 列由 finish_turn 清空。
+    /// 回合收尾必须等其仍持有的工具/交互结算完成(session_loop 责任),这里
+    /// 只发布真实终态,不 accepted 即宣布 cancelled。
     pub async fn finish_turn(
         &self,
         turn_id: &str,
@@ -175,43 +223,35 @@ impl SessionOwner {
         let outcome_json = serde_json::to_string(&outcome)
             .map_err(|error| DbError::Corrupt(format!("turn {turn_id} outcome: {error}")))?;
         let turn_id_owned = turn_id.to_string();
-        self.db
-            .write(move |conn| {
-                store::finish_turn(conn, &turn_id_owned, status, Some(&outcome_json))
-            })
-            .await?;
-        let turn = TurnId::new(turn_id);
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::TurnEnded {
+        self.submit_request(move |pump| {
+            let row_turn_id = turn_id_owned.clone();
+            pump.db.write_blocking(move |conn| {
+                store::finish_turn(conn, &row_turn_id, status, Some(&outcome_json))
+            })?;
+            let turn = TurnId::new(turn_id_owned);
+            pump.emit(SessionEvent::TurnEnded {
                 turn_id: turn.clone(),
                 outcome,
-            },
-        );
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::ActivityChanged {
+            });
+            pump.emit(SessionEvent::ActivityChanged {
                 activity: qaqh_ringing_contract::fact::ActivityState::Idle,
-                current_turn_id: Some(turn),
-            },
-        );
-        Ok(())
+                current_turn_id: None,
+            });
+            Ok(())
+        })
+        .await
     }
 
     /// 追加 timeline 块:业务表 + TimelineAppended 事件。
     pub async fn append_block(&self, entry: TimelineEntry) -> Result<(), DbError> {
         let block = timeline_block(&self.session_id, &entry)?;
-        self.db
-            .write(move |conn| store::append_block(conn, &block))
-            .await?;
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::TimelineAppended { entry },
-        );
-        Ok(())
+        self.submit_request(move |pump| {
+            pump.db
+                .write_blocking(move |conn| store::append_block(conn, &block))?;
+            pump.emit(SessionEvent::TimelineAppended { entry });
+            Ok(())
+        })
+        .await
     }
 
     /// 交互升起:interaction 行 + InteractionRequested 事件。
@@ -236,15 +276,13 @@ impl SessionOwner {
             kind,
             payload_json,
         };
-        self.db
-            .write(move |conn| store::create_interaction(conn, &row))
-            .await?;
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::InteractionRequested { interaction },
-        );
-        Ok(())
+        self.submit_request(move |pump| {
+            pump.db
+                .write_blocking(move |conn| store::create_interaction(conn, &row))?;
+            pump.emit(SessionEvent::InteractionRequested { interaction });
+            Ok(())
+        })
+        .await
     }
 
     /// 交互应答:pending → 终态,InteractionResolved 事件(未命中 pending 返回 false)。
@@ -262,22 +300,25 @@ impl SessionOwner {
             InteractionEndStatus::Cancelled => "cancelled",
         };
         let id = interaction_id.as_ref().to_string();
-        let changed = self
-            .db
-            .write(move |conn| store::resolve_interaction(conn, &id, status_db, &decision_json))
-            .await?;
-        if changed {
-            emit(
-                &self.events,
-                &self.next_seq,
-                SessionEvent::InteractionResolved {
-                    interaction_id: interaction_id.clone(),
+        let event_interaction_id = interaction_id.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.send_request(move |pump| {
+            let row_id = id.clone();
+            let changed = pump.db.write_blocking(move |conn| {
+                store::resolve_interaction(conn, &row_id, status_db, &decision_json)
+            });
+            if let Ok(true) = &changed {
+                pump.emit(SessionEvent::InteractionResolved {
+                    interaction_id: event_interaction_id,
                     decision,
                     status,
-                },
-            );
-        }
-        Ok(changed)
+                });
+            }
+            let _ = tx.send(changed);
+            Ok(())
+        });
+        rx.await
+            .map_err(|_| DbError::Corrupt("owner pump dropped request".into()))?
     }
 
     // ---- 流式展示(同步 API:provider 阻塞线程直接调用;不落库) ----
@@ -290,16 +331,18 @@ impl SessionOwner {
         block_kind: qaqh_ringing_contract::fact::AssistantBlockKind,
         text: &str,
     ) {
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::MessageDelta {
-                turn_id: turn_id.clone(),
-                block_id: block_id.clone(),
+        let turn_id = turn_id.clone();
+        let block_id = block_id.clone();
+        let text = text.to_string();
+        self.send_request(move |pump| {
+            pump.emit(SessionEvent::MessageDelta {
+                turn_id,
+                block_id,
                 block_kind,
-                text: text.to_string(),
-            },
-        );
+                text,
+            });
+            Ok(())
+        });
     }
 
     /// 工具参数流式片段(仅展示;不代表参数已合法或工具已执行)。
@@ -310,19 +353,22 @@ impl SessionOwner {
         tool_name: &str,
         text: &str,
     ) {
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::ToolArgumentsDelta {
-                turn_id: turn_id.clone(),
-                call_id: call_id.clone(),
-                tool_name: tool_name.to_string(),
-                text: text.to_string(),
-            },
-        );
+        let turn_id = turn_id.clone();
+        let call_id = call_id.clone();
+        let tool_name = tool_name.to_string();
+        let text = text.to_string();
+        self.send_request(move |pump| {
+            pump.emit(SessionEvent::ToolArgumentsDelta {
+                turn_id,
+                call_id,
+                tool_name,
+                text,
+            });
+            Ok(())
+        });
     }
 
-    // ---- 工具声明(回合循环侧;port 侧 lifecycle 接管 running 之后) ----
+    // ---- 工具声明与状态迁移(回合循环侧;port 侧 lifecycle 接管 running 之后) ----
 
     /// 模型声明工具调用:declared 行落库 + ToolDeclared 事件(实时订阅者
     /// 据此获得工具身份与最终参数,与 bootstrap `tools` 视图同形状)。
@@ -338,28 +384,38 @@ impl SessionOwner {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|error| DbError::Corrupt(format!("tool call {call_id} args: {error}")))?;
-        let upsert = store::ToolCallUpsert {
-            call_id: call_id.as_ref().to_string(),
-            session_id: self.session_id.clone(),
-            turn_id: Some(turn_id.as_ref().to_string()),
-            tool_name: tool_name.to_string(),
-            args_json,
-            status: "declared",
-        };
-        self.db
-            .write(move |conn| store::upsert_tool_call(conn, &upsert))
-            .await?;
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::ToolDeclared {
-                call_id: call_id.clone(),
-                turn_id: turn_id.clone(),
-                tool_name: tool_name.to_string(),
-                args,
-            },
-        );
-        Ok(())
+        let state_json = serde_json::to_string(&ToolCallState::Declared)
+            .map_err(|error| DbError::Corrupt(format!("tool call {call_id} state: {error}")))?;
+        let call_row = call_id.as_ref().to_string();
+        let turn_row = turn_id.as_ref().to_string();
+        let session_id = self.session_id.clone();
+        let tool_name_owned = tool_name.to_string();
+        let event_call = call_id.clone();
+        let event_turn = turn_id.clone();
+        let event_tool_name = tool_name.to_string();
+        self.submit_request(move |pump| {
+            let upsert = store::ToolCallUpsert {
+                call_id: call_row,
+                session_id,
+                turn_id: Some(turn_row),
+                tool_name: tool_name_owned,
+                args_json,
+                state_json,
+                state_kind: "declared",
+            };
+            let event_args = upsert.args_json.clone();
+            let row = upsert.clone();
+            pump.db
+                .write_blocking(move |conn| store::upsert_tool_call(conn, &row))?;
+            pump.emit(SessionEvent::ToolDeclared {
+                call_id: event_call,
+                turn_id: event_turn,
+                tool_name: event_tool_name,
+                args: event_args.and_then(|text| serde_json::from_str(&text).ok()),
+            });
+            Ok(())
+        })
+        .await
     }
 
     /// 会话标题变更:业务行落库 + SessionMetaChanged 事件(rename 的唯一写口)。
@@ -367,8 +423,8 @@ impl SessionOwner {
         let owned = self.session_id.clone();
         let row_title = title.to_string();
         let event_title = (!title.is_empty()).then(|| title.to_string());
-        self.db
-            .write(move |conn| {
+        self.submit_request(move |pump| {
+            pump.db.write_blocking(move |conn| {
                 store::update_session_columns(
                     conn,
                     &owned,
@@ -378,26 +434,81 @@ impl SessionOwner {
                     },
                 )
                 .map(|_| ())
-            })
-            .await?;
-        emit(
-            &self.events,
-            &self.next_seq,
-            SessionEvent::SessionMetaChanged { title: event_title },
-        );
-        Ok(())
+            })?;
+            pump.emit(SessionEvent::SessionMetaChanged { title: event_title });
+            Ok(())
+        })
+        .await
     }
 
-    /// 权限交互挂起:declared → awaiting_permission(快照可见,无事件)。
-    pub async fn tool_awaiting_permission(&self, call_id: &ToolCallId) -> Result<(), DbError> {
+    /// 权限/Ask/plan 交互挂起:declared → awaiting_interaction(统一覆盖
+    /// permission、Ask、plan;具体种类由关联 InteractionView 表达)。
+    pub async fn tool_awaiting_interaction(
+        &self,
+        call_id: &ToolCallId,
+        interaction_id: &InteractionId,
+    ) -> Result<(), DbError> {
         let call = call_id.as_ref().to_string();
-        self.db
-            .write(move |conn| store::set_tool_call_status(conn, &call, "awaiting_permission"))
-            .await
+        let state = ToolCallState::AwaitingInteraction {
+            interaction_id: interaction_id.as_ref().to_string(),
+        };
+        let state_json = serde_json::to_string(&state)
+            .map_err(|error| DbError::Corrupt(format!("tool call {call}: state: {error}")))?;
+        self.submit_request(move |pump| {
+            pump.db.write_blocking(move |conn| {
+                store::set_tool_call_state(conn, &call, &state_json, "awaiting_interaction")
+            })
+        })
+        .await
+    }
+
+    /// 权限允许后回到 declared 待实际执行(spec §4.2 迁移表);
+    /// 普通权限通过不提前宣称 running,必须等真正进入执行。
+    pub async fn tool_back_to_declared(&self, call_id: &ToolCallId) -> Result<(), DbError> {
+        let call = call_id.as_ref().to_string();
+        let state_json = serde_json::to_string(&ToolCallState::Declared)
+            .map_err(|error| DbError::Corrupt(format!("tool call {call}: state: {error}")))?;
+        self.submit_request(move |pump| {
+            pump.db.write_blocking(move |conn| {
+                store::set_tool_call_state(conn, &call, &state_json, "declared")
+            })
+        })
+        .await
+    }
+
+    fn send_request(
+        &self,
+        request: impl FnOnce(&OwnerPump) -> Result<(), DbError> + Send + 'static,
+    ) {
+        // 通道无界且泵线程随会话存活;发送失败意味着进程正在退出。
+        if let Err(error) = self.lifecycle_tx.send(OwnerMsg::Request(Box::new(request))) {
+            log::error!("[owner] request dropped: {error}");
+        }
+    }
+
+    /// 提交请求并等待回执(异步入口的唯一完成通道)。
+    async fn submit_request(
+        &self,
+        request: impl FnOnce(&OwnerPump) -> Result<(), DbError> + Send + 'static,
+    ) -> Result<(), DbError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self
+            .lifecycle_tx
+            .send(OwnerMsg::Request(Box::new(move |pump| {
+                let result = request(pump);
+                let _ = tx.send(result);
+                Ok(())
+            })))
+            .is_err()
+        {
+            return Err(DbError::Corrupt("owner pump stopped".into()));
+        }
+        rx.await
+            .map_err(|_| DbError::Corrupt("owner pump dropped request".into()))?
     }
 }
 
-/// 序号 + 广播:单流事件出口的唯一写入点。
+/// 序号 + 广播:单流事件出口的唯一写入点;只允许 owner 泵线程调用。
 fn emit(
     events: &tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: &AtomicU64,
@@ -498,50 +609,34 @@ fn inline_text(content: &ContentValue) -> Option<String> {
     }
 }
 
-enum OwnerMsg {
-    Started {
-        call_id: String,
-        tool_name: String,
-        args_json: Option<String>,
-    },
-    Output {
-        call_id: String,
-        stream: OutputStream,
-        text: String,
-    },
-    Settle(Box<ToolSettlement>),
-}
-
-/// 工具终态:落库行与 ToolFinished 事件的共同来源。
+/// 工具终态:落库行与 ToolFinished 事件的共同来源。契约 outcome 是唯一
+/// 终态权威;status/error 的分离权威字段已删除(spec §4.2)。
 pub struct ToolSettlement {
     pub call_id: String,
     pub tool_name: String,
-    pub args_json: Option<String>,
-    pub terminal: ToolTerminal,
-}
-
-/// 工具调用终态载荷。
-pub struct ToolTerminal {
-    pub status: ToolCallStatus,
+    pub outcome: ToolCallOutcome,
     pub output_text: Option<String>,
     pub output_truncated: bool,
-    pub error: Option<ToolError>,
     pub metrics: Option<ToolMetrics>,
     pub code_delta: Option<CodeDelta>,
     pub effects: Vec<ToolEffectInfo>,
 }
 
-impl ToolTerminal {
-    fn status_db(&self) -> &'static str {
-        match self.status {
-            ToolCallStatus::Finished => "finished",
-            ToolCallStatus::Failed => "failed",
-            ToolCallStatus::Cancelled => "cancelled",
-            // 后台进程仍在跑:调用已结清,状态保持运行中(view 映射 Running)。
-            ToolCallStatus::Running => "backgrounded",
-            other => unreachable!("non-terminal tool status {other:?} cannot settle a call"),
-        }
-    }
+/// 执行会话终态载荷:状态、完整性信息与最终输出引用(spec §8.2/§9.1)。
+pub struct ExecSessionSettlement {
+    pub exec_session_id: String,
+    /// 契约 `ExecSessionState::Finished{outcome}` 的 serde 形式。
+    pub state_json: String,
+    pub finished_at_ms: i64,
+    pub output_complete: bool,
+    /// 终态权威输出的 session_contents 引用(可空:无输出或外部化失败)。
+    pub output_content_id: Option<String>,
+    /// Captured head/tail transcript persisted atomically with the terminal row.
+    pub output_text: Option<String>,
+    pub output_truncated: bool,
+    /// 有界尾窗摘要(≤16 KiB,UTF-8 边界)。
+    pub output_preview: String,
+    pub preview_start_offset: u64,
 }
 
 /// 一次工具执行的生命周期凭据:执行路径持有,终态时交还。
@@ -549,7 +644,6 @@ pub struct ToolRun {
     call_id: String,
     tool_name: String,
     exec_sender: ExecProgressSender,
-    rx: Option<std::sync::mpsc::Receiver<ExecProgressEvent>>,
     totals: ExecProgressTotals,
     started_at_ms: i64,
 }
@@ -570,6 +664,40 @@ impl ToolRun {
     }
 }
 
+fn set_turn_phase_in_pump(
+    pump: &OwnerPump,
+    turn_id: String,
+    phase: TurnPhase,
+) -> Result<(), DbError> {
+    let phase_text = match phase {
+        TurnPhase::Running => "running",
+        TurnPhase::WaitingUser => "waiting_user",
+        TurnPhase::Cancelling => "cancelling",
+    };
+    let row_turn_id = turn_id.clone();
+    let changed = pump
+        .db
+        .write_blocking(move |conn| store::set_turn_phase(conn, &row_turn_id, phase_text))?;
+    if !changed {
+        return Ok(());
+    }
+    let turn = TurnId::new(turn_id);
+    pump.emit(SessionEvent::TurnPhaseChanged {
+        turn_id: turn.clone(),
+        phase,
+    });
+    let activity = match phase {
+        TurnPhase::Running => qaqh_ringing_contract::fact::ActivityState::Running,
+        TurnPhase::WaitingUser => qaqh_ringing_contract::fact::ActivityState::WaitingUser,
+        TurnPhase::Cancelling => qaqh_ringing_contract::fact::ActivityState::Cancelling,
+    };
+    pump.emit(SessionEvent::ActivityChanged {
+        activity,
+        current_turn_id: Some(turn),
+    });
+    Ok(())
+}
+
 /// 执行路径侧同步句柄:非阻塞上报,owner 泵消费。
 #[derive(Clone)]
 pub struct ToolLifecycle {
@@ -582,20 +710,82 @@ impl ToolLifecycle {
         &self.session_id
     }
 
-    /// 工具进入实际执行:登记 running 行,返回终态凭据(含输出通道)。
+    /// 工具进入实际执行:登记 running 行(即 tool_state_changed(running)),
+    /// 返回终态凭据(含输出通道)。
     pub fn started(&self, call_id: &str, tool_name: &str, args_json: Option<String>) -> ToolRun {
-        let (sender, rx) = bounded_exec_progress_channel();
-        self.send(OwnerMsg::Started {
-            call_id: call_id.to_string(),
-            tool_name: tool_name.to_string(),
-            args_json,
+        let msg_call_id = call_id.to_string();
+        let run_call_id = call_id.to_string();
+        let output_call_id = call_id.to_string();
+        let msg_tool_name = tool_name.to_string();
+        let tx = self.tx.clone();
+        if tx
+            .send(OwnerMsg::Request(Box::new(move |pump| {
+                let turn_id = pump.active_turn_id();
+                let state = ToolCallState::Running;
+                let state_json = serde_json::to_string(&state)
+                    .map_err(|error| DbError::Corrupt(format!("tool state: {error}")))?;
+                let upsert = store::ToolCallUpsert {
+                    call_id: msg_call_id.clone(),
+                    session_id: pump.session_id.clone(),
+                    turn_id,
+                    tool_name: msg_tool_name,
+                    args_json,
+                    state_json,
+                    state_kind: "running",
+                };
+                pump.db
+                    .write_blocking(move |conn| store::upsert_tool_call(conn, &upsert))?;
+                let turn_id = pump.active_turn_id().map(TurnId::new);
+                if let Some(turn_id) = turn_id {
+                    pump.emit(SessionEvent::ToolStateChanged {
+                        call_id: ToolCallId::new(msg_call_id),
+                        turn_id,
+                        state: ToolCallState::Running,
+                    });
+                }
+                Ok(())
+            })))
+            .is_err()
+        {
+            log::error!("[owner] tool start dropped: pump stopped");
+        }
+        // 每次输出立即入 owner 队列,与 Started/Settle 共用顺序。
+        // 无需第二个缓冲通道或等工具结束后才启动的转发线程。
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sender = ExecProgressSender::with_sink(move |event| {
+            // 保留每个工具的有界有损进度预算,生命周期消息不受此预算影响。
+            if queued
+                .try_update(
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                    |count| (count < EXEC_PROGRESS_CHANNEL_CAPACITY).then_some(count + 1),
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let stream = match event.stream {
+                ExecOutputStream::Stdout => OutputStream::Stdout,
+                ExecOutputStream::Stderr => OutputStream::Stderr,
+            };
+            let accepted = tx
+                .send(OwnerMsg::Output {
+                    call_id: output_call_id.clone(),
+                    stream,
+                    text: event.chunk,
+                    queued: Arc::clone(&queued),
+                })
+                .is_ok();
+            if !accepted {
+                queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            accepted
         });
         let totals = sender.totals();
         ToolRun {
-            call_id: call_id.to_string(),
+            call_id: run_call_id,
             tool_name: tool_name.to_string(),
             exec_sender: sender,
-            rx: Some(rx),
             totals,
             started_at_ms: store::now_ms(),
         }
@@ -603,65 +793,20 @@ impl ToolLifecycle {
 
     /// 终态上报(工具已 Started)。
     ///
-    /// 同线程先清空已断开输出通道的余量,再上终态——ToolFinished 不得越过
-    /// 同一调用的 ToolOutputDelta。通道未断开 = 后台进程仍在输出,转交
-    /// 转发线程继续流式(终态之后的后台输出对客户端是合法增量)。
-    pub fn finished(&self, mut run: ToolRun, terminal: ToolTerminal) {
+    /// 已上报输出先于终态进入同一队列;后台进程持有的 sender 仍可在终态后
+    /// 上报输出,不必等待后台进程退出。
+    pub fn finished(&self, run: ToolRun, settlement: ToolSettlement) {
         drop(run.exec_sender);
-        if let Some(rx) = run.rx.take() {
-            loop {
-                match rx.try_recv() {
-                    Ok(event) => {
-                        self.forward_output(&run.call_id, event);
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => {
-                        let tx = self.tx.clone();
-                        let call_id = run.call_id.clone();
-                        std::thread::Builder::new()
-                            .name("qaqh-tool-output".into())
-                            .spawn(move || {
-                                while let Ok(event) = rx.recv() {
-                                    let stream = match event.stream {
-                                        ExecOutputStream::Stdout => OutputStream::Stdout,
-                                        ExecOutputStream::Stderr => OutputStream::Stderr,
-                                    };
-                                    if tx
-                                        .send(OwnerMsg::Output {
-                                            call_id: call_id.clone(),
-                                            stream,
-                                            text: event.chunk,
-                                        })
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                            })
-                            .expect("spawn tool output forwarder");
-                        break;
-                    }
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
-                }
-            }
-        }
         self.send(OwnerMsg::Settle(Box::new(ToolSettlement {
             call_id: run.call_id,
             tool_name: run.tool_name,
-            args_json: None,
-            terminal,
+            outcome: settlement.outcome,
+            output_text: settlement.output_text,
+            output_truncated: settlement.output_truncated,
+            metrics: settlement.metrics,
+            code_delta: settlement.code_delta,
+            effects: settlement.effects,
         })));
-    }
-
-    fn forward_output(&self, call_id: &str, event: ExecProgressEvent) {
-        let stream = match event.stream {
-            ExecOutputStream::Stdout => OutputStream::Stdout,
-            ExecOutputStream::Stderr => OutputStream::Stderr,
-        };
-        self.send(OwnerMsg::Output {
-            call_id: call_id.to_string(),
-            stream,
-            text: event.chunk,
-        });
     }
 
     /// 调度前终态(没有 Started 行):终态直落,upsert 建行。
@@ -670,14 +815,57 @@ impl ToolLifecycle {
         call_id: &str,
         tool_name: &str,
         args_json: Option<String>,
-        terminal: ToolTerminal,
+        settlement: ToolSettlement,
     ) {
+        let _ = args_json;
         self.send(OwnerMsg::Settle(Box::new(ToolSettlement {
             call_id: call_id.to_string(),
             tool_name: tool_name.to_string(),
-            args_json,
-            terminal,
+            outcome: settlement.outcome,
+            output_text: settlement.output_text,
+            output_truncated: settlement.output_truncated,
+            metrics: settlement.metrics,
+            code_delta: settlement.code_delta,
+            effects: settlement.effects,
         })));
+    }
+
+    /// 执行会话建立或非终态迁移(exec_session_started/state_changed)。
+    pub fn exec_session_upsert(&self, session: ExecSessionView) {
+        self.send(OwnerMsg::ExecSessionUpsert(Box::new(session)));
+    }
+
+    /// 执行会话输出增量(采集端同锁定序后投递)。
+    pub fn exec_session_output(
+        &self,
+        exec_session_id: &str,
+        start_offset: u64,
+        end_offset: u64,
+        source: ExecOutputSource,
+        text: String,
+        next_offset: u64,
+        output_preview: String,
+        preview_start_offset: u64,
+        capture_omitted_bytes: u64,
+        stream_dropped_bytes: u64,
+    ) {
+        self.send(OwnerMsg::ExecSessionOutput {
+            exec_session_id: exec_session_id.to_string(),
+            start_offset,
+            end_offset,
+            source,
+            text,
+            next_offset,
+            output_preview,
+            preview_start_offset,
+            capture_omitted_bytes,
+            stream_dropped_bytes,
+        });
+    }
+
+    /// 执行会话终态:一次性落库 + exec_session_finished。
+    pub fn exec_session_finished(&self, settlement: ExecSessionSettlement) {
+        self.send(OwnerMsg::ExecSessionSettle(Box::new(settlement)));
     }
 
     fn send(&self, msg: OwnerMsg) {
@@ -718,37 +906,19 @@ impl OwnerPump {
 
     fn process(&self, msg: OwnerMsg) {
         match msg {
-            OwnerMsg::Started {
-                call_id,
-                tool_name,
-                args_json,
-            } => {
-                let turn_id = self.active_turn_id();
-                let upsert = store::ToolCallUpsert {
-                    call_id: call_id.clone(),
-                    session_id: self.session_id.clone(),
-                    turn_id,
-                    tool_name: tool_name.clone(),
-                    args_json,
-                    status: "running",
-                };
-                if let Err(error) = self
-                    .db
-                    .write_blocking(move |conn| store::upsert_tool_call(conn, &upsert))
-                {
-                    log::error!("[owner] tool {call_id} start not recorded: {error}");
-                    return;
+            OwnerMsg::Request(request) => {
+                if let Err(error) = request(self) {
+                    log::error!("[owner] request failed: {error}");
                 }
-                self.emit(SessionEvent::ToolStarted {
-                    call_id: ToolCallId::new(call_id),
-                    tool_name,
-                });
             }
             OwnerMsg::Output {
                 call_id,
                 stream,
                 text,
+                queued,
             } => {
+                queued.fetch_sub(1, Ordering::Relaxed);
+                // 无执行会话的普通工具输出;exec 输出经 ExecSessionOutput。
                 self.emit(SessionEvent::ToolOutputDelta {
                     call_id: ToolCallId::new(call_id),
                     stream,
@@ -758,30 +928,37 @@ impl OwnerPump {
             OwnerMsg::Settle(settlement) => {
                 let turn_id = self.active_turn_id();
                 let who = format!("tool {}", settlement.call_id);
+                let state = ToolCallState::Finished {
+                    outcome: settlement.outcome.clone(),
+                };
+                let state_json = match serde_json::to_string(&state) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        log::error!("[owner] {who} terminal state: {error}");
+                        return;
+                    }
+                };
                 let finish = store::ToolCallFinish {
                     call_id: settlement.call_id.clone(),
                     session_id: self.session_id.clone(),
                     turn_id,
                     tool_name: settlement.tool_name,
-                    status: settlement.terminal.status_db(),
-                    output_text: settlement.terminal.output_text.clone(),
+                    state_json,
+                    exec_session_id: settlement
+                        .outcome
+                        .exec_session_id()
+                        .map(|id| id.as_str().to_string()),
+                    output_text: settlement.output_text.clone(),
                     output_ref: None,
-                    output_truncated: settlement.terminal.output_truncated,
-                    error_json: settlement
-                        .terminal
-                        .error
-                        .as_ref()
-                        .and_then(|e| serialize_typed(&who, "error", e)),
+                    output_truncated: settlement.output_truncated,
                     meta_json: settlement
-                        .terminal
                         .metrics
                         .as_ref()
                         .and_then(|m| serialize_typed(&who, "metrics", m)),
-                    effects_json: (!settlement.terminal.effects.is_empty())
-                        .then(|| serialize_typed(&who, "effects", &settlement.terminal.effects))
+                    effects_json: (!settlement.effects.is_empty())
+                        .then(|| serialize_typed(&who, "effects", &settlement.effects))
                         .flatten(),
                     code_delta_json: settlement
-                        .terminal
                         .code_delta
                         .as_ref()
                         .and_then(|d| serialize_typed(&who, "code_delta", d)),
@@ -798,20 +975,219 @@ impl OwnerPump {
                 }
                 self.emit(SessionEvent::ToolFinished {
                     call_id: ToolCallId::new(settlement.call_id),
-                    status: settlement.terminal.status,
+                    outcome: settlement.outcome.clone(),
+                    exec_session_id: settlement.outcome.exec_session_id().cloned(),
                     output: settlement
-                        .terminal
                         .output_text
                         .map(|text| ContentValue::Inline { text }),
-                    output_truncated: settlement.terminal.output_truncated,
-                    error: settlement.terminal.error,
-                    metrics: settlement.terminal.metrics,
-                    code_delta: settlement.terminal.code_delta,
-                    effects: settlement.terminal.effects,
+                    output_truncated: settlement.output_truncated,
+                    metrics: settlement.metrics,
+                    code_delta: settlement.code_delta,
+                    effects: settlement.effects,
                 });
+            }
+            OwnerMsg::ExecSessionUpsert(session) => {
+                let session_id = session.id.as_ref().to_string();
+                let is_new = match self.db.read_blocking(move |conn| {
+                    store::exec_session_by_id(conn, &session_id).map(|row| row.is_none())
+                }) {
+                    Ok(is_new) => is_new,
+                    Err(error) => {
+                        log::error!("[owner] exec session {} lookup failed: {error}", session.id);
+                        return;
+                    }
+                };
+                let row = exec_session_row_from_view(&self.session_id, &session);
+                if let Err(error) = self
+                    .db
+                    .write_blocking(move |conn| store::upsert_exec_session(conn, &row))
+                {
+                    log::error!(
+                        "[owner] exec session {} upsert not recorded: {error}",
+                        session.id
+                    );
+                    return;
+                }
+                let event = if session.state.is_terminal() {
+                    SessionEvent::ExecSessionFinished { session: *session }
+                } else if is_new {
+                    SessionEvent::ExecSessionStarted { session: *session }
+                } else {
+                    SessionEvent::ExecSessionStateChanged { session: *session }
+                };
+                // 会话建立必须先于其任何输出;started 事件在 upsert 路径发出。
+                self.emit(event);
+            }
+            OwnerMsg::ExecSessionOutput {
+                exec_session_id,
+                start_offset,
+                end_offset,
+                source,
+                text,
+                next_offset,
+                output_preview,
+                preview_start_offset,
+                capture_omitted_bytes,
+                stream_dropped_bytes,
+            } => {
+                let row_id = exec_session_id.clone();
+                let updated = self.db.write_blocking(move |conn| {
+                    store::update_exec_session_progress(
+                        conn,
+                        &row_id,
+                        next_offset,
+                        &output_preview,
+                        preview_start_offset,
+                        capture_omitted_bytes,
+                        stream_dropped_bytes,
+                    )
+                });
+                match updated {
+                    Ok(true) => {}
+                    Ok(false) => return,
+                    Err(error) => {
+                        log::error!(
+                            "[owner] exec session {exec_session_id} output progress failed: {error}"
+                        );
+                        return;
+                    }
+                }
+                self.emit(SessionEvent::ExecSessionOutputDelta {
+                    exec_session_id: qaqh_ringing_contract::fact::ExecSessionId::new(
+                        exec_session_id,
+                    ),
+                    start_offset,
+                    end_offset,
+                    source,
+                    text,
+                });
+            }
+            OwnerMsg::ExecSessionSettle(settlement) => {
+                let exec_session_id = settlement.exec_session_id.clone();
+                let changed = self
+                    .db
+                    .write_blocking(move |conn| {
+                        store::finish_exec_session(
+                            conn,
+                            &settlement.exec_session_id,
+                            &settlement.state_json,
+                            settlement.finished_at_ms,
+                            settlement.output_complete,
+                            settlement.output_content_id.as_deref(),
+                            settlement.output_text.as_deref(),
+                            settlement.output_truncated,
+                            &settlement.output_preview,
+                            settlement.preview_start_offset,
+                        )
+                    })
+                    .map_err(|error| error.to_string())
+                    .unwrap_or_else(|error| {
+                        log::error!(
+                            "[owner] exec session {exec_session_id} finish failed: {error}"
+                        );
+                        false
+                    });
+                if !changed {
+                    // 已终态:终态不可回退,迟到回调不再次提交另一种结论。
+                    return;
+                }
+                // 终态视图从已提交行读取,不重新推断。
+                match self
+                    .db
+                    .read_blocking(|conn| store::exec_session_by_id(conn, &exec_session_id))
+                {
+                    Ok(Some(row)) => match exec_session_view_from_row(&row) {
+                        Ok(session) => self.emit(SessionEvent::ExecSessionFinished { session }),
+                        Err(error) => {
+                            log::error!("[owner] exec session final view: {error}");
+                        }
+                    },
+                    Ok(None) => {
+                        log::error!("[owner] exec session {exec_session_id} missing after settle");
+                    }
+                    Err(error) => {
+                        log::error!("[owner] exec session final read: {error}");
+                    }
+                }
             }
         }
     }
+}
+
+/// ExecSessionView → 持久化行(创建/非终态迁移路径)。
+fn exec_session_row_from_view(
+    fallback_session_id: &str,
+    session: &ExecSessionView,
+) -> store::ExecSessionRow {
+    let state_kind = match &session.state {
+        qaqh_ringing_contract::state::ExecSessionState::Running => "running",
+        qaqh_ringing_contract::state::ExecSessionState::Stopping { .. } => "stopping",
+        qaqh_ringing_contract::state::ExecSessionState::Finished { .. } => "finished",
+    };
+    let owner = session.owner_session_id.as_ref();
+    store::ExecSessionRow {
+        exec_session_id: session.id.as_str().to_string(),
+        session_id: if owner.is_empty() {
+            fallback_session_id.to_string()
+        } else {
+            owner.to_string()
+        },
+        origin_turn_id: Some(session.origin_turn_id.as_ref().to_string()),
+        origin_call_id: Some(session.origin_call_id.as_ref().to_string()),
+        tty: session.tty,
+        command: session.command.clone(),
+        cwd: session.cwd.clone(),
+        state_json: serde_json::to_string(&session.state)
+            .unwrap_or_else(|_| "{\"kind\":\"running\"}".to_string()),
+        state_kind: state_kind.to_string(),
+        started_at_ms: session.started_at_ms,
+        finished_at_ms: session.finished_at_ms,
+        next_offset: session.next_offset,
+        output_complete: session.output_complete,
+        capture_omitted_bytes: session.capture_omitted_bytes,
+        stream_dropped_bytes: session.stream_dropped_bytes,
+        output_content_id: None,
+        output_preview: session.output_preview.clone(),
+        preview_start_offset: session.preview_start_offset,
+    }
+}
+
+/// 持久化行 → ExecSessionView(终态发布路径;不重新推断状态)。
+fn exec_session_view_from_row(row: &store::ExecSessionRow) -> Result<ExecSessionView, DbError> {
+    let state: qaqh_ringing_contract::state::ExecSessionState =
+        serde_json::from_str(&row.state_json).map_err(|error| {
+            DbError::Corrupt(format!(
+                "exec session {}: state: {error}",
+                row.exec_session_id
+            ))
+        })?;
+    let output = row
+        .output_content_id
+        .clone()
+        .map(|content_id| ContentValue::Ref {
+            content_ref: qaqh_ringing_contract::fact::ContentRef::new(
+                qaqh_ringing_contract::fact::ContentHash::new(content_id),
+            ),
+        });
+    Ok(ExecSessionView {
+        id: qaqh_ringing_contract::fact::ExecSessionId::new(row.exec_session_id.clone()),
+        owner_session_id: qaqh_ringing_contract::fact::SessionId::new(row.session_id.clone()),
+        origin_turn_id: TurnId::new(row.origin_turn_id.clone().unwrap_or_default()),
+        origin_call_id: ToolCallId::new(row.origin_call_id.clone().unwrap_or_default()),
+        state,
+        tty: row.tty,
+        command: row.command.clone(),
+        cwd: row.cwd.clone(),
+        started_at_ms: row.started_at_ms,
+        finished_at_ms: row.finished_at_ms,
+        next_offset: row.next_offset,
+        output_preview: row.output_preview.clone(),
+        preview_start_offset: row.preview_start_offset,
+        output_complete: row.output_complete,
+        capture_omitted_bytes: row.capture_omitted_bytes,
+        stream_dropped_bytes: row.stream_dropped_bytes,
+        output,
+    })
 }
 
 /// 会话 owner 目录:daemon 全局一份,每会话一个 owner。
@@ -822,8 +1198,19 @@ pub struct OwnerDirectory {
 
 impl OwnerDirectory {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<OwnerDirectory, DbError> {
+        let db = Arc::new(Db::open(path)?);
+        let recovery = db.write_blocking(store::recover_after_restart)?;
+        if recovery.total() > 0 {
+            log::info!(
+                "[owner] recovered interrupted state after daemon restart: {} exec sessions, {} tool calls, {} turns, {} interactions",
+                recovery.exec_sessions,
+                recovery.tool_calls,
+                recovery.turns,
+                recovery.interactions,
+            );
+        }
         Ok(Self {
-            db: Arc::new(Db::open(path)?),
+            db,
             owners: Mutex::new(HashMap::new()),
         })
     }
@@ -915,16 +1302,20 @@ impl OwnerDirectory {
             .read_blocking(move |conn| store::child_session_ids(conn, &parent))
     }
 
-    /// 运行状态读取(列表/诊断用,不建 owner):活动回合 = Running,
-    /// 挂起交互 = Waiting,有回合历史 = Idle,从未开过回合 = NeverStarted。
+    /// 运行状态读取(列表/诊断用,不建 owner):未决交互 = Waiting(优先,
+    /// 不被 active turn 遮蔽),活动回合 phase = 对应状态,有回合历史 = Idle,
+    /// 从未开过回合 = NeverStarted(spec §4.4)。
     pub fn session_run_state(&self, session_id: &str) -> Result<SessionRunState, DbError> {
         let session_id = session_id.to_string();
         self.db.read_blocking(move |conn| {
-            if store::active_turn_id(conn, &session_id)?.is_some() {
-                return Ok::<_, rusqlite::Error>(SessionRunState::Running);
-            }
             if !store::pending_interactions(conn, &session_id)?.is_empty() {
-                return Ok(SessionRunState::Waiting);
+                return Ok::<_, rusqlite::Error>(SessionRunState::Waiting);
+            }
+            match store::active_turn_phase(conn, &session_id)?.as_deref() {
+                Some("waiting_user") => return Ok(SessionRunState::Waiting),
+                Some("cancelling") => return Ok(SessionRunState::Cancelling),
+                Some(_) => return Ok(SessionRunState::Running),
+                None => {}
             }
             if store::turn_count(conn, &session_id)? > 0 {
                 Ok(SessionRunState::Idle)
@@ -940,6 +1331,7 @@ impl OwnerDirectory {
 pub enum SessionRunState {
     Running,
     Waiting,
+    Cancelling,
     Idle,
     NeverStarted,
 }

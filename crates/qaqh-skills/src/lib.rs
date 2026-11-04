@@ -11,16 +11,15 @@
 //! - **Catalog**: lightweight metadata index for browsing without loading bodies
 //! - **Scope**: each skill belongs to either `Project` or `User` scope
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+pub mod install;
 pub mod runtime;
 pub mod session_state;
-pub mod install;
 pub use runtime::{SkillContextManager, SkillRuntimeInfo, SkillRuntimeState, SkillTurnSnapshot};
 pub use session_state::{SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2};
 
@@ -253,10 +252,7 @@ fn discovery_roots(workspace: &Path) -> Vec<(PathBuf, SkillScope)> {
     discovery_roots_with_home(workspace, home_dir().as_deref())
 }
 
-fn discovery_roots_with_home(
-    workspace: &Path,
-    home: Option<&Path>,
-) -> Vec<(PathBuf, SkillScope)> {
+fn discovery_roots_with_home(workspace: &Path, home: Option<&Path>) -> Vec<(PathBuf, SkillScope)> {
     let workspace = absolutize(workspace);
     let mut roots = vec![
         (workspace.join(".qaqh/skills"), SkillScope::Project),
@@ -760,11 +756,7 @@ pub fn render_catalog(catalog: &SkillCatalog) -> String {
             .chars()
             .take(600)
             .collect();
-        let line = format!(
-            "- {}: {}\n",
-            skill.name,
-            description,
-        );
+        let line = format!("- {}: {}\n", skill.name, description,);
         if output.chars().count() + line.chars().count() > MAX_CATALOG_CHARS {
             omitted += 1;
         } else {
@@ -904,10 +896,9 @@ mod tests {
             "windows",
             "---\r\nname: windows\r\ndescription: Windows lines.\r\n---\r\n\r\nFull body",
         );
-        let metadata =
-            parse_metadata(&path, SkillScope::Project, SkillOrigin::Project)
-                .unwrap()
-                .metadata;
+        let metadata = parse_metadata(&path, SkillScope::Project, SkillOrigin::Project)
+            .unwrap()
+            .metadata;
         assert_eq!(load(&metadata).unwrap().body, "Full body");
     }
 
@@ -946,10 +937,9 @@ mod tests {
         );
         fs::create_dir_all(path.parent().unwrap().join("references")).unwrap();
         fs::write(path.parent().unwrap().join("references/info.md"), "info").unwrap();
-        let metadata =
-            parse_metadata(&path, SkillScope::Project, SkillOrigin::Project)
-                .unwrap()
-                .metadata;
+        let metadata = parse_metadata(&path, SkillScope::Project, SkillOrigin::Project)
+            .unwrap()
+            .metadata;
         let activation = load(&metadata).unwrap();
         let rendered = render_activation(&activation);
         assert!(rendered.matches("instruction\n").count() >= 350);
@@ -1010,8 +1000,7 @@ mod tests {
             "multiline",
             "---\nname: multiline\ndescription: \"line one\\nline two\"\n---\n\nBody",
         );
-        let metadata =
-            parse_metadata(&path, SkillScope::Project, SkillOrigin::Project).unwrap();
+        let metadata = parse_metadata(&path, SkillScope::Project, SkillOrigin::Project).unwrap();
         assert_eq!(metadata.metadata.description, "line one line two");
     }
 
@@ -1034,7 +1023,10 @@ mod tests {
             parsed.metadata.metadata.get("author").map(String::as_str),
             Some("qaqh")
         );
-        assert_eq!(parsed.metadata.allowed_tools, vec!["read", "exec"]);
+        assert_eq!(
+            parsed.metadata.allowed_tools,
+            vec!["exec_command", "write_stdin"]
+        );
         assert!(validate_file(&path).is_empty());
     }
 
