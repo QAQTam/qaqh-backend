@@ -1,5 +1,7 @@
 # Backend v3 契约裁定(阶段 0)
 
+> 后续待实施规范：[Exec 执行会话与工具状态统一修改 Spec](spec-exec-session-lifecycle-2026-11-04.md)。新实现切换时替代本文 D4 的工具状态事件、D6 的 exec 暂态恢复及 D8 的握手约定；D1 的 exclusive watermark 语义保留。该 spec 尚未实施，本注不表示当前运行契约已经切换。
+
 日期:2026-11-03。基线:`b144398d`(干净)。依据 handoff `backend-v3-implementation-handoff-2026-11-03.md` 的"建议单独锁定的产品 / 契约问题"。实现者会话在用户离线期间按宪法 #3(以更优架构推行)做出以下裁定并执行;任何一项如需反悔,改动面在文中标注。
 
 ## D1(B01)水位语义:`seq` = "已覆盖序号上界"(exclusive)

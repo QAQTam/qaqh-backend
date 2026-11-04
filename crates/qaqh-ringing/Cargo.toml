@@ -17,7 +17,7 @@ ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-ser
 
 
 [features]
-ts = ["dep:ts-rs", "qaqh-profile/ts", "qaqh-types/ts"]
+ts = ["dep:ts-rs", "qaqh-profile/ts", "qaqh-types/ts", "qaqh-ringing-contract/ts"]
 
 [lints]
 workspace = true

@@ -654,7 +654,11 @@ async fn provider_cas_conflict_is_http_409_not_502() {
         ))
         .await
         .unwrap();
-    assert_eq!(first.status(), StatusCode::OK, "revision 0 first write must be accepted");
+    assert_eq!(
+        first.status(),
+        StatusCode::OK,
+        "revision 0 first write must be accepted"
+    );
     // 同一 revision 0 重发 = 并发修订冲突 → 409 revision_conflict，而非 502。
     let conflict = app
         .clone()
@@ -679,7 +683,7 @@ async fn provider_cas_conflict_is_http_409_not_502() {
     let current = body_json(
         app.clone()
             .clone()
-        .oneshot(request(
+            .oneshot(request(
                 "POST",
                 "/ringing/v2/commands",
                 Some(&token),

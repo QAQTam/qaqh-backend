@@ -291,6 +291,7 @@ pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。
     owners: Arc<qaqh_session::owner::OwnerDirectory>,
+    exec_sessions: Arc<qaqh_agent_runtime::ExecSessionManager>,
     /// Ringing 运行时；None = 未启用 legacy worker-only 模式。
     hub: Option<Arc<RingingHub>>,
     /// daemon 正在关闭：worker 退出是预期的，禁止自动重生。
@@ -341,6 +342,7 @@ impl AgentRegistry {
         Self {
             instances: HashMap::new(),
             owners,
+            exec_sessions: Arc::new(qaqh_agent_runtime::ExecSessionManager::new()),
             hub: None,
             shutting_down: false,
             last_spawn: HashMap::new(),
@@ -357,6 +359,10 @@ impl AgentRegistry {
             subagent_outcomes: HashMap::new(),
             spawn_configs: HashMap::new(),
         }
+    }
+
+    pub fn exec_sessions(&self) -> Arc<qaqh_agent_runtime::ExecSessionManager> {
+        Arc::clone(&self.exec_sessions)
     }
 
     /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。

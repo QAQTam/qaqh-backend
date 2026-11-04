@@ -56,6 +56,11 @@ fn fresh_catalog_writes_at_revision_zero_and_conflicts_after() {
     );
     // 当前 revision 1 命中。
     service
-        .provider_model_upsert("fresh-provider", "m1", Some(1), qaqh_profile::ModelDef::default())
+        .provider_model_upsert(
+            "fresh-provider",
+            "m1",
+            Some(1),
+            qaqh_profile::ModelDef::default(),
+        )
         .expect("revision 1 write");
 }

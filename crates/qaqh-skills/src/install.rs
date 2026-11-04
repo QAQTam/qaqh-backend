@@ -60,7 +60,10 @@ pub fn ensure_bundled_skills(home: &Path) -> Result<InstallReport, String> {
     if old.version == PACK_VERSION
         && old.fingerprint == fingerprint
         && old.skipped.is_empty()
-        && old.managed.iter().all(|name| skills_root.join(name).is_dir())
+        && old
+            .managed
+            .iter()
+            .all(|name| skills_root.join(name).is_dir())
     {
         return Ok(InstallReport {
             changed: false,
@@ -89,7 +92,10 @@ pub fn ensure_bundled_skills(home: &Path) -> Result<InstallReport, String> {
             continue;
         };
         let Some(name) = skill.path().file_name().and_then(|name| name.to_str()) else {
-            warnings.push(format!("ignore bundled entry without a name: {}", skill.path().display()));
+            warnings.push(format!(
+                "ignore bundled entry without a name: {}",
+                skill.path().display()
+            ));
             continue;
         };
         if name.starts_with('.') || name.contains('/') || name.contains('\\') {
@@ -139,7 +145,9 @@ pub fn ensure_bundled_skills(home: &Path) -> Result<InstallReport, String> {
             continue;
         }
         if !is_safe_managed_name(old_name) {
-            warnings.push(format!("ignore unsafe managed name in manifest: {old_name:?}"));
+            warnings.push(format!(
+                "ignore unsafe managed name in manifest: {old_name:?}"
+            ));
             continue;
         }
         let target = skills_root.join(old_name);
@@ -226,7 +234,10 @@ fn write_dir(dir: &Dir<'_>, dest: &Path) -> Result<(), String> {
     fs::create_dir_all(dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
     for entry in dir.entries() {
         let relative = match entry {
-            DirEntry::Dir(subdir) => subdir.path().strip_prefix(dir.path()).unwrap_or(subdir.path()),
+            DirEntry::Dir(subdir) => subdir
+                .path()
+                .strip_prefix(dir.path())
+                .unwrap_or(subdir.path()),
             DirEntry::File(file) => file.path().strip_prefix(dir.path()).unwrap_or(file.path()),
         };
         let target = dest.join(relative);
@@ -265,16 +276,10 @@ fn write_manifest(path: &Path, manifest: &BundledManifest) -> Result<(), String>
     fs::write(&temp, format!("{text}\n"))
         .map_err(|error| format!("write {}: {error}", temp.display()))?;
     if path.exists() {
-        fs::remove_file(path)
-            .map_err(|error| format!("replace {}: {error}", path.display()))?;
+        fs::remove_file(path).map_err(|error| format!("replace {}: {error}", path.display()))?;
     }
-    fs::rename(&temp, path).map_err(|error| {
-        format!(
-            "rename {} -> {}: {error}",
-            temp.display(),
-            path.display()
-        )
-    })
+    fs::rename(&temp, path)
+        .map_err(|error| format!("rename {} -> {}: {error}", temp.display(), path.display()))
 }
 
 /// Test helper: the manifest filename is part of the public contract.
@@ -285,8 +290,8 @@ pub fn manifest_filename() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::discover_with_home;
     use crate::SkillOrigin;
+    use crate::discover_with_home;
     use std::path::PathBuf;
 
     fn write_user_skill(home: &Path, name: &str, body: &str) -> PathBuf {
@@ -306,7 +311,11 @@ mod tests {
         let report = ensure_bundled_skills(home.path()).unwrap();
         assert!(report.changed);
         assert!(report.installed.iter().any(|name| name == "qaqh-core"));
-        assert!(home.path().join(".agents/skills/qaqh-core/SKILL.md").is_file());
+        assert!(
+            home.path()
+                .join(".agents/skills/qaqh-core/SKILL.md")
+                .is_file()
+        );
         assert!(bundled_manifest_path(home.path()).is_file());
 
         let workspace = home.path().join("workspace");
@@ -344,7 +353,10 @@ mod tests {
             "qaqh-recovery",
             "qaqh-manual",
         ] {
-            assert!(names.contains(&expected), "missing bundled skill {expected}");
+            assert!(
+                names.contains(&expected),
+                "missing bundled skill {expected}"
+            );
         }
         assert!(
             catalog

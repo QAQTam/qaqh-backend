@@ -7,12 +7,11 @@
 //! ## 取值规则（逐项核对，评审依据）
 //!
 //! - `concurrency`：`Parallel` ⇔ 纯只读（category ∈ {Read, Net}）且无共享可变
-//!   状态；`Exclusive` ⇔ 派生进程组（exec/process）或批量重写文件（journal
+//!   状态；`Exclusive` ⇔ 执行会话或批量重写文件（journal
 //!   replay）；其余保守 `Serial`。
-//! - `streaming`：只有真实产生进度帧的工具为 `true`（现状仅 exec——
-//!   `exec/handler.rs` 是唯一消费 `tx_progress` 的 handler）。
-//! - `cancel_grace`：`1s` = 进程内、IO 边界轮询取消；`5s` = 派生进程组或批量
-//!   重写（exec/process/journal；spec Q7 的兜底值，迁移时按实际收割路径标定）。
+//! - `streaming`：只有真实产生进度帧的工具为 `true`（执行会话工具会发布输出增量）。
+//! - `cancel_grace`：`1s` = 进程内、IO 边界轮询取消；`5s` = 执行会话或批量
+//!   重写（spec Q7 的兜底值，迁移时按实际收割路径标定）。
 //! - `idempotent`：`true` ⇔ 纯读取（重放不改本地状态）；写类/交互类/exec 一律
 //!   `false`（对齐 canonical ToolIntent「已准入执行」语义）。
 //! - `workspace_bound`：触碰工作区文件的工具为 `true`（执行器须强制注入
@@ -69,16 +68,6 @@ const SESSION_MUTATING: ToolCapabilities = ToolCapabilities {
     interactive: false,
 };
 
-/// 独占批次（派生进程组 / 批量重写）。
-const EXCLUSIVE: ToolCapabilities = ToolCapabilities {
-    concurrency: Concurrency::Exclusive,
-    streaming: false,
-    cancel_grace: SLOW_GRACE,
-    idempotent: false,
-    workspace_bound: true,
-    interactive: false,
-};
-
 /// 阻塞交互（串行、非幂等、非 workspace 绑定）。
 const INTERACTIVE: ToolCapabilities = ToolCapabilities {
     concurrency: Concurrency::Serial,
@@ -89,7 +78,7 @@ const INTERACTIVE: ToolCapabilities = ToolCapabilities {
     interactive: true,
 };
 
-/// exec：独占 + 流式（唯一进度生产者）。
+/// 执行会话工具：独占批次，poll 和输入共享每会话交互锁。
 const EXEC: ToolCapabilities = ToolCapabilities {
     concurrency: Concurrency::Exclusive,
     streaming: true,
@@ -108,10 +97,10 @@ const TABLE: [(&str, ToolCapabilities); 22] = [
     ("copy_range", MUTATING),
     ("delete", MUTATING),
     ("edit", MUTATING),
-    ("exec", EXEC),
+    ("exec_command", EXEC),
     ("glob", READ_ONLY),
     ("grep", READ_ONLY),
-    ("process", EXCLUSIVE),
+    ("write_stdin", EXEC),
     ("read", READ_ONLY),
     ("read_image", READ_ONLY),
     // search：官方 Search 端点（网络，不碰工作区）。与 `tool_search`（检索工具
@@ -194,7 +183,7 @@ mod tests {
 
     #[test]
     fn golden_rows_are_pinned() {
-        let exec = builtin_capabilities("exec").expect("表内条目");
+        let exec = builtin_capabilities("exec_command").expect("表内条目");
         assert_eq!(exec.concurrency, Concurrency::Exclusive);
         assert!(exec.streaming);
         assert_eq!(exec.cancel_grace, SLOW_GRACE);

@@ -546,6 +546,7 @@ pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
         exec_progress: None,
+        exec_host: None,
         official_web: None,
         source: crate::tool_api::ToolCallSource::Model,
     };
@@ -632,11 +633,7 @@ mod tests {
         // metadata.truncated 置位，后续行不受影响。
         let dir = tempfile::tempdir().unwrap();
         let long_line = "x".repeat(3000);
-        std::fs::write(
-            dir.path().join("long.txt"),
-            format!("{long_line}\ntail\n"),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("long.txt"), format!("{long_line}\ntail\n")).unwrap();
 
         let result = exec_read(&serde_json::json!({
             "path": dir.path().join("long.txt").to_string_lossy(),
@@ -649,7 +646,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("L2: tail"), "{text}");
-        assert_eq!(result.data["files"][0]["truncated"], serde_json::json!(true));
+        assert_eq!(
+            result.data["files"][0]["truncated"],
+            serde_json::json!(true)
+        );
         // 截断后 body 仍计入 hash 的原文内容不变（hash 基于完整 LF 内容）。
         let hash = result.data["files"][0]["hash"].as_str().unwrap();
         assert_eq!(
@@ -742,7 +742,10 @@ fn read_registration_is_typed_and_schema_is_type_generated() {
     // 藏出 schema 只会让「教用的形状」与「据以容错的形状」分叉（见下条测试）。
     let properties = &registered.descriptor.input_schema["properties"];
     assert_eq!(properties["path"]["type"], serde_json::json!("string"));
-    assert_eq!(properties["start_line"]["type"], serde_json::json!("integer"));
+    assert_eq!(
+        properties["start_line"]["type"],
+        serde_json::json!("integer")
+    );
     assert_eq!(properties["end_line"]["type"], serde_json::json!("integer"));
     // `Option<u64>` 经 schemars 会产 `["integer","null"]`；折叠后必须是单类型，
     // 且可选性只由「不在 required 里」表达。

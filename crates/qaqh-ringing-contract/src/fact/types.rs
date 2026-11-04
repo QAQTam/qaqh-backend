@@ -6,6 +6,12 @@
 
 use qaqh_types::SettingValue;
 pub use qaqh_types::UsageInfo;
+pub use qaqh_types::execution_contract::SessionContentRef as ContentRef;
+pub use qaqh_types::execution_contract::SessionToolError as ToolError;
+pub use qaqh_types::execution_contract::{
+    ContentHash, ExecSessionId, SessionContentRef, ToolCallOutcome, ToolCancellationReason,
+    ToolInterruptionReason,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
@@ -61,40 +67,6 @@ string_id!(BlockId);
 string_id!(CheckpointId);
 string_id!(RecoveryId);
 string_id!(ResourceId);
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ContentHash(pub String);
-
-impl ContentHash {
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-#[cfg_attr(
-    feature = "ts",
-    derive(TS),
-    ts(export, export_to = "qaqh/", rename = "SessionContentRef")
-)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct ContentRef(pub ContentHash);
-
-impl ContentRef {
-    pub fn new(hash: ContentHash) -> Self {
-        Self(hash)
-    }
-
-    pub fn hash(&self) -> &ContentHash {
-        &self.0
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -785,19 +757,8 @@ pub struct ToolMetrics {
     pub progress_bytes_total: u64,
 }
 
-#[cfg_attr(
-    feature = "ts",
-    derive(TS),
-    ts(export, export_to = "qaqh/", rename = "SessionToolError")
-)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ToolError {
-    pub code: String,
-    pub message: String,
-    pub retryable: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub details_ref: Option<ContentRef>,
-}
+// `ToolError`(TS `SessionToolError`)自 qaqh-types::execution_contract 下沉,本模块
+// 仅以 Rust 名 `ToolError` 再导出,所有既有消费者路径不变。
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -973,6 +934,9 @@ pub enum SideEffectClass {
     External,
 }
 
+/// 统一活动词表(spec §4.4):无活动回合为 idle,有活动回合由其 phase 派生;
+/// waiting_user 优先于 running(有未决交互时不被 active turn 遮蔽)。
+/// 连接状态(connecting/reconnecting/disconnected)不属于业务 activity。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -980,7 +944,8 @@ pub enum ActivityState {
     #[default]
     Idle,
     Running,
-    Interrupted,
+    WaitingUser,
+    Cancelling,
 }
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]

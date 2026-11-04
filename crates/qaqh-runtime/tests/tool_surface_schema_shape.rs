@@ -58,7 +58,10 @@ fn production_registry_omits_subagent_and_collaboration_tools() {
         "board_subscribe",
         "board_list",
     ] {
-        assert!(manager.lookup(name).is_none(), "{name} must not be callable");
+        assert!(
+            manager.lookup(name).is_none(),
+            "{name} must not be callable"
+        );
         assert!(
             defs.iter().all(|def| def.function.name != name),
             "{name} must not be advertised"
@@ -72,6 +75,9 @@ fn production_registry_omits_subagent_and_collaboration_tools() {
         );
     }
     for name in ["read", "exec", "tool_search", "todo_write", "todo_update"] {
-        assert!(manager.lookup(name).is_some(), "{name} must remain available");
+        assert!(
+            manager.lookup(name).is_some(),
+            "{name} must remain available"
+        );
     }
 }

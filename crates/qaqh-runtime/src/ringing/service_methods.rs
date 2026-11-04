@@ -104,6 +104,27 @@ pub struct SessionGetActivityParams {
     pub session_id: String,
 }
 
+/// `exec_session.list` returns one session's active executions and recent terminal summaries.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ExecSessionListParams {
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ExecSessionListResult {
+    pub sessions: Vec<qaqh_ringing_contract::ExecSessionView>,
+}
+
+/// Load one persisted turn by its canonical turn id for session-level origin links.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SessionTurnParams {
+    pub session_id: String,
+    pub turn_id: String,
+}
+
 /// `session.get_activity` 的单条工具执行记录。`args` 是调用参数的
 /// JSON 字符串（原样保留模型侧形状，不二次结构化）；`finished_at_ms`
 /// 是该次调用终态事实的 epoch 毫秒（与 `ToolFinished.finished_at_ms` 同源）。
@@ -381,6 +402,8 @@ validators! {
         validate_session_meta_params => SessionMetaParams,
         validate_session_activity_params => SessionActivityParams,
         validate_session_get_activity_params => SessionGetActivityParams,
+        validate_exec_session_list_params => ExecSessionListParams,
+        validate_session_turn_params => SessionTurnParams,
         validate_skills_catalog_params => SkillsCatalogParams,
         validate_workspace_get_params => WorkspaceGetParams,
         validate_workspace_list_params => WorkspaceListParams,
@@ -401,6 +424,8 @@ validators! {
         validate_session_meta_result => Option<qaqh_types::SessionListEntry>,
         validate_session_activity_result => Vec<qaqh_ringing_contract::SessionActivity>,
         validate_session_get_activity_result => Vec<SessionToolActivity>,
+        validate_exec_session_list_result => ExecSessionListResult,
+        validate_session_turn_result => Option<qaqh_ringing_contract::SessionTurnSnapshot>,
         validate_skills_catalog_result => SkillsCatalogResult,
         validate_workspace_list_result => Vec<qaqh_ringing_contract::WorkspaceEntry>,
         validate_config_dto_result => qaqh_config_api::ConfigDto,
@@ -581,6 +606,30 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         validate_result: validate_session_dashboard_result,
     },
     TypedMethodInfo {
+        method: "exec_session.list",
+        params_type: "ExecSessionListParams",
+        result_type: "ExecSessionListResult",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_exec_session_list_params,
+        validate_result: validate_exec_session_list_result,
+    },
+    TypedMethodInfo {
+        method: "session.turn",
+        params_type: "SessionTurnParams",
+        result_type: "SessionTurnSnapshot",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_session_turn_params,
+        validate_result: validate_session_turn_result,
+    },
+    TypedMethodInfo {
         method: "skills.list_tools",
         params_type: "SkillsListToolsParams",
         result_type: "string[]",
@@ -736,6 +785,8 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("session.activity", READ),
     ("session.dashboard", READ_SEEDED),
     ("session.get_activity", READ_SEEDED),
+    ("session.turn", READ_SEEDED),
+    ("exec_session.list", READ_SEEDED),
     // workspace
     ("workspace.get", READ_SEEDED),
     ("workspace.list", READ),

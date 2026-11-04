@@ -38,8 +38,8 @@ pub use qaqh_ringing::RingingV2ResyncRequired;
 pub use qaqh_ringing::v2::{RingingV2DeviceWire, RingingV2PairTokenResponse};
 pub use qaqh_ringing::{
     COMMAND_CONTRACT_REVISION, CommandPrecondition, CommandTarget, ProviderUpsertDto,
-    RingingV2CommandEnvelope, SecretWrite, SessionCreateResult, SessionSettingsPatch,
-    ToolsSettingPatch,
+    RingingV2CommandEnvelope, SESSION_CONTRACT_REVISION, SecretWrite, SessionCreateResult,
+    SessionSettingsPatch, ToolsSettingPatch,
 };
 /// 公开字段背后的**类型名**：`ConfigDto.credential` 的取值域由
 /// `CredentialSource` 定义，`ConfigDto.wire` 与 `ConfigPatch::wire` 的规范拼写

@@ -15,8 +15,7 @@
 //! `ToolManager` 留守门面；`register()` 粘合层经 `RegistersTyped` trait 接受，
 //! 组内测试经 dev-dependency 环引用门面具体 manager。
 
-
-#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(not(test), deny(unsafe_code))]
 pub mod apply_patch;
 pub mod apply_patch_engine;
 pub mod arg_estimate;

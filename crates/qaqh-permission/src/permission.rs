@@ -111,9 +111,9 @@ pub fn extract_target_paths_in(
             paths.push(PathBuf::from(o));
         }
     }
-    // exec 独占后唯一命令入口：取 cwd 进授权资源。
-    if tool_name == "exec"
-        && let Some(cwd) = args.get("cwd").and_then(|v| v.as_str())
+    // 执行会话的工作目录属于授权资源。
+    if tool_name == "exec_command"
+        && let Some(cwd) = args.get("workdir").and_then(|v| v.as_str())
     {
         paths.push(PathBuf::from(cwd));
     }
@@ -153,39 +153,25 @@ pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<Pa
 
 /// Build the bounded, user-facing operation summary for an approval dialog.
 ///
-/// `exec` is the one built-in tool whose effect cannot be inferred from
-/// [`extract_target_paths`]: the command text may write outside `cwd`. Include
-/// the command/args, shell and cwd for informed approval, but deliberately
+/// `exec_command` is the one built-in tool whose effect cannot be inferred from
+/// [`extract_target_paths`]: the command text may write outside `workdir`. Include
+/// the command, shell and workdir for informed approval, but deliberately
 /// omit `env` and all other arbitrary tool args so the dialog cannot become a
 /// secret-dumping surface.
 pub fn summarize_permission_action(tool_name: &str, args: &serde_json::Value) -> Option<String> {
-    if tool_name != "exec" {
+    if tool_name != "exec_command" {
         return None;
     }
 
     let mut parts = Vec::new();
     if let Some(command) = args
-        .get("command")
+        .get("cmd")
         .and_then(serde_json::Value::as_str)
         .filter(|value| !value.trim().is_empty())
     {
         parts.push(format!("command: {}", json_display(command)));
     }
-    for key in ["args"] {
-        if let Some(values) = args
-            .get(key)
-            .and_then(serde_json::Value::as_array)
-            .filter(|values| !values.is_empty())
-        {
-            let rendered = values
-                .iter()
-                .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "\"?\"".into()))
-                .collect::<Vec<_>>()
-                .join(", ");
-            parts.push(format!("{key}: [{rendered}]"));
-        }
-    }
-    for key in ["shell", "cwd"] {
+    for key in ["shell", "workdir"] {
         if let Some(value) = args
             .get(key)
             .and_then(serde_json::Value::as_str)
@@ -491,15 +477,17 @@ pub fn needs_permission(
         };
     }
 
-    // `process` 按调用形态细分（per-action 授权颗粒度的扩展点）：
-    // - process: check/wait 只读、kill/write 控制进程；
-    // - edit 已收敛为纯写工具（read 模式移除，行号系统归 read 工具）。
+    // `write_stdin` 的空输入只续读输出；带输入时会改变执行会话状态。
     let category = match tool_name {
-        "process" => match args.get("action").and_then(|value| value.as_str()) {
-            Some("check" | "wait") => ToolCategory::Read,
-            Some("write" | "kill") => ToolCategory::Exec,
-            _ => ToolCategory::Write,
-        },
+        "write_stdin"
+            if args
+                .get("chars")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(str::is_empty) =>
+        {
+            ToolCategory::Read
+        }
+        "write_stdin" => ToolCategory::Exec,
         _ => declared_category,
     };
     let workspace_root = resolve_target_path(workspace_root.to_path_buf());
@@ -942,7 +930,7 @@ mod tests {
     #[test]
     fn workspace_free_requires_approval_for_exec_and_network() {
         for (tool, category) in [
-            ("exec", ToolCategory::Exec),
+            ("exec_command", ToolCategory::Exec),
             ("spawn_subagent", ToolCategory::Exec),
             ("web_fetch", ToolCategory::Net),
         ] {
@@ -964,7 +952,7 @@ mod tests {
     #[test]
     fn skip_permissions_auto_approves_execution_and_network() {
         for (tool, category) in [
-            ("exec", ToolCategory::Exec),
+            ("exec_command", ToolCategory::Exec),
             ("spawn_subagent", ToolCategory::Exec),
             ("web_fetch", ToolCategory::Net),
         ] {
@@ -1023,12 +1011,16 @@ mod w3_w7_tests {
         let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| ws.clone());
         let inside_ws = |p: &std::path::Path| p.starts_with(&ws_canon) || p.starts_with(&ws);
 
-        // exec 独占后唯一命令入口：cwd 必须进授权资源。
+        // 执行会话命令入口：workdir 必须进授权资源。
         let res = extract_target_paths(
-            "exec",
-            &serde_json::json!({ "command": "ls", "cwd": "./src" }),
+            "exec_command",
+            &serde_json::json!({ "cmd": "ls", "workdir": "./src" }),
         );
-        assert_eq!(res.len(), 1, "exec cwd missing from resources: {res:?}");
+        assert_eq!(
+            res.len(),
+            1,
+            "exec_command workdir missing from resources: {res:?}"
+        );
         assert!(inside_ws(&res[0]), "exec cwd not under ws: {:?}", res[0]);
 
         // W3：apply_patch 目标从 patch 文本解析进授权资源（两条目标）。
@@ -1089,12 +1081,12 @@ mod w3_w7_tests {
     #[test]
     fn exec_approval_summary_flags_unenforced_sandbox() {
         // 审计 H1：无强制后端的平台上，审批摘要必须带「无沙箱」警告，
-        // 用户不得带着「命令在沙箱内」的错觉放行 exec。
+        // 用户不得带着「命令在沙箱内」的错觉放行 exec_command。
         let summary = summarize_permission_action(
-            "exec",
-            &serde_json::json!({ "command": "ls", "cwd": "/repo" }),
+            "exec_command",
+            &serde_json::json!({ "cmd": "ls", "workdir": "/repo" }),
         )
-        .expect("exec summary");
+        .expect("exec_command summary");
         if qaqh_sandbox::filesystem_and_network_isolation_enforced() {
             assert!(!summary.contains("WARNING"), "{summary}");
         } else {
@@ -1108,24 +1100,19 @@ mod w3_w7_tests {
     #[test]
     fn exec_permission_action_summary_shows_command_without_env() {
         let summary = summarize_permission_action(
-            "exec",
+            "exec_command",
             &serde_json::json!({
-                "command": "cargo test",
-                "args": ["--all", "name with spaces"],
+                "cmd": "cargo test",
                 "shell": "bash",
-                "cwd": "/repo",
+                "workdir": "/repo",
                 "env": {"API_KEY": "must-not-leak"}
             }),
         )
         .expect("exec summary");
 
         assert!(summary.contains(r#"command: "cargo test""#), "{summary}");
-        assert!(
-            summary.contains(r#"args: ["--all", "name with spaces"]"#),
-            "{summary}"
-        );
+        assert!(summary.contains(r#"workdir: "/repo""#), "{summary}");
         assert!(summary.contains(r#"shell: "bash""#), "{summary}");
-        assert!(summary.contains(r#"cwd: "/repo""#), "{summary}");
         assert!(!summary.contains("must-not-leak"), "{summary}");
         assert_eq!(
             summarize_permission_action("read", &serde_json::json!({})),
@@ -1137,8 +1124,8 @@ mod w3_w7_tests {
     fn exec_permission_action_summary_uses_command_and_is_bounded() {
         let command = "echo ".repeat(3000);
         let summary = summarize_permission_action(
-            "exec",
-            &serde_json::json!({ "command": command, "cwd": "/repo" }),
+            "exec_command",
+            &serde_json::json!({ "cmd": command, "workdir": "/repo" }),
         )
         .expect("command summary");
         assert!(summary.starts_with("command: \"echo echo"), "{summary}");

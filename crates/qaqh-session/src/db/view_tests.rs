@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use super::super::{Db, store, view};
-    use qaqh_ringing_contract::fact::ContentValue;
-    use qaqh_ringing_contract::state::{TimelineEntry, ToolCallStatus};
+    use qaqh_ringing_contract::fact::{ContentValue, ToolCallOutcome};
+    use qaqh_ringing_contract::state::{TimelineEntry, ToolCallState};
 
     fn test_db() -> Db {
         let dir = tempfile::tempdir().expect("tempdir").keep();
@@ -151,7 +151,9 @@ mod tests {
                         turn_id: Some("T1".into()),
                         tool_name: "shell".into(),
                         args_json: Some(r#"{"kind":"inline","data":{"text":"ls"}}"#.into()),
-                        status: "running",
+                        state_json: serde_json::to_string(&ToolCallState::Running)
+                            .expect("serialize running state"),
+                        state_kind: "running",
                     },
                 )?;
                 store::create_interaction(
@@ -200,7 +202,7 @@ mod tests {
             assert_eq!(state.timeline.len(), 1);
             assert!(matches!(&state.timeline[0], TimelineEntry::Input { .. }));
             assert_eq!(state.tools.len(), 1);
-            assert_eq!(state.tools[0].status, ToolCallStatus::Running);
+            assert_eq!(state.tools[0].state, ToolCallState::Running);
             assert_eq!(state.interactions.len(), 1);
 
             // 工具完成 + 交互应答:状态迁移反映到下一次读取。
@@ -212,11 +214,14 @@ mod tests {
                         session_id: "SES1".into(),
                         turn_id: Some("T1".into()),
                         tool_name: "shell".into(),
-                        status: "finished",
+                        state_json: serde_json::to_string(&ToolCallState::Finished {
+                            outcome: ToolCallOutcome::Completed,
+                        })
+                        .expect("serialize finished state"),
+                        exec_session_id: None,
                         output_text: Some("file-a\nfile-b".into()),
                         output_ref: None,
                         output_truncated: false,
-                        error_json: None,
                         meta_json: None,
                         effects_json: None,
                         code_delta_json: None,
@@ -237,11 +242,39 @@ mod tests {
                 .read(|conn| view::load_session_state(conn, "SES1"))
                 .await
                 .expect("reload");
-            assert_eq!(state.tools[0].status, ToolCallStatus::Finished);
+            assert_eq!(
+                state.tools[0].state,
+                ToolCallState::Finished {
+                    outcome: ToolCallOutcome::Completed
+                }
+            );
             assert!(
                 state.interactions.is_empty(),
                 "resolved interaction leaves pending list"
             );
+
+            let source = db
+                .read(|conn| view::load_session_turn(conn, "SES1", "T1"))
+                .await
+                .expect("load source turn")
+                .expect("source turn exists");
+            assert_eq!(
+                source.turn.turn_id,
+                qaqh_ringing_contract::fact::TurnId::new("T1")
+            );
+            assert_eq!(source.timeline.len(), 1);
+            assert_eq!(source.tools.len(), 1);
+            assert_eq!(
+                source.tools[0].output,
+                Some(ContentValue::Inline {
+                    text: "file-a\nfile-b".into()
+                })
+            );
+            let missing = db
+                .read(|conn| view::load_session_turn(conn, "SES1", "T-MISSING"))
+                .await
+                .expect("query missing turn");
+            assert!(missing.is_none());
 
             // 列表分页直查业务表。
             let rows = db

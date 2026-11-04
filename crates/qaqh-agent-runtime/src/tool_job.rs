@@ -9,9 +9,15 @@
 //! quota reservations for backgrounded or unstopped work, and telling the truth
 //! about whether anything started.
 
-use qaqh_ringing_contract::fact::{ToolError, ToolMetrics};
-use qaqh_ringing_contract::state::{CodeDelta, ToolCallStatus, ToolEffectInfo};
-use qaqh_session::owner::{ToolLifecycle, ToolRun, ToolTerminal};
+use qaqh_process_tools::exec_session::{
+    ExecManagerError, ExecManagerErrorKind, ExecSessionManager, ExecSessionPoll,
+    ExecSessionPublisher, ExecSessionResult, ExecSessionStart,
+};
+use qaqh_ringing_contract::fact::{
+    ToolCallOutcome, ToolCancellationReason, ToolError, ToolInterruptionReason, ToolMetrics,
+};
+use qaqh_ringing_contract::state::{CodeDelta, ToolEffectInfo};
+use qaqh_session::owner::{ToolLifecycle, ToolRun, ToolSettlement};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
@@ -24,11 +30,178 @@ use std::{
 
 use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaReservation, ReleaseReason};
 
+#[derive(Clone)]
+struct OwnerExecPublisher {
+    lifecycle: ToolLifecycle,
+}
+
+impl std::fmt::Debug for OwnerExecPublisher {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnerExecPublisher")
+    }
+}
+
+impl ExecSessionPublisher for OwnerExecPublisher {
+    fn upsert(&self, view: qaqh_ringing_contract::state::ExecSessionView) {
+        self.lifecycle.exec_session_upsert(view);
+    }
+
+    fn output(
+        &self,
+        exec_session_id: &qaqh_types::ExecSessionId,
+        start_offset: u64,
+        end_offset: u64,
+        source: qaqh_ringing_contract::events::ExecOutputSource,
+        text: String,
+        snapshot: qaqh_process_tools::exec_session::capture::OutputSnapshot,
+        stream_dropped_bytes: u64,
+    ) {
+        self.lifecycle.exec_session_output(
+            exec_session_id.as_str(),
+            start_offset,
+            end_offset,
+            source,
+            text,
+            snapshot.next_offset,
+            snapshot.output_preview,
+            snapshot.preview_start_offset,
+            snapshot.capture_omitted_bytes,
+            stream_dropped_bytes,
+        );
+    }
+
+    fn finish(
+        &self,
+        view: qaqh_ringing_contract::state::ExecSessionView,
+        transcript: String,
+        truncated: bool,
+    ) {
+        let state_json =
+            serde_json::to_string(&view.state).expect("execution session state is serializable");
+        self.lifecycle
+            .exec_session_finished(qaqh_session::owner::ExecSessionSettlement {
+                exec_session_id: view.id.as_str().to_string(),
+                state_json,
+                finished_at_ms: view
+                    .finished_at_ms
+                    .unwrap_or_else(qaqh_session::db::store::now_ms),
+                output_complete: view.output_complete,
+                output_content_id: None,
+                output_text: (!transcript.is_empty()).then_some(transcript),
+                output_truncated: truncated,
+                output_preview: view.output_preview,
+                preview_start_offset: view.preview_start_offset,
+            });
+    }
+}
+
+#[derive(Debug)]
+struct SessionExecHost {
+    manager: Arc<ExecSessionManager>,
+    publisher: Arc<OwnerExecPublisher>,
+    origin_turn_id: String,
+}
+
+impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
+    fn exec_command(
+        &self,
+        context: &qaqh_workspace::tool_api::ToolCallContext,
+        request: qaqh_workspace::tool_api::ExecCommandRequest,
+    ) -> Result<qaqh_workspace::tool_api::ExecCommandResult, qaqh_workspace::tool_api::ToolError>
+    {
+        let result = self
+            .manager
+            .start(
+                ExecSessionStart {
+                    owner_session_id: context.session_id.clone(),
+                    origin_turn_id: self.origin_turn_id.clone(),
+                    origin_call_id: context.call_id.clone(),
+                    command: request.command,
+                    cwd: request.cwd,
+                    argv: request.argv,
+                    env: request.env,
+                    tty: request.tty,
+                    timeout_ms: request.timeout_ms,
+                    yield_time_ms: request.yield_time_ms,
+                    max_output_bytes: request.max_output_tokens as usize * 4,
+                    cancellation: context.cancellation.shared_flag(),
+                },
+                self.publisher.clone(),
+            )
+            .map_err(exec_manager_error)?;
+        Ok(exec_result_to_tool_core(result))
+    }
+
+    fn write_stdin(
+        &self,
+        context: &qaqh_workspace::tool_api::ToolCallContext,
+        request: qaqh_workspace::tool_api::WriteStdinRequest,
+    ) -> Result<qaqh_workspace::tool_api::ExecCommandResult, qaqh_workspace::tool_api::ToolError>
+    {
+        let result = self
+            .manager
+            .poll(ExecSessionPoll {
+                exec_session_id: request.exec_session_id,
+                owner_session_id: context.session_id.clone(),
+                chars: request.chars,
+                yield_time_ms: request.yield_time_ms,
+                max_output_bytes: request.max_output_tokens as usize * 4,
+                cancellation: context.cancellation.shared_flag(),
+            })
+            .map_err(exec_manager_error)?;
+        Ok(exec_result_to_tool_core(result))
+    }
+}
+
+fn exec_result_to_tool_core(
+    result: ExecSessionResult,
+) -> qaqh_workspace::tool_api::ExecCommandResult {
+    qaqh_workspace::tool_api::ExecCommandResult {
+        outcome: result.outcome,
+        exec_session_id: result.exec_session_id,
+        output: result.output,
+        output_truncated: result.output_truncated,
+        omitted_bytes: result.omitted_bytes,
+        exit_code: result.exit_code,
+        timed_out: result.timed_out,
+        cancelled: result.cancelled,
+        input_bytes_written: result.input_bytes_written,
+    }
+}
+
+fn exec_manager_error(error: ExecManagerError) -> qaqh_workspace::tool_api::ToolError {
+    use qaqh_workspace::tool_api::ToolErrorKind;
+    let kind = match error.kind {
+        ExecManagerErrorKind::QuotaExceeded | ExecManagerErrorKind::Shutdown => {
+            ToolErrorKind::Unavailable
+        }
+        ExecManagerErrorKind::NotFound => ToolErrorKind::NotFound,
+        ExecManagerErrorKind::WrongOwner => ToolErrorKind::PermissionDenied,
+        ExecManagerErrorKind::InputUnsupported | ExecManagerErrorKind::InputTooLarge => {
+            ToolErrorKind::InvalidArguments
+        }
+        ExecManagerErrorKind::InputWrite | ExecManagerErrorKind::Spawn => ToolErrorKind::Execution,
+    };
+    let mut tool_error = qaqh_workspace::tool_api::ToolError::new(kind, error.message);
+    tool_error.retryable = matches!(
+        error.kind,
+        ExecManagerErrorKind::QuotaExceeded | ExecManagerErrorKind::Shutdown
+    );
+    if error.bytes_written > 0 {
+        tool_error.details = Some(serde_json::json!({
+            "input_bytes_written": error.bytes_written,
+            "input_may_have_been_applied": true,
+        }));
+    }
+    tool_error
+}
+
 /// Everything the authorized effect pinned before dispatch.
 #[derive(Debug, Clone)]
 pub struct ToolRequest {
     pub execution_id: String,
     pub call_id: String,
+    pub turn_id: String,
     pub tool_name: String,
     /// 只读工具被取消时无需不确定性上报(直接 Cancelled)。
     pub read_only: bool,
@@ -135,15 +308,15 @@ pub struct ToolApprovalGrant {
     pub workspace_root: PathBuf,
 }
 
-/// Owner record for a backgrounded process or unstopped tool whose quota
-/// reservation remains held until explicit reaping/settlement.
+/// Owner record for a backgrounded (yielded) execution whose quota
+/// reservation remains held until the exec session reaches a real terminal
+/// state(spec §8.2:工具调用 quota 调用返回时释放;存活进程的执行会话 quota
+/// 保留到真实终态,不靠下次工具调用顺便回收)。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetainedToolOwner {
     pub session_id: String,
     pub call_id: String,
     pub execution_id: String,
-    pub process_id: Option<u64>,
-    pub backgrounded: bool,
     pub reservation: Option<QuotaReservation>,
 }
 
@@ -161,6 +334,7 @@ pub struct WorkspaceToolPort {
     quota: Option<Arc<Mutex<QuotaLedger>>>,
     retained_owners: Mutex<HashMap<String, RetainedToolOwner>>,
     lifecycle: ToolLifecycle,
+    exec_sessions: Arc<ExecSessionManager>,
 }
 
 impl WorkspaceToolPort {
@@ -170,6 +344,7 @@ impl WorkspaceToolPort {
         policy: ToolPolicySnapshot,
         quota: Option<Arc<Mutex<QuotaLedger>>>,
         lifecycle: ToolLifecycle,
+        exec_sessions: Arc<ExecSessionManager>,
     ) -> Self {
         Self {
             session_id: session_id.into(),
@@ -179,6 +354,7 @@ impl WorkspaceToolPort {
             quota,
             retained_owners: Mutex::new(HashMap::new()),
             lifecycle,
+            exec_sessions,
         }
     }
 
@@ -305,52 +481,15 @@ impl WorkspaceToolPort {
             .is_some())
     }
 
-    /// Reconcile backgrounded tool owners before reserving more quota. Process
-    /// completion is authoritative in ProcessRegistry; no per-owner poller thread
-    /// or duplicate lifecycle state is needed.
-    fn reap_finished_process_owners(&self) {
-        let pending: Vec<(String, u64)> = self
-            .retained_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .values()
-            .filter_map(|owner| {
-                owner
-                    .process_id
-                    .map(|process_id| (owner.execution_id.clone(), process_id))
-            })
-            .collect();
-
-        for (execution_id, process_id) in pending {
-            let Ok(process_id) = u32::try_from(process_id) else {
-                continue;
-            };
-            let _ = qaqh_process_tools::process_registry::ProcessRegistry::try_wait(process_id);
-            let info = qaqh_process_tools::process_registry::ProcessRegistry::get_info(process_id);
-            let reason = match info {
-                None => ReleaseReason::Completed,
-                Some(info) => match info["status"].as_str() {
-                    Some("running") => continue,
-                    Some("killed") => ReleaseReason::Cancelled,
-                    Some("exited") => ReleaseReason::Completed,
-                    _ => continue,
-                },
-            };
-            if let Err(error) = self.settle_retained_owner(&execution_id, reason) {
-                log::warn!(
-                    "[tool-job] could not release reaped process quota for {execution_id}: {error}"
-                );
-            }
-        }
-    }
-
     fn retain_owner(
         &self,
         request: &ToolRequest,
-        process_id: Option<u64>,
         backgrounded: bool,
         reservation: Option<QuotaReservation>,
     ) {
+        if !backgrounded {
+            return;
+        }
         self.retained_owners
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -360,22 +499,9 @@ impl WorkspaceToolPort {
                     session_id: self.session_id.clone(),
                     call_id: request.call_id.clone(),
                     execution_id: request.execution_id.clone(),
-                    process_id,
-                    backgrounded,
                     reservation,
                 },
             );
-    }
-
-    fn uncertain_process_id(request: &ToolRequest) -> Option<u64> {
-        if request.tool_name != "process" {
-            return None;
-        }
-        let args: serde_json::Value = serde_json::from_slice(&request.args).ok()?;
-        if args.get("action")?.as_str()? != "write" {
-            return None;
-        }
-        args.get("id")?.as_u64()
     }
 
     fn release_reservation(&self, reservation: Option<QuotaReservation>, reason: ReleaseReason) {
@@ -441,6 +567,13 @@ impl WorkspaceToolPort {
             })?;
 
         let cancellation = qaqh_workspace::tool_api::CancellationToken::new();
+        let exec_host = Arc::new(SessionExecHost {
+            manager: Arc::clone(&self.exec_sessions),
+            publisher: Arc::new(OwnerExecPublisher {
+                lifecycle: self.lifecycle.clone(),
+            }),
+            origin_turn_id: request.turn_id.clone(),
+        });
         let context = qaqh_workspace::tool_api::ToolCallContext {
             call_id: request.call_id.clone(),
             session_id: self.session_id.clone(),
@@ -457,6 +590,7 @@ impl WorkspaceToolPort {
             cancellation,
             progress: None,
             exec_progress: None,
+            exec_host: Some(exec_host),
             official_web: None,
             source: qaqh_workspace::tool_api::ToolCallSource::Model,
         };
@@ -515,7 +649,7 @@ impl ToolPort for WorkspaceToolPort {
                 &request.call_id,
                 &request.tool_name,
                 args_json.clone(),
-                failed_terminal("cancelled", "cancelled before dispatch", None, None),
+                cancelled_settlement("cancelled before dispatch"),
             );
             return Err(ToolFailure::NotStarted("cancelled before dispatch".into()));
         }
@@ -540,7 +674,7 @@ impl ToolPort for WorkspaceToolPort {
                         &request.call_id,
                         &request.tool_name,
                         args_json.clone(),
-                        failed_terminal("permission_denied", &reason, None, None),
+                        failed_settlement("permission_denied", &reason, None, None),
                     );
                     return Err(ToolFailure::Denied(reason));
                 }
@@ -561,7 +695,7 @@ impl ToolPort for WorkspaceToolPort {
                                 &request.call_id,
                                 &request.tool_name,
                                 args_json.clone(),
-                                failed_terminal("permission_denied", &reason, None, None),
+                                failed_settlement("permission_denied", &reason, None, None),
                             );
                             return Err(ToolFailure::Denied(reason));
                         }
@@ -581,7 +715,7 @@ impl ToolPort for WorkspaceToolPort {
                             &request.call_id,
                             &request.tool_name,
                             args_json.clone(),
-                            failed_terminal("permission_denied", &reason, None, None),
+                            failed_settlement("permission_denied", &reason, None, None),
                         );
                         return Err(ToolFailure::Denied(reason));
                     }
@@ -593,7 +727,7 @@ impl ToolPort for WorkspaceToolPort {
                                 &request.call_id,
                                 &request.tool_name,
                                 args_json.clone(),
-                                failed_terminal("permission_denied", &reason, None, None),
+                                failed_settlement("permission_denied", &reason, None, None),
                             );
                             return Err(ToolFailure::Denied(reason));
                         }
@@ -606,14 +740,12 @@ impl ToolPort for WorkspaceToolPort {
                 &request.call_id,
                 &request.tool_name,
                 args_json.clone(),
-                failed_terminal("cancelled", "cancelled before handler start", None, None),
+                cancelled_settlement("cancelled before handler start"),
             );
             return Err(ToolFailure::NotStarted(
                 "cancelled before handler start".into(),
             ));
         }
-
-        self.reap_finished_process_owners();
 
         let reservation = match &self.quota {
             Some(ledger) => match ledger
@@ -632,7 +764,7 @@ impl ToolPort for WorkspaceToolPort {
                         &request.call_id,
                         &request.tool_name,
                         args_json.clone(),
-                        failed_terminal("quota_refused", &message, None, None),
+                        failed_settlement("quota_refused", &message, None, None),
                     );
                     return Err(ToolFailure::NotStarted(message));
                 }
@@ -676,11 +808,10 @@ impl ToolPort for WorkspaceToolPort {
                         request.call_id
                     );
                 }
-                self.retain_owner(request, None, false, reservation);
                 let metrics = run_metrics(&run);
                 self.lifecycle.finished(
                     run,
-                    failed_terminal(
+                    failed_settlement(
                         "tool_panicked",
                         "tool handler panicked; side-effect status is unknown",
                         None,
@@ -692,32 +823,27 @@ impl ToolPort for WorkspaceToolPort {
                 ));
             }
         };
-        self.reap_finished_process_owners();
 
-        let parsed_output: Option<serde_json::Value> =
-            serde_json::from_str(&exec_result.content).ok();
-        let is_backgrounded = parsed_output
-            .as_ref()
-            .and_then(|v| v.get("status"))
-            .and_then(|v| v.as_str())
-            == Some("backgrounded");
-        let process_id = parsed_output
-            .as_ref()
-            .and_then(|v| v.get("process_id"))
-            .and_then(|v| v.as_u64());
-
-        if is_backgrounded {
-            self.retain_owner(request, process_id, true, reservation);
-            self.reap_finished_process_owners();
+        // 契约 outcome 是唯一终态权威(spec §4.2):typed 执行器直接给出
+        // completed/yielded/failed 等事实;不再从模型正文 JSON 推断
+        // backgrounded/process_id(E03 已删)。
+        let contract_outcome = exec_result.outcome.clone();
+        if let Some(outcome) = &contract_outcome {
+            let is_yielded = matches!(outcome, ToolCallOutcome::Yielded { .. });
+            if is_yielded {
+                self.retain_owner(request, true, reservation);
+            } else {
+                self.release_reservation(reservation, ReleaseReason::Completed);
+            }
             let metrics = run_metrics(&run);
             self.lifecycle.finished(
                 run,
-                ToolTerminal {
-                    // 调用结清但进程仍在跑:状态保持运行中,由后台收割落终态。
-                    status: ToolCallStatus::Running,
+                ToolSettlement {
+                    call_id: request.call_id.clone(),
+                    tool_name: request.tool_name.clone(),
+                    outcome: outcome.clone(),
                     output_text: Some(exec_result.content.clone()),
                     output_truncated: false,
-                    error: None,
                     metrics: Some(metrics),
                     code_delta: code_delta_of(&exec_result),
                     effects: effect_infos(&exec_result),
@@ -725,7 +851,7 @@ impl ToolPort for WorkspaceToolPort {
             );
             return Ok(ToolOutput {
                 output: exec_result.content.into_bytes(),
-                backgrounded: true,
+                backgrounded: is_yielded,
             });
         }
 
@@ -734,11 +860,12 @@ impl ToolPort for WorkspaceToolPort {
             let metrics = run_metrics(&run);
             self.lifecycle.finished(
                 run,
-                ToolTerminal {
-                    status: ToolCallStatus::Finished,
+                ToolSettlement {
+                    call_id: request.call_id.clone(),
+                    tool_name: request.tool_name.clone(),
+                    outcome: ToolCallOutcome::Completed,
                     output_text: Some(exec_result.content.clone()),
                     output_truncated: false,
-                    error: None,
                     metrics: Some(metrics),
                     code_delta: code_delta_of(&exec_result),
                     effects: effect_infos(&exec_result),
@@ -760,7 +887,7 @@ impl ToolPort for WorkspaceToolPort {
             "permission_denied" | "blocked_by_mode" | "session_mismatch" | "workspace_mismatch"
             | "resource_mismatch" => {
                 self.release_reservation(reservation, ReleaseReason::Cancelled);
-                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                let terminal = exec_error_terminal(&run, &exec_result);
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::Denied(exec_result.content))
             }
@@ -769,35 +896,41 @@ impl ToolPort for WorkspaceToolPort {
             | "audit_unavailable"
             | "cancelled_before_start" => {
                 self.release_reservation(reservation, ReleaseReason::Cancelled);
-                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                let terminal = exec_error_terminal(&run, &exec_result);
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::NotStarted(exec_result.content))
             }
             "partial" | "audit_quarantined" | "tool_panicked" => {
-                self.retain_owner(
-                    request,
-                    Self::uncertain_process_id(request),
-                    false,
-                    reservation,
-                );
-                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                let terminal = exec_error_terminal(&run, &exec_result);
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::AfterStart(exec_result.content))
             }
             "cancelled" if !request.read_only => {
-                self.retain_owner(
-                    request,
-                    Self::uncertain_process_id(request),
-                    false,
-                    reservation,
-                );
-                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Cancelled);
+                // 取消但效果不可确认:interrupted/execution_unconfirmed,
+                // 不把发出取消信号当已取消(spec §8.1)。
+                let terminal = ToolSettlement {
+                    call_id: request.call_id.clone(),
+                    tool_name: request.tool_name.clone(),
+                    outcome: ToolCallOutcome::Interrupted {
+                        reason: ToolInterruptionReason::ExecutionUnconfirmed,
+                    },
+                    output_text: Some(exec_result.content.clone()),
+                    output_truncated: false,
+                    metrics: Some(run_metrics(&run)),
+                    code_delta: code_delta_of(&exec_result),
+                    effects: effect_infos(&exec_result),
+                };
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::AfterStart(exec_result.content))
             }
+            "cancelled" => {
+                let terminal = cancelled_settlement(&exec_result.content);
+                self.lifecycle.finished(run, terminal);
+                Err(ToolFailure::Denied(exec_result.content))
+            }
             _ => {
                 self.release_reservation(reservation, ReleaseReason::Completed);
-                let terminal = exec_error_terminal(&run, &exec_result, ToolCallStatus::Failed);
+                let terminal = exec_error_terminal(&run, &exec_result);
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::TerminalError {
                     message: exec_result.content.clone(),
@@ -817,8 +950,10 @@ impl WorkspaceToolPort {
         failure: &ToolFailure,
     ) {
         let terminal = match failure {
-            ToolFailure::Denied(reason) => failed_terminal("permission_denied", reason, None, None),
-            ToolFailure::NotStarted(reason) => failed_terminal("not_started", reason, None, None),
+            ToolFailure::Denied(reason) => {
+                failed_settlement("permission_denied", reason, None, None)
+            }
+            ToolFailure::NotStarted(reason) => failed_settlement("not_started", reason, None, None),
             // 其余变体只产生于 started 之后,走 finished。
             _ => return,
         };
@@ -831,44 +966,60 @@ impl WorkspaceToolPort {
     }
 }
 
-/// 执行期错误 → 业务终态:code 取执行器 typed 错误,正文保留完整输出。
+/// 执行期错误 → 业务终态:错误进规范错误对象(outcome.failed),正文保留完整输出。
 fn exec_error_terminal(
     run: &ToolRun,
     result: &qaqh_workspace::execution::ToolExecResult,
-    status: ToolCallStatus,
-) -> ToolTerminal {
+) -> ToolSettlement {
     let code = result
         .result
         .error
         .as_ref()
         .map(|e| e.code.as_str().to_string())
         .unwrap_or_else(|| "tool_failed".into());
-    let mut terminal = failed_terminal(
+    failed_settlement(
         &code,
         &result.content,
         Some(result.content.clone()),
         Some(run_metrics(run)),
-    );
-    terminal.status = status;
-    terminal
+    )
 }
 
-fn failed_terminal(
+/// 已确认取消(只读工具/调度前):取消原因按回合取消记录。
+fn cancelled_settlement(message: &str) -> ToolSettlement {
+    ToolSettlement {
+        call_id: String::new(),
+        tool_name: String::new(),
+        outcome: ToolCallOutcome::Cancelled {
+            reason: ToolCancellationReason::TurnCancel,
+        },
+        output_text: Some(message.to_string()),
+        output_truncated: false,
+        metrics: None,
+        code_delta: None,
+        effects: Vec::new(),
+    }
+}
+
+fn failed_settlement(
     code: &str,
     message: &str,
     output_text: Option<String>,
     metrics: Option<ToolMetrics>,
-) -> ToolTerminal {
-    ToolTerminal {
-        status: ToolCallStatus::Failed,
+) -> ToolSettlement {
+    ToolSettlement {
+        call_id: String::new(),
+        tool_name: String::new(),
+        outcome: ToolCallOutcome::Failed {
+            error: ToolError {
+                code: code.to_string(),
+                message: message.to_string(),
+                retryable: false,
+                details_ref: None,
+            },
+        },
         output_text,
         output_truncated: false,
-        error: Some(ToolError {
-            code: code.to_string(),
-            message: message.to_string(),
-            retryable: false,
-            details_ref: None,
-        }),
         metrics,
         code_delta: None,
         effects: Vec::new(),

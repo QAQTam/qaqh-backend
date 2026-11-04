@@ -98,6 +98,8 @@ fn sandboxed_failure(display_name: &str, message: String) -> ExecOutput {
         timed_out: false,
         cancelled: false,
         process_id: None,
+        output_omitted_bytes: 0,
+        protocol_dropped_bytes: 0,
     }
 }
 
@@ -532,5 +534,7 @@ pub(crate) fn sbx_exec(
         timed_out,
         cancelled,
         process_id: None,
+        output_omitted_bytes: 0,
+        protocol_dropped_bytes: 0,
     }
 }

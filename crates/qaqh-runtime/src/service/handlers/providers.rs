@@ -42,16 +42,20 @@ fn validate_provider_id(id: &str) -> QaqhResult<()> {
 
 fn check_revision(store: &ProfilesStore, expected: Option<u64>) -> QaqhResult<()> {
     if let Some(expected) = expected {
-        store.check_revision(expected).map_err(|error| match error {
-            // CAS 冲突必须以 Conflict 语义上抛(409),与 settings_revision
-            // 同档——目录漂移是并发修订事实,不是"参数非法"。
-            qaqh_profile::ProfileStoreError::RevisionConflict { expected, actual } => {
-                QaqhError::Conflict {
-                    message: format!("config revision conflict: expected {expected}, current {actual}"),
+        store
+            .check_revision(expected)
+            .map_err(|error| match error {
+                // CAS 冲突必须以 Conflict 语义上抛(409),与 settings_revision
+                // 同档——目录漂移是并发修订事实,不是"参数非法"。
+                qaqh_profile::ProfileStoreError::RevisionConflict { expected, actual } => {
+                    QaqhError::Conflict {
+                        message: format!(
+                            "config revision conflict: expected {expected}, current {actual}"
+                        ),
+                    }
                 }
-            }
-            other => QaqhError::message(other.to_string()),
-        })?;
+                other => QaqhError::message(other.to_string()),
+            })?;
     }
     Ok(())
 }

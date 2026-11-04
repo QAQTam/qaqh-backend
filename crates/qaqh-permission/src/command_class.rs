@@ -57,14 +57,14 @@ pub fn default_shell_kind() -> ExecShellKind {
 
 /// 从 exec 工具参数直接分类。
 pub fn classify_exec_args(args: &Value) -> ExecCommandClass {
-    let command = args.get("command").and_then(Value::as_str).unwrap_or("");
+    let command = args.get("cmd").and_then(Value::as_str).unwrap_or("");
     let shell = exec_shell_kind(args.get("shell").and_then(Value::as_str));
     classify_exec_command(command, shell)
 }
 
 /// exec 命令文本的词元（供调用方做会话敏感路径补扫）。
 pub fn exec_argument_tokens(args: &Value) -> Vec<String> {
-    args.get("command")
+    args.get("cmd")
         .and_then(Value::as_str)
         .map(|c| c.split_whitespace().map(str::to_string).collect())
         .unwrap_or_default()
@@ -951,15 +951,15 @@ mod tests {
         assert_eq!(exec_shell_kind(Some("pwsh")), ExecShellKind::PowerShell);
         assert_eq!(exec_shell_kind(None), default_shell_kind());
         // 缺省 shell 下 pwsh 平台不自动放行 bash 白名单
-        let args = serde_json::json!({ "command": "ls", "shell": "pwsh" });
+        let args = serde_json::json!({ "cmd": "ls", "shell": "pwsh" });
         assert_eq!(classify_exec_args(&args), ExecCommandClass::Unclassified);
-        let args = serde_json::json!({ "command": "ls", "shell": "bash" });
+        let args = serde_json::json!({ "cmd": "ls", "shell": "bash" });
         assert_eq!(classify_exec_args(&args), ExecCommandClass::ReadOnly);
     }
 
     #[test]
     fn exec_argument_tokens_expose_command_words() {
-        let args = serde_json::json!({ "command": "cat C:\\data\\sessions\\x\\messages.jsonl" });
+        let args = serde_json::json!({ "cmd": "cat C:\\data\\sessions\\x\\messages.jsonl" });
         let tokens = exec_argument_tokens(&args);
         assert!(tokens.iter().any(|t| t.contains("messages.jsonl")));
     }

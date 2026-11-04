@@ -98,12 +98,12 @@ pub(crate) fn run_replace(
     // 删除语义（Claude Code hW2）：new 为空且 old 不以 \n 结尾时，
     // 自动尝试 old+"\n"——连行尾一起删，不留空行；old 以 \n 结尾或
     // 文件中无 old+"\n" 形态时退回裸匹配。
-    let (old, new) = if new.is_empty() && !old.ends_with('\n') && content.contains(&format!("{old}\n"))
-    {
-        (&*format!("{old}\n"), new)
-    } else {
-        (old, new)
-    };
+    let (old, new) =
+        if new.is_empty() && !old.ends_with('\n') && content.contains(&format!("{old}\n")) {
+            (&*format!("{old}\n"), new)
+        } else {
+            (old, new)
+        };
     let targets = if replace_all {
         non_overlapping_occurrences(content, old)
     } else {
@@ -283,7 +283,9 @@ pub(crate) fn render_success_snippet(edited: &str, start_line: usize, new_lf: &s
     let start0 = start_line.saturating_sub(1).min(lines.len() - 1);
     let inserted = count_lf(new_lf) + 1;
     let lo = start0.saturating_sub(SNIPPET_RADIUS);
-    let hi = (start0 + inserted + SNIPPET_RADIUS).min(lines.len()).max(lo + 1);
+    let hi = (start0 + inserted + SNIPPET_RADIUS)
+        .min(lines.len())
+        .max(lo + 1);
     (lo..hi)
         .map(|i| format!("L{}: {}", i + 1, lines[i]))
         .collect::<Vec<_>>()

@@ -1,5 +1,5 @@
 //! owner 往返测试:P2 退出标准的四条流(完整输入/工具输出/结构化结果/effects)
-//! 在一个会话 owner 上端到端走通(报告一 §12.5-2)。
+//! 在一个会话 owner 上端到端走通(报告一 §12.5-2);契约 state/outcome 单一权威。
 
 #[cfg(test)]
 mod tests {
@@ -13,15 +13,15 @@ mod tests {
     };
     use qaqh_ringing_contract::fact::{
         ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionDecision,
-        InteractionId, InteractionKind, ToolCallId, ToolMetrics, TurnId, TurnMode,
+        InteractionId, InteractionKind, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId, TurnMode,
     };
     use qaqh_ringing_contract::state::{
-        CodeDelta, InteractionView, TimelineEntry, ToolCallStatus, ToolEffectInfo, TurnOutcome,
+        CodeDelta, InteractionView, TimelineEntry, ToolCallState, ToolEffectInfo, TurnOutcome,
     };
     use qaqh_tool_core::{ExecOutputStream, ExecProgressEvent};
 
     use crate::db::store;
-    use crate::owner::{OwnerDirectory, ToolTerminal};
+    use crate::owner::{OwnerDirectory, ToolSettlement};
 
     fn test_owner_dir() -> (tempfile::TempDir, Arc<OwnerDirectory>) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -107,6 +107,13 @@ mod tests {
             ));
             assert!(matches!(
                 recv_event(&mut rx),
+                SessionEvent::TurnPhaseChanged {
+                    phase: qaqh_ringing_contract::state::TurnPhase::Running,
+                    ..
+                }
+            ));
+            assert!(matches!(
+                recv_event(&mut rx),
                 SessionEvent::ActivityChanged { .. }
             ));
             assert!(matches!(
@@ -114,7 +121,7 @@ mod tests {
                 SessionEvent::TimelineAppended { .. }
             ));
 
-            // 工具生命周期:started → 实时输出 ×2 → 终态(结构化结果 + effects)。
+            // 工具生命周期:running → 实时输出 ×2 → 终态(结构化结果 + effects)。
             let lifecycle = owner.lifecycle();
             let run = lifecycle.started("C1", "shell", Some(r#"{"command":"ls"}"#.into()));
             let sender = run.exec_sender();
@@ -127,6 +134,37 @@ mod tests {
                     bytes_total: 0,
                 });
             }
+            // running 的首次迁移就是执行开始;不再有独立 tool_started 事件。
+            match recv_event(&mut rx) {
+                SessionEvent::ToolStateChanged {
+                    call_id,
+                    state: ToolCallState::Running,
+                    ..
+                } => assert_eq!(call_id.as_ref(), "C1"),
+                other => panic!("expected tool state changed running, got {other:?}"),
+            }
+            for chunk in ["file-a\n", "file-b\n"] {
+                match recv_event(&mut rx) {
+                    SessionEvent::ToolOutputDelta {
+                        call_id,
+                        stream,
+                        text,
+                    } => {
+                        assert_eq!(call_id.as_ref(), "C1");
+                        assert_eq!(stream, OutputStream::Stdout);
+                        assert_eq!(text, chunk);
+                    }
+                    other => panic!("expected live output delta, got {other:?}"),
+                }
+            }
+            // 紧邻终态上报的输出也必须先于 ToolFinished。
+            sender.try_send(ExecProgressEvent {
+                tool_call_id: "C1".into(),
+                stream: ExecOutputStream::Stderr,
+                seq: 2,
+                chunk: "warning\n".into(),
+                bytes_total: 0,
+            });
             let metrics = ToolMetrics {
                 started_at_ms: run.started_at_ms(),
                 finished_at_ms: store::now_ms(),
@@ -136,11 +174,12 @@ mod tests {
             };
             lifecycle.finished(
                 run,
-                ToolTerminal {
-                    status: ToolCallStatus::Finished,
+                ToolSettlement {
+                    call_id: "C1".into(),
+                    tool_name: "shell".into(),
+                    outcome: ToolCallOutcome::Completed,
                     output_text: Some("file-a\nfile-b\n".into()),
                     output_truncated: false,
-                    error: None,
                     metrics: Some(metrics),
                     code_delta: Some(CodeDelta {
                         lines_added: 3,
@@ -155,28 +194,15 @@ mod tests {
                 },
             );
 
-            assert!(matches!(
-                recv_event(&mut rx),
-                SessionEvent::ToolStarted { .. }
-            ));
-            for chunk in ["file-a\n", "file-b\n"] {
-                match recv_event(&mut rx) {
-                    SessionEvent::ToolOutputDelta {
-                        call_id,
-                        stream,
-                        text,
-                    } => {
-                        assert_eq!(call_id.as_ref(), "C1");
-                        assert_eq!(stream, OutputStream::Stdout);
-                        assert_eq!(text, chunk);
-                    }
-                    other => panic!("expected output delta, got {other:?}"),
-                }
-            }
+            assert!(
+                matches!(recv_event(&mut rx), SessionEvent::ToolOutputDelta {
+                stream: OutputStream::Stderr, text, ..
+            } if text == "warning\n")
+            );
             match recv_event(&mut rx) {
                 SessionEvent::ToolFinished {
                     call_id,
-                    status,
+                    outcome,
                     output,
                     metrics,
                     code_delta,
@@ -184,9 +210,9 @@ mod tests {
                     ..
                 } => {
                     assert_eq!(call_id.as_ref(), "C1");
-                    assert_eq!(status, ToolCallStatus::Finished);
+                    assert_eq!(outcome, ToolCallOutcome::Completed);
                     assert!(output.is_some());
-                    assert_eq!(metrics.expect("metrics").progress_bytes_total, 14);
+                    assert_eq!(metrics.expect("metrics").progress_bytes_total, 22);
                     assert_eq!(code_delta.expect("code delta").lines_added, 3);
                     assert_eq!(
                         effects,
@@ -197,6 +223,20 @@ mod tests {
                 }
                 other => panic!("expected tool finished, got {other:?}"),
             }
+            // 后台进程仍持有 sender 时,终态不等待它退出,后续输出继续可见。
+            sender.try_send(ExecProgressEvent {
+                tool_call_id: "C1".into(),
+                stream: ExecOutputStream::Stdout,
+                seq: 3,
+                chunk: "background\n".into(),
+                bytes_total: 0,
+            });
+            assert!(
+                matches!(recv_event(&mut rx), SessionEvent::ToolOutputDelta {
+                stream: OutputStream::Stdout, text, ..
+            } if text == "background\n")
+            );
+            drop(sender);
 
             // 交互:升起 → 应答。
             owner
@@ -261,7 +301,12 @@ mod tests {
             assert_eq!(state.tools.len(), 1);
             let tool = &state.tools[0];
             assert_eq!(tool.call_id.as_ref(), "C1");
-            assert_eq!(tool.status, ToolCallStatus::Finished);
+            assert_eq!(
+                tool.state,
+                ToolCallState::Finished {
+                    outcome: ToolCallOutcome::Completed
+                }
+            );
             assert_eq!(
                 tool.turn_id.as_ref().map(|turn| turn.as_ref()),
                 Some("T1"),
@@ -279,6 +324,7 @@ mod tests {
 
     /// B01 边界:首帧 seq = 0;快照水位 = "下一个将分配的 seq";水位读取后的
     /// 下一帧 seq **等于**水位(相等边界必须被客户端处理,不是跳过)。
+    /// 提交回执语义:submit_request 完成时"落库 + emit"已在泵内完成。
     #[test]
     fn watermark_is_exclusive_and_first_frame_seq_is_zero() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -325,10 +371,7 @@ mod tests {
             };
 
             // 首帧 seq = 0(0 基)。
-            owner
-                .append_block(input("B1"))
-                .await
-                .expect("append B1");
+            owner.append_block(input("B1")).await.expect("append B1");
             let first = rx.try_recv().expect("first frame");
             assert_eq!(first.seq, 0, "首帧 seq 必须 = 0(exclusive 水位语义)");
             assert_eq!(owner.current_seq(), 1);
@@ -347,10 +390,7 @@ mod tests {
             assert_eq!(owner.current_seq(), 3);
 
             // 相等边界:快照后发出的下一帧 seq == 快照水位。
-            owner
-                .append_block(input("B4"))
-                .await
-                .expect("append B4");
+            owner.append_block(input("B4")).await.expect("append B4");
             let boundary = rx.try_recv().expect("boundary frame");
             assert_eq!(
                 boundary.seq, state.seq,
@@ -390,7 +430,10 @@ mod tests {
                 .await
                 .expect("create session");
             let mut rx = owner.subscribe();
-            owner.start_turn("T1", None, None).await.expect("start turn");
+            owner
+                .start_turn("T1", None, None)
+                .await
+                .expect("start turn");
             owner
                 .declare_tool_call(
                     &ToolCallId::new("C1"),
@@ -403,6 +446,10 @@ mod tests {
             match recv_event(&mut rx) {
                 SessionEvent::TurnStarted { .. } => {}
                 other => panic!("expected turn started, got {other:?}"),
+            }
+            match recv_event(&mut rx) {
+                SessionEvent::TurnPhaseChanged { .. } => {}
+                other => panic!("expected turn phase changed, got {other:?}"),
             }
             match recv_event(&mut rx) {
                 SessionEvent::ActivityChanged { .. } => {}
@@ -425,7 +472,7 @@ mod tests {
             let tool = state.tools.iter().find(|t| t.call_id.as_ref() == "C1");
             let tool = tool.expect("declared call in snapshot");
             assert_eq!(tool.tool_name.as_deref(), Some("shell"));
-            assert_eq!(tool.status, ToolCallStatus::Declared);
+            assert_eq!(tool.state, ToolCallState::Declared);
             assert_eq!(tool.args, Some(serde_json::json!({ "command": "ls" })));
         });
     }
@@ -473,6 +520,7 @@ mod tests {
     }
 
     /// D7:外部生产者经 owner.publish 进入同一单流定序(driver 席位事件)。
+    /// publish 经泵队列;submit 回执语义同样覆盖(发送完成前事件已定序)。
     #[test]
     fn published_events_share_the_single_stream_sequence() {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -502,14 +550,25 @@ mod tests {
                 .await
                 .expect("create session");
             let mut rx = owner.subscribe();
-            owner
-                .publish(SessionEvent::DriverChanged {
-                    driver: Some(qaqh_ringing_contract::state::DriverState {
-                        holder: Some("lease-a".into()),
-                        epoch: 1,
-                    }),
-                });
-            let frame = rx.try_recv().expect("published frame");
+            owner.publish(SessionEvent::DriverChanged {
+                driver: Some(qaqh_ringing_contract::state::DriverState {
+                    holder: Some("lease-a".into()),
+                    epoch: 1,
+                }),
+            });
+            let frame = {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match rx.try_recv() {
+                        Ok(frame) => break frame,
+                        Err(broadcast::error::TryRecvError::Empty) => {
+                            assert!(Instant::now() < deadline, "event not delivered in time");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("event channel: {error}"),
+                    }
+                }
+            };
             assert_eq!(frame.seq, 0);
             match frame.event {
                 SessionEvent::DriverChanged { driver } => {

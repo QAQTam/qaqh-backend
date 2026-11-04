@@ -264,7 +264,7 @@ mod tool_capabilities_cross_check {
     }
 
     #[test]
-    fn exclusive_tools_are_process_or_rewrite() {
+    fn exclusive_tools_are_execution_sessions_or_rewrite() {
         let manager = build_tool_manager(&[]);
         let exclusive: Vec<&str> = table_tool_names()
             .into_iter()
@@ -274,7 +274,7 @@ mod tool_capabilities_cross_check {
             .collect();
         assert_eq!(
             exclusive,
-            vec!["exec", "process"],
+            vec!["exec_command", "write_stdin"],
             "独占档变更必须显式审查（spec §3.4）"
         );
         for name in exclusive {

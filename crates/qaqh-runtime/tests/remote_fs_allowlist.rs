@@ -143,7 +143,10 @@ fn fs_read_scope_rejects_other_session_workspace() {
     let other_file = other_workspace.join("secret.txt");
     std::fs::write(&other_file, "other\n").expect("seed other file");
     let other_session = "fs-other-seed";
-    let other_cwd = other_workspace.to_str().expect("utf8 other workspace").to_string();
+    let other_cwd = other_workspace
+        .to_str()
+        .expect("utf8 other workspace")
+        .to_string();
     service()
         .owners()
         .db()

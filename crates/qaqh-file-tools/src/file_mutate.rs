@@ -901,6 +901,7 @@ pub fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext
         cancellation,
         progress: None,
         exec_progress: None,
+        exec_host: None,
         official_web: None,
         source: ToolCallSource::Model,
     }
@@ -977,6 +978,7 @@ mod tests {
             cancellation: TestCancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: TestToolCallSource::Model,
         }

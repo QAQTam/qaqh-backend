@@ -4,7 +4,7 @@
 //! captures payload text. It combines process-level measurements with
 //! caller-supplied logical/estimated gauges and a bounded phase-sample ring.
 
-#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(not(test), deny(unsafe_code))]
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -468,6 +468,7 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn capture_process_memory() -> ProcessMemory {
     #[repr(C)]
     struct ProcessMemoryCountersEx {

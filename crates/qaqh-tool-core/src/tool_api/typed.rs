@@ -156,6 +156,7 @@ fn project_output<O: ToolProjection>(
         status,
         output: ToolOutputValue::Json(output_value),
         error,
+        call_outcome: output.call_outcome(),
         model: ToolModelProjection {
             text: model_text,
             truncated: false,
@@ -185,6 +186,7 @@ fn recoverable_outcome(error: ToolError, elapsed: Duration, tool_name: &str) -> 
         status: qaqh_types::ToolStatus::Error,
         output: ToolOutputValue::Empty,
         error: Some(error),
+        call_outcome: None,
         model: ToolModelProjection {
             text: text.clone(),
             truncated: false,
@@ -278,6 +280,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         }
