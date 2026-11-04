@@ -12,6 +12,7 @@ use super::official_web::OfficialWebBackend;
 use super::progress::ProgressSink;
 use crate::permission::PermissionLevel;
 pub use qaqh_policy::SandboxSpec;
+use qaqh_types::{ExecSessionId, ToolCallOutcome};
 
 /// Sandbox policy effective for one tool call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -47,6 +48,55 @@ pub enum AgentMode {
     Code,
     /// 计划模式（写类工具受限）。
     Plan,
+}
+
+/// Validated command invocation passed to the session-owned execution host.
+#[derive(Debug, Clone)]
+pub struct ExecCommandRequest {
+    pub command: String,
+    pub argv: Vec<String>,
+    pub cwd: Option<String>,
+    pub env: Vec<(String, String)>,
+    pub tty: bool,
+    pub yield_time_ms: u32,
+    pub timeout_ms: Option<u64>,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct WriteStdinRequest {
+    pub exec_session_id: ExecSessionId,
+    pub chars: String,
+    pub yield_time_ms: u32,
+    pub max_output_tokens: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExecCommandResult {
+    pub outcome: ToolCallOutcome,
+    pub exec_session_id: Option<ExecSessionId>,
+    pub output: String,
+    pub output_truncated: bool,
+    pub omitted_bytes: u64,
+    pub exit_code: Option<i32>,
+    pub timed_out: bool,
+    pub cancelled: bool,
+    pub input_bytes_written: Option<usize>,
+}
+
+/// Per-call bridge to the session-owned execution manager.
+pub trait ExecSessionHost: std::fmt::Debug + Send + Sync {
+    fn exec_command(
+        &self,
+        context: &ToolCallContext,
+        request: ExecCommandRequest,
+    ) -> Result<ExecCommandResult, super::error::ToolError>;
+
+    fn write_stdin(
+        &self,
+        context: &ToolCallContext,
+        request: WriteStdinRequest,
+    ) -> Result<ExecCommandResult, super::error::ToolError>;
 }
 
 /// 取消信号（v1 同步执行器形态：`Arc<AtomicBool>` 只读句柄）。
@@ -125,6 +175,8 @@ pub struct ToolCallContext {
     /// runtime 在执行入口把 exec 进度通道 sender 注入；exec handler 优先
     /// 直用，`progress`（ProgressSink → v1 进度桥）退为兜底。非 exec 工具忽略。
     pub exec_progress: Option<crate::ExecProgressSender>,
+    /// Session-owned execution manager injected by the runtime for exec tools.
+    pub exec_host: Option<Arc<dyn ExecSessionHost>>,
     /// 官方网页工具后端（fetch / search）。
     ///
     /// 只有声明了官方工具面的 profile（`EndpointCompat::official_web_tools`）才由
@@ -171,6 +223,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: ToolCallSource::Model,
         };
@@ -197,6 +250,7 @@ mod tests {
             cancellation: CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: ToolCallSource::Model,
         };

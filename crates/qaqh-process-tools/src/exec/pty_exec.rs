@@ -64,7 +64,10 @@ pub(crate) fn pty_exec(
     let Some(spec) = sandbox else {
         // tty 路径必须有 spec（含 None 后端）以便统一走 prepare_pty_launch；
         // handler 层 ctx.sandbox_spec() 恒有值，这里只做防御。
-        return failure_output(&display_name, "SANDBOX SPEC MISSING: tty path requires a sandbox spec");
+        return failure_output(
+            &display_name,
+            "SANDBOX SPEC MISSING: tty path requires a sandbox spec",
+        );
     };
     let launch = match qaqh_sandbox::prepare_pty_launch(argv, cwd, spec) {
         Ok(launch) => launch,
@@ -114,11 +117,7 @@ pub(crate) fn pty_exec(
     let proc_id = crate::process_registry::ProcessRegistry::register(&display_name);
     // os_pid（会话 leader）与 stdin writer 入册：现有 kill 路径的 killpg
     // 由此覆盖 PTY 会话组；write_stdin 时代 writer 已就位。
-    crate::process_registry::ProcessRegistry::attach_pty_session(
-        proc_id,
-        handle.pid,
-        io.writer,
-    );
+    crate::process_registry::ProcessRegistry::attach_pty_session(proc_id, handle.pid, io.writer);
     let (done_tx, done_rx) = std::sync::mpsc::channel::<PumpOutcome>();
     let reader_tool_call_id = tool_call_id.to_string();
     let reader_seq = Arc::new(AtomicU64::new(0));
@@ -205,7 +204,9 @@ pub(crate) fn pty_exec(
             outcome.bytes,
             outcome.omitted,
             outcome.protocol_dropped,
-            exit_code.map(|code| code.to_string()).unwrap_or_else(|| "none".to_string()),
+            exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "none".to_string()),
         );
     }
     let total_tokens = qaqh_types::token::count_tokens(&cleaned);
@@ -305,8 +306,7 @@ fn pump_pty_output(
     let mut window_start: Option<std::time::Instant> = None;
     let mut saw_eof = false;
 
-    let mut flush_frame = |frame: &mut Vec<u8>,
-                           window_start: &mut Option<std::time::Instant>| {
+    let mut flush_frame = |frame: &mut Vec<u8>, window_start: &mut Option<std::time::Instant>| {
         if frame.is_empty() {
             return;
         }

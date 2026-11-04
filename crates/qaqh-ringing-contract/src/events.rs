@@ -1,27 +1,39 @@
 //! 单条会话 SSE 流的类型化事件词表。
 //!
-//! 一条流、一个游标(`epoch:seq`);消息、工具、交互用同一套事件表达,
-//! 不再有 control/conversation/tool 频道区分。
+//! 一条流、一个游标(`epoch:seq`);消息、工具、交互、执行会话用同一套
+//! 事件表达,不创建第二条进程 SSE(spec §6.1)。事件只表达业务状态迁移;
+//! 内部调度、授权检查与诊断数据不进入公共协议。
 
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
 use crate::fact::{
-    ActivityState, AssistantBlockKind, BlockId, ContentValue, InputId, InteractionDecision,
-    InteractionId, ToolCallId, ToolError, ToolMetrics, TurnId, TurnMode,
+    ActivityState, AssistantBlockKind, BlockId, ContentValue, ExecSessionId, InputId,
+    InteractionDecision, InteractionId, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId, TurnMode,
 };
 use crate::state::{
-    DriverState, InteractionView, SubagentView, TimelineEntry, ToolCallStatus, TurnOutcome,
+    DriverState, ExecSessionView, InteractionView, SubagentView, TimelineEntry, ToolCallState,
+    TurnOutcome, TurnPhase,
 };
 
-/// 工具实时输出流标识;无输出的工具不产生 output.delta 事件。
+/// 普通工具(无执行会话)实时输出流标识;无输出的工具不产生 output.delta 事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(rename_all = "snake_case")]
 pub enum OutputStream {
     Stdout,
     Stderr,
+}
+
+/// 执行会话输出块来源(spec §7.1):PTY 使用 terminal,不能假称还可区分两条流。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum ExecOutputSource {
+    Stdout,
+    Stderr,
+    Terminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -33,8 +45,8 @@ pub enum InteractionEndStatus {
     Cancelled,
 }
 
-/// 会话内业务变化。事件只表达业务状态迁移;内部调度、授权检查与
-/// 诊断数据不进入公共协议。
+/// 会话内业务变化。exec 事件与调用事件同流同水位;客户端不得靠事件顺序
+/// 推断关联,关联只按 call_id/turn_id/exec_session_id(spec §6.1)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -47,6 +59,12 @@ pub enum SessionEvent {
         turn_id: TurnId,
         input_id: Option<InputId>,
         mode: Option<TurnMode>,
+    },
+    /// 回合非终态 phase 迁移(waiting_user/cancelling/running);终态由
+    /// TurnEnded 表达,不发 phase=null 事件。
+    TurnPhaseChanged {
+        turn_id: TurnId,
+        phase: TurnPhase,
     },
     /// 回合终态:finished 或 interrupted 由 outcome 区分,不发两类事件。
     TurnEnded {
@@ -70,23 +88,27 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         args: Option<serde_json::Value>,
     },
-    /// 后端进入工具实际执行阶段;不代表执行成功。
-    ToolStarted {
+    /// 非终态工具调用状态迁移:running 的首次迁移就是执行开始,等待与取消
+    /// 也经此表达(spec §6.1;替代旧 tool_started)。
+    ToolStateChanged {
         call_id: ToolCallId,
-        tool_name: String,
+        turn_id: TurnId,
+        state: ToolCallState,
     },
-    /// 工具执行输出尾窗片段;按需区分 stdout/stderr。
+    /// 工具执行输出尾窗片段(无执行会话的普通工具);按需区分 stdout/stderr。
     ToolOutputDelta {
         call_id: ToolCallId,
         stream: OutputStream,
         text: String,
     },
+    /// 工具调用终态:outcome 类型层面不可携带 running;yielded 是成功返回。
     ToolFinished {
         call_id: ToolCallId,
-        status: ToolCallStatus,
+        outcome: ToolCallOutcome,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exec_session_id: Option<ExecSessionId>,
         output: Option<ContentValue>,
         output_truncated: bool,
-        error: Option<ToolError>,
         metrics: Option<ToolMetrics>,
         /// edit 类工具的结构化结果。
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -94,6 +116,27 @@ pub enum SessionEvent {
         /// 工具产生的结构化效果(owner 消费后随终态发布)。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         effects: Vec<crate::state::ToolEffectInfo>,
+    },
+    /// 执行会话建立;先于该会话任何输出。
+    ExecSessionStarted {
+        session: ExecSessionView,
+    },
+    /// 执行会话非终态迁移(含 stopping)。
+    ExecSessionStateChanged {
+        session: ExecSessionView,
+    },
+    /// 执行会话输出增量;追加语义,offset 控制去重(spec §6.3)。
+    ExecSessionOutputDelta {
+        exec_session_id: ExecSessionId,
+        start_offset: u64,
+        end_offset: u64,
+        source: ExecOutputSource,
+        text: String,
+    },
+    /// 执行会话终态;每个会话一次,含权威输出引用与完整性信息。
+    /// 之前必须完成已接受输出的发布;之后不再发布该会话的输出。
+    ExecSessionFinished {
+        session: ExecSessionView,
     },
     TimelineAppended {
         entry: TimelineEntry,
@@ -136,8 +179,10 @@ impl SessionEvent {
             } => current_turn_id.as_ref(),
             SessionEvent::TurnStarted { turn_id, .. }
             | SessionEvent::TurnEnded { turn_id, .. }
+            | SessionEvent::TurnPhaseChanged { turn_id, .. }
             | SessionEvent::MessageDelta { turn_id, .. }
-            | SessionEvent::ToolDeclared { turn_id, .. } => Some(turn_id),
+            | SessionEvent::ToolDeclared { turn_id, .. }
+            | SessionEvent::ToolStateChanged { turn_id, .. } => Some(turn_id),
             SessionEvent::ToolArgumentsDelta { turn_id, .. } => Some(turn_id),
             _ => None,
         }

@@ -60,6 +60,42 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
                 })
                 .map_err(QaqhError::message)
         }
+        SessionCommand::ExecSessionList(args) => {
+            let session_id = args.session_id;
+            let rows = service
+                .owners
+                .db()
+                .read_blocking(move |conn| {
+                    qaqh_session::db::store::exec_sessions_for_bootstrap(conn, &session_id)
+                })
+                .map_err(QaqhError::message)?;
+            let sessions = rows
+                .into_iter()
+                .map(qaqh_session::db::view::exec_session_view)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(QaqhError::message)?;
+            QaqhError::to_value(
+                "exec session list",
+                crate::ringing::service_methods::ExecSessionListResult { sessions },
+            )
+        }
+        SessionCommand::SessionTurn(args) => {
+            let turn_id = args.turn_id;
+            let missing_turn_id = turn_id.clone();
+            let snapshot = service
+                .owners
+                .db()
+                .read_blocking(move |conn| {
+                    qaqh_session::db::view::load_session_turn(conn, &args.session_id, &turn_id)
+                })
+                .map_err(QaqhError::message)?;
+            let Some(snapshot) = snapshot else {
+                return Err(QaqhError::message(format!(
+                    "session turn not found: {missing_turn_id}"
+                )));
+            };
+            QaqhError::to_value("session turn", snapshot)
+        }
         SessionCommand::SkillsListTools(_) => {
             Ok(json!(qaqh_workspace::runtime::process_all_tool_names()))
         }

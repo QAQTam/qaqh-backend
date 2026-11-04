@@ -162,10 +162,12 @@ fn parse_integer(raw: &str) -> Option<Value> {
 pub(crate) fn parse_integer_like(value: &Value) -> Option<Value> {
     match value {
         Value::String(raw) => parse_integer(raw),
-        Value::Number(number) => number
-            .as_u64()
-            .map(Value::from)
-            .or_else(|| number.as_f64().filter(|v| *v >= 0.0 && v.fract() == 0.0).map(|v| Value::from(v as u64))),
+        Value::Number(number) => number.as_u64().map(Value::from).or_else(|| {
+            number
+                .as_f64()
+                .filter(|v| *v >= 0.0 && v.fract() == 0.0)
+                .map(|v| Value::from(v as u64))
+        }),
         _ => None,
     }
 }

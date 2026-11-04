@@ -259,20 +259,12 @@ pub enum SessionRunStatus {
     /// 未加载 ≠ idle——前端不得把本状态渲染成「空闲」。
     #[default]
     NotRunning,
+    /// 统一活动词表(spec-exec-session-lifecycle §4.4):与 ActivityState
+    /// 同源;失败/中断记录在回合 outcome,不再用活动状态替代历史结果。
     Idle,
-    Working,
-    /// 等待工具授权（interaction kind = permission）。
-    WaitingPermission,
-    /// 等待用户回答 ask。
-    WaitingAsk,
-    /// 等待计划评审。
-    WaitingPlan,
-    /// 最近一个回合被取消（terminal = cancelled，或 interrupt reason =
-    /// cancel_before_seal）。
-    Canceled,
-    /// 最近一个回合失败或被非用户原因打断（terminal = failed，interrupt
-    /// reason = crash / restart / unknown_fact）。
-    Error,
+    Running,
+    WaitingUser,
+    Cancelling,
 }
 
 /// `session.list` 的条目 = [`SessionMeta`] + daemon 运行期附加字段（前端契约 **G2**）。

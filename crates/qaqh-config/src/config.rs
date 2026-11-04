@@ -67,7 +67,7 @@ impl Default for SubagentConfig {
             api_key: String::new(),
             max_tokens: 4096,
             timeout_secs: 120,
-            default_tools: vec!["read".into(), "exec".into()],
+            default_tools: vec!["read".into(), "exec_command".into()],
             max_depth: 1,
             message_in_flight_per_pair: 16,
             message_outbound_per_sender: 1024,
@@ -733,6 +733,18 @@ fn migrate_profile(
     (profile, migrated)
 }
 
+fn migrate_legacy_exec_tool_names(tools: &[String]) -> Vec<String> {
+    tools
+        .iter()
+        .map(|tool| match tool.as_str() {
+            "exec" => "exec_command",
+            "process" => "write_stdin",
+            _ => tool.as_str(),
+        })
+        .map(String::from)
+        .collect()
+}
+
 /// DeepSeek 账号额度 → 官方工具面开关的一次性迁移。
 /// 判据：`credential = deepseek_account`，且配置文件里**没有**显式写
 /// `[profiles.<name>.compat] official_web_tools`。命中则补 `true` 并触发一次写回，
@@ -1091,7 +1103,9 @@ impl Config {
                     // edit_file_v2→edit）旧配置持久化的
                     // 默认白名单仍指向旧名；加载时归一化为当前正式词汇表，
                     // 否则 apply_init 会静默剔除旧名，子代理丢失读文件能力。
-                    cfg.subagent.default_tools = tools
+                    let migrated_names = migrate_legacy_exec_tool_names(tools);
+                    needs_rewrite |= migrated_names.as_slice() != tools.as_slice();
+                    cfg.subagent.default_tools = migrated_names
                         .iter()
                         .map(|t| match t.as_str() {
                             "file" | "read_file" => "read",
@@ -1179,7 +1193,9 @@ falling back to 1 (read-only)"
                 cfg.session_idle_unload_secs = v;
             }
             cfg.tool_allowlist_enabled = pc.tool_allowlist_enabled.unwrap_or(false);
-            cfg.tool_allowlist = pc.tool_allowlist.clone().unwrap_or_default();
+            let persisted_tool_allowlist = pc.tool_allowlist.clone().unwrap_or_default();
+            cfg.tool_allowlist = migrate_legacy_exec_tool_names(&persisted_tool_allowlist);
+            needs_rewrite |= cfg.tool_allowlist != persisted_tool_allowlist;
 
             // ── Sandbox ──
             if let Some(ref sb) = pc.sandbox {
@@ -1213,6 +1229,23 @@ falling back to 1 (read-only)"
                     && is_plain(&s.api_key)
                 {
                     s.api_key = Some(CONFIG_MARKER.to_owned());
+                }
+                if let Some(ref mut s) = fresh.subagent {
+                    if let Some(ref mut tools) = s.default_tools {
+                        *tools = migrate_legacy_exec_tool_names(tools);
+                        *tools = tools
+                            .iter()
+                            .map(|tool| match tool.as_str() {
+                                "file" | "read_file" => "read",
+                                "edit_file_v2" => "edit",
+                                _ => tool,
+                            })
+                            .map(String::from)
+                            .collect();
+                    }
+                }
+                if let Some(ref mut tools) = fresh.tool_allowlist {
+                    *tools = migrate_legacy_exec_tool_names(tools);
                 }
                 // BYOK 迁移写回：把磁盘上的旧形状 profile（带 `endpoint` 预设键）
                 // 补成自述的六字段记录。此后 `[profiles.*]` 里不再有预设坐标，

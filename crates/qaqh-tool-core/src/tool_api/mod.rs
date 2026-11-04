@@ -53,7 +53,8 @@ pub mod typed;
 pub use args::{CommandArgs, OffsetLimit, PathArg, PatternArg};
 pub use capabilities::{Concurrency, ToolCapabilities};
 pub use context::{
-    AgentMode, CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
+    AgentMode, CancellationToken, ExecCommandRequest, ExecCommandResult, ExecSessionHost,
+    SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource, WriteStdinRequest,
 };
 pub use descriptor::{
     DescriptorError, Namespace, NativeTextRepresentation, OutputBudget, ToolDescriptor,

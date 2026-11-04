@@ -686,7 +686,7 @@ impl ToolManager {
                         }
                     }
                 }
-                "exec" => {
+                "exec_command" | "write_stdin" => {
                     // These mutate the workspace but don't have a single 'path' argument
                 }
                 _ => {}
@@ -1082,6 +1082,7 @@ mod tests {
                     cancellation: crate::tool_api::CancellationToken::new(),
                     progress: None,
                     exec_progress: None,
+                    exec_host: None,
                     official_web: None,
                     source: crate::tool_api::ToolCallSource::Model,
                 },

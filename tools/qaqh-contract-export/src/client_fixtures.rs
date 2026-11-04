@@ -58,6 +58,7 @@ fn write_bootstrap(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let bootstrap = SessionBootstrap {
         schema: qaqh_ringing::RINGING_SCHEMA.into(),
         version: qaqh_ringing::RINGING_V2_VERSION,
+        session_contract_revision: qaqh_ringing::SESSION_CONTRACT_REVISION.into(),
         server_epoch: "fixture-epoch".into(),
         session_id: session_id().as_str().to_owned(),
         state: qaqh_ringing_contract::SessionState {
@@ -71,6 +72,7 @@ fn write_bootstrap(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             tools: Vec::new(),
             interactions: Vec::new(),
             subagents: Vec::new(),
+            exec_sessions: Vec::new(),
             driver: Some(DriverState {
                 holder: None,
                 epoch: 4,

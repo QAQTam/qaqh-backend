@@ -258,8 +258,8 @@ pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>>
 /// （Read 类不入表；Write/Exec/Net 按语义列名）。
 pub const PLAN_BLOCKED: &[&str] = &[
     "edit",
-    "exec",
-    "process",
+    "exec_command",
+    "write_stdin",
     // Todo v3：write/update 写类受 plan 阻断；todo_list 是读，plan 模式
     // 需要查看任务清单，不放名单。
     "todo_update",

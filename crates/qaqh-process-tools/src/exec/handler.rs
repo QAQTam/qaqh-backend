@@ -97,7 +97,7 @@ fn exec_error(code: &str, message: impl Into<String>, hint: Option<&str>) -> Too
 }
 
 #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
-fn ensure_shell_available(shell: super::shell::Shell) -> Result<(), ToolExecutionError> {
+pub(crate) fn ensure_shell_available(shell: super::shell::Shell) -> Result<(), ToolExecutionError> {
     if shell_available(shell) {
         return Ok(());
     }
@@ -109,7 +109,7 @@ fn ensure_shell_available(shell: super::shell::Shell) -> Result<(), ToolExecutio
 }
 
 #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
-fn resolve_shell(
+pub(crate) fn resolve_shell(
     ctx: &ToolCallContext,
     requested: Option<&str>,
     fixed: Option<super::shell::Shell>,
@@ -339,6 +339,7 @@ fn exec_output_to_tool_result(output: &super::direct::ExecOutput, args: &Value) 
         status: output.status(),
         output: ToolOutputValue::Json(serde_json::to_value(output).unwrap_or_else(|_| json!({}))),
         error: output.error(),
+        call_outcome: None,
         model: ToolModelProjection {
             text: model_text.clone(),
             truncated: false,

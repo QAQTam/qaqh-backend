@@ -29,15 +29,15 @@ use std::sync::Arc;
 
 use qaqh_types::ToolResult;
 
-/// 命令输出（exec）的默认字符上限（StandardPolicy）。
+/// 执行会话输出的默认字符上限（StandardPolicy）。
 const EXEC_CHAR_LIMIT: usize = 8_000;
-/// 大内容工具（网络/图像/进程输出）的默认字符上限。
+/// 大内容工具（网络/图像输出）的默认字符上限。
 ///
 /// display 投影复用同一个上限（见 `tool_api::display::clamp_display_body`）：
 /// canonical display 会随 `ToolResult` 落进 `messages.jsonl`，不设限等于把完整
 /// 正文再持久化一份。
 pub(crate) const CONTENT_BEARING_CHAR_LIMIT: usize = 16_000;
-/// exec 内部 token 截断的默认上限（StandardPolicy；模型可显式传参覆盖）。
+/// 执行会话内部 token 截断的默认上限（StandardPolicy；模型可显式传参覆盖）。
 const EXEC_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 10_000;
 
 /// 工具结果折叠策略。
@@ -68,9 +68,9 @@ impl ToolResultFoldPolicy for StandardPolicy {
     fn limit_for(&self, tool_name: &str) -> Option<usize> {
         match tool_name {
             // 命令输出
-            "exec" => Some(EXEC_CHAR_LIMIT),
+            "exec_command" | "write_stdin" => Some(EXEC_CHAR_LIMIT),
             // 大内容
-            "read_image" | "web_fetch" | "process" => Some(CONTENT_BEARING_CHAR_LIMIT),
+            "read_image" | "web_fetch" => Some(CONTENT_BEARING_CHAR_LIMIT),
             // 其余工具（含 todo_write/todo_update/todo_list 等清单/收据/激活说明类）
             // 一律透传——与默认分支同义。曾经在此手列白名单，但名单与兜底 `None`
             // 行为完全相同，且一度混入已退役的 todo legacy 名、漏列现役名
@@ -182,7 +182,8 @@ mod tests {
         assert_eq!(p.limit_for("read"), None);
         assert_eq!(p.limit_for("edit"), None);
         assert_eq!(p.limit_for("skills"), None);
-        assert_eq!(p.limit_for("exec"), Some(EXEC_CHAR_LIMIT));
+        assert_eq!(p.limit_for("exec_command"), Some(EXEC_CHAR_LIMIT));
+        assert_eq!(p.limit_for("write_stdin"), Some(EXEC_CHAR_LIMIT));
         assert_eq!(p.limit_for("web_fetch"), Some(CONTENT_BEARING_CHAR_LIMIT));
         assert_eq!(p.limit_for("read_image"), Some(CONTENT_BEARING_CHAR_LIMIT));
         assert_eq!(p.limit_for("unknown_tool"), None);
@@ -192,7 +193,14 @@ mod tests {
     #[test]
     fn no_fold_policy_passes_everything_through() {
         let p = NoFoldPolicy;
-        for name in ["exec", "web_fetch", "grep", "read", "edit"] {
+        for name in [
+            "exec_command",
+            "write_stdin",
+            "web_fetch",
+            "grep",
+            "read",
+            "edit",
+        ] {
             assert_eq!(p.limit_for(name), None, "{name} must not be limited");
         }
         assert_eq!(p.exec_max_output_tokens(), None);
@@ -239,7 +247,7 @@ mod tests {
     fn exec_result_is_truncated_with_head_and_marker() {
         let body = "line of output\n".repeat(2_000); // ~34K chars > 8K cap
         let mut result = ok(&body);
-        apply("exec", &mut result);
+        apply("exec_command", &mut result);
         assert!(result.model_truncated());
         assert!(result.model_text().len() < body.len());
         assert!(result.model_text().starts_with("line of output\n"));
@@ -268,7 +276,7 @@ mod tests {
     fn short_exec_result_passes_through() {
         let body = "done in 12ms\n";
         let mut result = ok(body);
-        apply("exec", &mut result);
+        apply("exec_command", &mut result);
         assert_eq!(result.model_text(), body);
         assert!(!result.model_truncated());
     }
@@ -291,7 +299,7 @@ mod tests {
             .repeat(200); // ~19K chars < qaqh-types 24K 硬顶
         let mut result =
             ToolResult::error_with("no_match", error.clone(), true, Some("refine old".into()));
-        apply("exec", &mut result);
+        apply("exec_command", &mut result);
         assert_eq!(result.model_text(), error);
 
         let mut partial = ToolResult::partial("x\n".repeat(5_000));

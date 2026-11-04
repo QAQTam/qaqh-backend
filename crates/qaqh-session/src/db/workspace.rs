@@ -56,6 +56,9 @@ pub fn list(conn: &Connection) -> rusqlite::Result<Vec<WorkspaceMeta>> {
 pub fn list_entries(conn: &Connection) -> rusqlite::Result<Vec<WorkspaceEntry>> {
     Ok(list(conn)?
         .into_iter()
+        .filter(|workspace| {
+            !qaqh_types::platform::is_managed_session_workspace(Path::new(&workspace.path))
+        })
         .map(|workspace| {
             let missing_dir = !Path::new(&workspace.path).is_dir();
             workspace.entry(missing_dir)

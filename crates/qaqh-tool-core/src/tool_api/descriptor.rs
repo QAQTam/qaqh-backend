@@ -296,7 +296,6 @@ impl ToolMeta {
         self.native_text = Some(representation);
         self
     }
-
 }
 
 impl From<ToolMeta> for ToolDescriptor {
@@ -349,9 +348,18 @@ impl ToolDescriptor {
                 || native.canonical_field.trim().is_empty()
                 || !native.canonical_defaults.is_object()
                 || (!native.custom_text && !native.function_text_field)
-                || native.canonical_defaults.get(&native.canonical_field).is_some()
-                || native.preview_description.as_ref().is_some_and(|text| text.trim().is_empty())
-                || native.preview_parameters.as_ref().is_some_and(|schema| !schema.is_object())
+                || native
+                    .canonical_defaults
+                    .get(&native.canonical_field)
+                    .is_some()
+                || native
+                    .preview_description
+                    .as_ref()
+                    .is_some_and(|text| text.trim().is_empty())
+                || native
+                    .preview_parameters
+                    .as_ref()
+                    .is_some_and(|schema| !schema.is_object())
                 || native.preview_description.is_some() != native.preview_parameters.is_some())
         {
             return Err(DescriptorError::InvalidNativeTextRepresentation);
@@ -384,7 +392,9 @@ pub enum DescriptorError {
 impl fmt::Display for DescriptorError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidNativeTextRepresentation => f.write_str("invalid native patch representation"),
+            Self::InvalidNativeTextRepresentation => {
+                f.write_str("invalid native patch representation")
+            }
             Self::InvalidName { reason } => write!(f, "非法工具名: {reason}"),
             Self::EmptyDescription => f.write_str("工具描述不得为空"),
             Self::SchemaNotObject { field } => write!(f, "{field} 必须是 JSON Schema object"),
@@ -513,7 +523,10 @@ mod tests {
         ));
         assert_eq!(d.validate(), Ok(()));
         d.source = ToolSource::Mcp;
-        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativeTextRepresentation));
+        assert_eq!(
+            d.validate(),
+            Err(DescriptorError::InvalidNativeTextRepresentation)
+        );
     }
 
     #[test]
@@ -526,6 +539,9 @@ mod tests {
             true,
             false,
         ));
-        assert_eq!(d.validate(), Err(DescriptorError::InvalidNativeTextRepresentation));
+        assert_eq!(
+            d.validate(),
+            Err(DescriptorError::InvalidNativeTextRepresentation)
+        );
     }
 }

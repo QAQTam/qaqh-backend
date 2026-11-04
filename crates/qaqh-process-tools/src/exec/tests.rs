@@ -66,6 +66,7 @@ fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::Tool
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
         exec_progress: None,
+        exec_host: None,
         official_web: None,
         source: crate::tool_api::ToolCallSource::Model,
     }
@@ -1301,6 +1302,7 @@ fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         },
@@ -1340,8 +1342,8 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
         timed_out: false,
         cancelled: false,
         process_id: None,
-            output_omitted_bytes: 0,
-            protocol_dropped_bytes: 0,
+        output_omitted_bytes: 0,
+        protocol_dropped_bytes: 0,
     };
     assert_eq!(success.status(), crate::ToolStatus::Ok);
     assert!(success.error().is_none());
@@ -1357,8 +1359,8 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
         timed_out: false,
         cancelled: false,
         process_id: None,
-            output_omitted_bytes: 0,
-            protocol_dropped_bytes: 0,
+        output_omitted_bytes: 0,
+        protocol_dropped_bytes: 0,
     };
     assert_eq!(failed.status(), crate::ToolStatus::Error);
     assert_eq!(
@@ -1410,9 +1412,7 @@ fn exec_registered_alone_with_shell_param() {
         "command is serde(default); required set comes from the type"
     );
     assert!(
-        exec.function
-            .description
-            .contains("exit_code/output"),
+        exec.function.description.contains("exit_code/output"),
         "desc: {}",
         exec.function.description
     );
@@ -1624,8 +1624,16 @@ fn tty_exec_returns_output_and_exit_code() {
     )
     .expect("tty exec");
     assert_eq!(output.exit_code, Some(0), "output: {}", output.output);
-    assert!(output.stdout.contains("pty-tty-ok"), "stdout: {:?}", output.stdout);
-    assert!(output.stderr.is_empty(), "PTY 合流后 stderr 恒空: {:?}", output.stderr);
+    assert!(
+        output.stdout.contains("pty-tty-ok"),
+        "stdout: {:?}",
+        output.stdout
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "PTY 合流后 stderr 恒空: {:?}",
+        output.stderr
+    );
     assert!(!output.truncated);
     assert!(!output.timed_out);
 }
@@ -1778,12 +1786,13 @@ fn tty_exec_streams_raw_ansi_to_progress_but_strips_it_for_the_model() {
 #[cfg(unix)]
 #[test]
 fn tty_flood_reports_omitted_bytes_instead_of_silent_truncation() {
-    if !shell_available(Shell::Bash) || std::process::Command::new("python3")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-        == false
+    if !shell_available(Shell::Bash)
+        || std::process::Command::new("python3")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            == false
     {
         return;
     }

@@ -1,6 +1,6 @@
 //! QAQ-Harness 进程工具组（P2 crate split from qaqh-workspace）。
 //!
-//! 承载 exec（方案 A 独占命令入口）与 process_registry / process_inspect。
+//! 承载执行会话、共享进程控制原语与旧执行器内部实现。
 //! 依赖 qaqh-sandbox（沙箱执行）、qaqh-policy、qaqh-file-tools（exec 结果
 //! 落 journal）、qaqh-tool-core（SDK）。
 //!
@@ -12,8 +12,10 @@
 //!   （投影实现留守门面 `display::project_process`）。
 
 pub mod exec;
+pub mod exec_session;
 pub mod hooks;
-pub mod process_inspect;
+#[cfg(test)]
+mod process_inspect;
 pub mod process_registry;
 
 // ── 根 re-export：让搬移后的模块内 `crate::x` 路径保持可解析 ──

@@ -14,7 +14,8 @@ pub mod head_tail;
 pub mod pipe;
 pub mod pty_exec;
 pub mod redirect_guard;
-pub mod register;
+#[cfg(test)]
+pub(crate) mod register;
 pub mod shell;
 pub mod truncate;
 
@@ -22,7 +23,8 @@ pub mod truncate;
 #[cfg(windows)]
 pub(crate) mod sbx_bypass;
 
-pub use register::register;
+#[cfg(test)]
+pub(crate) use register::register;
 pub use shell::{bootstrap, register_shell};
 
 #[cfg(test)]

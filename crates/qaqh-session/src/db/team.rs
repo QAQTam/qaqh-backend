@@ -563,11 +563,10 @@ pub fn board_channels(
 
 pub fn board_thread_insert(conn: &Connection, thread: &BoardThreadRow) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO board_threads (thread_id, root_session_id, channel_id, title, task_id, created_by, created_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO board_threads (thread_id, channel_id, title, task_id, created_by, created_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             thread.thread_id,
-            thread.root_session_id,
             thread.channel_id,
             thread.title,
             thread.task_id,
@@ -583,10 +582,12 @@ pub fn board_threads(
     root_session_id: &str,
 ) -> rusqlite::Result<Vec<BoardThreadRow>> {
     let mut stmt = conn.prepare(
-        "SELECT t.thread_id, t.root_session_id, t.channel_id, t.title, t.task_id,
+        "SELECT t.thread_id, c.root_session_id, t.channel_id, t.title, t.task_id,
                 t.created_by, t.created_at_ms,
                 (SELECT COUNT(*) FROM board_posts p WHERE p.thread_id = t.thread_id) AS post_count
-         FROM board_threads t WHERE t.root_session_id = ?1
+         FROM board_threads t
+         JOIN board_channels c ON c.channel_id = t.channel_id
+         WHERE c.root_session_id = ?1
          ORDER BY t.created_at_ms, t.thread_id",
     )?;
     stmt.query_map([root_session_id], |row| {

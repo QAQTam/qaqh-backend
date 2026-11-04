@@ -8,7 +8,6 @@
 //! 工具面），无需依赖 `qaqh-workspace` 门面。门面经 re-export 保持
 //! `qaqh_workspace::tool_api::*` 等既有路径兼容。
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #[cfg(feature = "native-tool-plan")]
 pub mod model_tool_plan;
@@ -18,14 +17,13 @@ pub mod tool_capabilities;
 
 pub use tool_api::{
     Concurrency, DescriptorError, ErasedTool, FatalToolError, Namespace, NativeTextRepresentation,
-    OfficialHit, OfficialPage, OfficialWebBackend, OfficialWebTools,
-    OutputBudget, PathOp, ProgressSink, ProgressStream,
-    SandboxMode, SandboxSpec, ToolBody, ToolCallContext, ToolCallSource, ToolCapabilities,
-    ToolContentBlock, ToolDescriptor, ToolDisplay, ToolDisplayFn, ToolDisplayOutcome, ToolError,
-    ToolErrorCode, ToolErrorCodeError, ToolErrorKind, ToolExecutionError, ToolExposure, ToolHeader,
-    ToolMeta, ToolMetrics, ToolModelProjection, ToolName, ToolOutcome, ToolOutputValue,
-    ToolProgress, ToolProjection, ToolSource, ToolStatus, ToolTerminalState, TypedTool,
-    TypedToolAdapter, map_tool_result,
+    OfficialHit, OfficialPage, OfficialWebBackend, OfficialWebTools, OutputBudget, PathOp,
+    ProgressSink, ProgressStream, SandboxMode, SandboxSpec, ToolBody, ToolCallContext,
+    ToolCallSource, ToolCapabilities, ToolContentBlock, ToolDescriptor, ToolDisplay, ToolDisplayFn,
+    ToolDisplayOutcome, ToolError, ToolErrorCode, ToolErrorCodeError, ToolErrorKind,
+    ToolExecutionError, ToolExposure, ToolHeader, ToolMeta, ToolMetrics, ToolModelProjection,
+    ToolName, ToolOutcome, ToolOutputValue, ToolProgress, ToolProjection, ToolSource, ToolStatus,
+    ToolTerminalState, TypedTool, TypedToolAdapter, map_tool_result,
 };
 pub use tool_capabilities::builtin_capabilities;
 
@@ -94,7 +92,7 @@ impl JsonArgs for serde_json::Value {
     }
 }
 
-// ── exec 进度通道（有界、有损；09-18 展示契约 §5）───────────────────────
+// ── exec 进度出口（非阻塞；09-18 展示契约 §5）────────────────────────
 
 /// exec 子进程输出进度帧。有界 channel 有意丢弃超限帧，保留跨流交错观测
 /// 顺序，流内顺序精确。
@@ -143,15 +141,25 @@ impl ExecOutputStream {
     }
 }
 
-/// Bounded, lossy progress sender. Pipe readers must never wait for a slow UI.
+/// Nonblocking progress sender. Pipe readers must never wait for a slow UI.
 #[derive(Clone)]
 pub struct ExecProgressSender {
-    tx: std::sync::mpsc::SyncSender<ExecProgressEvent>,
+    sink: std::sync::Arc<dyn Fn(ExecProgressEvent) -> bool + Send + Sync>,
     emitted_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
     dropped_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl ExecProgressSender {
+    /// Host-owned progress destination; return false when the frame is dropped.
+    /// The sink must enqueue without waiting for the UI or performing I/O.
+    pub fn with_sink(sink: impl Fn(ExecProgressEvent) -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            sink: std::sync::Arc::new(sink),
+            emitted_bytes: Default::default(),
+            dropped_bytes: Default::default(),
+        }
+    }
+
     pub fn try_send(&self, mut event: ExecProgressEvent) {
         let bytes = event.chunk.len() as u64;
         let emitted = self
@@ -162,8 +170,8 @@ impl ExecProgressSender {
             + self
                 .dropped_bytes
                 .load(std::sync::atomic::Ordering::Relaxed);
-        if self.tx.try_send(event).is_err() {
-            // 通道满：这批字节未被消费，从 emitted 挪到 dropped（总量口径不变）。
+        if !(self.sink)(event) {
+            // 出口拒收：从 emitted 挪到 dropped（总量口径不变）。
             self.emitted_bytes
                 .fetch_sub(bytes, std::sync::atomic::Ordering::Relaxed);
             self.dropped_bytes
@@ -187,7 +195,7 @@ impl ExecProgressSender {
 
 impl std::fmt::Debug for ExecProgressSender {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // 手动实现：`ToolCallContext` derive Debug，而内部 SyncSender 不 Debug。
+        // 手动实现：`ToolCallContext` derive Debug，进度出口不实现 Debug。
         f.debug_struct("ExecProgressSender")
             .field("dropped_bytes", &self.dropped_bytes())
             .finish_non_exhaustive()
@@ -201,14 +209,8 @@ pub fn bounded_exec_progress_channel() -> (
     std::sync::mpsc::Receiver<ExecProgressEvent>,
 ) {
     let (tx, rx) = std::sync::mpsc::sync_channel(EXEC_PROGRESS_CHANNEL_CAPACITY);
-    let dropped_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-    let emitted_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     (
-        ExecProgressSender {
-            tx,
-            emitted_bytes,
-            dropped_bytes,
-        },
+        ExecProgressSender::with_sink(move |event| tx.try_send(event).is_ok()),
         rx,
     )
 }

@@ -18,7 +18,6 @@ pub fn content_hash(content: &str) -> String {
     hex::encode(Sha256::digest(content.as_bytes()))
 }
 
-
 /// Write through a sibling temporary file, so a failed write never leaves a partially
 /// truncated destination. Rename is atomic on supported filesystems.
 pub fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
@@ -54,6 +53,7 @@ fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{

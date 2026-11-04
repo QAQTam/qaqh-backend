@@ -310,10 +310,7 @@ pub fn adapt_text_input(
     adapter: &TextInputAdapter,
 ) -> Result<Value, ToolPlanError> {
     let text = match (&adapter.source, payload) {
-        (
-            TextPayloadSource::FunctionField { field },
-            NativeToolPayload::JsonArguments(value),
-        ) => {
+        (TextPayloadSource::FunctionField { field }, NativeToolPayload::JsonArguments(value)) => {
             let object = value.as_object().ok_or(ToolPlanError::InvalidPayload)?;
             if object.len() != 1 {
                 return Err(ToolPlanError::InvalidPayload);
@@ -332,8 +329,7 @@ pub fn adapt_text_input(
         .as_object()
         .cloned()
         .ok_or(ToolPlanError::InvalidAdapter)?;
-    if adapter.canonical_field.trim().is_empty()
-        || canonical.contains_key(&adapter.canonical_field)
+    if adapter.canonical_field.trim().is_empty() || canonical.contains_key(&adapter.canonical_field)
     {
         return Err(ToolPlanError::InvalidAdapter);
     }
@@ -388,9 +384,7 @@ fn validate_entry(entry: &ModelToolEntry) -> Result<(), ToolPlanError> {
         ) if !field.trim().is_empty()
             && !canonical_field.trim().is_empty()
             && canonical_defaults.is_object()
-            && canonical_defaults
-                .get(canonical_field)
-                .is_none() =>
+            && canonical_defaults.get(canonical_field).is_none() =>
         {
             Ok(())
         }
@@ -473,7 +467,9 @@ mod tests {
             Some("functions"),
             "apply_patch",
             "apply_patch",
-            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
+            InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+            ),
         );
         let preview = entry(
             ModelToolKind::Function,
@@ -514,7 +510,9 @@ mod tests {
             Some("functions"),
             "apply_patch",
             "apply_patch",
-            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
+            InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+            ),
         );
         let function = entry(
             ModelToolKind::Function,
@@ -551,7 +549,9 @@ mod tests {
             None,
             "apply_patch",
             "apply_patch",
-            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
+            InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+            ),
         );
         let preview = entry(
             ModelToolKind::Function,
@@ -612,7 +612,9 @@ mod tests {
             None,
             "apply_patch",
             "delete",
-            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
+            InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+            ),
         );
         assert_eq!(
             ModelToolPlan::new("v1", "p", vec![custom.clone()]).unwrap_err(),
@@ -672,8 +674,7 @@ mod tests {
             "patch_text",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch")
-                    .with_defaults(json!({"dry_run": false})),
+                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
             ),
         );
         let function = entry(
@@ -770,7 +771,9 @@ mod tests {
             None,
             "apply_patch",
             "apply_patch",
-            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
+            InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+            ),
         );
         let preview = entry(
             ModelToolKind::Function,
@@ -862,7 +865,9 @@ mod tests {
             None,
             "apply_patch",
             "apply_patch",
-            InputAdapter::TextInput(TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false}))),
+            InputAdapter::TextInput(
+                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+            ),
         );
         let plan = ModelToolPlan::new("v1", "p", vec![custom.clone()]).expect("plan");
         let call = plan

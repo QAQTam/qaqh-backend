@@ -1,5 +1,4 @@
-
-#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(not(test), deny(unsafe_code))]
 pub mod config;
 pub mod dto;
 pub mod error;

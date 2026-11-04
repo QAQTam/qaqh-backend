@@ -52,6 +52,22 @@ pub(crate) async fn handle_open_v2(
             "unsupported Ringing v2 schema/version",
         );
     }
+    // 契约代际预检(spec §11):旧客户端在 open 阶段明确失败,不进入半兼容消费。
+    if request.command_contract_revision != qaqh_ringing::COMMAND_CONTRACT_REVISION
+        || request.session_contract_revision != qaqh_ringing::SESSION_CONTRACT_REVISION
+    {
+        return api_error_response(
+            StatusCode::UPGRADE_REQUIRED,
+            "unsupported_contract_revision",
+            &format!(
+                "client expects command/session revision {}/{}; daemon provides {}/{}",
+                request.command_contract_revision,
+                request.session_contract_revision,
+                qaqh_ringing::COMMAND_CONTRACT_REVISION,
+                qaqh_ringing::SESSION_CONTRACT_REVISION,
+            ),
+        );
+    }
     let client_session_id = random_hex();
     // 身份由 token 反推：device 的 lease 以 `device_id` 派生身份登记，客户端自报的
     // `client_instance_id` 降级为纯诊断（不参与任何信任判定）。admin 维持旧行为。
@@ -81,7 +97,9 @@ pub(crate) async fn handle_open_v2(
             pairing: true,
         },
         // B07:命令目录代际随握手下发,客户端在发命令前即可校验兼容性。
+        // spec §11:读模型/事件词表代际同批下发,客户端严格校验。
         command_contract_revision: qaqh_ringing::COMMAND_CONTRACT_REVISION.into(),
+        session_contract_revision: qaqh_ringing::SESSION_CONTRACT_REVISION.into(),
     };
     json_response(StatusCode::OK, &response)
 }
@@ -174,6 +192,7 @@ pub(crate) async fn handle_bootstrap_v2(
     let response = SessionBootstrap {
         schema: RINGING_SCHEMA.into(),
         version: RINGING_V2_VERSION,
+        session_contract_revision: qaqh_ringing::SESSION_CONTRACT_REVISION.into(),
         server_epoch: state.epoch.clone(),
         session_id: session_id.clone(),
         state: snapshot,
@@ -231,6 +250,9 @@ pub(crate) async fn handle_team_snapshot_v2(
             }
             Ok(qaqh_session::owner::SessionRunState::Waiting) => {
                 qaqh_ringing_contract::team::TeamAgentStatus::WaitingUser
+            }
+            Ok(qaqh_session::owner::SessionRunState::Cancelling) => {
+                qaqh_ringing_contract::team::TeamAgentStatus::Running
             }
             Ok(qaqh_session::owner::SessionRunState::Idle) => {
                 qaqh_ringing_contract::team::TeamAgentStatus::Running
@@ -956,56 +978,4 @@ pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         serde_json::to_vec(value).unwrap_or_default(),
     )
         .into_response()
-}
-
-// ── exec 会话生命周期（前端后台进程面板）───────────────────────────────
-//
-// codex 没有这一层：它的哲学是「长驻 = 存活 session + write_stdin 轮询」，
-// 全在模型侧。qaqh 的 backgrounded 移交（background_after_secs）需要给
-// 前端一个**用户可直接操作**的面：列出在册进程 + 主动 kill。数据源是
-// ProcessRegistry（owner 校验、墓碑、终态收敛都在那一层做过了）；
-// 鉴权面沿用 v2 lease（Bearer 中间件已在上层解析身份）。
-// 注：当前不做跨 lease 的 owner 过滤（本 daemon 单用户模型）——若未来
-// 多租户接入，先在 list/kill 加 owner 断言再放行。
-
-/// `GET /ringing/v2/exec-sessions` — 在册进程全量快照（含后台移交的
-/// exec 与 PTY 会话；条目终态驱逐后消失，墓碑只服务按 id 对账）。
-pub(crate) async fn handle_exec_sessions_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    if require_v2_lease(&state, &headers).is_none() {
-        return lease_required_v2();
-    }
-    let sessions = qaqh_process_tools::process_registry::ProcessRegistry::list_sessions();
-    json_response(StatusCode::OK, &serde_json::json!({ "sessions": sessions }))
-}
-
-/// `POST /ringing/v2/exec-sessions/{id}/kill` — 用户主动终止。
-/// 语义与 `process kill` 完全一致（整组 SIGKILL / taskkill /T，墓碑路径
-/// 按 os_pid 尽力清残留），回复如实区分「已清理」与「无可清理」。
-pub(crate) async fn handle_exec_session_kill(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(session_id): Path<u32>,
-) -> Response {
-    if require_v2_lease(&state, &headers).is_none() {
-        return lease_required_v2();
-    }
-    use qaqh_process_tools::process_registry::KillOutcome;
-    match qaqh_process_tools::process_registry::ProcessRegistry::kill(session_id) {
-        KillOutcome::Killed | KillOutcome::TombstoneCleaned => json_response(
-            StatusCode::OK,
-            &serde_json::json!({ "id": session_id, "killed": true }),
-        ),
-        KillOutcome::NoOsPid => json_response(
-            StatusCode::OK,
-            &serde_json::json!({ "id": session_id, "killed": false, "reason": "no_os_pid" }),
-        ),
-        KillOutcome::NotFound => api_error_response(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            &format!("exec session {session_id} not found"),
-        ),
-    }
 }

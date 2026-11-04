@@ -227,10 +227,7 @@ impl Shell {
                 .map(String::as_str)
                 .or(resolved)
                 .unwrap_or("bash"),
-            Shell::Zsh => registered
-                .map(String::as_str)
-                .or(resolved)
-                .unwrap_or("zsh"),
+            Shell::Zsh => registered.map(String::as_str).or(resolved).unwrap_or("zsh"),
             Shell::Sh => resolved.unwrap_or("sh"),
             Shell::PowerShell => registered
                 .map(String::as_str)

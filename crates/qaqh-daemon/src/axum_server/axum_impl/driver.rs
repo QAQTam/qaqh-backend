@@ -68,10 +68,13 @@ impl DriverSeats {
             },
             Some(seat) if stale_holder == Some(seat.holder.as_str()) => {
                 let epoch = seat.epoch + 1;
-                seats.insert(session_id.to_string(), Seat {
-                    holder: caller.to_string(),
-                    epoch,
-                });
+                seats.insert(
+                    session_id.to_string(),
+                    Seat {
+                        holder: caller.to_string(),
+                        epoch,
+                    },
+                );
                 DriverVerdict {
                     accepted: true,
                     holder: Some(caller.to_string()),
@@ -87,10 +90,13 @@ impl DriverSeats {
             },
             None => {
                 let epoch = 1;
-                seats.insert(session_id.to_string(), Seat {
-                    holder: caller.to_string(),
-                    epoch,
-                });
+                seats.insert(
+                    session_id.to_string(),
+                    Seat {
+                        holder: caller.to_string(),
+                        epoch,
+                    },
+                );
                 DriverVerdict {
                     accepted: true,
                     holder: Some(caller.to_string()),

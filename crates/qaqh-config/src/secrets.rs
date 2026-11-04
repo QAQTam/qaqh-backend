@@ -359,11 +359,7 @@ impl SecretStore {
     fn load_named_slot(&self, section: &str, name: &str) -> Option<String> {
         let data = std::fs::read_to_string(&self.path).ok()?;
         let doc: toml::Value = toml::from_str(&data).ok()?;
-        let raw = doc
-            .get("secrets")?
-            .get(section)?
-            .get(name)?
-            .as_str()?;
+        let raw = doc.get("secrets")?.get(section)?.get(name)?.as_str()?;
         decrypt(raw).ok()
     }
 
@@ -565,6 +561,7 @@ fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
@@ -607,6 +604,7 @@ pub fn unprotect(cipher: &str) -> Result<Vec<u8>, String> {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn encrypt(plain: &[u8]) -> Result<String, String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
@@ -637,6 +635,7 @@ fn encrypt(plain: &[u8]) -> Result<String, String> {
 }
 
 #[cfg(windows)]
+#[allow(unsafe_code)]
 fn decrypt(raw: &str) -> Result<String, String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};

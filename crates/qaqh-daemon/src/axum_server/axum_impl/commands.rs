@@ -125,6 +125,46 @@ pub(crate) async fn handle_command(
             );
         }
     }
+    if let CommandTarget::ExecSession { id } = &envelope.target {
+        let owner_session_id = match state.service.exec_session_owner(id) {
+            Ok(Some(owner_session_id)) => owner_session_id,
+            Ok(None) => {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    &super::command::reject_ack(
+                        envelope.command_id.clone(),
+                        "exec_session_not_found",
+                        "execution session was not found".into(),
+                    ),
+                );
+            }
+            Err(error) => {
+                return fail_response(
+                    &state,
+                    envelope.command_id.clone(),
+                    StatusCode::BAD_GATEWAY,
+                    "operation_failed",
+                    error,
+                );
+            }
+        };
+        if !identity.is_admin()
+            && !state
+                .leases
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .owns_session(&client_session, &owner_session_id)
+        {
+            return json_response(
+                StatusCode::FORBIDDEN,
+                &super::command::reject_ack(
+                    envelope.command_id.clone(),
+                    "forbidden_not_owner",
+                    "lease does not own the execution session's conversation".into(),
+                ),
+            );
+        }
+    }
 
     // 幂等指纹：target + command + precondition 的规范化摘要（§8.5）。
     let fingerprint = super::command::command_fingerprint(&envelope);
@@ -197,6 +237,8 @@ pub(crate) async fn handle_command(
             | RingingCommand::DiagnosticsMemoryStop {}
             | RingingCommand::DriverClaim { .. }
             | RingingCommand::DriverRelease { .. }
+            | RingingCommand::ExecSessionInterrupt {}
+            | RingingCommand::ExecSessionTerminate {}
     ) {
         let (status, ack) = super::execute_command(&state, &headers, &identity, envelope).await;
         return json_response(status, &ack);
@@ -278,200 +320,242 @@ async fn dispatch(
     // 同步操作直接 completed（§8.4）：回执带 typed result 与资源 revision。
     // 错误保留 QaqhError 原型——Conflict（目录/会话修订 CAS）要在收口处映射
     // 409，不能在这里 to_string 掉变体、把并发修订伪装成 502 operation_failed。
-    let outcome: Result<(serde_json::Value, Option<u64>), qaqh_runtime::QaqhError> = match &envelope.command {
-        RingingCommand::SessionCreate {
-            cwd,
-            title,
-            profile,
-            effort,
-            model_selection,
-            tool_mode,
-            custom_tools,
-        } => {
-            let created = match service.create_session_command(
-                cwd.clone(),
-                title.clone(),
-                profile.clone(),
-                effort.clone(),
-                model_selection.clone(),
-                tool_mode.clone(),
-                custom_tools.clone(),
-            ) {
-                Ok(created) => created,
-                Err(error) => {
+    let outcome: Result<(serde_json::Value, Option<u64>), qaqh_runtime::QaqhError> =
+        match &envelope.command {
+            RingingCommand::SessionCreate {
+                cwd,
+                title,
+                profile,
+                effort,
+                model_selection,
+                tool_mode,
+                custom_tools,
+            } => {
+                let created = match service.create_session_command(
+                    cwd.clone(),
+                    title.clone(),
+                    profile.clone(),
+                    effort.clone(),
+                    model_selection.clone(),
+                    tool_mode.clone(),
+                    custom_tools.clone(),
+                ) {
+                    Ok(created) => created,
+                    Err(error) => {
+                        return fail_response(
+                            &state,
+                            command_id,
+                            StatusCode::BAD_GATEWAY,
+                            "operation_failed",
+                            error.to_string(),
+                        );
+                    }
+                };
+                let attached = state
+                    .leases
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .attach_session(client_session, &created.session_id);
+                if !attached {
                     return fail_response(
                         &state,
                         command_id,
-                        StatusCode::BAD_GATEWAY,
-                        "operation_failed",
-                        error.to_string(),
+                        StatusCode::UNAUTHORIZED,
+                        "lease_required",
+                        "lease is not active",
                     );
                 }
-            };
-            let attached = state
-                .leases
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .attach_session(client_session, &created.session_id);
-            if !attached {
-                return fail_response(
-                    &state,
-                    command_id,
-                    StatusCode::UNAUTHORIZED,
-                    "lease_required",
-                    "lease is not active",
-                );
+                match serde_json::to_value(created) {
+                    Ok(result) => Ok((result, None)),
+                    Err(error) => Err(qaqh_runtime::QaqhError::message(format!(
+                        "serialize session.create result: {error}"
+                    ))),
+                }
             }
-            match serde_json::to_value(created) {
-                Ok(result) => Ok((result, None)),
-                Err(error) => Err(qaqh_runtime::QaqhError::message(format!(
-                    "serialize session.create result: {error}"
-                ))),
-            }
-        }
-        RingingCommand::SessionSettingsPatch { patch } => {
-            let CommandTarget::Session { session_id } = &envelope.target else {
-                return fail_response(
-                    &state,
-                    command_id,
-                    StatusCode::BAD_REQUEST,
-                    "target_mismatch",
-                    "session.settings.patch requires a session target",
-                );
-            };
-            let revision = envelope
-                .precondition("settings_revision")
-                .expect("validated settings revision precondition");
-            match service.patch_session_settings(session_id, patch.clone(), revision) {
-                Ok(revision) => Ok((json!({ "settings_revision": revision }), Some(revision))),
-                Err(qaqh_runtime::QaqhError::Conflict { message }) => {
+            RingingCommand::SessionSettingsPatch { patch } => {
+                let CommandTarget::Session { session_id } = &envelope.target else {
                     return fail_response(
                         &state,
                         command_id,
-                        StatusCode::CONFLICT,
-                        "settings_revision_conflict",
-                        message,
+                        StatusCode::BAD_REQUEST,
+                        "target_mismatch",
+                        "session.settings.patch requires a session target",
                     );
+                };
+                let revision = envelope
+                    .precondition("settings_revision")
+                    .expect("validated settings revision precondition");
+                match service.patch_session_settings(session_id, patch.clone(), revision) {
+                    Ok(revision) => Ok((json!({ "settings_revision": revision }), Some(revision))),
+                    Err(qaqh_runtime::QaqhError::Conflict { message }) => {
+                        return fail_response(
+                            &state,
+                            command_id,
+                            StatusCode::CONFLICT,
+                            "settings_revision_conflict",
+                            message,
+                        );
+                    }
+                    Err(error) => Err(error),
                 }
-                Err(error) => Err(error),
             }
-        }
-        RingingCommand::ProviderList { .. } => service
-            .provider_catalog()
-            .map(|value| (value, None)),
-        RingingCommand::ProviderUpsert { id, provider } => service
-            .provider_upsert(id, provider, expected_revision_from(&envelope))
-            .map(|value| {
-                let revision = catalog_revision(&value);
-                (value, revision)
-            }),
-        RingingCommand::ProviderDelete { id } => service
-            .provider_delete(id, expected_revision_from(&envelope))
-            .map(|value| {
-                let revision = catalog_revision(&value);
-                (value, revision)
-            }),
-        RingingCommand::ProviderModelUpsert {
-            provider_id,
-            model_id,
-            model,
-        } => service
-            .provider_model_upsert(
+            RingingCommand::ProviderList { .. } => {
+                service.provider_catalog().map(|value| (value, None))
+            }
+            RingingCommand::ExecSessionInterrupt {} | RingingCommand::ExecSessionTerminate {} => {
+                let CommandTarget::ExecSession { id } = &envelope.target else {
+                    return fail_response(
+                        &state,
+                        command_id,
+                        StatusCode::BAD_REQUEST,
+                        "target_mismatch",
+                        "exec session stop commands require an execution-session target",
+                    );
+                };
+                let owner_session_id = match service.exec_session_owner(id) {
+                    Ok(Some(owner_session_id)) => owner_session_id,
+                    Ok(None) => {
+                        return fail_response(
+                            &state,
+                            command_id,
+                            StatusCode::NOT_FOUND,
+                            "exec_session_not_found",
+                            "execution session was not found",
+                        );
+                    }
+                    Err(error) => {
+                        return fail_response(
+                            &state,
+                            command_id,
+                            StatusCode::BAD_GATEWAY,
+                            "operation_failed",
+                            error,
+                        );
+                    }
+                };
+                let reason = match &envelope.command {
+                    RingingCommand::ExecSessionInterrupt {} => {
+                        qaqh_ringing_contract::state::ExecStopReason::Interrupt
+                    }
+                    RingingCommand::ExecSessionTerminate {} => {
+                        qaqh_ringing_contract::state::ExecStopReason::Terminate
+                    }
+                    _ => unreachable!(),
+                };
+                service
+                    .stop_exec_session(&owner_session_id, id, reason)
+                    .map(|status| (json!({ "status": status }), None))
+                    .map_err(qaqh_runtime::QaqhError::message)
+            }
+            RingingCommand::ProviderUpsert { id, provider } => service
+                .provider_upsert(id, provider, expected_revision_from(&envelope))
+                .map(|value| {
+                    let revision = catalog_revision(&value);
+                    (value, revision)
+                }),
+            RingingCommand::ProviderDelete { id } => service
+                .provider_delete(id, expected_revision_from(&envelope))
+                .map(|value| {
+                    let revision = catalog_revision(&value);
+                    (value, revision)
+                }),
+            RingingCommand::ProviderModelUpsert {
                 provider_id,
                 model_id,
-                expected_revision_from(&envelope),
-                model.clone(),
-            )
-            .map(|value| {
-                let revision = catalog_revision(&value);
-                (value, revision)
-            }),
-        RingingCommand::ProviderModelDelete {
-            provider_id,
-            model_id,
-        } => service
-            .provider_model_delete(provider_id, model_id, expected_revision_from(&envelope))
-            .map(|value| {
-                let revision = catalog_revision(&value);
-                (value, revision)
-            }),
-        RingingCommand::ModelSelectionSetDefault { selection } => service
-            .set_default_model_selection(expected_revision_from(&envelope), selection.clone())
-            .map(|value| {
-                let revision = catalog_revision(&value);
-                (value, revision)
-            }),
-        RingingCommand::DriverClaim {
-            client_session_id,
-            stale_holder,
-        } => {
-            let CommandTarget::Session { session_id } = &envelope.target else {
-                return fail_response(
-                    &state,
-                    command_id,
-                    StatusCode::BAD_REQUEST,
-                    "target_mismatch",
-                    "driver.claim requires a session target",
-                );
-            };
-            let caller = caller_lease_bound_to_identity(&state, &headers, identity)
-                .unwrap_or_else(|| client_session_id.clone());
-            let verdict =
-                state
+                model,
+            } => service
+                .provider_model_upsert(
+                    provider_id,
+                    model_id,
+                    expected_revision_from(&envelope),
+                    model.clone(),
+                )
+                .map(|value| {
+                    let revision = catalog_revision(&value);
+                    (value, revision)
+                }),
+            RingingCommand::ProviderModelDelete {
+                provider_id,
+                model_id,
+            } => service
+                .provider_model_delete(provider_id, model_id, expected_revision_from(&envelope))
+                .map(|value| {
+                    let revision = catalog_revision(&value);
+                    (value, revision)
+                }),
+            RingingCommand::ModelSelectionSetDefault { selection } => service
+                .set_default_model_selection(expected_revision_from(&envelope), selection.clone())
+                .map(|value| {
+                    let revision = catalog_revision(&value);
+                    (value, revision)
+                }),
+            RingingCommand::DriverClaim {
+                client_session_id,
+                stale_holder,
+            } => {
+                let CommandTarget::Session { session_id } = &envelope.target else {
+                    return fail_response(
+                        &state,
+                        command_id,
+                        StatusCode::BAD_REQUEST,
+                        "target_mismatch",
+                        "driver.claim requires a session target",
+                    );
+                };
+                let caller = caller_lease_bound_to_identity(&state, &headers, identity)
+                    .unwrap_or_else(|| client_session_id.clone());
+                let verdict = state
                     .drivers
                     .claim(session_id, &caller, stale_holder.as_deref());
-            if verdict.accepted {
-                publish_driver_changed(&state, session_id);
+                if verdict.accepted {
+                    publish_driver_changed(&state, session_id);
+                }
+                driver_result(&verdict)
             }
-            driver_result(&verdict)
-        }
-        RingingCommand::DriverRelease {
-            client_session_id,
-            expected_epoch,
-        } => {
-            let CommandTarget::Session { session_id } = &envelope.target else {
-                return fail_response(
-                    &state,
-                    command_id,
-                    StatusCode::BAD_REQUEST,
-                    "target_mismatch",
-                    "driver.release requires a session target",
-                );
-            };
-            let caller = caller_lease_bound_to_identity(&state, &headers, identity)
-                .unwrap_or_else(|| client_session_id.clone());
-            let verdict =
-                state
-                    .drivers
-                    .release(session_id, &caller, *expected_epoch);
-            if verdict.accepted {
-                publish_driver_changed(&state, session_id);
+            RingingCommand::DriverRelease {
+                client_session_id,
+                expected_epoch,
+            } => {
+                let CommandTarget::Session { session_id } = &envelope.target else {
+                    return fail_response(
+                        &state,
+                        command_id,
+                        StatusCode::BAD_REQUEST,
+                        "target_mismatch",
+                        "driver.release requires a session target",
+                    );
+                };
+                let caller = caller_lease_bound_to_identity(&state, &headers, identity)
+                    .unwrap_or_else(|| client_session_id.clone());
+                let verdict = state.drivers.release(session_id, &caller, *expected_epoch);
+                if verdict.accepted {
+                    publish_driver_changed(&state, session_id);
+                }
+                driver_result(&verdict)
             }
-            driver_result(&verdict)
-        }
-        RingingCommand::ConfigSave { .. }
-        | RingingCommand::ConfigSetPermissionLevel { .. }
-        | RingingCommand::ProfileCreate { .. }
-        | RingingCommand::ProfileSetDefault { .. }
-        | RingingCommand::ProfileApply { .. }
-        | RingingCommand::ProfileSaveCurrent { .. }
-        | RingingCommand::ProfileDelete { .. }
-        | RingingCommand::WorkspaceSet { .. }
-        | RingingCommand::WorkspaceCreate { .. }
-        | RingingCommand::WorkspaceRename { .. }
-        | RingingCommand::WorkspaceDelete {}
-        | RingingCommand::WorkspaceMoveSession { .. }
-        | RingingCommand::WorkspaceDetach {}
-        | RingingCommand::SubagentSpawn { .. }
-        | RingingCommand::TodoSet { .. }
-        | RingingCommand::TodoCancel { .. }
-        | RingingCommand::PlanAction { .. }
-        | RingingCommand::DiagnosticsMemoryStart {}
-        | RingingCommand::DiagnosticsMemoryStop {} => service
-            .execute_ringing_command(&envelope.target, &envelope.command)
-            .map(|value| (value, None)),
-        _ => unreachable!("command router selected a non-synchronous operation"),
-    };
+            RingingCommand::ConfigSave { .. }
+            | RingingCommand::ConfigSetPermissionLevel { .. }
+            | RingingCommand::ProfileCreate { .. }
+            | RingingCommand::ProfileSetDefault { .. }
+            | RingingCommand::ProfileApply { .. }
+            | RingingCommand::ProfileSaveCurrent { .. }
+            | RingingCommand::ProfileDelete { .. }
+            | RingingCommand::WorkspaceSet { .. }
+            | RingingCommand::WorkspaceCreate { .. }
+            | RingingCommand::WorkspaceRename { .. }
+            | RingingCommand::WorkspaceDelete {}
+            | RingingCommand::WorkspaceMoveSession { .. }
+            | RingingCommand::WorkspaceDetach {}
+            | RingingCommand::SubagentSpawn { .. }
+            | RingingCommand::TodoSet { .. }
+            | RingingCommand::TodoCancel { .. }
+            | RingingCommand::PlanAction { .. }
+            | RingingCommand::DiagnosticsMemoryStart {}
+            | RingingCommand::DiagnosticsMemoryStop {} => service
+                .execute_ringing_command(&envelope.target, &envelope.command)
+                .map(|value| (value, None)),
+            _ => unreachable!("command router selected a non-synchronous operation"),
+        };
 
     match outcome {
         Ok((result, revision)) => {

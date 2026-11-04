@@ -347,12 +347,10 @@ impl SubagentHost for QaqhService {
         let previous_status = registry
             .activity(target_id)
             .map(|activity| match activity.state {
-                qaqh_ringing_contract::SessionActivityState::Starting => "starting",
                 qaqh_ringing_contract::SessionActivityState::Idle => "idle",
-                qaqh_ringing_contract::SessionActivityState::Working => "working",
+                qaqh_ringing_contract::SessionActivityState::Running => "running",
                 qaqh_ringing_contract::SessionActivityState::WaitingUser => "waiting_user",
-                qaqh_ringing_contract::SessionActivityState::Disconnected => "disconnected",
-                qaqh_ringing_contract::SessionActivityState::Failed => "failed",
+                qaqh_ringing_contract::SessionActivityState::Cancelling => "cancelling",
             })
             .unwrap_or("running")
             .to_string();
@@ -1616,7 +1614,7 @@ fn collector_event_from_session_event(
     event: &qaqh_ringing_contract::events::SessionEvent,
 ) -> Option<CollectorEvent> {
     use qaqh_ringing_contract::events::SessionEvent;
-    use qaqh_ringing_contract::fact::InterruptReason;
+    use qaqh_ringing_contract::fact::TurnTerminal;
     use qaqh_ringing_contract::state::{TimelineEntry, TurnOutcome};
     match event {
         SessionEvent::TimelineAppended {
@@ -1635,13 +1633,14 @@ fn collector_event_from_session_event(
         }),
         SessionEvent::TurnEnded { outcome, .. } => Some(CollectorEvent::TurnFinished {
             failed: match outcome {
-                TurnOutcome::Finished { error, .. } => error.is_some(),
+                TurnOutcome::Finished { terminal, .. } => *terminal == TurnTerminal::Failed,
                 TurnOutcome::Interrupted { .. } => true,
             },
             cancelled: matches!(
                 outcome,
-                TurnOutcome::Interrupted {
-                    reason: InterruptReason::CancelBeforeSeal,
+                TurnOutcome::Finished {
+                    terminal: TurnTerminal::Cancelled,
+                    ..
                 }
             ),
             error: match outcome {
@@ -1665,4 +1664,48 @@ fn nanos() -> u128 {
 
 fn unix_ms() -> i64 {
     (nanos() / 1_000_000).min(i64::MAX as u128) as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collector_event_from_session_event;
+    use qaqh_ringing_contract::events::SessionEvent;
+    use qaqh_ringing_contract::fact::{InterruptReason, TurnId, TurnTerminal};
+    use qaqh_ringing_contract::state::TurnOutcome;
+    use qaqh_subagent::CollectorEvent;
+
+    fn collect_turn(outcome: TurnOutcome) -> CollectorEvent {
+        collector_event_from_session_event(&SessionEvent::TurnEnded {
+            turn_id: TurnId::new("turn_test".to_string()),
+            outcome,
+        })
+        .expect("turn end projects to a collector event")
+    }
+
+    #[test]
+    fn collector_preserves_typed_cancellation_and_legacy_interrupt_unknown() {
+        let CollectorEvent::TurnFinished {
+            failed, cancelled, ..
+        } = collect_turn(TurnOutcome::Finished {
+            terminal: TurnTerminal::Cancelled,
+            usage: None,
+            error: None,
+        })
+        else {
+            panic!("expected a turn-finished collector event");
+        };
+        assert!(!failed);
+        assert!(cancelled);
+
+        let CollectorEvent::TurnFinished {
+            failed, cancelled, ..
+        } = collect_turn(TurnOutcome::Interrupted {
+            reason: InterruptReason::CancelBeforeSeal,
+        })
+        else {
+            panic!("expected a turn-finished collector event");
+        };
+        assert!(failed);
+        assert!(!cancelled);
+    }
 }

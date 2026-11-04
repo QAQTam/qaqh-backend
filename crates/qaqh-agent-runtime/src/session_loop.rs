@@ -18,11 +18,12 @@ use qaqh_ringing_contract::events::InteractionEndStatus;
 use qaqh_ringing_contract::fact::AssistantBlockKind;
 use qaqh_ringing_contract::fact::{
     ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionChoice,
-    InteractionDecision, InteractionId, InteractionKind, InterruptReason, ToolCallId, TurnId,
+    InteractionDecision, InteractionId, InteractionKind, InterruptReason, ToolCallId,
+    ToolCallOutcome, TurnId,
 };
-use qaqh_ringing_contract::state::{InteractionView, TimelineEntry, ToolCallStatus, TurnOutcome};
+use qaqh_ringing_contract::state::{InteractionView, TimelineEntry, ToolCallState, TurnOutcome};
 use qaqh_ringing_contract::ulid::generate_ulid;
-use qaqh_session::owner::{SessionOwner, ToolTerminal};
+use qaqh_session::owner::{SessionOwner, ToolSettlement};
 use qaqh_types::{ContentBlock, Message, ToolResult as ToolResultPayload, UsageInfo};
 use tokio::sync::{oneshot, watch};
 
@@ -235,16 +236,22 @@ impl SessionLoop {
 
     /// 取消活动回合(给出的 turn_id 不匹配时忽略,返回是否生效)。
     pub fn cancel_turn(&self, turn_id: Option<&str>) -> bool {
-        let inner = self.lock();
-        let Some(active) = &inner.active else {
-            return false;
-        };
-        if let Some(want) = turn_id
-            && want != active.turn_id
         {
-            return false;
+            let inner = self.lock();
+            let Some(active) = &inner.active else {
+                return false;
+            };
+            if let Some(want) = turn_id
+                && want != active.turn_id
+            {
+                return false;
+            }
+            self.owner.queue_turn_phase(
+                &active.turn_id,
+                qaqh_ringing_contract::TurnPhase::Cancelling,
+            );
+            let _ = active.cancel.send(true);
         }
-        let _ = active.cancel.send(true);
         true
     }
 
@@ -396,7 +403,8 @@ impl SessionLoop {
                     "[loop] {} context assembly failed: {error}",
                     self.session_id
                 );
-                self.interrupt(&turn, InterruptReason::Crash).await;
+                self.finish_failed(&turn, None, "context_assembly_failed", &error.to_string())
+                    .await;
                 self.finish_active(&turn_id).await;
                 return;
             }
@@ -452,21 +460,44 @@ impl SessionLoop {
             )
             .await;
             match outcome.evidence {
-                // 未出发:取消或凭据失败,无任何可见输出。
+                // 未出发:确认取消或 provider 准备失败,无任何可见输出。
                 Evidence::NotStarted => {
-                    let reason = if *cancel_rx.borrow() {
-                        InterruptReason::CancelBeforeSeal
+                    if outcome.cancelled {
+                        self.finish_cancelled(&turn, outcome.usage.clone()).await;
                     } else {
-                        InterruptReason::Crash
-                    };
-                    self.interrupt(&turn, reason).await;
+                        self.finish_failed(
+                            &turn,
+                            outcome.usage.clone(),
+                            "provider_failed",
+                            outcome
+                                .error
+                                .as_deref()
+                                .unwrap_or("provider request did not start"),
+                        )
+                        .await;
+                    }
                     break;
                 }
-                // 已出发但无终态:保留已流出文本,按取消结算。
+                // 已出发但无终态:保留已流出文本,按取消或 provider 失败结算。
                 Evidence::StartedUnknown => {
                     self.seal_partial(&turn, &blocks, &outcome).await;
-                    self.interrupt(&turn, InterruptReason::CancelBeforeSeal)
+                    if outcome.failure_kind == Some(provider_job::ProviderFailureKind::WorkerCrash)
+                    {
+                        self.interrupt(&turn, InterruptReason::Crash).await;
+                    } else if outcome.cancelled {
+                        self.finish_cancelled(&turn, outcome.usage.clone()).await;
+                    } else {
+                        self.finish_failed(
+                            &turn,
+                            outcome.usage.clone(),
+                            "provider_failed",
+                            outcome
+                                .error
+                                .as_deref()
+                                .unwrap_or("provider request failed"),
+                        )
                         .await;
+                    }
                     break;
                 }
                 Evidence::Terminal => {
@@ -489,7 +520,13 @@ impl SessionLoop {
                                 })
                                 .collect::<Vec<_>>();
                             if tool_uses.is_empty() {
-                                self.interrupt(&turn, InterruptReason::Crash).await;
+                                self.finish_failed(
+                                    &turn,
+                                    outcome.usage.clone(),
+                                    "provider_incomplete",
+                                    "provider returned a tool-use finish without tool declarations",
+                                )
+                                .await;
                                 break;
                             }
                             for (call_id, name, input) in &tool_uses {
@@ -531,8 +568,17 @@ impl SessionLoop {
                             messages.extend(tool_messages);
                         }
                         _ => {
-                            // Length/Incomplete/Unknown:已 seal,按中断结算。
-                            self.interrupt(&turn, InterruptReason::Crash).await;
+                            // Provider 给出了终态,但响应不完整或不可用:已确认失败。
+                            self.finish_failed(
+                                &turn,
+                                outcome.usage.clone(),
+                                "provider_incomplete",
+                                outcome
+                                    .incomplete_reason
+                                    .as_deref()
+                                    .unwrap_or("provider returned an incomplete response"),
+                            )
+                            .await;
                             break;
                         }
                     }
@@ -578,7 +624,7 @@ impl SessionLoop {
     ) -> Result<(bool, String), LoopError> {
         // ask:答案来自交互应答,不走 port。
         if tool_name == "ask" {
-            return self.run_ask(turn, call_id, input).await;
+            return self.run_ask(turn, call_id, input, cancel_rx).await;
         }
         let args = serde_json::to_vec(input).map_err(|error| {
             LoopError::Db(qaqh_session::db::DbError::Corrupt(error.to_string()))
@@ -587,6 +633,7 @@ impl SessionLoop {
         let request = ToolRequest {
             execution_id: generate_ulid(),
             call_id: call_id.to_string(),
+            turn_id: turn.as_str().to_string(),
             tool_name: tool_name.to_string(),
             read_only: false,
             args: args.clone(),
@@ -598,9 +645,19 @@ impl SessionLoop {
                 return Ok((false, reason));
             }
             ToolAdmission::ApprovalRequired { reason } => {
-                let Some((interaction_id, answer)) =
-                    self.request_permission(turn, call_id, &reason).await
+                let Some((interaction_id, answer)) = self
+                    .request_permission(turn, call_id, &reason, cancel_rx)
+                    .await
                 else {
+                    if *cancel_rx.borrow() {
+                        self.settle_cancelled(
+                            call_id,
+                            tool_name,
+                            args_json,
+                            qaqh_types::ToolCancellationReason::TurnCancel,
+                        );
+                        return Ok((false, "cancelled".into()));
+                    }
                     self.settle_failed(
                         call_id,
                         tool_name,
@@ -628,6 +685,11 @@ impl SessionLoop {
                     );
                     return Ok((false, "denied by user".into()));
                 }
+                // 迁移表:权限允许后回到 declared,等真正进入执行再 running。
+                self.owner
+                    .tool_back_to_declared(&ToolCallId::new(call_id.to_string()))
+                    .await
+                    .ok();
                 self.port.grant_approval(ToolApprovalGrant {
                     interaction_id: interaction_id.as_ref().to_string(),
                     call_id: call_id.to_string(),
@@ -676,10 +738,15 @@ impl SessionLoop {
         turn: &TurnId,
         call_id: &str,
         reason: &str,
+        cancel_rx: &watch::Receiver<bool>,
     ) -> Option<(InteractionId, PermissionAnswer)> {
         let call = ToolCallId::new(call_id.to_string());
-        self.owner.tool_awaiting_permission(&call).await.ok();
         let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
+        // 等待迁移实时可见且快照一致(E07):awaiting_interaction 落库,owner 泵定序。
+        self.owner
+            .tool_awaiting_interaction(&call, &interaction_id)
+            .await
+            .ok();
         let (tx, rx) = oneshot::channel();
         {
             let mut inner = self.lock();
@@ -718,7 +785,31 @@ impl SessionLoop {
             self.lock().permissions.remove(call_id);
             return None;
         }
-        let answer = rx.await.ok()?;
+        self.owner
+            .set_turn_phase(turn.as_ref(), qaqh_ringing_contract::TurnPhase::WaitingUser)
+            .await
+            .ok();
+        let mut cancel_rx = cancel_rx.clone();
+        let answer = tokio::select! {
+            answer = rx => answer.ok(),
+            _ = wait_for_turn_cancel(&mut cancel_rx) => None,
+        };
+        let Some(answer) = answer else {
+            {
+                let mut inner = self.lock();
+                inner.permissions.remove(call_id);
+                if let Some(active) = inner.active.as_mut() {
+                    active
+                        .pending_interactions
+                        .retain(|pending| pending != &interaction_id);
+                }
+            }
+            self.owner
+                .interaction_resolved(&interaction_id, None, InteractionEndStatus::Cancelled)
+                .await
+                .ok();
+            return None;
+        };
         self.owner
             .interaction_resolved(
                 &interaction_id,
@@ -731,6 +822,12 @@ impl SessionLoop {
             )
             .await
             .ok();
+        if !self.waiting_user() {
+            self.owner
+                .set_turn_phase(turn.as_ref(), qaqh_ringing_contract::TurnPhase::Running)
+                .await
+                .ok();
+        }
         Some((interaction_id, answer))
     }
 
@@ -740,6 +837,7 @@ impl SessionLoop {
         turn: &TurnId,
         call_id: &str,
         input: &serde_json::Value,
+        cancel_rx: &watch::Receiver<bool>,
     ) -> Result<(bool, String), LoopError> {
         let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
         let (tx, rx) = oneshot::channel();
@@ -763,17 +861,46 @@ impl SessionLoop {
             resolution: None,
         };
         self.owner.interaction_requested(view).await?;
-        let answers = match rx.await {
-            Ok(answers) => answers,
-            Err(_) => {
-                // 回合被中断:取消交互并按取消结算。
+        self.owner
+            .set_turn_phase(turn.as_ref(), qaqh_ringing_contract::TurnPhase::WaitingUser)
+            .await
+            .ok();
+        let mut cancel_rx = cancel_rx.clone();
+        let answers = tokio::select! {
+            answers = rx => answers.ok(),
+            _ = wait_for_turn_cancel(&mut cancel_rx) => None,
+        };
+        let Some(answers) = answers else {
+            {
+                let mut inner = self.lock();
+                inner.asks.remove(interaction_id.as_ref());
+                if let Some(active) = inner.active.as_mut() {
+                    active
+                        .pending_interactions
+                        .retain(|pending| pending != &interaction_id);
+                }
+            }
+            self.owner
+                .interaction_resolved(&interaction_id, None, InteractionEndStatus::Cancelled)
+                .await
+                .ok();
+            if !*cancel_rx.borrow() && !self.waiting_user() {
                 self.owner
-                    .interaction_resolved(&interaction_id, None, InteractionEndStatus::Cancelled)
+                    .set_turn_phase(turn.as_ref(), qaqh_ringing_contract::TurnPhase::Running)
                     .await
                     .ok();
-                self.settle_finished_text(call_id, "ask", "cancelled");
-                return Ok((false, "cancelled".into()));
             }
+            self.settle_cancelled(
+                call_id,
+                "ask",
+                None,
+                if *cancel_rx.borrow() {
+                    qaqh_types::ToolCancellationReason::TurnCancel
+                } else {
+                    qaqh_types::ToolCancellationReason::InteractionDismissed
+                },
+            );
+            return Ok((false, "cancelled".into()));
         };
         let text = answers
             .iter()
@@ -788,6 +915,12 @@ impl SessionLoop {
             )
             .await
             .ok();
+        if !self.waiting_user() {
+            self.owner
+                .set_turn_phase(turn.as_ref(), qaqh_ringing_contract::TurnPhase::Running)
+                .await
+                .ok();
+        }
         self.settle_finished_text(call_id, "ask", &text);
         Ok((true, text))
     }
@@ -804,16 +937,19 @@ impl SessionLoop {
             call_id,
             tool_name,
             args_json,
-            ToolTerminal {
-                status: ToolCallStatus::Failed,
+            ToolSettlement {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                outcome: ToolCallOutcome::Failed {
+                    error: qaqh_ringing_contract::fact::ToolError {
+                        code: code.to_string(),
+                        message: message.chars().take(512).collect(),
+                        retryable: false,
+                        details_ref: None,
+                    },
+                },
                 output_text: None,
                 output_truncated: false,
-                error: Some(qaqh_ringing_contract::fact::ToolError {
-                    code: code.to_string(),
-                    message: message.chars().take(512).collect(),
-                    retryable: false,
-                    details_ref: None,
-                }),
                 metrics: None,
                 code_delta: None,
                 effects: Vec::new(),
@@ -826,11 +962,36 @@ impl SessionLoop {
             call_id,
             tool_name,
             None,
-            ToolTerminal {
-                status: ToolCallStatus::Finished,
+            ToolSettlement {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                outcome: ToolCallOutcome::Completed,
                 output_text: Some(text.to_string()),
                 output_truncated: false,
-                error: None,
+                metrics: None,
+                code_delta: None,
+                effects: Vec::new(),
+            },
+        );
+    }
+
+    fn settle_cancelled(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        args_json: Option<String>,
+        reason: qaqh_types::ToolCancellationReason,
+    ) {
+        self.lifecycle.settled(
+            call_id,
+            tool_name,
+            args_json,
+            ToolSettlement {
+                call_id: call_id.to_string(),
+                tool_name: tool_name.to_string(),
+                outcome: ToolCallOutcome::Cancelled { reason },
+                output_text: None,
+                output_truncated: false,
                 metrics: None,
                 code_delta: None,
                 effects: Vec::new(),
@@ -944,8 +1105,49 @@ impl SessionLoop {
             .ok();
     }
 
-    async fn interrupt(&self, turn: &TurnId, reason: InterruptReason) {
-        // 挂起交互随回合取消。
+    async fn finish_cancelled(&self, turn: &TurnId, usage: Option<UsageInfo>) {
+        self.resolve_pending_interactions().await;
+        self.owner
+            .finish_turn(
+                turn.as_ref(),
+                "finished",
+                TurnOutcome::Finished {
+                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Cancelled,
+                    usage,
+                    error: None,
+                },
+            )
+            .await
+            .ok();
+    }
+
+    async fn finish_failed(
+        &self,
+        turn: &TurnId,
+        usage: Option<UsageInfo>,
+        code: &str,
+        message: &str,
+    ) {
+        self.owner
+            .finish_turn(
+                turn.as_ref(),
+                "finished",
+                TurnOutcome::Finished {
+                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Failed,
+                    usage,
+                    error: Some(qaqh_ringing_contract::fact::TurnError {
+                        code: code.to_string(),
+                        message: message.to_string(),
+                        retryable: false,
+                        details_ref: None,
+                    }),
+                },
+            )
+            .await
+            .ok();
+    }
+
+    async fn resolve_pending_interactions(&self) {
         let pending = self
             .lock()
             .active
@@ -958,6 +1160,11 @@ impl SessionLoop {
                 .await
                 .ok();
         }
+    }
+
+    async fn interrupt(&self, turn: &TurnId, reason: InterruptReason) {
+        // 挂起交互随回合取消。
+        self.resolve_pending_interactions().await;
         self.owner
             .finish_turn(
                 turn.as_ref(),
@@ -1088,9 +1295,14 @@ impl SessionLoop {
                     call_id, content, ..
                 } => {
                     flush_assistant(&mut messages, group.take());
+                    // E06:重放不可变的调用 outcome;yielded 是成功返回,不查
+                    // 进程当前状态推断调用成功,也不因后来 exit 1 翻成历史 error。
                     let ok = tools_by_id
                         .get(call_id.as_ref())
-                        .map(|tool| tool.status == ToolCallStatus::Finished)
+                        .map(|tool| match &tool.state {
+                            ToolCallState::Finished { outcome } => outcome.is_success(),
+                            _ => false,
+                        })
                         .unwrap_or(false);
                     let text = match content {
                         ContentValue::Inline { text } => text,
@@ -1146,6 +1358,14 @@ fn tool_result_message(call_id: &str, text: &str, ok: bool) -> Message {
                 ToolResultPayload::error(text)
             },
         }],
+    }
+}
+
+async fn wait_for_turn_cancel(cancel: &mut watch::Receiver<bool>) {
+    while !*cancel.borrow() {
+        if cancel.changed().await.is_err() {
+            return;
+        }
     }
 }
 

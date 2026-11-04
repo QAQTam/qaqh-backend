@@ -336,6 +336,7 @@ fn legacy_tool_call_context(
         cancellation,
         progress: None,
         exec_progress: None,
+        exec_host: None,
         official_web: None,
         source: ToolCallSource::Model,
     }
@@ -430,7 +431,7 @@ pub fn admit_with_context(
     let exec_backend_resolved =
         qaqh_sandbox::exec_backend_enforces_write_isolation(&context.sandbox_spec);
     let exec_class = if !sandboxed
-        && invocation.tool_name == "exec"
+        && invocation.tool_name == "exec_command"
         && context.sandbox_spec.enabled
         && exec_backend_resolved
         && qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
@@ -482,7 +483,7 @@ pub fn admit_with_context(
             // 前先行拦截，落到 AutoApprove 的沙箱 exec 在此补充强制——
             // skip-permissions bypass 不豁免会话文件外泄面。
             if sandboxed
-                && invocation.tool_name == "exec"
+                && invocation.tool_name == "exec_command"
                 && exec_hits_self_administration_paths(&invocation, &workspace_root)
             {
                 return Admission::Denied(format!(
@@ -611,7 +612,7 @@ fn trusted_snapshot() -> HashSet<PathBuf> {
 fn exec_hits_self_administration_paths(invocation: &ToolInvocation, workspace_root: &Path) -> bool {
     let base = invocation
         .args
-        .get("cwd")
+        .get("workdir")
         .and_then(|value| value.as_str())
         .filter(|cwd| !cwd.trim().is_empty())
         .map(|cwd| crate::permission::resolve_target_path_in(PathBuf::from(cwd), workspace_root))
@@ -743,9 +744,9 @@ mod tests {
         let invocation = |command: &str, shell: Option<&str>| ToolInvocation {
             session_id: "seed-a".into(),
             call_id: "call-exec".into(),
-            tool_name: "exec".into(),
+            tool_name: "exec_command".into(),
             args: serde_json::json!({
-                "command": command,
+                "cmd": command,
                 "shell": shell,
             }),
             category: crate::permission::ToolCategory::Exec,
@@ -831,8 +832,8 @@ mod tests {
         let invocation = |command: &str, cwd: Option<String>| ToolInvocation {
             session_id: "seed-a".into(),
             call_id: "call-sensitive".into(),
-            tool_name: "exec".into(),
-            args: serde_json::json!({ "command": command, "shell": "bash", "cwd": cwd }),
+            tool_name: "exec_command".into(),
+            args: serde_json::json!({ "cmd": command, "shell": "bash", "workdir": cwd }),
             category: crate::permission::ToolCategory::Exec,
         };
         let data_text = data_dir.to_string_lossy().into_owned();
@@ -870,11 +871,11 @@ mod tests {
         let invocation = ToolInvocation {
             session_id: "seed-a".into(),
             call_id: "call-exec-cwd".into(),
-            tool_name: "exec".into(),
+            tool_name: "exec_command".into(),
             args: serde_json::json!({
-                "command": "cat messages.jsonl",
+                "cmd": "cat messages.jsonl",
                 "shell": "bash",
-                "cwd": sessions_dir.to_string_lossy(),
+                "workdir": sessions_dir.to_string_lossy(),
             }),
             category: crate::permission::ToolCategory::Exec,
         };
@@ -907,11 +908,11 @@ mod tests {
         let invocation = ToolInvocation {
             session_id: "seed-a".into(),
             call_id: "call-exec-cwd-ok".into(),
-            tool_name: "exec".into(),
+            tool_name: "exec_command".into(),
             args: serde_json::json!({
-                "command": "cat messages.jsonl",
+                "cmd": "cat messages.jsonl",
                 "shell": "bash",
-                "cwd": workspace.join("src").to_string_lossy(),
+                "workdir": workspace.join("src").to_string_lossy(),
             }),
             category: crate::permission::ToolCategory::Exec,
         };
@@ -955,9 +956,9 @@ mod tests {
 
         // pwsh 无法判定形态 → 沙箱优先自动放行（写强制平台上）；无强制平台回退审批
         let inv = invocation(
-            "exec",
+            "exec_command",
             crate::permission::ToolCategory::Exec,
-            serde_json::json!({ "command": "Get-ChildItem src", "shell": "pwsh" }),
+            serde_json::json!({ "cmd": "Get-ChildItem src", "shell": "pwsh" }),
         );
         let admission = admit_with_context(
             inv.clone(),
@@ -975,9 +976,9 @@ mod tests {
 
         // 审计 F1/P0 回归锁：Auto 未晋升 = 实际 plain spawn = 不得自动放行
         let inv = invocation(
-            "exec",
+            "exec_command",
             crate::permission::ToolCategory::Exec,
-            serde_json::json!({ "command": "Get-ChildItem src", "shell": "pwsh" }),
+            serde_json::json!({ "cmd": "Get-ChildItem src", "shell": "pwsh" }),
         );
         let admission = admit_with_context(
             inv.clone(),
@@ -988,9 +989,9 @@ mod tests {
 
         // deny 形态与网络面任何平台都保持审批
         let inv = invocation(
-            "exec",
+            "exec_command",
             crate::permission::ToolCategory::Exec,
-            serde_json::json!({ "command": "rm -rf build", "shell": "bash" }),
+            serde_json::json!({ "cmd": "rm -rf build", "shell": "bash" }),
         );
         assert!(asks(admit_with_context(
             inv.clone(),
@@ -998,9 +999,9 @@ mod tests {
             &HashSet::new(),
         )));
         let inv = invocation(
-            "exec",
+            "exec_command",
             crate::permission::ToolCategory::Exec,
-            serde_json::json!({ "command": "curl http://x.example", "shell": "bash" }),
+            serde_json::json!({ "cmd": "curl http://x.example", "shell": "bash" }),
         );
         assert!(asks(admit_with_context(
             inv.clone(),
@@ -1021,9 +1022,9 @@ mod tests {
         // 会话历史文件经命令文本引用：保持审批
         let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");
         let inv = invocation(
-            "exec",
+            "exec_command",
             crate::permission::ToolCategory::Exec,
-            serde_json::json!({ "command": format!("cat {}", session_log.display()), "shell": "bash" }),
+            serde_json::json!({ "cmd": format!("cat {}", session_log.display()), "shell": "bash" }),
         );
         assert!(asks(admit_with_context(
             inv.clone(),
@@ -1219,12 +1220,12 @@ mod tests {
             }
         }
         for (tool, category) in [
-            ("exec", crate::permission::ToolCategory::Exec),
+            ("exec_command", crate::permission::ToolCategory::Exec),
             ("web_fetch", crate::permission::ToolCategory::Net),
         ] {
             let admission = invoke(
                 tool,
-                serde_json::json!({ "command": "whoami" }),
+                serde_json::json!({ "cmd": "whoami" }),
                 &PathBuf::from("."),
                 category,
             );
@@ -1288,13 +1289,13 @@ mod tests {
         let _g = sandbox_guard();
         let ws = std::env::temp_dir().join("qaqh-sandbox-c");
         for (tool, args) in [
-            ("exec", serde_json::json!({ "command": "whoami" })),
+            ("exec_command", serde_json::json!({ "cmd": "whoami" })),
             (
                 "web_fetch",
                 serde_json::json!({ "url": "https://example.com" }),
             ),
         ] {
-            let category = if tool == "exec" {
+            let category = if tool == "exec_command" {
                 crate::permission::ToolCategory::Exec
             } else {
                 crate::permission::ToolCategory::Net

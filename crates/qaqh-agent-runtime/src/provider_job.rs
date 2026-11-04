@@ -53,6 +53,12 @@ pub enum Evidence {
     Terminal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderFailureKind {
+    Request,
+    WorkerCrash,
+}
+
 /// 一次模型请求的结果:证据级别 + 中性消息 + 流式展示残段。
 pub struct ProviderOutcome {
     /// How far the effect actually got.
@@ -68,6 +74,9 @@ pub struct ProviderOutcome {
     pub partial_text: Option<String>,
     pub partial_reasoning: Option<String>,
     pub error: Option<String>,
+    /// True only when run_round observed and acted on this turn's cancel signal.
+    pub cancelled: bool,
+    pub failure_kind: Option<ProviderFailureKind>,
 }
 
 impl ProviderRequestSpec {
@@ -183,7 +192,9 @@ pub async fn run_round(
     progress: Option<ProgressStream>,
 ) -> ProviderOutcome {
     if *cancel.borrow() {
-        return not_started("cancelled before provider request started");
+        let mut outcome = not_started("cancelled before provider request started");
+        outcome.cancelled = true;
+        return outcome;
     }
     let spec = match resolve_provider_credential(spec) {
         Ok(spec) => spec,
@@ -192,26 +203,32 @@ pub async fn run_round(
             return not_started(&error);
         }
     };
-    let cancelled = Arc::new(AtomicBool::new(*cancel.borrow()));
-    let flag = cancelled.clone();
+    let cancel_flag = Arc::new(AtomicBool::new(*cancel.borrow()));
+    let flag = cancel_flag.clone();
     let display = progress.clone();
     let mut job =
         tokio::task::spawn_blocking(move || stream_once(spec, messages, user_id, &flag, display));
     let mut finished: Option<ProviderOutcome> = None;
+    let mut cancelled_by_turn = false;
     loop {
         tokio::select! {
+            biased;
             result = &mut job => {
                 finished = Some(match result {
                     Ok(value) => value,
                     Err(error) => {
-                        failed_after_start(&format!("provider worker join failed: {error}"))
+                        worker_crashed(&format!("provider worker join failed: {error}"))
                     }
                 });
                 break;
             }
             changed = cancel.changed() => {
-                if changed.is_err() || *cancel.borrow() {
-                    cancelled.store(true, Ordering::Release);
+                if changed.is_err() {
+                    break;
+                }
+                if *cancel.borrow() {
+                    cancel_flag.store(true, Ordering::Release);
+                    cancelled_by_turn = true;
                     break;
                 }
             }
@@ -222,9 +239,11 @@ pub async fn run_round(
         // Never drop a running blocking handle and claim the provider stopped.
         None => match job.await {
             Ok(value) => value,
-            Err(error) => failed_after_start(&format!("provider worker join failed: {error}")),
+            Err(error) => worker_crashed(&format!("provider worker join failed: {error}")),
         },
     };
+    let mut outcome = outcome;
+    outcome.cancelled = cancelled_by_turn;
     // Publish the final cumulative value regardless of the throttle window so a
     // cancelled or failed attempt still shows everything that was generated.
     if let Some(display) = &progress {
@@ -387,6 +406,8 @@ fn stream_once(
         partial_text: (!partial_text.is_empty()).then_some(partial_text),
         partial_reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
         error: None,
+        cancelled: false,
+        failure_kind: None,
     }
 }
 
@@ -538,6 +559,8 @@ fn not_started(message: &str) -> ProviderOutcome {
         partial_text: None,
         partial_reasoning: None,
         error: Some(message.chars().take(512).collect()),
+        cancelled: false,
+        failure_kind: Some(ProviderFailureKind::Request),
     }
 }
 
@@ -554,5 +577,13 @@ fn failed_after_start(message: &str) -> ProviderOutcome {
         partial_text: None,
         partial_reasoning: None,
         error: Some(message.chars().take(512).collect()),
+        cancelled: false,
+        failure_kind: Some(ProviderFailureKind::Request),
     }
+}
+
+fn worker_crashed(message: &str) -> ProviderOutcome {
+    let mut outcome = failed_after_start(message);
+    outcome.failure_kind = Some(ProviderFailureKind::WorkerCrash);
+    outcome
 }

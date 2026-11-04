@@ -14,8 +14,9 @@ this table.
 | Codex patch | `apply_patch` | First context hit; partial application possible. |
 | Move lines | `copy_range` | Uses exact whole-line anchors. |
 | Delete | `delete` | Moves to `.qaqh/trash/`, not unlink. |
-| Run a command | `exec` | Do not use for typed file operations. |
-| Continue a process | `process` | `check` / `wait` / `write` / `kill`; no list. |
+| Run a command | `exec_command` | Returns an execution session ID when it yields. |
+| Read output or provide input | `write_stdin` | Uses the execution session ID. |
+| Stop an execution session | Ringing `exec_session.interrupt` / `exec_session.terminate` | Uses a typed execution session target. |
 | Delegate | `spawn_subagent` | Include all context; no polling. |
 | Inspect changes | `journal` / `spy` | Inspect before undo/restore. |
 
@@ -29,16 +30,18 @@ this table.
   instead of guessing.
 - `delete` is recoverable through `.qaqh/trash/`.
 
-## Exec and process
+## Execution sessions
 
+- Use `exec_command` to run commands and `write_stdin` to continue a yielded
+  execution session.
 - Use `shell: "bash"` only when POSIX syntax is required.
 - The environment is minimal; pass necessary variables explicitly.
 - `cwd` defaults to the workspace root.
-- A timeout backgrounds the process with an id; use `process` to check, wait,
-  write, or kill it.
-- Use `background_after_secs` for long jobs; never append `&`.
-- Do not use `exec` for `cat`, `sed`, `awk`, `find`, `ls`, `rm`, or `echo >`
-  when a typed file tool exists.
+- A yielded command returns `exec_session_id`; pass it to `write_stdin` to read
+  newly captured output or send input.
+- `timeout_ms` is a hard deadline. Use Ringing interrupt or terminate commands
+  for administrative stopping.
+- Do not use `exec_command` for file operations when a typed file tool exists.
 
 ## Recovery
 

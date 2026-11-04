@@ -286,11 +286,7 @@ pub fn apply_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Engin
 }
 
 /// Apply a single hunk to disk, appending its delta to `outcome`.
-fn apply_hunk(
-    hunk: &Hunk,
-    cwd: &Path,
-    outcome: &mut ApplyOutcome,
-) -> Result<(), EngineError> {
+fn apply_hunk(hunk: &Hunk, cwd: &Path, outcome: &mut ApplyOutcome) -> Result<(), EngineError> {
     let affected_path = hunk.path().to_string_lossy().to_string();
     let resolved = resolve_workspace_path(cwd, hunk.path())?;
     match hunk {
@@ -474,14 +470,13 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                 // Full compute (read + match + rebuild) — same failure surface
                 // as a real apply, minus the write.
                 let applied =
-                    derive_new_contents_from_chunks(&resolved, chunks)
-                        .map_err(|e| match e {
-                            EngineError::Compute(msg) => EngineError::Compute(format!(
-                                "Failed to update file {}: {msg}",
-                                resolved.to_string_lossy()
-                            )),
-                            other => other,
-                        })?;
+                    derive_new_contents_from_chunks(&resolved, chunks).map_err(|e| match e {
+                        EngineError::Compute(msg) => EngineError::Compute(format!(
+                            "Failed to update file {}: {msg}",
+                            resolved.to_string_lossy()
+                        )),
+                        other => other,
+                    })?;
                 outcome.affected.modified.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
@@ -543,9 +538,8 @@ mod tests {
     fn add_file_overwrite_records_previous_contents() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "old one\nold two\n").unwrap();
-        let outcome =
-            apply_patch_engine(&add_file_patch("a.txt"), dir.path())
-                .expect("overwrite keeps upstream semantics");
+        let outcome = apply_patch_engine(&add_file_patch("a.txt"), dir.path())
+            .expect("overwrite keeps upstream semantics");
         assert_eq!(outcome.deltas.len(), 1);
         assert_eq!(outcome.deltas[0].old.as_deref(), Some("old one\nold two\n"));
         assert_eq!(outcome.deltas[0].new.as_deref(), Some("new\n"));
@@ -829,7 +823,8 @@ mod tests {
     fn crlf_file_preserves_line_endings() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("crlf.txt"), "alpha\r\nbeta\r\n").unwrap();
-        let patch = "*** Begin Patch\n*** Update File: crlf.txt\n@@\n-alpha\n+ALPHA\n*** End Patch\n";
+        let patch =
+            "*** Begin Patch\n*** Update File: crlf.txt\n@@\n-alpha\n+ALPHA\n*** End Patch\n";
         apply_patch_engine(patch, dir.path()).expect("apply ok");
         assert_eq!(
             std::fs::read(dir.path().join("crlf.txt")).unwrap(),

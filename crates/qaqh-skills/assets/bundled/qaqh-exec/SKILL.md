@@ -1,28 +1,27 @@
 ---
 name: qaqh-exec
-description: Run commands, choose shells, and manage background processes with exec and process.
+description: Run commands and continue, provide input to, or stop execution sessions.
 metadata:
-  short-description: Shell, background, and process rules
-allowed-tools: exec process
+  short-description: Shell and execution session rules
+allowed-tools: exec_command write_stdin
 ---
 
-# Exec and Process
+# Execution Sessions
 
-Use `exec` for commands that are not covered by a typed tool.
+Use `exec_command` to run shell commands.
 
-- The session shell wraps the command; pass `shell: "bash"` only when POSIX
-  syntax is required.
-- Under bash/zsh/sh, extra `args` arrive as `$1`, `$2`, `$@`; under pwsh they
-  arrive in `$args`.
+- `cmd` is the command string. The selected shell wraps it; set `shell` only
+  when a specific shell is needed.
+- `workdir` defaults to the conversation workspace root.
 - The child environment is minimal. Pass required variables explicitly; do not
   assume daemon secrets are inherited.
-- `cwd` defaults to the workspace root.
-- Output is merged stdout/stderr, ANSI-stripped, and folded to the configured
-  limit. Filter inside the command (`rg -n`, `--json`, `head`, `-q`) instead of
-  rerunning a large command.
-- A timeout does not kill the process; it becomes `backgrounded` with a
-  `process_id`. Use `process {action: check|wait|write|kill, id}`. There is no
-  `list` action.
-- For servers and long jobs, use `background_after_secs`; never append `&`.
-- Never use `exec` to bypass a typed file tool's permission or stale-file
-  checks.
+- Choose `tty: true` for interactive terminal behavior. Ordinary commands keep
+  stdout and stderr as separate streams.
+- A command that outlives its initial wait returns an `exec_session_id`. Use
+  `write_stdin` with that ID to read new output or provide terminal input.
+- Set `timeout_ms` only when the process needs a hard deadline. Reaching the
+  deadline stops the command and reports a timed out outcome.
+- Use the Ringing commands `exec_session.interrupt` and
+  `exec_session.terminate` to stop a session administratively.
+- Never use `exec_command` to bypass a typed file tool's permission or
+  stale-file checks.

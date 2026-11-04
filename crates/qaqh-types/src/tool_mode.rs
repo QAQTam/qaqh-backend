@@ -34,7 +34,8 @@ pub const MINIMAL_PREFIX: &str = "minimal";
 
 /// Minimal tier A (internal registration keys).
 pub const MINIMAL_TOOLS: &[&str] = &[
-    "exec",
+    "exec_command",
+    "write_stdin",
     "write",
     "edit",
     "read",
@@ -44,10 +45,24 @@ pub const MINIMAL_TOOLS: &[&str] = &[
 ];
 
 /// Minimal tier B (internal registration keys).
-pub const MINIMAL_TOOLS_B: &[&str] = &["exec", "edit", "glob", "grep", "read", "confirm_apply"];
+pub const MINIMAL_TOOLS_B: &[&str] = &[
+    "exec_command",
+    "write_stdin",
+    "edit",
+    "glob",
+    "grep",
+    "read",
+    "confirm_apply",
+];
 
 /// Minimal tier C (internal registration keys).
-pub const MINIMAL_TOOLS_C: &[&str] = &["exec", "edit", "glob", "confirm_apply"];
+pub const MINIMAL_TOOLS_C: &[&str] = &[
+    "exec_command",
+    "write_stdin",
+    "edit",
+    "glob",
+    "confirm_apply",
+];
 
 /// Returns `true` for every mode accepted by the daemon action whitelist.
 pub fn is_known(mode: &str) -> bool {

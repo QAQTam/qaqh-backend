@@ -134,9 +134,7 @@ mod escape_probes {
         let tmp = tempdir().unwrap();
         let outside = tmp.path().parent().unwrap().join("qaqh-escape-probe-a.txt");
         let _ = std::fs::remove_file(&outside);
-        let result = apply_patch_engine(
-            &patch_add("a/b/../../evil.txt"),
-            tmp.path());
+        let result = apply_patch_engine(&patch_add("a/b/../../evil.txt"), tmp.path());
         assert!(result.is_ok(), "expected Ok, got {result:?}");
         assert!(
             tmp.path().join("evil.txt").exists(),
@@ -169,9 +167,7 @@ mod escape_probes {
         std::fs::create_dir_all(&outside).unwrap();
 
         // ws/a/../../outside/evil.txt → 词法消解为 tmp/outside/evil.txt（受控目录）。
-        let result = apply_patch_engine(
-            &patch_add("a/../../outside/evil.txt"),
-            &ws);
+        let result = apply_patch_engine(&patch_add("a/../../outside/evil.txt"), &ws);
         assert!(
             result.is_ok(),
             "lexical `..` escape applies after admission, got {result:?}"

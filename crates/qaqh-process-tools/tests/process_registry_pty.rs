@@ -66,7 +66,9 @@ fn registry_kill_covers_a_registered_pty_session() {
     // 前端列表可见（list_sessions 含在册 PTY 会话）。
     let listed = ProcessRegistry::list_sessions();
     assert!(
-        listed.iter().any(|info| info.get("id") == Some(&serde_json::json!(proc_id))),
+        listed
+            .iter()
+            .any(|info| info.get("id") == Some(&serde_json::json!(proc_id))),
         "PTY 会话必须出现在 list_sessions: {listed:?}"
     );
 

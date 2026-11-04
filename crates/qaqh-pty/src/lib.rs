@@ -6,13 +6,13 @@
 //! 审批、策略、registry、工具面——那些属于上层 `qaqh-process-tools`（P2 的
 //! unified-exec manager）。会话有两种对称后端：
 //!
-//! - [`SessionKind::Pty`]：portable-pty（Unix openpty）。子进程被建立为
-//!   **新会话 leader**（PID == PGID），stdin/stdout/stderr 合流为单个终端
-//!   流，`writer` 写入的字节就是终端输入——`\u{3}`（Ctrl-C）、`\u{4}`
-//!   （Ctrl-D）等控制字符天然具有终端语义。
+//! - [`SessionKind::Pty`]：portable-pty（Unix openpty / Windows ConPTY）。
+//!   stdin/stdout/stderr 合流为单个终端流，`writer` 写入的字节就是终端输入。
+//!   Unix 子进程是新会话 leader（PID == PGID）；Windows 通过 ConPTY 管理。
 //! - [`SessionKind::Pipe`]：`std::process` + `process_group(0)`，stdout 与
-//!   stderr 经转发线程合流为单流。这是 `tty=false` 的退化路径，也是
-//!   Windows（ConPTY 落地前，见下）的兼容后端。
+//!   stderr 经转发线程合流为单流，是 `tty=false` 的退化路径。
+//! - [`spawn_pipe_split`]：执行会话专用的 pipe 入口，stdout/stderr 保持独立，
+//!   交给上层 collector 在同一 offset 序列中定序。
 //!
 //! # 为什么"合并 process 和 exec"从这里开始
 //!
@@ -37,9 +37,8 @@
 //!
 //! # 平台状态
 //!
-//! Linux 是默认主路径（已测试）。Windows：P1 仅保留 Pipe 后端的编译占位
-//! （返回 unsupported），ConPTY 按 `portable_pty` 的 ConPtySystem 在 P3
-//! 落地——Windows 属"未验证"而非"必须验证后才合入"。
+//! Unix 使用 openpty，Windows 使用 portable-pty 的 ConPTY 后端；Windows
+//! ConPTY 运行行为仍需 Windows 主机验收。
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -92,6 +91,13 @@ pub struct SessionIo {
     pub writer: Box<dyn std::io::Write + Send>,
 }
 
+/// Pipe backend IO with source identity preserved for independent collectors.
+pub struct SplitPipeIo {
+    pub stdout: Box<dyn std::io::Read + Send>,
+    pub stderr: Box<dyn std::io::Read + Send>,
+    pub writer: Box<dyn std::io::Write + Send>,
+}
+
 /// 一个已启动的进程会话：合流输出读端 + stdin 写端 + 组级终止原语。
 pub struct SpawnedSession {
     pub pid: u32,
@@ -102,14 +108,40 @@ pub struct SpawnedSession {
 }
 
 enum SessionInner {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Pty {
         child: Box<dyn portable_pty::Child + Send + Sync>,
         killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
+        #[cfg(windows)]
+        interrupt_writer: std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
+        #[cfg(unix)]
         master_fd: OwnedFd,
     },
     #[cfg(unix)]
     Pipe { child: std::process::Child },
+    #[cfg(not(unix))]
+    #[allow(dead_code)]
+    Unsupported,
+}
+
+#[cfg(windows)]
+struct SharedPtyWriter(std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>);
+
+#[cfg(windows)]
+impl std::io::Write for SharedPtyWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .flush()
+    }
 }
 
 impl std::fmt::Debug for SpawnedSession {
@@ -133,7 +165,7 @@ impl SpawnedSession {
     /// 非阻塞收割：`Ok(None)` = 仍在运行。
     pub fn try_wait(&mut self) -> std::io::Result<Option<SessionExit>> {
         match &mut self.inner {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             SessionInner::Pty { child, .. } => {
                 Ok(child.try_wait()?.map(|status| pty_exit_of(&status)))
             }
@@ -141,6 +173,10 @@ impl SpawnedSession {
             SessionInner::Pipe { child } => Ok(child.try_wait()?.map(|status| SessionExit {
                 code: status.code(),
             })),
+            #[cfg(not(unix))]
+            SessionInner::Unsupported => Err(std::io::Error::other(
+                "qaqh-pty: legacy session backend is not implemented on this platform",
+            )),
         }
     }
 
@@ -186,10 +222,149 @@ impl SpawnedSession {
     }
 }
 
+/// Pipe-backed child with stdout/stderr preserved as separate streams.
+///
+/// Unlike [`SpawnedSession`] returned by [`spawn_pipe`], this type does not
+/// merge streams. It is the execution-session backend because each stream must
+/// retain its source while sharing one collector offset sequence.
+#[cfg(unix)]
+pub struct SpawnedPipeSession {
+    pub pid: u32,
+    pub stdout: Box<dyn std::io::Read + Send>,
+    pub stderr: Box<dyn std::io::Read + Send>,
+    pub writer: Box<dyn std::io::Write + Send>,
+    child: std::process::Child,
+}
+
+#[cfg(windows)]
+pub struct SpawnedPipeSession {
+    pub pid: u32,
+    pub stdout: Box<dyn std::io::Read + Send>,
+    pub stderr: Box<dyn std::io::Read + Send>,
+    pub writer: Box<dyn std::io::Write + Send>,
+    child: std::process::Child,
+}
+
+#[cfg(not(any(unix, windows)))]
+pub struct SpawnedPipeSession;
+
+#[cfg(unix)]
+impl std::fmt::Debug for SpawnedPipeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnedPipeSession")
+            .field("pid", &self.pid)
+            .finish()
+    }
+}
+
+#[cfg(unix)]
+impl SpawnedPipeSession {
+    /// Split stream readers and stdin from the process-control handle.
+    pub fn into_parts(mut self) -> (SplitPipeIo, Self) {
+        let stdout = std::mem::replace(&mut self.stdout, Box::new(std::io::empty()));
+        let stderr = std::mem::replace(&mut self.stderr, Box::new(std::io::empty()));
+        let writer = std::mem::replace(&mut self.writer, Box::new(std::io::sink()));
+        (
+            SplitPipeIo {
+                stdout,
+                stderr,
+                writer,
+            },
+            self,
+        )
+    }
+
+    /// Nonblocking reap: `Ok(None)` means the process is still running.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<SessionExit>> {
+        Ok(self.child.try_wait()?.map(|status| SessionExit {
+            code: status.code(),
+        }))
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<SessionExit> {
+        let status = self.child.wait()?;
+        Ok(SessionExit {
+            code: status.code(),
+        })
+    }
+
+    /// Send SIGINT to the child's process group.
+    pub fn interrupt(&mut self) -> std::io::Result<()> {
+        signal_group(self.pid, libc::SIGINT)
+    }
+
+    /// Send SIGKILL to the child's process group.
+    pub fn kill_group(&mut self) -> std::io::Result<()> {
+        signal_group(self.pid, libc::SIGKILL)
+    }
+}
+
+#[cfg(windows)]
+impl std::fmt::Debug for SpawnedPipeSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SpawnedPipeSession")
+            .field("pid", &self.pid)
+            .finish()
+    }
+}
+
+#[cfg(windows)]
+impl SpawnedPipeSession {
+    pub fn into_parts(mut self) -> (SplitPipeIo, Self) {
+        let stdout = std::mem::replace(&mut self.stdout, Box::new(std::io::empty()));
+        let stderr = std::mem::replace(&mut self.stderr, Box::new(std::io::empty()));
+        let writer = std::mem::replace(&mut self.writer, Box::new(std::io::sink()));
+        (
+            SplitPipeIo {
+                stdout,
+                stderr,
+                writer,
+            },
+            self,
+        )
+    }
+
+    pub fn try_wait(&mut self) -> std::io::Result<Option<SessionExit>> {
+        Ok(self.child.try_wait()?.map(|status| SessionExit {
+            code: status.code(),
+        }))
+    }
+
+    pub fn wait(&mut self) -> std::io::Result<SessionExit> {
+        let status = self.child.wait()?;
+        Ok(SessionExit {
+            code: status.code(),
+        })
+    }
+
+    /// Ask a process group created with CREATE_NEW_PROCESS_GROUP to stop, then
+    /// let the execution manager escalate to tree termination if it ignores it.
+    pub fn interrupt(&mut self) -> std::io::Result<()> {
+        const CTRL_BREAK_EVENT: u32 = 1;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GenerateConsoleCtrlEvent(ctrl_event: u32, process_group_id: u32) -> i32;
+        }
+        // SAFETY: The child PID is also its process group ID because it was
+        // launched with CREATE_NEW_PROCESS_GROUP.
+        let sent = unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, self.pid) };
+        if sent != 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+
+    /// Terminate the owned process tree, including descendants holding pipes open.
+    pub fn kill_group(&mut self) -> std::io::Result<()> {
+        kill_windows_process_tree(self.pid).or_else(|_| self.child.kill())
+    }
+}
+
 /// 阻塞收割会话。
 pub fn wait_session(session: &mut SpawnedSession) -> std::io::Result<SessionExit> {
     match &mut session.inner {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         SessionInner::Pty { child, .. } => {
             let status = child.wait()?;
             Ok(pty_exit_of(&status))
@@ -201,6 +376,10 @@ pub fn wait_session(session: &mut SpawnedSession) -> std::io::Result<SessionExit
                 code: status.code(),
             })
         }
+        #[cfg(not(unix))]
+        SessionInner::Unsupported => Err(std::io::Error::other(
+            "qaqh-pty: legacy session backend is not implemented on this platform",
+        )),
     }
 }
 
@@ -216,6 +395,13 @@ fn pty_exit_of(status: &portable_pty::ExitStatus) -> SessionExit {
     SessionExit { code }
 }
 
+#[cfg(windows)]
+fn pty_exit_of(status: &portable_pty::ExitStatus) -> SessionExit {
+    SessionExit {
+        code: Some(i32::try_from(status.exit_code()).unwrap_or(-1)),
+    }
+}
+
 /// 向**整个进程组**发送 SIGINT（PTY 下等价于终端 Ctrl-C）。
 pub fn interrupt_session(session: &mut SpawnedSession) -> std::io::Result<()> {
     #[cfg(unix)]
@@ -227,7 +413,30 @@ pub fn interrupt_session(session: &mut SpawnedSession) -> std::io::Result<()> {
         }
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match &mut session.inner {
+            SessionInner::Pty {
+                interrupt_writer, ..
+            } => {
+                let mut writer = match interrupt_writer.try_lock() {
+                    Ok(writer) => writer,
+                    Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                    Err(std::sync::TryLockError::WouldBlock) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WouldBlock,
+                            "PTY input is busy while sending Ctrl-C",
+                        ));
+                    }
+                };
+                std::io::Write::write_all(&mut **writer, &[0x03])
+            }
+            SessionInner::Unsupported => Err(std::io::Error::other(
+                "qaqh-pty: legacy session backend is not implemented on this platform",
+            )),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = session;
         Err(std::io::Error::other(
@@ -248,12 +457,42 @@ pub fn kill_session_group(session: &mut SpawnedSession) -> std::io::Result<()> {
         }
         Ok(())
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match &mut session.inner {
+            SessionInner::Pty { killer, .. } => {
+                kill_windows_process_tree(session.pid).or_else(|_| killer.kill())
+            }
+            SessionInner::Unsupported => Err(std::io::Error::other(
+                "qaqh-pty: legacy session backend is not implemented on this platform",
+            )),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = session;
         Err(std::io::Error::other(
             "qaqh-pty: kill is not supported on this platform yet",
         ))
+    }
+}
+
+#[cfg(windows)]
+fn kill_windows_process_tree(pid: u32) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+
+    let status = Command::new("taskkill")
+        .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "taskkill failed with status {status}"
+        )))
     }
 }
 
@@ -272,7 +511,7 @@ fn signal_group(pid: u32, sig: i32) -> std::io::Result<()> {
     Err(err)
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn anyhow_to_io(error: anyhow::Error) -> std::io::Error {
     std::io::Error::other(error.to_string())
 }
@@ -336,7 +575,7 @@ impl std::io::Read for PollingPtyReader {
 }
 
 /// 在 **PTY** 后端上启动会话（`tty=true` 路径）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     if spec.argv.is_empty() {
         return Err(std::io::Error::new(
@@ -353,13 +592,16 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
             pixel_height: 0,
         })
         .map_err(anyhow_to_io)?;
+    #[cfg(unix)]
     let master_raw_fd = pair
         .master
         .as_raw_fd()
         .ok_or_else(|| std::io::Error::other("portable-pty master has no raw fd"))?;
+    #[cfg(unix)]
     // Keep one master descriptor in the session handle so the process executor
     // can set O_NONBLOCK; PollingPtyReader preserves blocking reads on the shared fd.
     let master_fd = duplicate_owned_fd(master_raw_fd)?;
+    #[cfg(unix)]
     let reader_poll_fd = duplicate_owned_fd(master_raw_fd)?;
 
     let mut command = portable_pty::CommandBuilder::new(&spec.argv[0]);
@@ -375,16 +617,30 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
         command.env(key, value);
     }
 
-    // portable-pty 在 Unix 上把子进程建立为新会话 leader（PID == PGID），
-    // 组级终止因此可以统一按 `kill(-pid)` 处理。
-    let reader = Box::new(PollingPtyReader {
+    #[cfg(unix)]
+    let reader: Box<dyn std::io::Read + Send> = Box::new(PollingPtyReader {
         reader: pair.master.try_clone_reader().map_err(anyhow_to_io)?,
         poll_fd: reader_poll_fd,
     });
-    let writer = pair.master.take_writer().map_err(anyhow_to_io)?;
+    #[cfg(windows)]
+    let reader = pair.master.try_clone_reader().map_err(anyhow_to_io)?;
+    let raw_writer = pair.master.take_writer().map_err(anyhow_to_io)?;
+    #[cfg(unix)]
+    let writer = raw_writer;
+    #[cfg(windows)]
+    let (writer, interrupt_writer) = {
+        let shared_writer = std::sync::Arc::new(std::sync::Mutex::new(raw_writer));
+        let interrupt_writer = std::sync::Arc::clone(&shared_writer);
+        (
+            Box::new(SharedPtyWriter(shared_writer)) as Box<dyn std::io::Write + Send>,
+            interrupt_writer,
+        )
+    };
     let child = pair.slave.spawn_command(command).map_err(anyhow_to_io)?;
     let pid = child.process_id().unwrap_or_default();
     let killer = child.clone_killer();
+    // On Unix the child is a new session leader (PID == PGID). ConPTY uses a
+    // separate process handle; Windows tree termination is delegated to taskkill.
     // 父进程必须关闭 slave 副本，子进程退出后 master 读端才能见到 EOF。
     drop(pair.slave);
 
@@ -396,6 +652,9 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
         inner: SessionInner::Pty {
             child,
             killer,
+            #[cfg(windows)]
+            interrupt_writer,
+            #[cfg(unix)]
             master_fd,
         },
     })
@@ -489,21 +748,103 @@ pub fn spawn_pipe(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     })
 }
 
+/// Spawn a pipe-backed session without combining stdout and stderr.
+#[cfg(unix)]
+pub fn spawn_pipe_split(spec: &SessionSpec) -> std::io::Result<SpawnedPipeSession> {
+    use std::process::{Command, Stdio};
+
+    if spec.argv.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "qaqh-pty: empty argv",
+        ));
+    }
+
+    let mut command = Command::new(&spec.argv[0]);
+    command.args(&spec.argv[1..]);
+    command.env_clear();
+    command.envs(spec.env.iter().map(|(key, value)| (key, value)));
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let stdout = child.stdout.take().expect("stdout is configured as piped");
+    let stderr = child.stderr.take().expect("stderr is configured as piped");
+    let writer = child.stdin.take().expect("stdin is configured as piped");
+
+    Ok(SpawnedPipeSession {
+        pid,
+        stdout: Box::new(stdout),
+        stderr: Box::new(stderr),
+        writer: Box::new(writer),
+        child,
+    })
+}
+
+/// Spawn a split pipe session on Windows. `taskkill /T` is the escalation path
+/// for descendants; the process group also supports a graceful Ctrl+Break.
+#[cfg(windows)]
+pub fn spawn_pipe_split(spec: &SessionSpec) -> std::io::Result<SpawnedPipeSession> {
+    use std::os::windows::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+
+    if spec.argv.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "qaqh-pty: empty argv",
+        ));
+    }
+
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let mut command = Command::new(&spec.argv[0]);
+    command
+        .args(&spec.argv[1..])
+        .env_clear()
+        .envs(spec.env.iter().map(|(key, value)| (key, value)))
+        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(cwd) = &spec.cwd {
+        command.current_dir(cwd);
+    }
+
+    let mut child = command.spawn()?;
+    let pid = child.id();
+    let stdout = child.stdout.take().expect("stdout is configured as piped");
+    let stderr = child.stderr.take().expect("stderr is configured as piped");
+    let writer = child.stdin.take().expect("stdin is configured as piped");
+    Ok(SpawnedPipeSession {
+        pid,
+        stdout: Box::new(stdout),
+        stderr: Box::new(stderr),
+        writer: Box::new(writer),
+        child,
+    })
+}
+
 /// 默认入口：PTY 后端。管道路径请显式 [`spawn_pipe`]（调用方显式声明
 /// `tty=false` 的语义归属）。
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub fn spawn(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     spawn_pty(spec)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn spawn(_spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     Err(std::io::Error::other(
         "qaqh-pty: PTY backend is not implemented on this platform yet (P3: ConPTY)",
     ))
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub fn spawn_pty(_spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     spawn(_spec)
 }
@@ -512,5 +853,12 @@ pub fn spawn_pty(_spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
 pub fn spawn_pipe(_spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     Err(std::io::Error::other(
         "qaqh-pty: pipe backend is not implemented on this platform yet",
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+pub fn spawn_pipe_split(_spec: &SessionSpec) -> std::io::Result<SpawnedPipeSession> {
+    Err(std::io::Error::other(
+        "qaqh-pty: split pipe backend is not implemented on this platform yet",
     ))
 }
