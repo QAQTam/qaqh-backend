@@ -25,6 +25,7 @@ async fn main() {
         remote: Some(RemoteEndpoint {
             base_url: base_url.clone(),
             token,
+            tls_fp: None,
         }),
         ..Default::default()
     })
