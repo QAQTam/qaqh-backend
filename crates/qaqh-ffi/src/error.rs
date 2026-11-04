@@ -8,30 +8,30 @@ use qaqh_client::ClientError;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum CoreError {
-    #[error("discovery: {message}")]
-    Discovery { message: String },
-    #[error("negotiation: {message}")]
-    Negotiation { message: String },
-    #[error("transport: {message}")]
-    Transport { message: String },
-    #[error("protocol: {message}")]
-    Protocol { message: String },
+    #[error("discovery: {detail}")]
+    Discovery { detail: String },
+    #[error("negotiation: {detail}")]
+    Negotiation { detail: String },
+    #[error("transport: {detail}")]
+    Transport { detail: String },
+    #[error("protocol: {detail}")]
+    Protocol { detail: String },
     #[error("HTTP {status} on {path}")]
     Http { status: u16, path: String },
-    #[error("api {code}: {message} (HTTP {status})")]
-    Api { status: u16, code: String, message: String },
+    #[error("api {code}: {detail} (HTTP {status})")]
+    Api { status: u16, code: String, detail: String },
 }
 
 impl From<ClientError> for CoreError {
     fn from(error: ClientError) -> Self {
         match error {
-            ClientError::Discovery(message) => Self::Discovery { message },
-            ClientError::Negotiation(message) => Self::Negotiation { message },
-            ClientError::Transport(message) => Self::Transport { message },
+            ClientError::Discovery(detail) => Self::Discovery { detail },
+            ClientError::Negotiation(detail) => Self::Negotiation { detail },
+            ClientError::Transport(detail) => Self::Transport { detail },
             ClientError::StreamTerminated { code, skipped } => Self::Transport {
-                message: format!("stream terminated: {code} (skipped {skipped:?})"),
+                detail: format!("stream terminated: {code} (skipped {skipped:?})"),
             },
-            ClientError::Protocol(message) => Self::Protocol { message },
+            ClientError::Protocol(detail) => Self::Protocol { detail },
             ClientError::Http { status, path } => Self::Http { status, path },
             ClientError::Api {
                 status,
@@ -40,19 +40,19 @@ impl From<ClientError> for CoreError {
             } => Self::Api {
                 status,
                 code,
-                message,
+                detail: message,
             },
             ClientError::ServiceMethodNotAllowed { method } => Self::Protocol {
-                message: format!("service method not allowed: {method}"),
+                detail: format!("service method not allowed: {method}"),
             },
             ClientError::Io(error) => Self::Transport {
-                message: format!("io: {error}"),
+                detail: format!("io: {error}"),
             },
             ClientError::Reqwest(error) => Self::Transport {
-                message: format!("http: {error}"),
+                detail: format!("http: {error}"),
             },
             ClientError::Json(error) => Self::Protocol {
-                message: format!("json: {error}"),
+                detail: format!("json: {error}"),
             },
         }
     }
