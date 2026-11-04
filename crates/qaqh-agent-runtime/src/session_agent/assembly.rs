@@ -190,6 +190,7 @@ pub struct SpawnInput<'a> {
     pub permission_level: u8,
     pub sandbox: qaqh_workspace::tool_api::SandboxMode,
     pub workspace_root: PathBuf,
+    pub exec_sessions: Arc<qaqh_process_tools::exec_session::ExecSessionManager>,
 }
 
 impl<'a> SpawnInput<'a> {
@@ -201,6 +202,7 @@ impl<'a> SpawnInput<'a> {
         custom_tools: &[String],
         workspace_root: PathBuf,
         owner: Arc<SessionOwner>,
+        exec_sessions: Arc<qaqh_process_tools::exec_session::ExecSessionManager>,
     ) -> Result<Self, String> {
         Ok(Self {
             session_id,
@@ -213,6 +215,7 @@ impl<'a> SpawnInput<'a> {
             permission_level: config.permission_level,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             workspace_root,
+            exec_sessions,
         })
     }
 }
@@ -253,6 +256,7 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         permission_level,
         sandbox,
         workspace_root,
+        exec_sessions,
     } = input;
 
     let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
@@ -273,6 +277,7 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         policy,
         None,
         owner.lifecycle(),
+        exec_sessions,
     ));
     Ok(SessionLoop::new(
         session_id,
@@ -335,18 +340,26 @@ mod tests {
     fn for_session_takes_the_allowlist_only_when_it_is_enabled() {
         let mut config = qaqh_config::Config::default();
         config.permission_level = 2;
-        config.tool_allowlist = vec!["read".into(), "exec".into()];
+        config.tool_allowlist = vec!["read".into(), "exec_command".into()];
 
         config.tool_allowlist_enabled = true;
         let restricted = {
             let owner = test_owner();
-            SpawnInput::for_session("s", &config, "standard", &[], PathBuf::from("/w"), owner)
-                .unwrap()
+            SpawnInput::for_session(
+                "s",
+                &config,
+                "standard",
+                &[],
+                PathBuf::from("/w"),
+                owner,
+                Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+            )
+            .unwrap()
         };
         assert!(restricted.allowed_tools.is_empty());
         assert_eq!(
             restricted.global_allowed_tools,
-            Some(vec!["read".into(), "exec".into()])
+            Some(vec!["read".into(), "exec_command".into()])
         );
         assert_eq!(restricted.permission_level, 2);
 
@@ -354,8 +367,16 @@ mod tests {
         config.tool_allowlist_enabled = false;
         let open = {
             let owner = test_owner();
-            SpawnInput::for_session("s", &config, "standard", &[], PathBuf::from("/w"), owner)
-                .unwrap()
+            SpawnInput::for_session(
+                "s",
+                &config,
+                "standard",
+                &[],
+                PathBuf::from("/w"),
+                owner,
+                Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+            )
+            .unwrap()
         };
         assert!(open.allowed_tools.is_empty());
         assert_eq!(open.global_allowed_tools, None);
@@ -371,8 +392,8 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            session_tool_allowlist("custom", &["exec".into()]).unwrap(),
-            vec!["exec"]
+            session_tool_allowlist("custom", &["exec_command".into()]).unwrap(),
+            vec!["exec_command"]
         );
         assert!(session_tool_allowlist("custom", &[]).is_err());
     }

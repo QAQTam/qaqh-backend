@@ -80,6 +80,7 @@ pub fn map_tool_result(result: ToolResult) -> ToolOutcome {
         status,
         output,
         error,
+        call_outcome: None,
         model,
         display,
         images: result.images.clone(),

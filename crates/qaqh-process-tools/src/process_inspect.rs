@@ -113,7 +113,10 @@ fn process_id(
     Ok(id)
 }
 
-fn handle_check(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
+fn handle_check(
+    ctx: &ToolCallContext,
+    args: &ProcessArgs,
+) -> Result<ProcessOutput, ToolExecutionError> {
     let id = process_id(args, "process.check", &ctx.session_id)?;
     let _ = ProcessRegistry::try_wait(id);
     match ProcessRegistry::get_info(id) {
@@ -150,7 +153,10 @@ fn handle_wait(
     }
 }
 
-fn handle_write(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
+fn handle_write(
+    ctx: &ToolCallContext,
+    args: &ProcessArgs,
+) -> Result<ProcessOutput, ToolExecutionError> {
     let id = process_id(args, "process.write", &ctx.session_id)?;
     let text = args
         .text
@@ -181,17 +187,17 @@ fn handle_write(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutp
             };
             Err(process_error(
                 code,
-                format!(
-                    "process write: {error}; requested {} bytes",
-                    text.len()
-                ),
+                format!("process write: {error}; requested {} bytes", text.len()),
                 "Check that the process is still running; a partial write may have reached it.",
             ))
         }
     }
 }
 
-fn handle_kill(ctx: &ToolCallContext, args: &ProcessArgs) -> Result<ProcessOutput, ToolExecutionError> {
+fn handle_kill(
+    ctx: &ToolCallContext,
+    args: &ProcessArgs,
+) -> Result<ProcessOutput, ToolExecutionError> {
     let id = process_id(args, "process.kill", &ctx.session_id)?;
     kill_result(id, ProcessRegistry::kill(id))
 }

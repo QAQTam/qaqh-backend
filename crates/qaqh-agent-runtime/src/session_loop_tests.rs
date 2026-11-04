@@ -29,14 +29,14 @@ mod tests {
         (server, addr)
     }
 
-    fn spawn_sse(server: tiny_http::Server) {
+    fn spawn_sse_response(server: tiny_http::Server, body: String) {
         std::thread::spawn(move || {
             let header =
                 tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
                     .expect("header");
             for request in server.incoming_requests() {
                 let _ = request.respond(
-                    tiny_http::Response::from_string(CHAT_SSE).with_header(header.clone()),
+                    tiny_http::Response::from_string(body.clone()).with_header(header.clone()),
                 );
             }
         });
@@ -44,6 +44,17 @@ mod tests {
 
     async fn test_loop(
         dir: &std::path::Path,
+    ) -> (
+        Arc<SessionLoop>,
+        Arc<OwnerDirectory>,
+        tokio::sync::broadcast::Receiver<SessionEventFrame>,
+    ) {
+        test_loop_with_response(dir, CHAT_SSE.to_string()).await
+    }
+
+    async fn test_loop_with_response(
+        dir: &std::path::Path,
+        response: String,
     ) -> (
         Arc<SessionLoop>,
         Arc<OwnerDirectory>,
@@ -80,10 +91,11 @@ mod tests {
             ToolPolicySnapshot::workspace_write(dir.join("ws")),
             None,
             owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
         ));
         let (_, base_url) = {
             let (server, addr) = sse_server();
-            spawn_sse(server);
+            spawn_sse_response(server, response);
             ((), addr)
         };
         let provider = qaqh_gate::ProviderConfig::chat(
@@ -130,12 +142,19 @@ mod tests {
             })
             .expect("send input");
 
-        // 事件流:TurnStarted → ActivityChanged → TimelineAppended(input)
+        // 事件流:TurnStarted → TurnPhaseChanged → ActivityChanged → TimelineAppended(input)
         // → MessageDelta(流式)→ TimelineAppended(assistant seal)
         // → TurnEnded → ActivityChanged。
         assert!(matches!(
             recv_event(&mut rx).await,
             SessionEvent::TurnStarted { .. }
+        ));
+        assert!(matches!(
+            recv_event(&mut rx).await,
+            SessionEvent::TurnPhaseChanged {
+                phase: qaqh_ringing_contract::state::TurnPhase::Running,
+                ..
+            }
         ));
         assert!(matches!(
             recv_event(&mut rx).await,
@@ -218,6 +237,135 @@ mod tests {
         let turn = loop_.active_turn().expect("active turn");
         assert!(!loop_.cancel_turn(Some("turn_stale")), "错目标不生效");
         assert!(loop_.cancel_turn(Some(&turn)), "匹配目标生效");
+    }
+
+    #[tokio::test]
+    async fn turn_cancel_during_permission_cancels_interaction_and_tool_call() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tool_args = serde_json::json!({ "cmd": "echo permission-cancel-smoke" });
+        let tool_call = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-permission-cancel",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": tool_args.to_string()
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+        let tool_calls_done = serde_json::json!({
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+        });
+        let response = format!(
+            "data: {}\n\ndata: {}\n\ndata: [DONE]\n\n",
+            tool_call, tool_calls_done
+        );
+        let (loop_, owners, _rx) = test_loop_with_response(dir.path(), response).await;
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-PERMISSION-CANCEL".into()),
+                text: "触发权限等待".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+            })
+            .expect("send input");
+
+        let owner = owners.get_or_create("SES-LOOP");
+        let mut waiting = None;
+        for _ in 0..500 {
+            let state = owner.snapshot().await.expect("snapshot");
+            let value = serde_json::to_value(state).expect("serialize snapshot");
+            if value["activity"] == "waiting_user"
+                && value["interactions"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            {
+                waiting = Some(value);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let waiting = waiting.expect("exec permission should be waiting for the user");
+        assert_eq!(waiting["interactions"][0]["kind"], "permission");
+        assert_eq!(waiting["tools"][0]["state"]["kind"], "awaiting_interaction");
+        let turn_id = waiting["current_turn_id"].as_str().expect("active turn id");
+
+        assert!(loop_.cancel_turn(Some(turn_id)));
+        let mut settled = None;
+        let mut last_state = serde_json::Value::Null;
+        for _ in 0..500 {
+            let state = owner.snapshot().await.expect("snapshot");
+            let value = serde_json::to_value(state).expect("serialize snapshot");
+            last_state = value.clone();
+            let turn_cancelled = value["turns"][0]["outcome"]["data"]["terminal"] == "cancelled";
+            let call_cancelled = value["tools"][0]["state"]["outcome"]["kind"] == "cancelled"
+                && value["tools"][0]["state"]["outcome"]["reason"] == "turn_cancel";
+            if turn_cancelled && call_cancelled {
+                settled = Some(value);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let settled = settled.unwrap_or_else(|| {
+            panic!("turn and waiting tool call should settle as cancelled: {last_state}")
+        });
+        assert_eq!(settled["activity"], "idle");
+        assert!(settled["exec_sessions"].as_array().unwrap().is_empty());
+        assert_eq!(settled["tools"][0]["state"]["kind"], "finished");
+    }
+
+    #[tokio::test]
+    async fn provider_incomplete_response_finishes_turn_as_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (loop_, owners, _rx) =
+            test_loop_with_response(dir.path(), "data: [DONE]\n\n".to_string()).await;
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-PROVIDER-FAILURE".into()),
+                text: "触发 provider 失败".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+            })
+            .expect("send input");
+
+        let owner = owners.get_or_create("SES-LOOP");
+        let mut failed = None;
+        for _ in 0..500 {
+            let state = owner.snapshot().await.expect("snapshot");
+            let value = serde_json::to_value(state).expect("serialize snapshot");
+            if value["turns"][0]["outcome"]["data"]["terminal"] == "failed" {
+                failed = Some(value);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let failed = failed.expect("provider failure should finish the turn as failed");
+        assert_eq!(failed["activity"], "idle");
+        assert_eq!(failed["turns"][0]["outcome"]["kind"], "finished");
+        assert_eq!(
+            failed["turns"][0]["outcome"]["data"]["error"]["code"],
+            "provider_incomplete"
+        );
+        assert_eq!(
+            failed["turns"][0]["outcome"]["data"]["error"]["retryable"],
+            false
+        );
     }
 
     #[tokio::test]

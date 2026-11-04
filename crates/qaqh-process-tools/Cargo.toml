@@ -7,11 +7,13 @@ description = "QAQ-Harness process tool group: exec + process registry/inspect (
 
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-permission = { path = "../qaqh-permission" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
 qaqh-file-tools = { path = "../qaqh-file-tools" }
 qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
+qaqh-pty = { path = "../qaqh-pty" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
@@ -20,7 +22,6 @@ log = "0.4"
 regex = "1"
 
 [target.'cfg(unix)'.dependencies]
-qaqh-pty = { path = "../qaqh-pty" }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]

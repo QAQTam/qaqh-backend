@@ -12,6 +12,7 @@ pub mod code_delta;
 pub mod config;
 pub mod context_usage;
 pub mod discovery;
+pub mod execution_contract;
 pub mod image_store;
 pub mod memory;
 pub mod message;
@@ -43,6 +44,10 @@ pub use context_usage::{
     ContextUsage, clear_api_context_usage, current_api_context_usage, note_api_context_usage,
 };
 pub use discovery::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
+pub use execution_contract::{
+    ExecSessionId, SessionContentRef, SessionToolError, ToolCallOutcome, ToolCancellationReason,
+    ToolInterruptionReason,
+};
 pub use image_store::sha256_hex;
 pub use message::{ContentBlock, FunctionCall, Message, ReasoningKind, ToolCall};
 pub use provider::{

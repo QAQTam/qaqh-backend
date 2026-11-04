@@ -17,9 +17,9 @@ use super::display::{
 };
 use super::error::{ToolError, ToolErrorKind};
 use qaqh_types::{
-    ContentRef, ToolImage, ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayFile,
-    ToolResultDisplayHeader, ToolResultDisplayItem, ToolResultDisplayOutcome,
-    ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
+    ContentRef, ToolCallOutcome, ToolImage, ToolResultDisplay, ToolResultDisplayBody,
+    ToolResultDisplayFile, ToolResultDisplayHeader, ToolResultDisplayItem,
+    ToolResultDisplayOutcome, ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
 };
 
 pub use qaqh_types::ToolStatus;
@@ -48,6 +48,12 @@ pub enum ToolContentBlock {
 /// 若评审否决可直接回退）。
 #[doc(alias = "ToolOutput")]
 pub trait ToolProjection: Serialize {
+    /// Typed lifecycle fact supplied by tools whose result cannot be derived
+    /// from the presentation status (for example `exec_command` yielding).
+    fn call_outcome(&self) -> Option<ToolCallOutcome> {
+        None
+    }
+
     /// 权威终态。默认成功；exec 等工具在输出内承载 exit_code / timeout /
     /// cancelled，需要覆盖此方法，避免把非零退出伪装成成功。
     fn status(&self) -> ToolStatus {
@@ -147,6 +153,9 @@ pub struct ToolOutcome {
     pub output: ToolOutputValue,
     /// 可恢复错误（与 status 的不变式见 [`ToolOutcome::check_invariants`]）。
     pub error: Option<ToolError>,
+    /// Immutable execution-contract outcome. `None` means the runtime derives
+    /// the lifecycle from the typed result's explicit success/error fields.
+    pub call_outcome: Option<ToolCallOutcome>,
     /// 模型投影。
     pub model: ToolModelProjection,
     /// 展示投影。
@@ -584,6 +593,7 @@ mod tests {
             status,
             output: ToolOutputValue::Empty,
             error,
+            call_outcome: None,
             model: ToolModelProjection::default(),
             display: ToolDisplay::default(),
             images: Vec::new(),

@@ -159,7 +159,10 @@ fn legacy_profile_store() -> qaqh_types::ProfileStore {
 fn persist_legacy_profiles(profiles: std::collections::HashMap<String, qaqh_types::ProfileConfig>) {
     let store = legacy_profile_store();
     if !store.save(&qaqh_types::PersistentProfiles { profiles }) {
-        log::warn!("[profile] legacy profiles.toml persist failed: {}", store.path().display());
+        log::warn!(
+            "[profile] legacy profiles.toml persist failed: {}",
+            store.path().display()
+        );
     }
 }
 

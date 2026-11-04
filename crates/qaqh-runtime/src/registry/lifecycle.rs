@@ -285,6 +285,7 @@ impl AgentRegistry {
         for instance in leftovers {
             instance.shutdown();
         }
+        self.exec_sessions.shutdown();
     }
 
     /// F4: 拉起所有已退出且非优雅关闭的 worker。由 daemon 侧周期任务调用；

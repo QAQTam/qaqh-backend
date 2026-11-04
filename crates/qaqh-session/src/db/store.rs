@@ -475,8 +475,8 @@ pub fn start_turn(
         |row| row.get(0),
     )?;
     conn.execute(
-        "INSERT INTO turns (turn_id, session_id, seq, input_id, mode, status, started_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'active', ?6)",
+        "INSERT INTO turns (turn_id, session_id, seq, input_id, mode, phase, status, started_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'running', 'active', ?6)",
         params![turn_id, session_id, seq, input_id, mode, now_ms()],
     )?;
     Ok(())
@@ -493,6 +493,26 @@ pub fn active_turn_id(conn: &Connection, session_id: &str) -> rusqlite::Result<O
     .optional()
 }
 
+/// 当前活跃回合的非终态 phase('running' | 'waiting_user' | 'cancelling')。
+pub fn active_turn_phase(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT phase FROM turns WHERE session_id = ?1 AND status = 'active'
+         ORDER BY seq DESC LIMIT 1",
+        [session_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// 回合非终态 phase 迁移(owner 定序);终态由 finish_turn 清空。
+pub fn set_turn_phase(conn: &mut Connection, turn_id: &str, phase: &str) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE turns SET phase = ?2 WHERE turn_id = ?1 AND status = 'active' AND phase != ?2",
+        params![turn_id, phase],
+    )?;
+    Ok(changed > 0)
+}
+
 /// `outcome_json` 保存 serde 形式的契约 `TurnOutcome`;视图层反序列化,坏数据报错。
 pub fn finish_turn(
     conn: &mut Connection,
@@ -501,7 +521,8 @@ pub fn finish_turn(
     outcome_json: Option<&str>,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE turns SET status = ?2, outcome_json = ?3, finished_at_ms = ?4 WHERE turn_id = ?1",
+        "UPDATE turns SET status = ?2, outcome_json = ?3, finished_at_ms = ?4, phase = NULL
+         WHERE turn_id = ?1",
         params![turn_id, status, outcome_json, now_ms()],
     )?;
     Ok(())
@@ -581,6 +602,33 @@ pub fn read_transcript_page(
     Ok(rows)
 }
 
+/// One turn's transcript, ordered by the same session-global block ordinal as bootstrap.
+pub fn read_transcript_for_turn(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> rusqlite::Result<Vec<BlockRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT block_id, turn_id, ord, kind, text, call_id, payload_json, created_at_ms
+         FROM blocks
+         WHERE session_id = ?1 AND turn_id = ?2
+         ORDER BY ord ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id, turn_id], |row| {
+        Ok(BlockRow {
+            block_id: row.get(0)?,
+            turn_id: row.get(1)?,
+            ord: row.get(2)?,
+            kind: row.get(3)?,
+            text: row.get(4)?,
+            call_id: row.get(5)?,
+            payload_json: row.get(6)?,
+            created_at_ms: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlockRow {
     pub block_id: String,
@@ -595,7 +643,7 @@ pub struct BlockRow {
 }
 
 // ---------------------------------------------------------------------------
-// tool_calls
+// tool_calls(契约 state 单一权威;state_kind 是查询冗余列)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -606,23 +654,28 @@ pub struct ToolCallUpsert {
     pub turn_id: Option<String>,
     pub tool_name: String,
     pub args_json: Option<String>,
-    pub status: &'static str,
+    /// 契约 `ToolCallState` 的 serde 形式(唯一权威)。
+    pub state_json: String,
+    /// state.kind 的查询冗余(declared/awaiting_interaction/running/cancelling/finished)。
+    pub state_kind: &'static str,
 }
 
 pub fn upsert_tool_call(conn: &mut Connection, call: &ToolCallUpsert) -> rusqlite::Result<()> {
     conn.execute(
-        "INSERT INTO tool_calls (call_id, session_id, turn_id, tool_name, args_json, status, started_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        "INSERT INTO tool_calls (call_id, session_id, turn_id, tool_name, args_json, state_json, state_kind, started_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(call_id) DO UPDATE SET
             args_json = COALESCE(excluded.args_json, args_json),
-            status = excluded.status",
+            state_json = excluded.state_json,
+            state_kind = excluded.state_kind",
         params![
             call.call_id,
             call.session_id,
             call.turn_id,
             call.tool_name,
             call.args_json,
-            call.status,
+            call.state_json,
+            call.state_kind,
             now_ms(),
         ],
     )?;
@@ -636,12 +689,13 @@ pub struct ToolCallFinish {
     pub session_id: String,
     pub turn_id: Option<String>,
     pub tool_name: String,
-    pub status: &'static str,
+    /// 契约 `ToolCallState::Finished{outcome}` 的 serde 形式(不可变终态)。
+    pub state_json: String,
+    /// 终态调用关联的执行会话(仅 yielded)。
+    pub exec_session_id: Option<String>,
     pub output_text: Option<String>,
     pub output_ref: Option<String>,
     pub output_truncated: bool,
-    /// 契约 `ToolError` 的 serde 形式。
-    pub error_json: Option<String>,
     /// 契约 `ToolMetrics` 的 serde 形式。
     pub meta_json: Option<String>,
     /// 契约 `ToolEffectInfo[]` 的 serde 形式(owner 消费的结构化效果)。
@@ -653,16 +707,17 @@ pub struct ToolCallFinish {
 pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO tool_calls
-            (call_id, session_id, turn_id, tool_name, status, output_text, output_ref,
-             output_truncated, error_json, meta_json, effects_json, code_delta_json,
-             started_at_ms, finished_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            (call_id, session_id, turn_id, tool_name, state_json, state_kind,
+             exec_session_id, output_text, output_ref, output_truncated,
+             meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'finished', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
          ON CONFLICT(call_id) DO UPDATE SET
-            status = excluded.status,
+            state_json = excluded.state_json,
+            state_kind = 'finished',
+            exec_session_id = excluded.exec_session_id,
             output_text = excluded.output_text,
             output_ref = excluded.output_ref,
             output_truncated = excluded.output_truncated,
-            error_json = excluded.error_json,
             meta_json = excluded.meta_json,
             effects_json = excluded.effects_json,
             code_delta_json = excluded.code_delta_json,
@@ -672,11 +727,11 @@ pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusql
             finish.session_id,
             finish.turn_id,
             finish.tool_name,
-            finish.status,
+            finish.state_json,
+            finish.exec_session_id,
             finish.output_text,
             finish.output_ref,
             i64::from(finish.output_truncated),
-            finish.error_json,
             finish.meta_json,
             finish.effects_json,
             finish.code_delta_json,
@@ -687,29 +742,28 @@ pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusql
     Ok(())
 }
 
-/// 状态单列迁移(declared → awaiting_permission 等)。
-pub fn set_tool_call_status(
+/// 非终态状态迁移(declared → awaiting_interaction/running/cancelling)。
+/// 终态只能经 finish_tool_call;不提供终态直写口。
+pub fn set_tool_call_state(
     conn: &mut Connection,
     call_id: &str,
-    status: &'static str,
+    state_json: &str,
+    state_kind: &'static str,
 ) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE tool_calls SET status = ?2 WHERE call_id = ?1",
-        params![call_id, status],
+        "UPDATE tool_calls SET state_json = ?2, state_kind = ?3
+         WHERE call_id = ?1 AND state_kind != 'finished'",
+        params![call_id, state_json, state_kind],
     )?;
     Ok(())
 }
 
-/// 运行中/待授权/后台工具:快照必须包含未完成卡片。
+/// 未完成调用:快照必须包含非终态卡片。
 pub fn unfinished_tool_calls(
     conn: &Connection,
     session_id: &str,
 ) -> rusqlite::Result<Vec<ToolCallRow>> {
-    read_tool_calls_where(
-        conn,
-        session_id,
-        "AND status IN ('declared','awaiting_permission','running','backgrounded')",
-    )
+    read_tool_calls_where(conn, session_id, "AND state_kind != 'finished'")
 }
 
 pub fn recent_tool_calls(
@@ -724,15 +778,50 @@ pub fn recent_tool_calls(
     )
 }
 
+pub fn tool_calls_for_turn(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> rusqlite::Result<Vec<ToolCallRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT call_id, turn_id, tool_name, args_json, state_json, state_kind,
+                exec_session_id, output_text, output_ref, output_truncated,
+                meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms
+         FROM tool_calls
+         WHERE session_id = ?1 AND turn_id = ?2
+         ORDER BY COALESCE(started_at_ms, 0), rowid",
+    )?;
+    let rows = stmt.query_map(params![session_id, turn_id], |row| {
+        Ok(ToolCallRow {
+            call_id: row.get(0)?,
+            turn_id: row.get(1)?,
+            tool_name: row.get(2)?,
+            args_json: row.get(3)?,
+            state_json: row.get(4)?,
+            state_kind: row.get(5)?,
+            exec_session_id: row.get(6)?,
+            output_text: row.get(7)?,
+            output_ref: row.get(8)?,
+            output_truncated: row.get::<_, i64>(9)? != 0,
+            meta_json: row.get(10)?,
+            effects_json: row.get(11)?,
+            code_delta_json: row.get(12)?,
+            started_at_ms: row.get(13)?,
+            finished_at_ms: row.get(14)?,
+        })
+    })?;
+    rows.collect()
+}
+
 fn read_tool_calls_where(
     conn: &Connection,
     session_id: &str,
     suffix: &str,
 ) -> rusqlite::Result<Vec<ToolCallRow>> {
     let sql = format!(
-        "SELECT call_id, turn_id, tool_name, args_json, status, output_text, output_ref,
-                output_truncated, error_json, meta_json, effects_json, code_delta_json,
-                started_at_ms, finished_at_ms
+        "SELECT call_id, turn_id, tool_name, args_json, state_json, state_kind,
+                exec_session_id, output_text, output_ref, output_truncated,
+                meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms
          FROM tool_calls WHERE session_id = ?1 {suffix}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -742,16 +831,17 @@ fn read_tool_calls_where(
             turn_id: row.get(1)?,
             tool_name: row.get(2)?,
             args_json: row.get(3)?,
-            status: row.get(4)?,
-            output_text: row.get(5)?,
-            output_ref: row.get(6)?,
-            output_truncated: row.get::<_, i64>(7)? != 0,
-            error_json: row.get(8)?,
-            meta_json: row.get(9)?,
-            effects_json: row.get(10)?,
-            code_delta_json: row.get(11)?,
-            started_at_ms: row.get(12)?,
-            finished_at_ms: row.get(13)?,
+            state_json: row.get(4)?,
+            state_kind: row.get(5)?,
+            exec_session_id: row.get(6)?,
+            output_text: row.get(7)?,
+            output_ref: row.get(8)?,
+            output_truncated: row.get::<_, i64>(9)? != 0,
+            meta_json: row.get(10)?,
+            effects_json: row.get(11)?,
+            code_delta_json: row.get(12)?,
+            started_at_ms: row.get(13)?,
+            finished_at_ms: row.get(14)?,
         })
     })?;
     rows.collect()
@@ -763,16 +853,325 @@ pub struct ToolCallRow {
     pub turn_id: Option<String>,
     pub tool_name: String,
     pub args_json: Option<String>,
-    pub status: String,
+    /// 契约 `ToolCallState` 的 serde 形式(唯一权威;终态 outcome 不可变)。
+    pub state_json: String,
+    pub state_kind: String,
+    pub exec_session_id: Option<String>,
     pub output_text: Option<String>,
     pub output_ref: Option<String>,
     pub output_truncated: bool,
-    pub error_json: Option<String>,
     pub meta_json: Option<String>,
     pub effects_json: Option<String>,
     pub code_delta_json: Option<String>,
     pub started_at_ms: Option<i64>,
     pub finished_at_ms: Option<i64>,
+}
+
+// ---------------------------------------------------------------------------
+// exec_sessions(身份与终态持久化;高频输出块只在内存捕获)
+// ---------------------------------------------------------------------------
+
+/// 执行会话行:身份、归属、启动信息、state 与输出统计(spec §9.1)。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecSessionRow {
+    pub exec_session_id: String,
+    pub session_id: String,
+    pub origin_turn_id: Option<String>,
+    pub origin_call_id: Option<String>,
+    pub tty: bool,
+    pub command: String,
+    pub cwd: Option<String>,
+    /// 契约 `ExecSessionState` 的 serde 形式。
+    pub state_json: String,
+    pub state_kind: String,
+    pub started_at_ms: i64,
+    pub finished_at_ms: Option<i64>,
+    pub next_offset: u64,
+    pub output_complete: bool,
+    pub capture_omitted_bytes: u64,
+    pub stream_dropped_bytes: u64,
+    /// 终态权威输出的 session_contents 引用。
+    pub output_content_id: Option<String>,
+    /// 有界尾窗摘要(终态时落库;非终态以 manager 内存视图为准)。
+    pub output_preview: String,
+    pub preview_start_offset: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RestartRecovery {
+    pub exec_sessions: usize,
+    pub tool_calls: usize,
+    pub turns: usize,
+    pub interactions: usize,
+}
+
+impl RestartRecovery {
+    pub fn total(self) -> usize {
+        self.exec_sessions + self.tool_calls + self.turns + self.interactions
+    }
+}
+
+/// Settle every persisted nonterminal fact from the previous daemon epoch.
+/// OS processes are never reattached after restart.
+pub fn recover_after_restart(conn: &mut Connection) -> rusqlite::Result<RestartRecovery> {
+    let tx = conn.transaction()?;
+    let now = now_ms();
+    let exec_state =
+        serde_json::to_string(&qaqh_ringing_contract::state::ExecSessionState::Finished {
+            outcome: qaqh_ringing_contract::state::ExecSessionOutcome::Interrupted {
+                reason: qaqh_ringing_contract::state::ExecInterruptReason::DaemonRestart,
+            },
+        })
+        .expect("exec session state serialization is infallible");
+    let tool_state =
+        serde_json::to_string(&qaqh_ringing_contract::state::ToolCallState::Finished {
+            outcome: qaqh_types::ToolCallOutcome::Interrupted {
+                reason: qaqh_types::ToolInterruptionReason::DaemonRestart,
+            },
+        })
+        .expect("tool call state serialization is infallible");
+    let turn_outcome =
+        serde_json::to_string(&qaqh_ringing_contract::state::TurnOutcome::Interrupted {
+            reason: qaqh_ringing_contract::fact::InterruptReason::Restart,
+        })
+        .expect("turn outcome serialization is infallible");
+
+    let recovery = RestartRecovery {
+        exec_sessions: tx.execute(
+            "UPDATE exec_sessions
+             SET state_json = ?1, state_kind = 'finished', finished_at_ms = ?2,
+                 output_complete = 0, updated_at_ms = ?2
+             WHERE state_kind != 'finished'",
+            params![exec_state, now],
+        )?,
+        tool_calls: tx.execute(
+            "UPDATE tool_calls
+             SET state_json = ?1, state_kind = 'finished', finished_at_ms = ?2
+             WHERE state_kind != 'finished'",
+            params![tool_state, now],
+        )?,
+        turns: tx.execute(
+            "UPDATE turns
+             SET status = 'interrupted', outcome_json = ?1, finished_at_ms = ?2, phase = NULL
+             WHERE status = 'active'",
+            params![turn_outcome, now],
+        )?,
+        interactions: tx.execute(
+            "UPDATE interactions
+             SET status = 'cancelled', decision_json = 'null', resolved_at_ms = ?1
+             WHERE status = 'pending'",
+            [now],
+        )?,
+    };
+    tx.commit()?;
+    Ok(recovery)
+}
+
+/// Persist the authoritative in-memory tail snapshot before publishing its output event.
+pub fn update_exec_session_progress(
+    conn: &Connection,
+    exec_session_id: &str,
+    next_offset: u64,
+    output_preview: &str,
+    preview_start_offset: u64,
+    capture_omitted_bytes: u64,
+    stream_dropped_bytes: u64,
+) -> rusqlite::Result<bool> {
+    let changed = conn.execute(
+        "UPDATE exec_sessions
+         SET next_offset = ?2, output_preview = ?3, preview_start_offset = ?4,
+             capture_omitted_bytes = ?5, stream_dropped_bytes = ?6, updated_at_ms = ?7
+         WHERE exec_session_id = ?1 AND state_kind != 'finished' AND next_offset <= ?2",
+        params![
+            exec_session_id,
+            next_offset as i64,
+            output_preview,
+            preview_start_offset as i64,
+            capture_omitted_bytes as i64,
+            stream_dropped_bytes as i64,
+            now_ms(),
+        ],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn upsert_exec_session(conn: &mut Connection, row: &ExecSessionRow) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO exec_sessions
+            (exec_session_id, session_id, origin_turn_id, origin_call_id, tty, command, cwd,
+             state_json, state_kind, started_at_ms, finished_at_ms, next_offset,
+             output_complete, capture_omitted_bytes, stream_dropped_bytes,
+             output_content_id, output_preview, preview_start_offset, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+         ON CONFLICT(exec_session_id) DO UPDATE SET
+            state_json = excluded.state_json,
+            state_kind = excluded.state_kind,
+            finished_at_ms = excluded.finished_at_ms,
+            next_offset = excluded.next_offset,
+            output_complete = excluded.output_complete,
+            capture_omitted_bytes = excluded.capture_omitted_bytes,
+            stream_dropped_bytes = excluded.stream_dropped_bytes,
+            output_content_id = excluded.output_content_id,
+            output_preview = excluded.output_preview,
+            preview_start_offset = excluded.preview_start_offset,
+            updated_at_ms = excluded.updated_at_ms",
+        params![
+            row.exec_session_id,
+            row.session_id,
+            row.origin_turn_id,
+            row.origin_call_id,
+            i64::from(row.tty),
+            row.command,
+            row.cwd,
+            row.state_json,
+            row.state_kind,
+            row.started_at_ms,
+            row.finished_at_ms,
+            row.next_offset as i64,
+            i64::from(row.output_complete),
+            row.capture_omitted_bytes as i64,
+            row.stream_dropped_bytes as i64,
+            row.output_content_id,
+            row.output_preview,
+            row.preview_start_offset as i64,
+            now_ms(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// 终态一次性落库:已终态的行不可改写(幂等重放返回 false)。
+pub fn finish_exec_session(
+    conn: &mut Connection,
+    exec_session_id: &str,
+    state_json: &str,
+    finished_at_ms: i64,
+    output_complete: bool,
+    output_content_id: Option<&str>,
+    output_text: Option<&str>,
+    output_truncated: bool,
+    output_preview: &str,
+    preview_start_offset: u64,
+) -> rusqlite::Result<bool> {
+    let tx = conn.transaction()?;
+    let session_id = tx
+        .query_row(
+            "SELECT session_id FROM exec_sessions WHERE exec_session_id = ?1 AND state_kind != 'finished'",
+            [exec_session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(session_id) = session_id else {
+        tx.rollback()?;
+        return Ok(false);
+    };
+    let generated_content_id = output_text.map(|text| {
+        use sha2::Digest as _;
+        format!(
+            "sha256:{}",
+            hex::encode(sha2::Sha256::digest(text.as_bytes()))
+        )
+    });
+    let content_id = output_content_id.or(generated_content_id.as_deref());
+    if let (Some(content_id), Some(text)) = (content_id, output_text) {
+        put_session_content(
+            &tx,
+            &session_id,
+            content_id,
+            "text/plain; charset=utf-8",
+            text.as_bytes(),
+            output_truncated,
+        )?;
+    }
+    let changed = tx.execute(
+        "UPDATE exec_sessions
+         SET state_json = ?2, state_kind = 'finished', finished_at_ms = ?3,
+             output_complete = ?4, output_content_id = ?5, output_preview = ?6,
+             preview_start_offset = ?7, updated_at_ms = ?3
+         WHERE exec_session_id = ?1 AND state_kind != 'finished'",
+        params![
+            exec_session_id,
+            state_json,
+            finished_at_ms,
+            i64::from(output_complete),
+            content_id,
+            output_preview,
+            preview_start_offset as i64,
+        ],
+    )?;
+    tx.commit()?;
+    Ok(changed > 0)
+}
+
+/// bootstrap 读面:全部非终态 + 最近 32 个终态摘要(spec §6.3)。
+pub fn exec_sessions_for_bootstrap(
+    conn: &Connection,
+    session_id: &str,
+) -> rusqlite::Result<Vec<ExecSessionRow>> {
+    let sql = format!(
+        "SELECT exec_session_id, session_id, origin_turn_id, origin_call_id, tty, command, cwd,
+                state_json, state_kind, started_at_ms, finished_at_ms, next_offset,
+                output_complete, capture_omitted_bytes, stream_dropped_bytes,
+                output_content_id, output_preview, preview_start_offset
+         FROM exec_sessions
+         WHERE session_id = ?1 AND state_kind != 'finished'
+         UNION ALL
+         SELECT exec_session_id, session_id, origin_turn_id, origin_call_id, tty, command, cwd,
+                state_json, state_kind, started_at_ms, finished_at_ms, next_offset,
+                output_complete, capture_omitted_bytes, stream_dropped_bytes,
+                output_content_id, output_preview, preview_start_offset
+         FROM exec_sessions
+         WHERE session_id = ?1 AND state_kind = 'finished'
+         ORDER BY started_at_ms DESC LIMIT 32"
+    );
+    read_exec_sessions_sql(conn, &sql, session_id)
+}
+
+/// 命令面按 ID 查找(越属校验前先定位)。
+pub fn exec_session_by_id(
+    conn: &Connection,
+    exec_session_id: &str,
+) -> rusqlite::Result<Option<ExecSessionRow>> {
+    let sql =
+        "SELECT exec_session_id, session_id, origin_turn_id, origin_call_id, tty, command, cwd,
+                state_json, state_kind, started_at_ms, finished_at_ms, next_offset,
+                output_complete, capture_omitted_bytes, stream_dropped_bytes,
+                output_content_id, output_preview, preview_start_offset
+         FROM exec_sessions WHERE exec_session_id = ?1";
+    Ok(read_exec_sessions_sql(conn, sql, exec_session_id)?
+        .into_iter()
+        .next())
+}
+
+fn read_exec_sessions_sql(
+    conn: &Connection,
+    sql: &str,
+    key: &str,
+) -> rusqlite::Result<Vec<ExecSessionRow>> {
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map([key], |row| {
+        Ok(ExecSessionRow {
+            exec_session_id: row.get(0)?,
+            session_id: row.get(1)?,
+            origin_turn_id: row.get(2)?,
+            origin_call_id: row.get(3)?,
+            tty: row.get::<_, i64>(4)? != 0,
+            command: row.get(5)?,
+            cwd: row.get(6)?,
+            state_json: row.get(7)?,
+            state_kind: row.get(8)?,
+            started_at_ms: row.get(9)?,
+            finished_at_ms: row.get(10)?,
+            next_offset: row.get::<_, i64>(11)?.max(0) as u64,
+            output_complete: row.get::<_, i64>(12)? != 0,
+            capture_omitted_bytes: row.get::<_, i64>(13)?.max(0) as u64,
+            stream_dropped_bytes: row.get::<_, i64>(14)?.max(0) as u64,
+            output_content_id: row.get(15)?,
+            output_preview: row.get(16)?,
+            preview_start_offset: row.get::<_, i64>(17)?.max(0) as u64,
+        })
+    })?;
+    rows.collect()
 }
 
 // ---------------------------------------------------------------------------

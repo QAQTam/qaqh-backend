@@ -3,7 +3,6 @@
 //! 各模块的 `register()` 在此组装。外部注册器通过 `extra_registrars` 注入。
 
 use super::ToolManager;
-use super::exec;
 // use super::journal;
 use super::read_image;
 use super::web;
@@ -17,7 +16,6 @@ use super::file_query;
 use super::grep_tool;
 
 use super::ask_user;
-use super::process_inspect;
 use super::todo;
 
 use super::skill;
@@ -45,7 +43,7 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     qaqh_process_tools::hooks::set_project_process(crate::display::project_process);
 
     // ── 系统工具 ──
-    exec::register(&mut mgr);
+    qaqh_process_tools::exec_session::register(&mut mgr);
     web::register(&mut mgr);
 
     // ── 文件操作 ──
@@ -72,9 +70,6 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     read_image::register(&mut mgr);
 
     // journal::register(&mut mgr); (retired from model tool surface)
-
-    // ── 进程巡查 ──
-    process_inspect::register(&mut mgr);
 
     // ── Agent Skills ──
     skill::register(&mut mgr);
@@ -110,10 +105,9 @@ mod tests {
                 "copy_range",
                 "delete",
                 "edit",
-                "exec",
+                "exec_command",
                 "glob",
                 "grep",
-                "process",
                 "read",
                 "read_image",
                 "search",
@@ -126,6 +120,7 @@ mod tests {
                 "tool_search",
                 "web_fetch",
                 "write",
+                "write_stdin",
             ]
         );
     }

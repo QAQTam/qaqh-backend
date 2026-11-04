@@ -9,12 +9,11 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 
 use qaqh_ringing_contract::fact::{
-    ActivityState, InteractionDecision, SessionId, ToolCallId, ToolError, ToolMetrics, TurnId,
-    TurnMode,
+    ActivityState, InteractionDecision, SessionId, ToolCallId, ToolMetrics, TurnId, TurnMode,
 };
 use qaqh_ringing_contract::state::{
-    InteractionResolution, InteractionView, SessionState, SubagentView, TimelineEntry,
-    ToolCallStatus, ToolCallView, TurnOutcome, TurnView,
+    ExecSessionState, ExecSessionView, InteractionResolution, InteractionView, SessionState,
+    SubagentView, TimelineEntry, ToolCallState, ToolCallView, TurnOutcome, TurnPhase, TurnView,
 };
 
 use super::DbError;
@@ -42,18 +41,25 @@ pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<Session
         .into_iter()
         .map(interaction_view)
         .collect::<Result<Vec<_>, DbError>>()?;
+    let exec_sessions = store::exec_sessions_for_bootstrap(conn, session_id)?
+        .into_iter()
+        .map(exec_session_view)
+        .collect::<Result<Vec<_>, DbError>>()?;
 
-    let pending_tools = store::unfinished_tool_calls(conn, session_id)?;
-    let has_active_turn = {
-        let mut stmt =
-            conn.prepare("SELECT COUNT(*) FROM turns WHERE session_id = ?1 AND status = 'active'")?;
-        let count: i64 = stmt.query_row([session_id], |row| row.get(0))?;
-        count > 0
-    };
-    let activity = if has_active_turn || !pending_tools.is_empty() {
-        ActivityState::Running
+    // activity 由活动回合 phase 直接派生(spec §4.4);后台执行会话数量不参与。
+    // 无 pending phase 的活动回合按 running 处理;未决交互优先于 running,
+    // 避免 waiting_user 被 active turn 遮蔽。
+    let active_phase = store::active_turn_phase(conn, session_id)?;
+    let has_pending_interaction = !interactions.is_empty();
+    let activity = if has_pending_interaction {
+        ActivityState::WaitingUser
     } else {
-        ActivityState::Idle
+        match active_phase.as_deref() {
+            Some("waiting_user") => ActivityState::WaitingUser,
+            Some("cancelling") => ActivityState::Cancelling,
+            Some(_) => ActivityState::Running,
+            None => ActivityState::Idle,
+        }
     };
     let current_turn_id = turns
         .iter()
@@ -75,8 +81,43 @@ pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<Session
         tools,
         interactions,
         subagents,
+        exec_sessions,
         driver: None,
     })
+}
+
+/// Load exactly one turn's authoritative metadata, timeline and tool views.
+pub fn load_session_turn(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Option<qaqh_ringing_contract::SessionTurnSnapshot>, DbError> {
+    if !store::session_exists(conn, session_id)? {
+        return Err(DbError::SessionNotFound {
+            session_id: session_id.to_string(),
+        });
+    }
+    let turn = load_turn(conn, session_id, turn_id)?;
+    let Some(turn) = turn else { return Ok(None) };
+    let timeline = store::read_transcript_for_turn(conn, session_id, turn_id)?
+        .into_iter()
+        .map(|block| {
+            let text = block.payload_json.ok_or_else(|| {
+                DbError::Corrupt(format!("block {} has no payload_json", block.block_id))
+            })?;
+            serde_json::from_str::<TimelineEntry>(&text)
+                .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let tools = store::tool_calls_for_turn(conn, session_id, turn_id)?
+        .into_iter()
+        .map(tool_call_view)
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(qaqh_ringing_contract::SessionTurnSnapshot {
+        turn,
+        timeline,
+        tools,
+    }))
 }
 
 /// `sessions.title`;空串归一为 None(创建时默认 '')。
@@ -98,10 +139,7 @@ fn load_subagents(conn: &Connection, session_id: &str) -> Result<Vec<SubagentVie
          WHERE session_id = ?1 AND effects_json IS NOT NULL ORDER BY started_at_ms",
     )?;
     let rows = stmt.query_map([session_id], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-        ))
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
     let mut subagents = Vec::new();
     for row in rows {
@@ -151,9 +189,7 @@ fn child_terminal_status(
     Ok(match status.as_deref() {
         Some("active") | None => None,
         Some("finished") => Some(qaqh_ringing_contract::fact::SubagentTerminalStatus::Completed),
-        Some("interrupted") => {
-            Some(qaqh_ringing_contract::fact::SubagentTerminalStatus::Cancelled)
-        }
+        Some("interrupted") => Some(qaqh_ringing_contract::fact::SubagentTerminalStatus::Cancelled),
         Some(other) => {
             return Err(DbError::Corrupt(format!(
                 "subagent {child_session_id}: unknown turn status {other:?}"
@@ -168,7 +204,7 @@ fn rusqlite_error(error: rusqlite::Error) -> DbError {
 
 fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT turn_id, input_id, mode, status, outcome_json FROM turns
+        "SELECT turn_id, input_id, mode, phase, status, outcome_json FROM turns
          WHERE session_id = ?1 ORDER BY seq",
     )?;
     let rows = stmt.query_map([session_id], |row| {
@@ -176,39 +212,93 @@ fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbEr
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
         ))
     })?;
-    let mut turns = Vec::new();
-    for row in rows {
-        let (turn_id, input_id, mode, status, outcome_json) = row?;
-        let outcome = match status.as_str() {
-            "finished" | "interrupted" => {
-                let text = outcome_json.ok_or_else(|| {
-                    DbError::Corrupt(format!("turn {turn_id} is {status} without outcome_json"))
-                })?;
-                Some(serde_json::from_str::<TurnOutcome>(&text).map_err(|error| {
-                    DbError::Corrupt(format!("turn {turn_id} outcome_json: {error}"))
-                })?)
+    rows.map(|row| {
+        let (turn_id, input_id, mode, phase, status, outcome_json) = row?;
+        turn_view(turn_id, input_id, mode, phase, status, outcome_json)
+    })
+    .collect()
+}
+
+fn load_turn(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Option<TurnView>, DbError> {
+    let row = conn
+        .query_row(
+            "SELECT turn_id, input_id, mode, phase, status, outcome_json
+             FROM turns WHERE session_id = ?1 AND turn_id = ?2",
+            rusqlite::params![session_id, turn_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            },
+        )
+        .optional()?;
+    row.map(|(turn_id, input_id, mode, phase, status, outcome_json)| {
+        turn_view(turn_id, input_id, mode, phase, status, outcome_json)
+    })
+    .transpose()
+}
+
+fn turn_view(
+    turn_id: String,
+    input_id: Option<String>,
+    mode: Option<String>,
+    phase: Option<String>,
+    status: String,
+    outcome_json: Option<String>,
+) -> Result<TurnView, DbError> {
+    let outcome = match status.as_str() {
+        "finished" | "interrupted" => {
+            let text = outcome_json.ok_or_else(|| {
+                DbError::Corrupt(format!("turn {turn_id} is {status} without outcome_json"))
+            })?;
+            Some(serde_json::from_str::<TurnOutcome>(&text).map_err(|error| {
+                DbError::Corrupt(format!("turn {turn_id} outcome_json: {error}"))
+            })?)
+        }
+        _ => None,
+    };
+    let mode = match mode {
+        Some(text) => Some(
+            serde_json::from_str::<TurnMode>(&text)
+                .map_err(|error| DbError::Corrupt(format!("turn {turn_id} mode: {error}")))?,
+        ),
+        None => None,
+    };
+    let phase = match outcome {
+        Some(_) => None,
+        None => match phase.as_deref() {
+            Some("running") => Some(TurnPhase::Running),
+            Some("waiting_user") => Some(TurnPhase::WaitingUser),
+            Some("cancelling") => Some(TurnPhase::Cancelling),
+            Some(other) => {
+                return Err(DbError::Corrupt(format!(
+                    "turn {turn_id}: unknown phase {other:?}"
+                )));
             }
-            _ => None,
-        };
-        let mode = match mode {
-            Some(text) => Some(
-                serde_json::from_str::<TurnMode>(&text)
-                    .map_err(|error| DbError::Corrupt(format!("turn {turn_id} mode: {error}")))?,
-            ),
-            None => None,
-        };
-        turns.push(TurnView {
-            turn_id: TurnId::new(turn_id),
-            input_id: input_id.map(qaqh_ringing_contract::fact::InputId::new),
-            mode,
-            outcome,
-        });
-    }
-    Ok(turns)
+            None => Some(TurnPhase::Running),
+        },
+    };
+    Ok(TurnView {
+        turn_id: TurnId::new(turn_id),
+        input_id: input_id.map(qaqh_ringing_contract::fact::InputId::new),
+        mode,
+        phase,
+        outcome,
+    })
 }
 
 fn load_timeline(conn: &Connection, session_id: &str) -> Result<Vec<TimelineEntry>, DbError> {
@@ -226,26 +316,11 @@ fn load_timeline(conn: &Connection, session_id: &str) -> Result<Vec<TimelineEntr
 }
 
 fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
-    let status = match call.status.as_str() {
-        "declared" => ToolCallStatus::Declared,
-        "awaiting_permission" => ToolCallStatus::AwaitingPermission,
-        "running" | "backgrounded" => ToolCallStatus::Running,
-        "finished" => ToolCallStatus::Finished,
-        "failed" => ToolCallStatus::Failed,
-        "cancelled" => ToolCallStatus::Cancelled,
-        other => {
-            return Err(DbError::Corrupt(format!(
-                "unknown tool call status {other:?}"
-            )));
-        }
-    };
     let who = format!("tool call {}", call.call_id);
+    // state_json 是唯一权威;state_kind 冗余列只用于查询,不参与投影判定。
+    let state = parse_typed::<ToolCallState>(&who, "state", &call.state_json)?;
     let args = match call.args_json {
         Some(text) => Some(parse_typed::<serde_json::Value>(&who, "args", &text)?),
-        None => None,
-    };
-    let error = match call.error_json {
-        Some(text) => Some(parse_typed::<ToolError>(&who, "error", &text)?),
         None => None,
     };
     let metrics = match call.meta_json {
@@ -266,20 +341,72 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
         )?,
         None => Vec::new(),
     };
+    // yielded 的调用视图带显式 exec_session_id;其他来源的列值(迁移历史)
+    // 也如实透出,客户端按 call_id/exec_session_id 关联。
+    let exec_session_id = call
+        .exec_session_id
+        .map(qaqh_ringing_contract::fact::ExecSessionId::new);
     Ok(ToolCallView {
         call_id: ToolCallId::new(call.call_id),
         turn_id: call.turn_id.map(TurnId::new),
         tool_name: Some(call.tool_name),
         args,
-        status,
+        state,
+        exec_session_id,
         output: call
             .output_text
-            .map(|text| qaqh_ringing_contract::fact::ContentValue::Inline { text }),
+            .map(|text| qaqh_ringing_contract::fact::ContentValue::Inline { text })
+            .or_else(|| {
+                call.output_ref.map(
+                    |content_id| qaqh_ringing_contract::fact::ContentValue::Ref {
+                        content_ref: qaqh_ringing_contract::fact::ContentRef::new(
+                            qaqh_ringing_contract::fact::ContentHash::new(content_id),
+                        ),
+                    },
+                )
+            }),
         output_truncated: call.output_truncated,
-        error,
         metrics,
         code_delta,
         effects,
+    })
+}
+
+pub fn exec_session_view(row: store::ExecSessionRow) -> Result<ExecSessionView, DbError> {
+    let who = format!("exec session {}", row.exec_session_id);
+    let state = parse_typed::<ExecSessionState>(&who, "state", &row.state_json)?;
+    let output =
+        row.output_content_id.map(
+            |content_id| qaqh_ringing_contract::fact::ContentValue::Ref {
+                content_ref: qaqh_ringing_contract::fact::ContentRef::new(
+                    qaqh_ringing_contract::fact::ContentHash::new(content_id),
+                ),
+            },
+        );
+    Ok(ExecSessionView {
+        id: qaqh_ringing_contract::fact::ExecSessionId::new(row.exec_session_id),
+        owner_session_id: SessionId::new(row.session_id),
+        origin_turn_id: row
+            .origin_turn_id
+            .map(TurnId::new)
+            .unwrap_or_else(|| TurnId::new(String::new())),
+        origin_call_id: row
+            .origin_call_id
+            .map(ToolCallId::new)
+            .unwrap_or_else(|| ToolCallId::new(String::new())),
+        state,
+        tty: row.tty,
+        command: row.command,
+        cwd: row.cwd,
+        started_at_ms: row.started_at_ms,
+        finished_at_ms: row.finished_at_ms,
+        next_offset: row.next_offset,
+        output_preview: row.output_preview,
+        preview_start_offset: row.preview_start_offset,
+        output_complete: row.output_complete,
+        capture_omitted_bytes: row.capture_omitted_bytes,
+        stream_dropped_bytes: row.stream_dropped_bytes,
+        output,
     })
 }
 

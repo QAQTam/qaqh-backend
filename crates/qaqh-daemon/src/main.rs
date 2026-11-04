@@ -517,7 +517,10 @@ fn run_command_call(
     ) {
         Ok((status, body)) if (200..300).contains(&status) => {
             let result = body.get("result").unwrap_or(&body);
-            println!("{}", serde_json::to_string_pretty(result).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(result).unwrap_or_default()
+            );
             0
         }
         Ok((status, body)) => {

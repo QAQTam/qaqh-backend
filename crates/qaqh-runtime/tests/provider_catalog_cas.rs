@@ -54,9 +54,7 @@ fn model() -> qaqh_profile::ModelDef {
 }
 
 fn catalog_revision() -> u64 {
-    service()
-        .provider_catalog()
-        .expect("catalog")["revision"]
+    service().provider_catalog().expect("catalog")["revision"]
         .as_u64()
         .expect("revision")
 }
@@ -97,12 +95,11 @@ fn stale_revision_is_rejected_and_catalog_stays_consistent() {
         Some(current.wrapping_sub(1)),
         model(),
     );
-    assert!(matches!(stale, Err(qaqh_runtime::QaqhError::Conflict { .. })));
-    assert_eq!(
-        catalog_revision(),
-        current,
-        "冲突后目录 revision 不变"
-    );
+    assert!(matches!(
+        stale,
+        Err(qaqh_runtime::QaqhError::Conflict { .. })
+    ));
+    assert_eq!(catalog_revision(), current, "冲突后目录 revision 不变");
 }
 
 #[test]
@@ -144,10 +141,19 @@ fn referenced_provider_and_model_cannot_be_deleted() {
     // 解除引用前,先自建 repoint 目标(provider + model),不依赖其他测试
     // 的执行顺序。
     service
-        .provider_upsert("acme-repoint", &provider_dto("Acme Repoint"), Some(catalog_revision()))
+        .provider_upsert(
+            "acme-repoint",
+            &provider_dto("Acme Repoint"),
+            Some(catalog_revision()),
+        )
         .expect("repoint provider");
     service
-        .provider_model_upsert("acme-repoint", "m-repoint", Some(catalog_revision()), model())
+        .provider_model_upsert(
+            "acme-repoint",
+            "m-repoint",
+            Some(catalog_revision()),
+            model(),
+        )
         .expect("repoint model");
     let latest = catalog_revision();
     service
@@ -171,7 +177,11 @@ fn profile_create_and_delete_live_on_the_legacy_directory() {
     let service = service();
     // provider 目录写入不影响 legacy profiles 摘要。
     service
-        .provider_upsert("acme-legacy", &provider_dto("Acme Legacy"), Some(catalog_revision()))
+        .provider_upsert(
+            "acme-legacy",
+            &provider_dto("Acme Legacy"),
+            Some(catalog_revision()),
+        )
         .expect("provider");
 
     // legacy profile 命令不携带 config_revision,平铺 payload 即契约。
@@ -219,7 +229,10 @@ fn profile_create_and_delete_live_on_the_legacy_directory() {
     let listed = service
         .handle("profile.list", &serde_json::json!({}))
         .expect("profile.list after delete");
-    assert!(listed["profiles"]["legacy-profile"].is_null(), "已删除的 profile 不再出现");
+    assert!(
+        listed["profiles"]["legacy-profile"].is_null(),
+        "已删除的 profile 不再出现"
+    );
 
     // 不存在的 profile 无法重复删除。
     let again = service.execute_ringing_command(

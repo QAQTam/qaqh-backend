@@ -124,6 +124,14 @@ pub enum RingingCommand {
         #[serde(default)]
         trust_folder: bool,
     },
+    /// 执行会话统一控制(spec §6.2):interrupt 是中断请求;target 必须是
+    /// `CommandTarget::ExecSession`。accepted 仅代表受理;最终事实由
+    /// exec_session_finished 或读取相同 ExecSessionView 确认。
+    #[serde(rename = "exec_session.interrupt")]
+    ExecSessionInterrupt {},
+    /// 执行会话进程树终止;共用执行管理器与 owner,不另建 kill 注册表。
+    #[serde(rename = "exec_session.terminate")]
+    ExecSessionTerminate {},
     #[serde(rename = "provider.list")]
     ProviderList {},
     #[serde(rename = "provider.upsert")]
@@ -250,6 +258,8 @@ impl RingingCommand {
             Self::DriverRelease { .. } => "driver.release",
             Self::PlanReviewRespond { .. } => "plan.review.respond",
             Self::ToolPermissionRespond { .. } => "tool.permission.respond",
+            Self::ExecSessionInterrupt {} => "exec_session.interrupt",
+            Self::ExecSessionTerminate {} => "exec_session.terminate",
             Self::ProviderList { .. } => "provider.list",
             Self::ProviderUpsert { .. } => "provider.upsert",
             Self::ProviderDelete { .. } => "provider.delete",

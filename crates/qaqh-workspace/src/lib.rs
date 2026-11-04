@@ -48,7 +48,6 @@ pub mod ask_user;
 pub mod todo;
 
 pub use qaqh_permission::workspace;
-pub use qaqh_process_tools::process_inspect;
 pub use qaqh_process_tools::process_registry;
 
 pub mod registration;

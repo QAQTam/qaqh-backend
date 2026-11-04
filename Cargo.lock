@@ -2478,6 +2478,7 @@ dependencies = [
  "qaqh-permission",
  "qaqh-policy",
  "qaqh-pty",
+ "qaqh-ringing-contract",
  "qaqh-sandbox",
  "qaqh-tool-core",
  "qaqh-types",

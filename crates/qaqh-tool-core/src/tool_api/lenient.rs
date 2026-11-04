@@ -119,7 +119,10 @@ mod tests {
             parse(json!({"end_line": 220})).unwrap(),
             "字符串拼写与数字必须解析成同一个值"
         );
-        assert_eq!(parse(json!({"end_line": " 40 "})).unwrap().end_line, Some(40));
+        assert_eq!(
+            parse(json!({"end_line": " 40 "})).unwrap().end_line,
+            Some(40)
+        );
         assert_eq!(parse(json!({"end_line": "3.0"})).unwrap().end_line, Some(3));
         assert_eq!(parse(json!({"end_line": null})).unwrap().end_line, None);
         assert_eq!(parse(json!({})).unwrap().end_line, None);
@@ -145,11 +148,7 @@ mod tests {
     #[test]
     fn error_text_names_the_received_shape() {
         let error = parse(json!({"end_line": "220x"})).expect_err("非数字文本");
-        assert!(
-            error.to_string().contains("string \"220x\""),
-            "{}",
-            error
-        );
+        assert!(error.to_string().contains("string \"220x\""), "{}", error);
     }
 
     #[derive(Debug, Deserialize, PartialEq)]
@@ -163,10 +162,7 @@ mod tests {
         let single = serde_json::from_value::<ManyArgs>(json!({"paths": "src"})).unwrap();
         assert_eq!(single.paths, Some(vec!["src".to_owned()]));
         let many = serde_json::from_value::<ManyArgs>(json!({"paths": ["src", "tests"]})).unwrap();
-        assert_eq!(
-            many.paths,
-            Some(vec!["src".to_owned(), "tests".to_owned()])
-        );
+        assert_eq!(many.paths, Some(vec!["src".to_owned(), "tests".to_owned()]));
         let empty = serde_json::from_value::<ManyArgs>(json!({})).unwrap();
         assert_eq!(empty.paths, None);
     }
@@ -179,7 +175,8 @@ mod tests {
             Some(vec!["src,tests".to_owned()]),
             "逗号分隔是猜测，不得展平"
         );
-        let bogus = serde_json::from_value::<ManyArgs>(json!({"paths": [1]})).expect_err("非字符串项");
+        let bogus =
+            serde_json::from_value::<ManyArgs>(json!({"paths": [1]})).expect_err("非字符串项");
         assert!(bogus.to_string().contains("expected string"), "{bogus}");
     }
 }

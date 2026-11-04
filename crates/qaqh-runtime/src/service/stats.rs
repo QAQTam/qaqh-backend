@@ -19,7 +19,9 @@ struct ToolActivityRow {
 /// `session.dashboard`:任务卡来自 todo 状态投影,recent_edits 来自
 /// code_stats.jsonl 的去重尾部(最近优先)。B08 权威 DTO,handler 直出
 /// typed 结构,序列化即 wire 形状。
-pub(crate) fn dashboard(session_id: &str) -> Result<crate::ringing::service_methods::SessionDashboard, String> {
+pub(crate) fn dashboard(
+    session_id: &str,
+) -> Result<crate::ringing::service_methods::SessionDashboard, String> {
     use crate::ringing::service_methods::{SessionDashboard, SessionDashboardTask};
     let dir = qaqh_types::platform::sessions_dir().join(session_id);
     let tasks: Vec<SessionDashboardTask> = qaqh_workspace::todo::todo_status_value(session_id)

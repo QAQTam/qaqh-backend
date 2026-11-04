@@ -196,6 +196,12 @@ impl Client {
             return Err(api_error(response, &path).await);
         }
         let bootstrap: SessionBootstrap = response.json().await?;
+        if bootstrap.session_contract_revision != qaqh_ringing::SESSION_CONTRACT_REVISION {
+            return Err(ClientError::Protocol(format!(
+                "unsupported session contract revision: {}",
+                bootstrap.session_contract_revision
+            )));
+        }
         Ok(bootstrap)
     }
 
