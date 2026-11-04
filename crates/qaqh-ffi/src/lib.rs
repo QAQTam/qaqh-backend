@@ -52,6 +52,16 @@ pub struct PairResult {
     pub protocol_version: u32,
 }
 
+/// 当前租约的协商结果（ClientV2SessionState 的窄投影）。
+#[derive(uniffi::Record, Debug, Clone)]
+pub struct LeaseState {
+    pub client_instance_id: String,
+    pub client_session_id: String,
+    pub server_epoch: String,
+    pub lease_ttl_ms: u64,
+    pub renew_interval_ms: u64,
+}
+
 /// v2 单流状态（`qaqh_client::V2StreamStatus` 的窄映射；`ReconnectReason`
 /// 序列化成 `lagged:<n>` / `stream_terminated:<code>` 字符串）。
 #[derive(uniffi::Enum, Debug, Clone)]
@@ -132,27 +142,27 @@ async fn with_timeout<T>(future: impl Future<Output = Result<T, ClientError>>) -
     match tokio::time::timeout(CALL_TIMEOUT, future).await {
         Ok(result) => result.map_err(CoreError::from),
         Err(_) => Err(CoreError::Transport {
-            message: format!("request timed out after {}s", CALL_TIMEOUT.as_secs()),
+            detail: format!("request timed out after {}s", CALL_TIMEOUT.as_secs()),
         }),
     }
 }
 
 fn to_json_string<T: serde::Serialize>(value: &T) -> Result<String, CoreError> {
     serde_json::to_string(value).map_err(|error| CoreError::Protocol {
-        message: format!("serialize: {error}"),
+        detail: format!("serialize: {error}"),
     })
 }
 
 fn parse_json(raw: &str) -> Result<Value, CoreError> {
     serde_json::from_str(raw).map_err(|error| CoreError::Protocol {
-        message: format!("invalid json: {error}"),
+        detail: format!("invalid json: {error}"),
     })
 }
 
 // ── 顶层入口 ─────────────────────────────────────────────────────────────
 
 /// 手机侧配对：消费一次性 `pairing_token` 换 `device_token`（免鉴权端点）。
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 pub async fn pair_device(
     base_url: String,
     pairing_token: String,
@@ -181,7 +191,7 @@ pub async fn pair_device(
 /// 连接 daemon（remote 直连模式）：open 租约 + 起续租/attach 重放后台任务。
 ///
 /// 之后调用方负责 `attach(seed) → activate_stream(seed)` 编排。
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 pub async fn connect_client(
     base_url: String,
     device_token: String,
@@ -240,9 +250,21 @@ impl Drop for QaqhClient {
     }
 }
 
-#[uniffi::export]
+#[uniffi::export(async_runtime = "tokio")]
 impl QaqhClient {
     // ── 流编排 ──
+
+    /// 当前租约状态（open 协商结果；壳层状态机的 Connected 字段来源）。
+    pub async fn lease_state(&self) -> Option<LeaseState> {
+        let state = self.inner.v2_session_state().await?;
+        Some(LeaseState {
+            client_instance_id: state.client_instance_id,
+            client_session_id: state.client_session_id,
+            server_epoch: state.server_epoch,
+            lease_ttl_ms: state.lease_ttl_ms,
+            renew_interval_ms: state.renew_interval_ms,
+        })
+    }
 
     /// attach 一个 seed（SessionResume 命令；租约重协商后由 client 自动重放）。
     pub async fn attach(&self, session_id: String) -> Result<String, CoreError> {
@@ -357,7 +379,7 @@ impl QaqhClient {
         let command: RingingCommand =
             serde_json::from_value(parse_json(&command_json)?).map_err(|error| {
                 CoreError::Protocol {
-                    message: format!("unknown command shape: {error}"),
+                    detail: format!("unknown command shape: {error}"),
                 }
             })?;
         let target = match session_id {
@@ -399,7 +421,7 @@ impl QaqhClient {
     ) -> Result<String, CoreError> {
         let answers = serde_json::from_value(parse_json(&answers_json)?).map_err(|error| {
             CoreError::Protocol {
-                message: format!("invalid answers: {error}"),
+                detail: format!("invalid answers: {error}"),
             }
         })?;
         self.send_command_json(
@@ -444,7 +466,7 @@ impl QaqhClient {
             .v2_session_state()
             .await
             .ok_or(CoreError::Negotiation {
-                message: "v2 session not open".into(),
+                detail: "v2 session not open".into(),
             })?;
         self.send_command_json(
             Some(session_id),
@@ -463,7 +485,7 @@ impl QaqhClient {
             .v2_session_state()
             .await
             .ok_or(CoreError::Negotiation {
-                message: "v2 session not open".into(),
+                detail: "v2 session not open".into(),
             })?;
         self.send_command_json(
             Some(session_id),
@@ -562,7 +584,7 @@ impl QaqhClient {
     pub async fn download_content(&self, content_ref: String) -> Result<Vec<u8>, CoreError> {
         let reference = parse_json(&content_ref).and_then(|value| {
             serde_json::from_value(value).map_err(|error| CoreError::Protocol {
-                message: format!("invalid ContentRef: {error}"),
+                detail: format!("invalid ContentRef: {error}"),
             })
         })?;
         with_timeout(self.inner.download_content(&reference)).await
@@ -580,8 +602,9 @@ impl QaqhClient {
         to_json_string(&reference)
     }
 
-    /// 停全部后台任务（续租 + 流）。幂等。
-    pub fn close(&self) {
+    /// 停全部后台任务（续租 + 流）。幂等。（不叫 close：uniffi 生成的
+    /// Disposable.close() 是对象销毁语义，避免冲突。）
+    pub fn shutdown(&self) {
         self.inner.close();
     }
 }
