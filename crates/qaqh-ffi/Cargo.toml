@@ -1,0 +1,30 @@
+[package]
+name = "qaqh-ffi"
+version.workspace = true
+edition = "2024"
+description = "UniFFI bindings over qaqh-client for mobile shells (Android)"
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# `cargo run -p qaqh-ffi --bin uniffi-bindgen -- generate --library <so> --language kotlin`
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+qaqh-client = { path = "../qaqh-client" }
+qaqh-ringing = { path = "../qaqh-ringing" }
+uniffi = { version = "0.32.2", features = ["tokio", "cli"] }
+serde = { version = "1", features = ["derive"] }
+log = "0.4"
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android_logger = "0.15.1"
+
+[lints]
+workspace = true
