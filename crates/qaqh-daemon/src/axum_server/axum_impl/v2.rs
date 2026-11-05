@@ -11,7 +11,7 @@ use qaqh_ringing::{
     RingingV2PendingInteractionView, RingingV2PendingPermissionView,
 };
 use qaqh_ringing_contract::fact::{ContentValue, InteractionDecision, InteractionKind};
-use qaqh_ringing_contract::state::{InteractionView, SessionBootstrap};
+use qaqh_ringing_contract::state::{InteractionView, PermissionRequestDetails, SessionBootstrap};
 use serde::Serialize;
 
 use super::*;
@@ -522,19 +522,36 @@ fn pending_permission_view(
     else {
         return Ok(None);
     };
-    let body = interaction_body_value(state, session_id, &interaction.request)?;
-    let field = |name: &str| body.as_ref().and_then(|b| b.get(name)).cloned();
+    let details = permission_request_details(interaction_body_value(
+        state,
+        session_id,
+        &interaction.request,
+    )?);
     Ok(Some(RingingV2PendingPermissionView {
         tool_call_id,
-        tool_name: field("tool_name"),
-        action_summary: field("action_summary"),
-        reason: field("reason"),
-        paths: field("paths").unwrap_or_else(|| serde_json::json!([])),
-        category: field("category"),
-        level: field("level"),
-        risk: field("risk"),
-        consequence: field("consequence"),
-        details_unavailable: body.is_none(),
+        tool_name: details
+            .as_ref()
+            .map(|value| serde_json::json!(value.tool_name)),
+        action_summary: details
+            .as_ref()
+            .and_then(|value| value.action_summary.as_ref())
+            .map(|value| serde_json::json!(value)),
+        reason: details
+            .as_ref()
+            .map(|value| serde_json::json!(value.reason)),
+        paths: details
+            .as_ref()
+            .map(|value| serde_json::json!(value.paths))
+            .unwrap_or_else(|| serde_json::json!([])),
+        category: details
+            .as_ref()
+            .map(|value| serde_json::json!(value.category)),
+        level: details.as_ref().map(|value| serde_json::json!(value.level)),
+        risk: details.as_ref().map(|value| serde_json::json!(value.risk)),
+        consequence: details
+            .as_ref()
+            .map(|value| serde_json::json!(value.consequence)),
+        details_unavailable: details.is_none(),
     }))
 }
 
@@ -556,6 +573,54 @@ fn interaction_body_value(
             Ok(serde_json::from_slice(&entry.bytes).ok())
         }
         ContentValue::Unavailable(_) => Ok(None),
+    }
+}
+
+fn permission_request_details(body: Option<serde_json::Value>) -> Option<PermissionRequestDetails> {
+    body.and_then(|body| serde_json::from_value::<PermissionRequestDetails>(body).ok())
+        .filter(PermissionRequestDetails::is_valid)
+}
+
+#[cfg(test)]
+mod permission_request_details_tests {
+    use super::permission_request_details;
+    use serde_json::json;
+
+    #[test]
+    fn permission_details_require_the_ringing_v2_body_shape() {
+        let details = permission_request_details(Some(json!({
+            "tool_name": "exec_command",
+            "action_summary": "command: \"cargo check\"",
+            "reason": "Execution requires confirmation",
+            "paths": [],
+            "category": "exec",
+            "level": 1,
+            "risk": "high",
+            "consequence": "May execute arbitrary actions."
+        })))
+        .expect("structured permission details should project");
+        assert_eq!(details.tool_name, "exec_command");
+        assert_eq!(
+            details.action_summary.as_deref(),
+            Some("command: \"cargo check\"")
+        );
+        assert_eq!(details.level, 1);
+
+        assert!(
+            permission_request_details(Some(json!("Execution requires confirmation"))).is_none()
+        );
+        assert!(
+            permission_request_details(Some(json!({
+                "tool_name": "exec_command",
+                "reason": "Execution requires confirmation",
+                "paths": [],
+                "category": "exec",
+                "level": 0,
+                "risk": "high",
+                "consequence": "May execute arbitrary actions."
+            })))
+            .is_none()
+        );
     }
 }
 
