@@ -57,13 +57,7 @@ fn apply_model_selection(
     cfg.model_native_web_search = effective.native_web_search;
     if effective.credential == qaqh_types::CredentialSource::ApiKey {
         let secrets = qaqh_config::secrets::SecretStore::default_location();
-        if secrets.has_provider_key(&effective.provider_id) {
-            // 带槽取不到明文 → 空串（同 profile key 纪律：宁可报错也不串密钥）。
-            cfg.api_key = secrets
-                .load_provider_key(&effective.provider_id)
-                .unwrap_or_default();
-        }
-        // 未存储 → 继承 cfg.api_key（main 密钥），与旧 profile 语义一致。
+        cfg.api_key = secrets.load_provider_key(&effective.provider_id).unwrap_or_default();
     }
 }
 

@@ -28,6 +28,20 @@ impl AgentRegistry {
             ).into());
         }
         self.ensure_loaded_for_command(session_id)?;
+        if matches!(&env.command, qaqh_ringing::RingingCommand::ConversationSendMessage(_))
+            && self.instances.get(session_id).is_some_and(|instance| matches!(instance.kind, AgentKind::Session))
+        {
+            let owned = session_id.to_string();
+            let selection = self.owners.db().read_blocking(move |conn| {
+                qaqh_session::db::store::session_row(conn, &owned)
+            }).map_err(QaqhError::message)?
+                .and_then(|row| row.model_selection)
+                .ok_or_else(|| QaqhError::invalid("请先为此会话选择服务商和模型"))?;
+            let config = qaqh_config::watch::authoritative()
+                .ok_or_else(|| QaqhError::invalid("模型目录不可用"))?;
+            qaqh_profile::resolve_model_selection(&config.profiles_catalog, &selection)
+                .map_err(QaqhError::message)?;
+        }
         // A config reload replaces the provider *and* the tool environment:
         // the provider swap alone leaves the loop running the new model against
         // the old working directory / sandbox switch (report 2026-10-31 §11.4
