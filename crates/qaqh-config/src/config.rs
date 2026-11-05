@@ -627,9 +627,8 @@ pub const DEFAULT_CONTEXT_LENGTH: u32 = 128_000;
 
 /// 首次启动落盘的预设配置（带注释，可直接编辑）。
 /// 存在的前提是"配置文件不在"（`load` 只在 `!store.exists()` 时写），因此损坏的
-/// 用户文件绝不会被它覆盖。示例端点用的是 DeepSeek 的 OpenAI 兼容端点——换成自己的
-/// 服务商只改 `base_url` / `wire` / `model` / `context_length` 四项；这里**不含任何
-/// 密钥**（api key 走设置页 → `secrets.toml`，本文件只留 `api_key = "set"` 标记）。
+/// 用户文件绝不会被它覆盖。模型和端点留空，由用户在设置中填写。
+/// api key 走设置页 → `secrets.toml`，本文件不包含密钥。
 const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生成，改这份即可）。
 #
 # BYOK：一个端点只需要六个字段——
@@ -640,18 +639,16 @@ const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生�
 #   5. max_token       → max_tokens     （单次回复上限）
 #   6. context_length  → 端点声明的上下文窗口，也是本地压缩的唯一分母
 #
-# 下面是一份可直接改写的起点（DeepSeek 的 OpenAI 兼容端点）。换服务商时改
-# base_url / wire / model / context_length 四项即可；要多几个端点就整段复制
-# [profiles.<名字>]，切换走设置页的 profile。
+# 模型 ID 与端点没有默认值。请填写服务商提供的真实值，或使用设置页的端点模板。
+# 要多几个端点就整段复制 [profiles.<名字>]，切换走设置页的 profile。
 
 active_profile = "default"
 
 [profiles.default]
-model = "deepseek-chat"
+model = ""
 max_tokens = 16384
-effort = "high"
 context_length = 128000
-base_url = "https://api.deepseek.com"
+base_url = ""
 wire = "chat"
 
 # 可选：只有该端点与 wire 缺省语义不一致时才需要写；整段删掉即全用缺省。
@@ -708,9 +705,6 @@ fn migrate_profile(
                 profile.wire = preset.wire;
                 if profile.base_url.is_empty() {
                     profile.base_url = preset.base_url;
-                }
-                if profile.model.is_empty() && !preset.model.is_empty() {
-                    profile.model = preset.model;
                 }
                 if profile.compat.is_none() {
                     profile.compat = Some(preset.compat);
@@ -791,7 +785,7 @@ impl Default for Config {
         let profile = qaqh_types::ProfileConfig {
             model: String::new(),
             max_tokens: 16384,
-            effort: Some("high".into()),
+            effort: None,
             context_length: DEFAULT_CONTEXT_LENGTH,
             base_url: String::new(),
             wire: qaqh_types::Wire::default(),
@@ -827,7 +821,7 @@ impl Default for Config {
             model: String::new(),
             max_tokens: 16384,
             context_length: DEFAULT_CONTEXT_LENGTH,
-            reasoning_effort: "high".into(),
+            reasoning_effort: String::new(),
             profiles,
             active_profile: "default".into(),
             lang: None,
@@ -959,9 +953,6 @@ impl Config {
                 {
                     cfg.base_url = preset.base_url.clone();
                 }
-                if pc.model.as_deref().is_none_or(|m| m.is_empty()) && !preset.model.is_empty() {
-                    cfg.model = preset.model.clone();
-                }
             }
 
             // profile 是持久化真相：逐条迁移后接管 cfg 的端点族字段。
@@ -982,7 +973,7 @@ impl Config {
                 if let Some(profile) = cfg.profiles.get(active) {
                     cfg.model = profile.model.clone();
                     cfg.max_tokens = profile.max_tokens;
-                    cfg.reasoning_effort = profile.effort.clone().unwrap_or_else(|| "high".into());
+                    cfg.reasoning_effort = profile.effort.clone().unwrap_or_default();
                     cfg.context_length = profile.context_length;
                     cfg.base_url = profile.base_url.clone();
                     cfg.wire = profile.wire;
@@ -1589,7 +1580,7 @@ falling back to 1 (read-only)"
         self.credential = profile.credential;
         self.model = profile.model;
         self.max_tokens = profile.max_tokens;
-        self.reasoning_effort = profile.effort.unwrap_or_else(|| "high".into());
+        self.reasoning_effort = profile.effort.unwrap_or_default();
         self.context_length = profile.context_length;
         self.base_url = profile.base_url;
         self.active_profile = name.to_string();
@@ -2119,7 +2110,7 @@ responses_effort_max = \"max\"
     /// 首次启动（无配置文件）：落一份带注释的 BYOK 预设，且必须能原样解析回
     /// 六字段形状——模板与 serde 结构一旦漂移，这条就红。
     #[test]
-    fn first_run_writes_a_parsable_preset_once() {
+    fn first_run_writes_unconfigured_model_once() {
         let dir = temp_dir("first-run");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
@@ -2128,12 +2119,14 @@ responses_effort_max = \"max\"
         assert!(!store.exists(), "前置条件：还没有配置文件");
 
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
-        assert_eq!(cfg.model, "deepseek-chat");
-        assert_eq!(cfg.base_url, "https://api.deepseek.com");
+        assert!(cfg.model.is_empty());
+        assert!(cfg.base_url.is_empty());
+        assert!(cfg.default_model_selection.is_none());
+        assert!(cfg.profiles_catalog.providers.is_empty());
         assert_eq!(cfg.wire, qaqh_types::Wire::Chat);
         assert_eq!(cfg.max_tokens, 16_384);
         assert_eq!(cfg.context_length, 128_000);
-        assert_eq!(cfg.reasoning_effort, "high");
+        assert!(cfg.reasoning_effort.is_empty());
         assert!(cfg.api_key.is_empty(), "预设不得带密钥");
         assert_eq!(
             cfg.compat,

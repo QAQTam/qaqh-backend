@@ -5,7 +5,7 @@
 //! 保存契约 state/outcome,新增 exec_sessions 表,turns 保存 phase;5→6 是
 //! 一次性升级,不在运行路径同时支持两套 schema。
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::DbError;
 use super::store::now_ms;
@@ -233,14 +233,23 @@ CREATE TABLE board_subscriptions (
 
 /// 初始化 schema:空库建到最新版;已有库校验版本并按步进升级,比代码新直接报错。
 pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
-    let tx = conn.transaction()?;
+    // 版本读取、去重、DDL 和版本提交共用写事务,避免并发启动重复决定迁移。
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
         [],
     )?;
-    let existing: Option<u32> = tx
-        .query_row("SELECT version FROM schema_version", [], |row| row.get(0))
-        .optional()?;
+    // 旧版没有唯一约束,INSERT OR REPLACE 实际追加了版本历史。
+    // DDL 与版本记录一直同事务提交,最高版本才是已完成的升级。
+    let existing: Option<u32> =
+        tx.query_row("SELECT MAX(version) FROM schema_version", [], |row| {
+            row.get(0)
+        })?;
+    tx.execute_batch(
+        "DELETE FROM schema_version
+         WHERE rowid <> (SELECT rowid FROM schema_version ORDER BY version DESC LIMIT 1);
+         CREATE UNIQUE INDEX IF NOT EXISTS idx_schema_version_singleton ON schema_version ((1));",
+    )?;
     match existing {
         Some(found) if found > SCHEMA_VERSION => {
             return Err(DbError::SchemaTooNew {
@@ -250,9 +259,7 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
         }
         // schema 5 → 6:一次性升级(spec §9.3),在新 daemon 对外服务前完成。
         Some(5) => {
-            tx.commit()?;
-            upgrade_5_to_6(conn)?;
-            return Ok(());
+            upgrade_5_to_6(&tx)?;
         }
         Some(found) if found < SCHEMA_VERSION => {
             return Err(DbError::SchemaTooOld {
@@ -283,10 +290,7 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
 ///   采信;仅在文本里出现某个单词不构成修正证据。
 /// - 事实不足不补成成功:非终态迁移为 interrupted(legacy_state_unknown),
 ///   旧取消不伪造用户取消原因。
-fn upgrade_5_to_6(conn: &mut Connection) -> Result<(), DbError> {
-    let tx = conn
-        .transaction()
-        .map_err(|error| DbError::Corrupt(format!("upgrade 5→6 begin: {error}")))?;
+fn upgrade_5_to_6(tx: &Transaction<'_>) -> Result<(), DbError> {
     tx.execute_batch(
         r#"
         ALTER TABLE turns ADD COLUMN phase TEXT;
@@ -345,7 +349,7 @@ fn upgrade_5_to_6(conn: &mut Connection) -> Result<(), DbError> {
         .prepare(
             "SELECT call_id, session_id, turn_id, tool_name, args_json, status,
                     output_text, output_truncated, error_json, meta_json, effects_json,
-                    code_delta_json, started_at_ms, finished_at_ms
+                    code_delta_json, started_at_ms, finished_at_ms, output_ref
              FROM tool_calls",
         )
         .map_err(|error| DbError::Corrupt(format!("upgrade 5→6 read tool_calls: {error}")))?;
@@ -377,6 +381,7 @@ fn upgrade_5_to_6(conn: &mut Connection) -> Result<(), DbError> {
         let code_delta_json: Option<String> = row.get(11).map_err(corrupt("code_delta_json"))?;
         let started_at_ms: Option<i64> = row.get(12).map_err(corrupt("started_at_ms"))?;
         let finished_at_ms: Option<i64> = row.get(13).map_err(corrupt("finished_at_ms"))?;
+        let output_ref: Option<String> = row.get(14).map_err(corrupt("output_ref"))?;
 
         let migrated_call = migrate_tool_call_row(MigrationInput {
             call_id: &call_id,
@@ -393,7 +398,7 @@ fn upgrade_5_to_6(conn: &mut Connection) -> Result<(), DbError> {
                  state_json, state_kind, exec_session_id, interaction_id,
                  output_text, output_ref, output_truncated, meta_json, effects_json,
                  code_delta_json, started_at_ms, finished_at_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?16, ?10, ?11, ?12, ?13, ?14, ?15)",
             rusqlite::params![
                 call_id,
                 session_id,
@@ -410,6 +415,7 @@ fn upgrade_5_to_6(conn: &mut Connection) -> Result<(), DbError> {
                 code_delta_json,
                 started_at_ms,
                 finished_at_ms,
+                output_ref,
             ],
         )
         .map_err(|error| DbError::Corrupt(format!("upgrade 5→6 insert {call_id}: {error}")))?;
@@ -455,13 +461,6 @@ fn upgrade_5_to_6(conn: &mut Connection) -> Result<(), DbError> {
         "#,
     )
     .map_err(|error| DbError::Corrupt(format!("upgrade 5→6 index: {error}")))?;
-    tx.execute(
-        "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
-        [SCHEMA_VERSION],
-    )
-    .map_err(|error| DbError::Corrupt(format!("upgrade 5→6 version: {error}")))?;
-    tx.commit()
-        .map_err(|error| DbError::Corrupt(format!("upgrade 5→6 commit: {error}")))?;
     log::info!(
         "[schema] upgraded 5→6: {migrated} tool calls migrated, {corrected_backgrounded} corrected to yielded by explicit backgrounded evidence"
     );
@@ -707,6 +706,152 @@ fn migrate_tool_call_row(input: MigrationInput<'_>) -> MigratedToolCall {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // v5 的迁移输入结构独立于最新版 DDL,避免仅验证 Rust 单行映射而漏掉升级链路。
+    const V5: &str = r#"
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (5), (5);
+        CREATE TABLE turns (
+            turn_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, seq INTEGER NOT NULL,
+            input_id TEXT, mode TEXT, status TEXT NOT NULL, outcome_json TEXT,
+            started_at_ms INTEGER NOT NULL, finished_at_ms INTEGER
+        );
+        INSERT INTO turns VALUES ('turn', 'session', 1, NULL, NULL, 'active', NULL, 10, NULL);
+        CREATE TABLE tool_calls (
+            call_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT,
+            tool_name TEXT NOT NULL, args_json TEXT, status TEXT NOT NULL,
+            output_text TEXT, output_ref TEXT, output_truncated INTEGER NOT NULL DEFAULT 0,
+            error_json TEXT, meta_json TEXT, effects_json TEXT, code_delta_json TEXT,
+            started_at_ms INTEGER, finished_at_ms INTEGER
+        );
+        INSERT INTO tool_calls (call_id, session_id, turn_id, tool_name, status,
+                                output_text, output_ref, started_at_ms, finished_at_ms)
+        VALUES ('call', 'session', 'turn', 'shell', 'failed',
+                '{"status":"backgrounded","command":"cargo watch"}', 'content-ref', 10, 20);
+    "#;
+
+    #[test]
+    fn initialize_keeps_one_version_and_recovers_mixed_version_history() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        for _ in 0..3 {
+            initialize(&mut conn).expect("fresh/repeated initialize");
+        }
+        // 还原真实故障:已是 v6 的业务表,但版本历史仍以 v5 开头。
+        conn.execute_batch(
+            "DROP INDEX idx_schema_version_singleton;
+             DELETE FROM schema_version;
+             INSERT INTO schema_version VALUES (5), (5), (6);",
+        )
+        .expect("legacy metadata");
+        conn.execute(
+            "INSERT INTO sessions (session_id, title, created_at_ms, updated_at_ms)
+             VALUES ('retained', 'keep', 1, 1)",
+            [],
+        )
+        .expect("business data");
+        for _ in 0..3 {
+            initialize(&mut conn).expect("reopen migrated database");
+            let versions: (i64, u32) = conn
+                .query_row(
+                    "SELECT COUNT(*), MAX(version) FROM schema_version",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("version");
+            assert_eq!(versions, (1, SCHEMA_VERSION));
+        }
+        assert!(
+            conn.execute("INSERT INTO schema_version VALUES (5)", [])
+                .is_err()
+        );
+        let title: String = conn
+            .query_row(
+                "SELECT title FROM sessions WHERE session_id = 'retained'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("retained session");
+        assert_eq!(title, "keep");
+    }
+
+    #[test]
+    fn initialize_upgrades_v5_atomically_and_preserves_output_references() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(V5).expect("v5 fixture");
+        // 在 DDL 已执行后制造行读取失败,检查整次升级是否回滚。
+        conn.execute("UPDATE tool_calls SET output_text = x'ff'", [])
+            .expect("invalid text");
+        assert!(initialize(&mut conn).is_err());
+        let before: (i64, u32, String) = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM schema_version),
+                        (SELECT MAX(version) FROM schema_version), status FROM turns",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("rolled back state");
+        assert_eq!(before, (2, 5, "active".into()));
+        let added_tables: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name IN ('exec_sessions', 'tool_calls_v6', 'idx_schema_version_singleton')", [], |row| row.get(0))
+            .expect("rolled back DDL");
+        assert_eq!(added_tables, 0);
+        assert!(conn.prepare("SELECT phase FROM turns").is_err());
+
+        conn.execute(
+            "UPDATE tool_calls SET output_text = ?1",
+            [r#"{"status":"backgrounded","command":"cargo watch"}"#],
+        )
+        .expect("restore row");
+        initialize(&mut conn).expect("upgrade");
+        let migrated: (String, String, String) = conn
+            .query_row(
+                "SELECT output_ref, state_json, exec_session_id FROM tool_calls",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("migrated tool call");
+        assert_eq!(migrated.0, "content-ref");
+        assert!(migrated.1.contains("yielded"));
+        let exec: (String, String) = conn
+            .query_row(
+                "SELECT exec_session_id, state_json FROM exec_sessions",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("historical exec session");
+        assert_eq!(migrated.2, exec.0);
+        assert!(exec.1.contains("upgrade_state_unknown"));
+        initialize(&mut conn).expect("reopen after upgrade");
+        let versions: (i64, u32) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(version) FROM schema_version",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("committed version");
+        assert_eq!(versions, (1, SCHEMA_VERSION));
+    }
+
+    #[test]
+    fn initialize_rejects_unsupported_versions_without_changing_metadata() {
+        for version in [4, SCHEMA_VERSION + 1] {
+            let mut conn = Connection::open_in_memory().expect("open");
+            conn.execute_batch("CREATE TABLE schema_version (version INTEGER NOT NULL)")
+                .expect("version table");
+            conn.execute("INSERT INTO schema_version VALUES (?1), (?1)", [version])
+                .expect("version history");
+            let error = initialize(&mut conn).expect_err("unsupported version");
+            assert!(matches!(
+                error,
+                DbError::SchemaTooNew { found, .. } | DbError::SchemaTooOld { found, .. }
+                    if found == version
+            ));
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM schema_version", [], |row| row.get(0))
+                .expect("unchanged metadata");
+            assert_eq!(count, 2);
+        }
+    }
 
     #[test]
     fn migration_maps_legacy_statuses_to_immutable_outcomes() {
