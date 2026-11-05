@@ -1071,7 +1071,7 @@ mod tests {
                 "session.activity",
                 &serde_json::json!([{
                     "session_id": "s1",
-                    "state": "working",
+                    "state": "running",
                     "turn_id": "t1",
                     "seq": 3,
                     "updated_at": 1759000000000u64
@@ -1090,7 +1090,7 @@ mod tests {
                 }])
             )
             .is_err(),
-            "state 是闭集枚举（snake_case 六态）"
+            "state 是 Ringing ActivityState 闭集枚举"
         );
         assert!(
             validate_typed_result(
