@@ -168,6 +168,12 @@ fn create_session(
     service: &QaqhService,
     input: CreateSessionInput,
 ) -> QaqhResult<SessionCreateResult> {
+    let selection = input.model_selection.as_ref()
+        .ok_or_else(|| QaqhError::invalid("请选择服务商和模型"))?;
+    let catalog = qaqh_profile::ProfilesStore::load_or_create(&qaqh_profile::default_providers_path())
+        .map_err(QaqhError::message)?;
+    qaqh_profile::resolve_model_selection(catalog.document(), selection)
+        .map_err(QaqhError::message)?;
     let custom_tools = input.custom_tools.unwrap_or_default();
     let preset = optional_tool_mode(input.tool_mode.as_deref(), &custom_tools)
         .map_err(QaqhError::message)?;

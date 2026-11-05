@@ -227,7 +227,9 @@ pub(crate) fn pty_exec(
         output: output_str,
         // 合流终端流没有独立的 stderr；display 面以 stdout 呈现（与
         // codex unified_exec 的单流响应一致）。
-        stdout: cleaned,
+        // Final display keeps the original terminal stream for ANSI-aware
+        // renderers; the model-facing `output` above remains ANSI-free.
+        stdout: outcome.text,
         stderr: String::new(),
         truncated,
         timed_out,
