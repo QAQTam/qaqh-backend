@@ -33,7 +33,7 @@ pub struct EffectiveExecutionProfile {
     pub provider_id: String,
     /// 所属 Provider 名称
     pub provider_name: String,
-    /// 目标模型名称（例如 "deepseek-reasoner"）
+    /// 目标模型名称（例如 "reasoning-model"）
     pub model: String,
     /// 服务端点 Base URL
     pub base_url: String,
@@ -41,7 +41,7 @@ pub struct EffectiveExecutionProfile {
     pub wire: Wire,
     /// 凭据来源
     pub credential: CredentialSource,
-    /// 对应的 secrets.toml 槽位路径（如 "secrets.providers.deepseek"）
+    /// 对应的 secrets.toml 槽位路径（如 "secrets.providers.custom"）
     pub secret_slot: String,
     /// 上下文窗口总大小（作为软压缩阈值与 pre-flight 检查基数）
     pub context_length: u32,
@@ -217,49 +217,77 @@ pub fn resolve_effective(
 mod tests {
     use super::*;
 
+    fn configured_document() -> ProfilesDocument {
+        use crate::model::{ModelDef, ModelDefaults, ProfileDef, ProviderDef};
+        let mut doc = ProfilesDocument::default();
+        doc.providers.insert("custom".into(), ProviderDef {
+            name: "User endpoint".into(), base_url: "https://example.invalid/v1".into(),
+            wire: Wire::Responses, credential: CredentialSource::ApiKey, api_key: None,
+            headers: BTreeMap::new(), compat: None,
+            models: BTreeMap::from([
+                ("reasoning-model".into(), ModelDef {
+                    reasoning_levels: vec!["low".into(), "high".into()],
+                    capabilities: qaqh_types::ModelCapabilities { reasoning: true, ..Default::default() },
+                    defaults: ModelDefaults { reasoning_effort: Some("high".into()), ..Default::default() },
+                    ..Default::default()
+                }),
+                ("plain-model".into(), ModelDef::default()),
+            ]),
+        });
+        for (id, model) in [("reasoning-profile", "reasoning-model"), ("plain-profile", "plain-model")] {
+            doc.profiles.insert(id.into(), ProfileDef {
+                name: id.into(), provider: "custom".into(), model: model.into(),
+                reasoning_effort: None, context_length: None, max_tokens: None,
+            });
+        }
+        doc.default_profile = Some("reasoning-profile".into());
+        doc
+    }
+
+
     #[test]
-    fn test_resolve_default_builtin_profile() {
-        let doc = ProfilesDocument::create_builtin_template();
+    fn test_resolve_default_user_profile() {
+        let doc = configured_document();
         let eff = resolve_effective(&doc, None).expect("resolve default");
-        assert_eq!(eff.profile_id, "deepseek-r1");
-        assert_eq!(eff.provider_id, "deepseek");
-        assert_eq!(eff.model, "deepseek-reasoner");
-        assert_eq!(eff.base_url, "https://api.deepseek.com");
+        assert_eq!(eff.profile_id, "reasoning-profile");
+        assert_eq!(eff.provider_id, "custom");
+        assert_eq!(eff.model, "reasoning-model");
+        assert_eq!(eff.base_url, "https://example.invalid/v1");
         assert_eq!(eff.wire, Wire::Responses);
         assert_eq!(eff.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(eff.context_length, 128_000);
         assert_eq!(eff.max_tokens, 8_192);
-        assert_eq!(eff.secret_slot, "secrets.providers.deepseek");
+        assert_eq!(eff.secret_slot, "secrets.providers.custom");
     }
 
     #[test]
     fn test_resolve_explicit_profile_no_side_effects() {
-        let doc = ProfilesDocument::create_builtin_template();
-        let eff = resolve_effective(&doc, Some("deepseek-v3")).expect("resolve v3");
-        assert_eq!(eff.profile_id, "deepseek-v3");
-        assert_eq!(eff.model, "deepseek-chat");
+        let doc = configured_document();
+        let eff = resolve_effective(&doc, Some("plain-profile")).expect("resolve v3");
+        assert_eq!(eff.profile_id, "plain-profile");
+        assert_eq!(eff.model, "plain-model");
         assert_eq!(eff.reasoning_effort, None);
         // 全局默认依然是 r1，不受解析影响
-        assert_eq!(doc.default_profile.as_deref(), Some("deepseek-r1"));
+        assert_eq!(doc.default_profile.as_deref(), Some("reasoning-profile"));
     }
 
     #[test]
     fn test_resolve_missing_profile_errors() {
-        let doc = ProfilesDocument::create_builtin_template();
+        let doc = configured_document();
         let err = resolve_effective(&doc, Some("non-existent")).expect_err("should fail");
         assert_eq!(err, ProfileResolveError::ProfileNotFound("non-existent".to_string()));
     }
 
     #[test]
     fn model_selection_checks_identity_and_output_range() {
-        let doc = ProfilesDocument::create_builtin_template();
+        let doc = configured_document();
         let mut selection = ModelSelection {
-            provider_id: "deepseek".into(),
-            model_id: "deepseek-reasoner".into(),
+            provider_id: "custom".into(),
+            model_id: "reasoning-model".into(),
             options: Default::default(),
         };
         let effective = resolve_model_selection(&doc, &selection).expect("resolve model");
-        assert_eq!(effective.provider_id, "deepseek");
+        assert_eq!(effective.provider_id, "custom");
         assert_eq!(effective.selection.options.max_output_tokens, Some(8192));
         selection.options.max_output_tokens = Some(9000);
         assert!(matches!(resolve_model_selection(&doc, &selection), Err(ModelResolveError::InvalidOutputLimit { .. })));
