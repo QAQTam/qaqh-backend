@@ -377,6 +377,37 @@ pub enum ExecInterruptReason {
     UpgradeStateUnknown,
 }
 
+/// Tool-permission interaction body stored in `InteractionView.request` as
+/// JSON. Keep this shape aligned with RingingV2's `pending_permission` view.
+/// Full normalized tool arguments are deliberately excluded because they may
+/// contain secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermissionRequestDetails {
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_summary: Option<String>,
+    pub reason: String,
+    pub paths: Vec<String>,
+    pub category: String,
+    pub level: u8,
+    pub risk: String,
+    pub consequence: String,
+}
+
+impl PermissionRequestDetails {
+    /// Reject incomplete bodies before the approval view can enable approval.
+    pub fn is_valid(&self) -> bool {
+        !self.tool_name.trim().is_empty()
+            && !self.reason.trim().is_empty()
+            && !self.consequence.trim().is_empty()
+            && self.paths.iter().all(|path| !path.trim().is_empty())
+            && matches!(self.category.as_str(), "read" | "write" | "exec" | "net")
+            && (1..=4).contains(&self.level)
+            && matches!(self.risk.as_str(), "low" | "medium" | "high")
+    }
+}
+
 /// permission / ask / plan 统一的交互视图,按 interaction_id 应答。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]

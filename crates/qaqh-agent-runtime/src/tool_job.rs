@@ -16,7 +16,7 @@ use qaqh_process_tools::exec_session::{
 use qaqh_ringing_contract::fact::{
     ToolCallOutcome, ToolCancellationReason, ToolError, ToolInterruptionReason, ToolMetrics,
 };
-use qaqh_ringing_contract::state::{CodeDelta, ToolEffectInfo};
+use qaqh_ringing_contract::state::{CodeDelta, PermissionRequestDetails, ToolEffectInfo};
 use qaqh_session::owner::{ToolLifecycle, ToolRun, ToolSettlement};
 use std::{
     collections::{HashMap, HashSet},
@@ -519,7 +519,7 @@ impl WorkspaceToolPort {
 #[derive(Debug, Clone)]
 pub enum ToolAdmission {
     Authorized,
-    ApprovalRequired { reason: String },
+    ApprovalRequired { details: PermissionRequestDetails },
     Denied(String),
 }
 
@@ -624,7 +624,25 @@ impl WorkspaceToolPort {
             qaqh_workspace::Admission::Authorized(_) => ToolAdmission::Authorized,
             qaqh_workspace::Admission::ApprovalRequired(challenge) => {
                 ToolAdmission::ApprovalRequired {
-                    reason: challenge.reason().to_string(),
+                    details: PermissionRequestDetails {
+                        tool_name: challenge.tool_name().to_string(),
+                        action_summary: challenge.action_summary(),
+                        reason: challenge.reason().to_string(),
+                        paths: challenge
+                            .resources()
+                            .iter()
+                            .map(|path| path.to_string_lossy().into_owned())
+                            .collect(),
+                        category: challenge.category().as_str().to_string(),
+                        level: challenge.context().permission_level.to_u8(),
+                        risk: match challenge.risk() {
+                            qaqh_workspace::PermissionRisk::Low => "low",
+                            qaqh_workspace::PermissionRisk::Medium => "medium",
+                            qaqh_workspace::PermissionRisk::High => "high",
+                        }
+                        .to_string(),
+                        consequence: challenge.consequence().to_string(),
+                    },
                 }
             }
             qaqh_workspace::Admission::Denied(reason) => ToolAdmission::Denied(reason),
