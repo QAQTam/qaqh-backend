@@ -173,6 +173,7 @@ impl ChallengeStore {
                 "level": tool.level.clone().unwrap_or(Value::Null),
                 "risk": tool.risk.clone().unwrap_or(Value::Null),
                 "consequence": tool.consequence.clone().unwrap_or(Value::Null),
+                "details_unavailable": tool.details_unavailable,
             });
             let challenge = self
                 .issue(
@@ -191,7 +192,10 @@ impl ChallengeStore {
             }
             let kind = ApprovalKind::from_interaction(interaction.kind)
                 .ok_or("invalid_pending_interaction")?;
-            let details = interaction.details.clone().unwrap_or_else(|| json!({}));
+            let details = interaction
+                .details
+                .clone()
+                .unwrap_or_else(|| json!({ "details_unavailable": true }));
             let challenge = self
                 .issue(session_id, kind, interaction.id.clone(), details)
                 .map_err(|_| "approval_limit")?;
@@ -211,8 +215,14 @@ pub fn command_for(
     match challenge.kind {
         ApprovalKind::ToolPermission => {
             let (approved, trust_folder) = match decision {
+                "approve" if challenge.details["details_unavailable"] == true => {
+                    return Err("permission_details_unavailable");
+                }
                 "approve" => (true, false),
                 "reject" => (false, false),
+                "trust" if challenge.details["details_unavailable"] == true => {
+                    return Err("permission_details_unavailable");
+                }
                 "trust" => (true, true),
                 _ => return Err("invalid_decision"),
             };
@@ -223,6 +233,9 @@ pub fn command_for(
             })
         }
         ApprovalKind::Ask => match decision {
+            "submit" if challenge.details["details_unavailable"] == true => {
+                return Err("interaction_details_unavailable");
+            }
             "submit" => {
                 let answers = payload.get("answers").cloned().ok_or("missing_answers")?;
                 let answers: Vec<AskAnswer> =
@@ -239,6 +252,9 @@ pub fn command_for(
         },
         ApprovalKind::Plan => {
             let approved = match decision {
+                "approve" if challenge.details["details_unavailable"] == true => {
+                    return Err("interaction_details_unavailable");
+                }
                 "approve" => true,
                 "reject" => false,
                 _ => return Err("invalid_decision"),
@@ -373,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn permission_details_are_whitelisted() {
+    fn permission_details_are_whitelisted_and_keep_availability() {
         let store = ChallengeStore::default();
         let pending = RingingV2PendingApprovals {
             pending_permission: Some(RingingV2PendingPermissionView {
@@ -393,10 +409,76 @@ mod tests {
         let views = store.issue_views("seed1", &pending).unwrap();
         let view = &views[0];
         assert_eq!(view.kind, RingingV2DeviceApprovalKind::ToolPermission);
-        // 白名单：只放行展示字段，admin 面的 details_unavailable 不出 daemon。
+        // 白名单：只放行展示字段与 fail-closed 状态。
         assert!(view.details.get("tool_name").is_some());
-        assert!(view.details.get("details_unavailable").is_none());
+        assert_eq!(view.details["details_unavailable"], false);
         assert_eq!(view.challenge_id.len(), 64);
+    }
+
+    #[test]
+    fn unavailable_permission_details_allow_reject_but_block_approval() {
+        let store = ChallengeStore::default();
+        let pending = RingingV2PendingApprovals {
+            pending_permission: Some(RingingV2PendingPermissionView {
+                tool_call_id: "call_01ABC".into(),
+                tool_name: None,
+                action_summary: None,
+                reason: None,
+                paths: json!([]),
+                category: None,
+                level: None,
+                risk: None,
+                consequence: None,
+                details_unavailable: true,
+            }),
+            pending_interaction: None,
+        };
+        let views = store.issue_views("seed1", &pending).unwrap();
+        assert_eq!(views[0].details["details_unavailable"], true);
+        let challenge = store.consume(&views[0].challenge_id, "seed1").unwrap();
+
+        assert_eq!(
+            command_for(&challenge, "approve", &json!({})).unwrap_err(),
+            "permission_details_unavailable"
+        );
+        assert_eq!(
+            command_for(&challenge, "trust", &json!({})).unwrap_err(),
+            "permission_details_unavailable"
+        );
+        assert!(matches!(
+            command_for(&challenge, "reject", &json!({})).unwrap(),
+            RingingCommand::ToolPermissionRespond {
+                approved: false,
+                trust_folder: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn unavailable_ask_and_plan_details_block_submission_but_allow_rejection() {
+        let store = ChallengeStore::default();
+        for (kind, blocked_decision, safe_decision) in [
+            (InteractionKind::Ask, "submit", "dismiss"),
+            (InteractionKind::Plan, "approve", "reject"),
+        ] {
+            let pending = RingingV2PendingApprovals {
+                pending_permission: None,
+                pending_interaction: Some(RingingV2PendingInteractionView {
+                    id: format!("int_{kind:?}"),
+                    kind,
+                    details: None,
+                }),
+            };
+            let views = store.issue_views("seed1", &pending).unwrap();
+            assert_eq!(views[0].details["details_unavailable"], true);
+            let challenge = store.consume(&views[0].challenge_id, "seed1").unwrap();
+            assert_eq!(
+                command_for(&challenge, blocked_decision, &json!({})).unwrap_err(),
+                "interaction_details_unavailable"
+            );
+            assert!(command_for(&challenge, safe_decision, &json!({})).is_ok());
+        }
     }
 
     #[test]

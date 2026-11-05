@@ -21,7 +21,9 @@ use qaqh_ringing_contract::fact::{
     InteractionDecision, InteractionId, InteractionKind, InterruptReason, ToolCallId,
     ToolCallOutcome, TurnId,
 };
-use qaqh_ringing_contract::state::{InteractionView, TimelineEntry, ToolCallState, TurnOutcome};
+use qaqh_ringing_contract::state::{
+    InteractionView, PermissionRequestDetails, TimelineEntry, ToolCallState, TurnOutcome,
+};
 use qaqh_ringing_contract::ulid::generate_ulid;
 use qaqh_session::owner::{SessionOwner, ToolSettlement};
 use qaqh_types::{ContentBlock, Message, ToolResult as ToolResultPayload, UsageInfo};
@@ -425,7 +427,7 @@ impl SessionLoop {
             },
         );
 
-        loop {
+        'rounds: loop {
             // Steer/Interject 合并:下一轮请求前注入 user 消息。
             let steers = {
                 let mut inner = self.lock();
@@ -534,35 +536,46 @@ impl SessionLoop {
                             }
                             let mut tool_messages = Vec::with_capacity(tool_uses.len());
                             for (call_id, name, input) in &tool_uses {
-                                match self
+                                let (ok, text) = match self
                                     .dispatch_tool(&turn, call_id, name, input, &cancel_rx)
                                     .await
                                 {
-                                    Ok((ok, text)) => {
-                                        self.owner
-                                            .append_block(TimelineEntry::ToolResult {
-                                                call_id: ToolCallId::new(call_id.clone()),
-                                                turn_id: Some(turn.clone()),
-                                                content: ContentValue::Inline {
-                                                    text: text.clone(),
-                                                },
-                                            })
-                                            .await
-                                            .ok();
-                                        tool_messages.push(tool_result_message(call_id, &text, ok));
-                                    }
+                                    Ok(result) => result,
                                     Err(error) => {
                                         log::error!(
                                             "[loop] {} tool {name} dispatch failed: {error}",
                                             self.session_id
                                         );
-                                        tool_messages.push(tool_result_message(
-                                            call_id,
-                                            "tool dispatch failed",
-                                            false,
-                                        ));
+                                        (false, "tool dispatch failed".to_string())
                                     }
+                                };
+                                // ToolResult is the durable RingingV2 history fact. Keeping a
+                                // result only in this turn's in-memory request makes the next
+                                // context rebuild synthesize `missing tool result`.
+                                if let Err(error) = self
+                                    .owner
+                                    .append_block(TimelineEntry::ToolResult {
+                                        call_id: ToolCallId::new(call_id.clone()),
+                                        turn_id: Some(turn.clone()),
+                                        content: ContentValue::Inline { text: text.clone() },
+                                    })
+                                    .await
+                                {
+                                    let message = error.to_string();
+                                    log::error!(
+                                        "[loop] {} tool {name} result persistence failed: {message}",
+                                        self.session_id
+                                    );
+                                    self.finish_failed(
+                                        &turn,
+                                        outcome.usage.clone(),
+                                        "tool_result_persist_failed",
+                                        &message,
+                                    )
+                                    .await;
+                                    break 'rounds;
                                 }
+                                tool_messages.push(tool_result_message(call_id, &text, ok));
                             }
                             messages.push(message);
                             messages.extend(tool_messages);
@@ -644,9 +657,9 @@ impl SessionLoop {
                 self.settle_failed(call_id, tool_name, args_json, "permission_denied", &reason);
                 return Ok((false, reason));
             }
-            ToolAdmission::ApprovalRequired { reason } => {
+            ToolAdmission::ApprovalRequired { details } => {
                 let Some((interaction_id, answer)) = self
-                    .request_permission(turn, call_id, &reason, cancel_rx)
+                    .request_permission(turn, call_id, &details, cancel_rx)
                     .await
                 else {
                     if *cancel_rx.borrow() {
@@ -737,7 +750,7 @@ impl SessionLoop {
         &self,
         turn: &TurnId,
         call_id: &str,
-        reason: &str,
+        details: &PermissionRequestDetails,
         cancel_rx: &watch::Receiver<bool>,
     ) -> Option<(InteractionId, PermissionAnswer)> {
         let call = ToolCallId::new(call_id.to_string());
@@ -761,7 +774,8 @@ impl SessionLoop {
             turn_id: Some(turn.clone()),
             kind: InteractionKind::Permission,
             request: ContentValue::Inline {
-                text: reason.to_string(),
+                text: serde_json::to_string(details)
+                    .expect("permission request details are serializable"),
             },
             choices: vec![
                 InteractionChoice {
