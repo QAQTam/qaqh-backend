@@ -22,8 +22,8 @@ pub struct ExecCommandArgs {
     /// Start a login shell. Supported for bash, zsh, and sh.
     #[serde(default)]
     pub login: bool,
-    /// Allocate a PTY for interactive terminal semantics.
-    #[serde(default)]
+    /// Allocate a PTY for terminal semantics. Defaults to true; set false to use pipes.
+    #[serde(default = "default_tty")]
     pub tty: bool,
     /// Initial wait window, 250..=30000 ms. Defaults to 10000.
     #[serde(default)]
@@ -34,6 +34,10 @@ pub struct ExecCommandArgs {
     /// Maximum model output budget in tokens.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+}
+
+fn default_tty() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
