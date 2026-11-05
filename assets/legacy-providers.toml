@@ -12,9 +12,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://api.deepseek.com"
-default_model = ""
-models = []
-models_url = "https://api.deepseek.com"
 official_web_tools = true
 user_id_mode = "Body"
 thinking_mode = "OpenAi"
@@ -41,11 +38,6 @@ id = "responses"
 display = "Responses API"
 protocol = "responses"
 base_url = "https://api.deepseek.com"
-default_model = "deepseek-v4-flash"
-models = [
-    "deepseek-v4-flash",
-    "deepseek-v4-flash-vision-exp",
-]
 responses_path = "/responses"
 official_web_tools = true
 thinking_mode = "OpenAi"
@@ -77,9 +69,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://dashscope.aliyuncs.com"
-default_model = ""
-models = []
-models_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 chat_path = "/compatible-mode/v1/chat/completions"
 thinking_mode = "QwenEnableThinking"
 cache_field = "PromptDetailsCached"
@@ -105,9 +94,6 @@ id = "responses"
 display = "Responses API"
 protocol = "responses"
 base_url = "https://dashscope.aliyuncs.com"
-default_model = ""
-models = []
-models_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 responses_path = "/compatible-mode/v1/responses"
 thinking_mode = "QwenEnableThinking"
 cache_field = "PromptDetailsCached"
@@ -137,9 +123,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://open.bigmodel.cn"
-default_model = ""
-models = []
-models_url = "https://open.bigmodel.cn/api/paas/v4"
 chat_path = "/api/paas/v4/chat/completions"
 thinking_mode = "OpenAi"
 cache_field = "PromptDetailsCached"
@@ -170,9 +153,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://api.moonshot.cn/v1"
-default_model = ""
-models = []
-models_url = "https://api.moonshot.cn/v1"
 balance_path = "/users/me/balance"
 thinking_mode = "OpenAi"
 cache_field = "UsageCachedTokens"
@@ -202,9 +182,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://api.xiaomimimo.com/v1"
-default_model = ""
-models = []
-models_url = "https://api.xiaomimimo.com/v1"
 thinking_mode = "OpenAi"
 cache_field = "None"
 include_stream_usage = false
@@ -229,9 +206,6 @@ id = "responses"
 display = "Responses API"
 protocol = "responses"
 base_url = "https://api.xiaomimimo.com/v1"
-default_model = ""
-models = []
-models_url = "https://api.xiaomimimo.com/v1"
 responses_path = "/responses"
 thinking_mode = "OpenAi"
 cache_field = "None"
@@ -261,9 +235,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://api.minimaxi.com/v1"
-default_model = ""
-models = []
-models_url = "https://api.minimaxi.com/v1"
 thinking_mode = "MiniMaxAdaptive"
 cache_field = "None"
 include_stream_usage = false
@@ -292,9 +263,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://ark.cn-beijing.volces.com"
-default_model = ""
-models = []
-models_url = "https://ark.cn-beijing.volces.com/api/v3"
 chat_path = "/api/v3/chat/completions"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
@@ -320,9 +288,6 @@ id = "responses"
 display = "Responses API"
 protocol = "responses"
 base_url = "https://ark.cn-beijing.volces.com"
-default_model = ""
-models = []
-models_url = "https://ark.cn-beijing.volces.com/api/v3"
 responses_path = "/api/v3/responses"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
@@ -352,9 +317,6 @@ id = "openai"
 display = "Chat Completions"
 protocol = "openai"
 base_url = "https://api.openai.com/v1"
-default_model = ""
-models = []
-models_url = "https://api.openai.com/v1"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
 include_stream_usage = false
@@ -379,9 +341,6 @@ id = "responses"
 display = "Responses API"
 protocol = "responses"
 base_url = "https://api.openai.com/v1"
-default_model = ""
-models = []
-models_url = "https://api.openai.com/v1"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
 include_stream_usage = false
@@ -410,9 +369,6 @@ id = "openai"
 display = "OpenAI-compatible (text)"
 protocol = "openai"
 base_url = "https://openrouter.ai/api/v1"
-default_model = ""
-models = []
-models_url = "https://openrouter.ai/api/v1/models?output_modalities=text&supported_parameters=tools&sort=pricing-low-to-high"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
 include_stream_usage = false
@@ -446,9 +402,6 @@ id = "anthropic"
 display = "Anthropic Messages"
 protocol = "anthropic"
 base_url = "https://open.bigmodel.cn"
-default_model = "glm-5.3-flash"
-models = []
-models_url = "https://open.bigmodel.cn/api/paas/v4"
 anthropic_path = "/api/anthropic/v1/messages"
 thinking_mode = "OpenAi"
 cache_field = "PromptDetailsCached"
@@ -485,25 +438,6 @@ id = "openai"
 display = "OpenAI-compatible (workbuddy-proxy)"
 protocol = "openai"
 base_url = "http://127.0.0.1:8787/v1"
-default_model = "glm-5.2"
-models = [
-    "auto",
-    "hy4-preview",
-    "hy3",
-    "hy3-x",
-    "deepseek-v4.1-flash",
-    "glm-5.3",
-    "glm-5.3-flash",
-    "glm-5.2",
-    "glm-5.1",
-    "glm-5v-turbo",
-    "kimi-k3-1",
-    "kimi-k2.7",
-    "kimi-k2.6",
-    "minimax-m3",
-    "deepseek-v4-pro",
-]
-models_url = "http://127.0.0.1:8787/v1"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
 include_stream_usage = false
@@ -532,12 +466,6 @@ id = "cdp"
 display = "CDP Proxy (localhost:8080)"
 protocol = "openai"
 base_url = "http://localhost:8080/v1"
-default_model = "deepseek-v4-pro"
-models = [
-    "deepseek-v4-flash",
-    "deepseek-v4-pro",
-]
-models_url = "http://localhost:8080/v1"
 user_id_mode = "Body"
 thinking_mode = "OpenAi"
 cache_field = "PromptCacheHitTokens"
@@ -567,25 +495,6 @@ id = "openai"
 display = "OpenAI-compatible"
 protocol = "openai"
 base_url = "https://opencode.ai/zen/go/v1"
-default_model = "deepseek-v4-flash"
-models = [
-    "kimi-k3",
-    "kimi-k2.7-code",
-    "kimi-k2.6",
-    "deepseek-v4-pro",
-    "deepseek-v4-flash",
-    "glm-5.3",
-    "glm-5.2",
-    "glm-5.1",
-    "mimo-v2.5",
-    "mimo-v2.5-pro",
-    "qwen3.8-max",
-    "qwen3.7-max",
-    "qwen3.7-plus",
-    "qwen3.6-plus",
-    "hy3",
-]
-models_url = "https://opencode.ai/zen/go/v1"
 thinking_mode = "OpenAi"
 cache_field = "None"
 include_stream_usage = false
@@ -610,12 +519,6 @@ id = "responses"
 display = "Responses API (Grok 4.5 / GPT-5.6 Luna)"
 protocol = "responses"
 base_url = "https://opencode.ai/zen/go/v1"
-default_model = "grok-4.5"
-models = [
-    "grok-4.5",
-    "gpt-5.6-luna",
-]
-models_url = "https://opencode.ai/zen/go/v1"
 responses_path = "/responses"
 thinking_mode = "OpenAi"
 cache_field = "None"

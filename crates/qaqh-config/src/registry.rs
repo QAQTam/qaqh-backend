@@ -20,8 +20,6 @@ const LEGACY_TOML: &str = include_str!("../../../assets/legacy-providers.toml");
 pub struct LegacyPreset {
     pub wire: Wire,
     pub base_url: String,
-    /// 预设的兜底模型：仅在用户配置里还没有模型时使用，绝不覆盖用户选定的模型。
-    pub model: String,
     pub compat: EndpointCompat,
 }
 
@@ -100,8 +98,6 @@ struct LegacyEndpoint {
     protocol: String,
     #[serde(default)]
     base_url: String,
-    #[serde(default)]
-    default_model: String,
     #[serde(default)]
     user_id_mode: Option<UserSendMode>,
     #[serde(default)]
@@ -258,7 +254,6 @@ impl LegacyEndpoint {
         LegacyPreset {
             wire: self.wire(),
             base_url: self.base_url.clone(),
-            model: self.default_model.clone(),
             compat: self.compat(),
         }
     }

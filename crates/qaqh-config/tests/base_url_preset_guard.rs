@@ -117,21 +117,17 @@ max_tokens = 16384
         cfg.base_url, DEEPSEEK_PRESET,
         "空配置（无 base_url）应回退到 endpoint 预设"
     );
+    assert!(cfg.model.is_empty(), "端点迁移不能为用户选择模型");
 
-    // 4) 完全没有配置文件 → 首次启动落一份 BYOK 预设，load 直接用它。
-    //    预设是"可直接改写的起点"（DeepSeek OpenAI 兼容端点），不再依赖运行期
-    //    厂商目录，也没有明文密钥。
+    // 4) 首次启动只创建空配置,模型与端点等待用户填写。
     let root = setup("missing");
     let cfg = qaqh_config::Config::load().expect("load ok");
     assert!(
         root.join("config.toml").exists(),
         "首次启动必须把预设配置写到盘上，用户才有可编辑的起点"
     );
-    assert!(
-        !cfg.base_url.is_empty(),
-        "预设起点不得留空端点: {}",
-        cfg.base_url
-    );
+    assert!(cfg.base_url.is_empty());
+    assert!(cfg.model.is_empty());
     assert_eq!(cfg.wire, qaqh_types::Wire::Chat);
     assert_eq!(cfg.context_length, 128_000);
     let first_text = std::fs::read_to_string(root.join("config.toml")).expect("read preset");
@@ -156,7 +152,7 @@ base_url = "{DEEPSEEK_PRESET}"
 max_tokens = 16384
 
 [profiles.default]
-model = "deepseek-chat"
+model = "user-model"
 max_tokens = 16384
 effort = "high"
 context_limit = 1000000
