@@ -562,8 +562,8 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             inline_text(content),
         ),
         TimelineEntry::ToolCall { call_id, turn_id } => (
-            // 工具调用的 timeline 锚点用 call_id 作块标识。
-            call_id.as_ref().to_string(),
+            // 块表主键全库唯一;调用身份本身仍只保存在 call_id 字段。
+            format!("tool_call:{}:{}", session_id, call_id.as_ref()),
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "tool_call",
             Some(call_id.as_ref().to_string()),
@@ -574,7 +574,9 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             turn_id,
             content,
         } => (
-            call_id.as_ref().to_string(),
+            // ToolCall 与 ToolResult 是两条独立的 RingingV2 timeline 事实,
+            // 不能共用 block_id;blocks.block_id 是 PRIMARY KEY。
+            format!("tool_result:{}:{}", session_id, call_id.as_ref()),
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "tool_result",
             Some(call_id.as_ref().to_string()),
