@@ -1,0 +1,18 @@
+[package]
+name = "qaqh-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QAQHarness Agent Client Protocol entry point"
+
+[dependencies]
+agent-client-protocol = { version = "=5.0.0", features = ["stdio"] }
+qaqh-client = { path = "../qaqh-client" }
+qaqh-profile = { path = "../qaqh-profile" }
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[lints]
+workspace = true
