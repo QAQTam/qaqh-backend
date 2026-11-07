@@ -89,7 +89,6 @@ mod tests {
             "SES-LOOP",
             manager,
             ToolPolicySnapshot::workspace_write(dir.join("ws")),
-            None,
             owner.lifecycle(),
             Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
         ));

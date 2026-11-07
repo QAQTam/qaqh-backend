@@ -372,10 +372,7 @@ mod tests {
         // cwd = CURRENT_WORKSPACE（并行测试可能被踩踏）→ 用 cwd 无关的
         // 方式不可行，因此这里直接设置全局并立即 confirm（串行窗口内安全）。
         let apath = format!("{}/a.txt", ws.replace('\\', "/"));
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws);
+        qaqh_permission::set_workspace(&ws);
         let patch = format!(
             "*** Begin Patch\n*** Update File: {apath}\n@@\n-line2\n+LINE2\n*** End Patch\n"
         );
@@ -392,10 +389,7 @@ mod tests {
 
         // 并行测试可能覆盖 CURRENT_WORKSPACE（Linux 调度差异放大竞争）：
         // confirm 重放前重新钉住本测试的 workspace。
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws);
+        qaqh_permission::set_workspace(&ws);
         let out = run_confirm(&pending_id, "apply");
         assert_eq!(out["status"], "ok", "confirm patch failed: {out}");
         assert_eq!(

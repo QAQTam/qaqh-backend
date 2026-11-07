@@ -1569,8 +1569,7 @@ falling back to 1 (read-only)"
     /// **`api_key` is deliberately NOT touched.** `api_key` is the *main* key
     /// (the one [`Self::save_with`] writes to `SecretSlot::Main`); assigning a
     /// profile's key here would silently copy it into the main slot on the next
-    /// save. The *effective* key for a profile is resolved by the caller —
-    /// see [`Self::profile_carries_key`] + [`Self::for_session`].
+    /// save. Session credentials are resolved from the selected provider catalog entry.
     pub fn apply_profile(&mut self, name: &str) -> Option<String> {
         let profile = self.profiles.get(name)?.clone();
         // BYOK：profile 自述端点，切换 profile 就是切换 endpoint / wire / compat。
@@ -1593,25 +1592,6 @@ falling back to 1 (read-only)"
         self.profiles
             .get(name)
             .is_some_and(|profile| profile.api_key.is_some())
-    }
-
-    /// 合成一份**只属于某个会话**的有效配置（不落盘，不广播）。
-    /// `profile` = 该会话选定的 profile 名；`None` = 跟随全局 `active_profile`。
-    /// `own_key` = 调用方从 `secrets.toml` 解析出的该 profile 自带密钥；
-    /// `None` = 继承主密钥（profile 无自带 key，或名字进不了 secrets.toml）。
-    pub fn for_session(global: &Self, profile: Option<&str>, own_key: Option<String>) -> Self {
-        let effective = profile.unwrap_or(global.active_profile.as_str());
-        let mut cfg = global.clone();
-        // 活跃档的扁平字段可能刚被 config.save 修改，profiles 映射尚未重载。
-        // 跟随全局时直接使用当前快照；仅独立会话档需要展开 profile。
-        // 指定档已删除时保留全局快照，避免重新展开旧的活跃档副本。
-        if effective != global.active_profile {
-            let _ = cfg.apply_profile(effective);
-        }
-        if let Some(key) = own_key {
-            cfg.api_key = key;
-        }
-        cfg
     }
 
     /// 把当前扁平字段快照成命名 profile。`api_key_saved` 表示调用方已把当前
@@ -1663,7 +1643,7 @@ mod secret_tests {
     }
 
     #[test]
-    fn applying_profile_and_session_config_copy_credential_source() {
+    fn applying_profile_copies_credential_source() {
         let mut cfg = Config::default();
         cfg.credential = qaqh_types::CredentialSource::ApiKey;
         cfg.save_profile("byok", false);
@@ -1671,21 +1651,8 @@ mod secret_tests {
         cfg.save_profile("oauth", false);
         cfg.apply_profile("byok").unwrap();
         assert_eq!(cfg.credential, qaqh_types::CredentialSource::ApiKey);
-        let session = Config::for_session(&cfg, Some("oauth"), None);
-        assert_eq!(
-            session.credential,
-            qaqh_types::CredentialSource::ChatgptPlan
-        );
         cfg.apply_profile("oauth").unwrap();
         assert_eq!(cfg.credential, qaqh_types::CredentialSource::ChatgptPlan);
-        // 模拟 config.save 已更新扁平凭据、尚未重载 profiles 的快照。
-        cfg.credential = qaqh_types::CredentialSource::DeepseekAccount;
-        for profile in [None, Some("oauth"), Some("deleted")] {
-            assert_eq!(
-                Config::for_session(&cfg, profile, None).credential,
-                qaqh_types::CredentialSource::DeepseekAccount
-            );
-        }
     }
 
     #[test]
@@ -2389,47 +2356,6 @@ wire = \"messages\"
         assert!(reloaded.profile_carries_key("a"));
         assert_eq!(secrets.load_profile_key("a").as_deref(), Some("sk-a"));
         assert_eq!(reloaded.api_key, "sk-a", "主密钥仍从主槽位读");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `for_session`：会话指定的 profile 覆盖端点；自带 key 用之，否则继承主密钥；
-    /// profile 已被删则退回全局 `active_profile`，不留在旧端点上。
-    #[test]
-    fn for_session_overrides_endpoint_and_resolves_key() {
-        let (dir, store, secrets) = setup(
-            "for-session",
-            "active_profile = \"a\"
-[profiles.a]
-model = \"ma\"
-base_url = \"https://a/v1\"
-wire = \"messages\"
-
-[profiles.b]
-model = \"mb\"
-base_url = \"https://b/v1\"
-wire = \"responses\"
-",
-        );
-        let mut global = Config::load_from_paths_with(store, secrets).expect("load");
-        global.api_key = "sk-main".into();
-
-        let scoped = Config::for_session(&global, Some("b"), Some("sk-b".into()));
-        assert_eq!(scoped.api_key, "sk-b");
-        assert_eq!(scoped.base_url, "https://b/v1");
-        assert_eq!(scoped.wire, qaqh_types::Wire::Responses);
-        assert_eq!(global.api_key, "sk-main", "合成不得改全局");
-
-        let inherited = Config::for_session(&global, Some("b"), None);
-        assert_eq!(inherited.api_key, "sk-main", "无自带 key 则继承主密钥");
-        assert_eq!(inherited.base_url, "https://b/v1");
-
-        let followed = Config::for_session(&global, None, None);
-        assert_eq!(followed.base_url, "https://a/v1");
-        assert_eq!(followed.active_profile, "a");
-
-        let fallback = Config::for_session(&global, Some("gone"), None);
-        assert_eq!(fallback.base_url, "https://a/v1");
-        assert_eq!(fallback.active_profile, "a");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

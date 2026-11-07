@@ -13,5 +13,8 @@ pub use manager::SessionManager;
 
 /// Free-function epoch helper.
 pub fn now_epoch() -> u64 {
-    SessionManager::now_epoch()
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_secs()
 }

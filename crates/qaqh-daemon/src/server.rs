@@ -165,10 +165,10 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             .map_err(stringify)?,
         )
     };
-    // PR-3-1：SessionManager::init 收敛到 daemon main 装配点，全进程经注入
-    // 句柄访问会话存储（hub / service / registry 均在此注入）。
-    qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
-    let sessions = qaqh_session::SessionManager::global();
+    // Resource paths are injected; business session identity lives in SQLite.
+    let sessions = Arc::new(qaqh_session::SessionManager::new(
+        qaqh_types::platform::data_dir(),
+    ));
     let _lock = acquire_single_instance()?;
     let token = config.token.clone().unwrap_or_else(random_hex);
     if config.token.is_none() && !config.bind_ip.is_loopback() {
@@ -243,14 +243,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     qaqh_subagent::install_board_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_ringing_runtime::RingingLeaseStore::new()));
     let (shutdown, _) = watch::channel(false);
-    // L1 durability: the daemon previously had NO OS signal handling — Ctrl+C
-    // or a terminal close killed the process without running the graceful
-    // path below, so in-flight turns never reached messages.jsonl (the whole
-    // turn's rounds lived only in the worker's in-memory persist queue).
-    // Forward SIGINT/SIGTERM into the same watch channel the /control/v1/stop
-    // endpoint uses, so every death mode runs the graceful shutdown:
-    // service.shutdown() (cancel + SessionShutdown + join) → seal orphans →
-    // flush timeline persistence.
+    // Route OS signals through the same loop/process shutdown path as the control endpoint.
     spawn_signal_shutdown(shutdown.clone());
     let app_state = crate::axum_server::AppState {
         hub: hub.clone(),
@@ -270,9 +263,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         test_hooks: Arc::new(crate::axum_server::TestHooks::from_env()),
     };
     // E: idle 会话卸载周期任务。
-    // 每 60s 读一次 config（热生效），对空闲超过阈值的 Session worker 走
-    // 优雅 close（join + bundle drop + final flush/drain）。registry.close
-    // 是阻塞 join，必须放 spawn_blocking，避免卡死 tokio worker 线程。
+    // Re-read the idle timeout every minute, then unload settled loops off the async workers.
     {
         let service = service.clone();
         let mut shutdown_rx = shutdown.subscribe();
@@ -310,12 +301,9 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         });
     }
 
-    // F4: worker reader 线程 panic/崩溃时，registry 会把死实例标记为可重生；
-    // 此周期任务负责真正重新拉起，避免单条事件流故障永久饿死会话。
     // 冻结事故（2026-09-02）P0：同一 tick 顺带巡检僵尸 receipt（accepted/running
     // 无终态），让冻结路径在 30s 内于日志可见，不再依赖人肉轮询。
     {
-        let service = service.clone();
         let pending_commands = pending_commands.clone();
         let mut shutdown_rx = shutdown.subscribe();
         tokio::spawn(async move {
@@ -323,7 +311,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        service.respawn_dead_agents();
                         pending_commands
                             .lock()
                             .unwrap_or_else(|error| error.into_inner())

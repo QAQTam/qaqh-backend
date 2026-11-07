@@ -92,10 +92,7 @@ impl SubagentHost for QaqhService {
         // BUG-2026-09-13-24 + BETA-01：子代理也先分配 canonical identity，
         // 目录名与 `child_session_id` 必须是同一个 UUID。子代理目录保持
         // unindexed，由 V2 residency 决定生命周期。
-        let session_id = self
-            .sessions
-            .allocate_session()
-            .map_err(|error| format!("allocate child session failed: {error}"))?;
+        let session_id = self.sessions.allocate_session();
         if let Some(workspace) = workspace.filter(|w| !w.is_empty() && *w != ".") {
             log::info!("[SUBAGENT-HOST] inherited workspace for seed={session_id}: {workspace}");
         }

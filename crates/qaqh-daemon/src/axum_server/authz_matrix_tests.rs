@@ -53,12 +53,9 @@ async fn body_json(response: Response) -> serde_json::Value {
 }
 
 fn open_body() -> serde_json::Value {
-    serde_json::json!({
-        "schema": qaqh_ringing::RINGING_SCHEMA,
-        "version": qaqh_ringing::RINGING_V2_VERSION,
-        // 设备场景下该自报字段不参与信任判定（daemon 用 device_id 覆盖）。
-        "client_instance_id": "spoofed-instance",
-    })
+    // 设备场景下该自报字段不参与信任判定（daemon 用 device_id 覆盖）。
+    serde_json::to_value(qaqh_ringing::RingingV2OpenRequest::new("spoofed-instance"))
+        .expect("open request")
 }
 
 /// 注册一个设备并 `open` 取得 lease。返回 `(device_token, device_id, client_session_id)`。
@@ -378,6 +375,52 @@ async fn view_token_can_attach_then_read() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn command_replay_uses_the_receipt_and_rejects_a_changed_target() {
+    let state = super::test_state();
+    let app = build_router(state.clone());
+    let (token, _, cs) = open_device(&app, &state, Scope::View).await;
+    let mut body = envelope(&cs, SEED, session_attach());
+    for replay in [false, true] {
+        let response = app
+            .clone()
+            .oneshot(request(
+                "POST",
+                "/ringing/v2/commands",
+                Some(&token),
+                Some(&cs),
+                Some(body.clone()),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let ack = body_json(response).await;
+        assert_eq!(ack["status"], "accepted");
+        if replay {
+            assert!(
+                ack["existing"].is_object(),
+                "replay must return the recorded receipt: {ack}"
+            );
+        }
+    }
+    body["target"]["session_id"] = serde_json::json!("different-session-target");
+    let response = app
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/commands",
+            Some(&token),
+            Some(&cs),
+            Some(body),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        body_json(response).await["code"],
+        "duplicate_command_mismatch"
+    );
 }
 
 #[tokio::test]

@@ -1,12 +1,11 @@
-//! Supervised tool runner and workspace tool port for committed tool intents.
+//! Session-scoped tool execution and lifecycle reporting.
 //!
-//! Not connected to the production session lifecycle. The runner owns exactly
+//! The port owns exactly
 //! one execution: it never re-runs a tool to "retry" a lost result, and it
 //! never reports a cancelled or dropped future as a stopped side effect.
 //!
-//! The executor behind [`ToolPort`] is responsible for honouring the cancel
-//! flag, re-evaluating permissions and approval grants before dispatch, holding
-//! quota reservations for backgrounded or unstopped work, and telling the truth
+//! The executor behind [`WorkspaceToolPort`] is responsible for honouring the cancel
+//! flag, re-evaluating permissions and approval grants before dispatch, and telling the truth
 //! about whether anything started.
 
 use qaqh_process_tools::exec_session::{
@@ -27,8 +26,6 @@ use std::{
     },
     time::Duration,
 };
-
-use crate::quota_ledger::{QuotaKind, QuotaLedger, QuotaReservation, ReleaseReason};
 
 #[derive(Clone)]
 struct OwnerExecPublisher {
@@ -209,14 +206,6 @@ pub struct ToolRequest {
     pub args: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ToolOutput {
-    pub output: Vec<u8>,
-    /// The executor left a process running in the background. This is not a
-    /// terminal result and must not be settled as one.
-    pub backgrounded: bool,
-}
-
 /// The executor's own account of how far it got. Any error that could have
 /// applied a side effect must be reported as `AfterStart`.
 #[derive(Debug, Clone)]
@@ -227,19 +216,9 @@ pub enum ToolFailure {
     Denied(String),
     /// Executed and returned a deterministic tool-level failure (e.g. file not
     /// found, stale hash) with structured output.
-    TerminalError { message: String, output: Vec<u8> },
+    TerminalError(String),
     /// Started, and may have applied effects; the result is inconclusive.
     AfterStart(String),
-}
-
-pub trait ToolPort: Send + Sync + 'static {
-    /// Must return only after the external effect stopped, or must report
-    /// [`ToolFailure::AfterStart`] when it cannot prove that.
-    fn execute(
-        &self,
-        request: &ToolRequest,
-        cancel: Arc<AtomicBool>,
-    ) -> Result<ToolOutput, ToolFailure>;
 }
 
 /// Policy snapshot re-evaluated immediately before dispatching a tool handler.
@@ -308,21 +287,8 @@ pub struct ToolApprovalGrant {
     pub workspace_root: PathBuf,
 }
 
-/// Owner record for a backgrounded (yielded) execution whose quota
-/// reservation remains held until the exec session reaches a real terminal
-/// state(spec §8.2:工具调用 quota 调用返回时释放;存活进程的执行会话 quota
-/// 保留到真实终态,不靠下次工具调用顺便回收)。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RetainedToolOwner {
-    pub session_id: String,
-    pub call_id: String,
-    pub execution_id: String,
-    pub reservation: Option<QuotaReservation>,
-}
-
-/// Real [`ToolPort`] backed by a session-scoped [`qaqh_workspace::ToolManager`],
-/// pre-dispatch permission/approval re-verification, and an optional durable
-/// [`QuotaLedger`].
+/// Real [`WorkspaceToolPort`] backed by a session-scoped [`qaqh_workspace::ToolManager`],
+/// pre-dispatch permission/approval re-verification.
 ///
 /// 工具生命周期(运行状态、实时输出、结构化结果与 effects)经会话 owner 的
 /// [`ToolLifecycle`] 上报;这是 E09/E10 断点的接通点。
@@ -331,8 +297,6 @@ pub struct WorkspaceToolPort {
     manager: Arc<Mutex<qaqh_workspace::ToolManager>>,
     policy: RwLock<ToolPolicySnapshot>,
     approvals: Mutex<HashMap<String, ToolApprovalGrant>>,
-    quota: Option<Arc<Mutex<QuotaLedger>>>,
-    retained_owners: Mutex<HashMap<String, RetainedToolOwner>>,
     lifecycle: ToolLifecycle,
     exec_sessions: Arc<ExecSessionManager>,
 }
@@ -342,7 +306,6 @@ impl WorkspaceToolPort {
         session_id: impl Into<String>,
         manager: Arc<Mutex<qaqh_workspace::ToolManager>>,
         policy: ToolPolicySnapshot,
-        quota: Option<Arc<Mutex<QuotaLedger>>>,
         lifecycle: ToolLifecycle,
         exec_sessions: Arc<ExecSessionManager>,
     ) -> Self {
@@ -351,8 +314,6 @@ impl WorkspaceToolPort {
             manager,
             policy: RwLock::new(policy),
             approvals: Mutex::new(HashMap::new()),
-            quota,
-            retained_owners: Mutex::new(HashMap::new()),
             lifecycle,
             exec_sessions,
         }
@@ -403,114 +364,12 @@ impl WorkspaceToolPort {
             .trust_dir(dir);
     }
 
-    /// Hash of the sandbox spec this port will actually execute.
-    ///
-    /// Tool intents must pin the real policy, not a fixed placeholder string:
-    /// the ledger and the executor then agree on what the command ran under.
-    pub fn sandbox_spec_hash(&self) -> String {
-        let spec = self
-            .policy
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .sandbox_spec
-            .clone();
-        let bytes = serde_json::to_vec(&spec).unwrap_or_default();
-        sha256_hex(&bytes)
-    }
-
     /// Install a single-use approval grant for one specific `execution_id`.
     pub fn grant_approval(&self, grant: ToolApprovalGrant) {
         self.approvals
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(grant.execution_id.clone(), grant);
-    }
-
-    /// Revoke an unconsumed approval grant before dispatch.
-    pub fn revoke_approval(&self, execution_id: &str) -> bool {
-        self.approvals
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(execution_id)
-            .is_some()
-    }
-
-    /// Inspect a retained owner (backgrounded process or unstopped task).
-    pub fn retained_owner(&self, execution_id: &str) -> Option<RetainedToolOwner> {
-        self.retained_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(execution_id)
-            .cloned()
-    }
-
-    pub fn retained_owners_len(&self) -> usize {
-        self.retained_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len()
-    }
-
-    /// Explicitly settle and release the quota held by a backgrounded or
-    /// previously indeterminate execution after its process has been reaped.
-    pub fn settle_retained_owner(
-        &self,
-        execution_id: &str,
-        reason: ReleaseReason,
-    ) -> Result<bool, String> {
-        let owner = self
-            .retained_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(execution_id)
-            .cloned();
-        let Some(owner) = owner else {
-            return Ok(false);
-        };
-        if let (Some(ledger), Some(reservation)) = (&self.quota, &owner.reservation) {
-            ledger
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .release(&reservation.reservation_id, reason)?;
-        }
-        Ok(self
-            .retained_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(execution_id)
-            .is_some())
-    }
-
-    fn retain_owner(
-        &self,
-        request: &ToolRequest,
-        backgrounded: bool,
-        reservation: Option<QuotaReservation>,
-    ) {
-        if !backgrounded {
-            return;
-        }
-        self.retained_owners
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                request.execution_id.clone(),
-                RetainedToolOwner {
-                    session_id: self.session_id.clone(),
-                    call_id: request.call_id.clone(),
-                    execution_id: request.execution_id.clone(),
-                    reservation,
-                },
-            );
-    }
-
-    fn release_reservation(&self, reservation: Option<QuotaReservation>, reason: ReleaseReason) {
-        if let (Some(ledger), Some(res)) = (&self.quota, reservation) {
-            let _ = ledger
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .release(&res.reservation_id, reason);
-        }
     }
 }
 
@@ -655,12 +514,12 @@ impl WorkspaceToolPort {
     }
 }
 
-impl ToolPort for WorkspaceToolPort {
-    fn execute(
+impl WorkspaceToolPort {
+    pub fn execute(
         &self,
         request: &ToolRequest,
         cancel: Arc<AtomicBool>,
-    ) -> Result<ToolOutput, ToolFailure> {
+    ) -> Result<String, ToolFailure> {
         let args_json = String::from_utf8(request.args.clone()).ok();
         if cancel.load(Ordering::Acquire) {
             self.lifecycle.settled(
@@ -765,31 +624,6 @@ impl ToolPort for WorkspaceToolPort {
             ));
         }
 
-        let reservation = match &self.quota {
-            Some(ledger) => match ledger
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .reserve(
-                    QuotaKind::Tool,
-                    1,
-                    format!("tool:{}:{}", self.session_id, request.execution_id),
-                    None,
-                ) {
-                Ok(reservation) => Some(reservation),
-                Err(err) => {
-                    let message = format!("tool quota reservation refused: {err}");
-                    self.lifecycle.settled(
-                        &request.call_id,
-                        &request.tool_name,
-                        args_json.clone(),
-                        failed_settlement("quota_refused", &message, None, None),
-                    );
-                    return Err(ToolFailure::NotStarted(message));
-                }
-            },
-            None => None,
-        };
-
         let mut context = context;
         context.cancellation =
             qaqh_workspace::tool_api::CancellationToken::from_shared_flag(Arc::clone(&cancel));
@@ -847,12 +681,6 @@ impl ToolPort for WorkspaceToolPort {
         // backgrounded/process_id(E03 已删)。
         let contract_outcome = exec_result.outcome.clone();
         if let Some(outcome) = &contract_outcome {
-            let is_yielded = matches!(outcome, ToolCallOutcome::Yielded { .. });
-            if is_yielded {
-                self.retain_owner(request, true, reservation);
-            } else {
-                self.release_reservation(reservation, ReleaseReason::Completed);
-            }
             let metrics = run_metrics(&run);
             self.lifecycle.finished(
                 run,
@@ -867,14 +695,10 @@ impl ToolPort for WorkspaceToolPort {
                     effects: effect_infos(&exec_result),
                 },
             );
-            return Ok(ToolOutput {
-                output: exec_result.content.into_bytes(),
-                backgrounded: is_yielded,
-            });
+            return Ok(exec_result.content);
         }
 
         if exec_result.success {
-            self.release_reservation(reservation, ReleaseReason::Completed);
             let metrics = run_metrics(&run);
             self.lifecycle.finished(
                 run,
@@ -889,10 +713,7 @@ impl ToolPort for WorkspaceToolPort {
                     effects: effect_infos(&exec_result),
                 },
             );
-            return Ok(ToolOutput {
-                output: exec_result.content.into_bytes(),
-                backgrounded: false,
-            });
+            return Ok(exec_result.content);
         }
 
         let err_code = exec_result
@@ -904,7 +725,6 @@ impl ToolPort for WorkspaceToolPort {
         match err_code {
             "permission_denied" | "blocked_by_mode" | "session_mismatch" | "workspace_mismatch"
             | "resource_mismatch" => {
-                self.release_reservation(reservation, ReleaseReason::Cancelled);
                 let terminal = exec_error_terminal(&run, &exec_result);
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::Denied(exec_result.content))
@@ -913,7 +733,6 @@ impl ToolPort for WorkspaceToolPort {
             | "runtime_not_initialized"
             | "audit_unavailable"
             | "cancelled_before_start" => {
-                self.release_reservation(reservation, ReleaseReason::Cancelled);
                 let terminal = exec_error_terminal(&run, &exec_result);
                 self.lifecycle.finished(run, terminal);
                 Err(ToolFailure::NotStarted(exec_result.content))
@@ -947,13 +766,9 @@ impl ToolPort for WorkspaceToolPort {
                 Err(ToolFailure::Denied(exec_result.content))
             }
             _ => {
-                self.release_reservation(reservation, ReleaseReason::Completed);
                 let terminal = exec_error_terminal(&run, &exec_result);
                 self.lifecycle.finished(run, terminal);
-                Err(ToolFailure::TerminalError {
-                    message: exec_result.content.clone(),
-                    output: exec_result.content.into_bytes(),
-                })
+                Err(ToolFailure::TerminalError(exec_result.content))
             }
         }
     }

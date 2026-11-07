@@ -54,7 +54,7 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
         }
         SessionCommand::SessionDashboard(args) => {
             // B08 权威 DTO:typed 结构直出,序列化即 wire 形状。
-            dashboard(&args.session_id)
+            dashboard(&service.owners, &args.session_id)
                 .and_then(|dashboard| {
                     serde_json::to_value(dashboard).map_err(|error| error.to_string())
                 })
@@ -168,20 +168,18 @@ fn create_session(
     service: &QaqhService,
     input: CreateSessionInput,
 ) -> QaqhResult<SessionCreateResult> {
-    let selection = input.model_selection.as_ref()
+    let catalog =
+        qaqh_profile::ProfilesStore::load_or_create(&qaqh_profile::default_providers_path())
+            .map_err(QaqhError::message)?;
+    let model_selection = input
+        .model_selection
         .ok_or_else(|| QaqhError::invalid("请选择服务商和模型"))?;
-    let catalog = qaqh_profile::ProfilesStore::load_or_create(&qaqh_profile::default_providers_path())
-        .map_err(QaqhError::message)?;
-    qaqh_profile::resolve_model_selection(catalog.document(), selection)
+    qaqh_profile::resolve_model_selection(catalog.document(), &model_selection)
         .map_err(QaqhError::message)?;
     let custom_tools = input.custom_tools.unwrap_or_default();
     let preset = optional_tool_mode(input.tool_mode.as_deref(), &custom_tools)
         .map_err(QaqhError::message)?;
-    let session_id = service
-        .sessions
-        .allocate_session()
-        .map_err(|error| QaqhError::context("session.create: allocate session failed", error))?;
-    service.sessions.clear_active();
+    let session_id = service.sessions.allocate_session();
     let (tool_mode, custom_tools) = preset
         .map(|(tool_mode, custom_tools)| (Some(tool_mode), Some(custom_tools)))
         .unwrap_or((None, None));
@@ -199,7 +197,7 @@ fn create_session(
             effort: input.effort.as_deref(),
             tool_mode,
             custom_tools,
-            model_selection: input.model_selection,
+            model_selection,
         },
     )
     .inspect_err(|_| {
@@ -243,7 +241,7 @@ impl QaqhService {
     }
 }
 
-/// 业务行创建输入:cwd/model 由 `session_canonical_cwd` 解析,其余字段直通。
+/// 业务行创建输入，model_selection 已由模型目录校验。
 struct CreateRowInput<'a> {
     cwd: Option<&'a str>,
     title: Option<&'a str>,
@@ -251,7 +249,7 @@ struct CreateRowInput<'a> {
     effort: Option<&'a str>,
     tool_mode: Option<String>,
     custom_tools: Option<Vec<String>>,
-    model_selection: Option<qaqh_types::ModelSelection>,
+    model_selection: qaqh_types::ModelSelection,
 }
 
 /// 会话创建的第一站:一次性落 SQLite 业务行(cwd/model/profile/effort/
@@ -261,19 +259,19 @@ fn create_business_row(
     session_id: &str,
     input: CreateRowInput<'_>,
 ) -> Result<(), String> {
-    let (canonical_cwd, model) = session_canonical_cwd(&service.owners, session_id, input.cwd)?;
+    let canonical_cwd = session_canonical_cwd(&service.owners, session_id, input.cwd)?;
     let row = qaqh_session::db::store::NewSession {
         session_id: session_id.to_string(),
         parent_session_id: None,
         title: input.title.map(str::to_string).unwrap_or_default(),
         title_source: input.title.map(|_| "user".to_string()),
         cwd: Some(canonical_cwd),
-        model: Some(model),
+        model: Some(input.model_selection.model_id.clone()),
         effort: input.effort.filter(|e| !e.is_empty()).map(str::to_string),
         profile: input.profile.filter(|p| !p.is_empty()).map(str::to_string),
         mode: None,
         tool_mode: input.tool_mode,
-        model_selection: input.model_selection,
+        model_selection: Some(input.model_selection),
         custom_tools: input.custom_tools,
         skills: None,
         frozen_annotation: None,
@@ -331,10 +329,7 @@ fn spawn_subagent(
         .filter(|workspace| !workspace.is_empty() && *workspace != ".");
     // BETA-01：子代理与主会话共享 id 规则；cwd 由 spawn_subagent_in_workspace
     // 落进业务行（显式 workspace 优先，其次继承父会话 cwd）。
-    let session_id = service
-        .sessions
-        .allocate_session()
-        .map_err(|error| QaqhError::context("subagent.spawn: allocate child session", error))?;
+    let session_id = service.sessions.allocate_session();
     if let Some(workspace) = workspace {
         log::info!("[subagent] inherited workspace for seed={session_id}: {workspace}");
     }
