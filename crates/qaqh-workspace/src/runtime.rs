@@ -47,15 +47,7 @@ thread_local! {
 }
 
 pub fn set_context(session: &str, permission_level: u8) {
-    // P2 拆分：qaqh-permission 的取消状态需要知道本线程绑定的会话——
-    // 首次 set_context 时注册一个读 RUNTIME_CTX 的 resolver（幂等），
-    // 打断 lib.rs ↔ runtime 的反向依赖环。
-    static RESOLVER_REGISTERED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    if RESOLVER_REGISTERED.set(()).is_ok() {
-        qaqh_permission::set_cancel_session_resolver(|| {
-            crate::runtime::context().map(|ctx| ctx.active_session)
-        });
-    }
+    crate::set_current_session(session);
     RUNTIME_CTX.with(|ctx| {
         *ctx.borrow_mut() = Some(RuntimeContext {
             active_session: session.to_string(),
@@ -121,7 +113,7 @@ impl ToolExecutionScope {
         &self.context
     }
 
-    /// Install the manager/policy compatibility view on the current thread.
+    /// Install the manager, policy and execution context on the current thread.
     ///
     /// 显式上下文同时同步本线程工作区与 ambient 视图，Drop 时完整恢复。
     pub fn install(&self) -> ToolExecutionScopeGuard {
@@ -131,7 +123,12 @@ impl ToolExecutionScope {
         crate::tool_side_fold::set_thread_policy(self.policy.clone());
         let workspace = (!self.context.workspace_root.as_os_str().is_empty())
             .then(|| self.context.workspace_root.to_string_lossy().into_owned());
-        let previous_workspace = crate::push_thread_workspace(workspace);
+        let previous_execution =
+            qaqh_permission::replace_execution_context(Some(qaqh_permission::ExecutionContext {
+                session_id: Some(self.context.session_id.clone()),
+                workspace,
+                cancellation: self.context.cancellation.shared_flag(),
+            }));
         let previous_runtime = RUNTIME_CTX.with(|slot| {
             std::mem::replace(
                 &mut *slot.borrow_mut(),
@@ -157,7 +154,7 @@ impl ToolExecutionScope {
         ToolExecutionScopeGuard {
             previous_manager,
             previous_policy,
-            previous_workspace: Some(previous_workspace),
+            previous_execution,
             previous_runtime,
             previous_mode,
             previous_sandbox,
@@ -170,7 +167,7 @@ impl ToolExecutionScope {
 pub struct ToolExecutionScopeGuard {
     previous_manager: Option<Arc<Mutex<crate::ToolManager>>>,
     previous_policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
-    previous_workspace: Option<Option<String>>,
+    previous_execution: Option<qaqh_permission::ExecutionContext>,
     previous_runtime: Option<RuntimeContext>,
     previous_mode: u8,
     previous_sandbox: bool,
@@ -182,9 +179,7 @@ impl Drop for ToolExecutionScopeGuard {
             *slot.borrow_mut() = self.previous_manager.take();
         });
         crate::tool_side_fold::set_thread_policy(self.previous_policy.clone());
-        if let Some(previous_workspace) = self.previous_workspace.take() {
-            crate::pop_thread_workspace(previous_workspace);
-        }
+        qaqh_permission::replace_execution_context(self.previous_execution.take());
         RUNTIME_CTX.with(|slot| {
             *slot.borrow_mut() = self.previous_runtime.take();
         });
@@ -262,84 +257,6 @@ pub fn install_tool_ctx(ctx: &ToolCtx) -> ToolCtxGuard {
 /// 空列表 = 全量（标准模式）；未知名自动剔除并 warn（复用 apply_init 语义）。
 pub fn set_allowed_tools(tools: Vec<String>) {
     with_manager(|manager| manager.set_allowed(tools));
-}
-
-/// Snapshot of the legacy per-actor tool runtime state on the actor thread.
-///
-/// Production tool workers now carry [`ToolExecutionScope`], which binds an
-/// explicit `ToolCallContext` to the remaining manager/policy state. This
-/// compatibility type is retained for legacy callers and thread-boundary tests.
-#[derive(Clone, Default)]
-pub struct ActorToolScope {
-    runtime: Option<RuntimeContext>,
-    manager: Option<Arc<Mutex<crate::ToolManager>>>,
-    mode: u8,
-    sandbox: bool,
-    /// 会话工作区快照（BUG-2026-09-12-05）：派生工具线程不继承 actor 线程
-    /// 的 ACTOR_WORKSPACE thread-local，不搬运则 grep/glob/read 相对路径与
-    /// exec 缺省 cwd 全部锚定到 daemon 进程 cwd。capture 在 actor 线程上取
-    /// `current_workspace()` 快照，install 时经 push/pop 写入工具线程。
-    workspace: Option<String>,
-    /// 工具结果折叠策略（Standard / NoFold）。随工具模式按会话切换，因此必须
-    /// 跟着 actor 走——留在进程级 static 会让一个会话的 minimal 模式关掉其它
-    /// 会话的命令输出截断。
-    policy: Option<Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>>,
-}
-
-impl ActorToolScope {
-    /// Capture the current (actor) thread's per-actor tool state.
-    pub fn capture() -> Self {
-        Self {
-            runtime: context(),
-            manager: ACTOR_TOOL_MANAGER.with(|slot| slot.borrow().clone()),
-            mode: AGENT_MODE.with(|slot| slot.get()),
-            sandbox: crate::authorization::is_subagent_sandbox(),
-            policy: Some(crate::tool_side_fold::policy()),
-            workspace: Some(crate::current_workspace()),
-        }
-    }
-
-    /// Install this scope onto the current thread (a spawned tool worker),
-    /// restoring the caller's previous thread-local state when the guard drops.
-    pub fn install(&self) -> ActorToolScopeGuard {
-        let previous = Self::capture();
-        RUNTIME_CTX.with(|slot| *slot.borrow_mut() = self.runtime.clone());
-        ACTOR_TOOL_MANAGER.with(|slot| *slot.borrow_mut() = self.manager.clone());
-        AGENT_MODE.with(|slot| slot.set(self.mode));
-        crate::authorization::set_subagent_sandbox(self.sandbox);
-        // 会话工作区跨线程搬运（BUG-2026-09-12-05）：push 返回被覆盖的旧值，
-        // Drop 时经 pop 恢复，保证 guard 语义与其它 thread-local 对称。
-        let previous_workspace = crate::push_thread_workspace(self.workspace.clone());
-        if let Some(policy) = &self.policy {
-            crate::tool_side_fold::set_thread_policy(policy.clone());
-        }
-        ActorToolScopeGuard {
-            previous,
-            previous_workspace: Some(previous_workspace),
-        }
-    }
-}
-
-/// Restores the pre-install thread-local state on drop.
-pub struct ActorToolScopeGuard {
-    previous: ActorToolScope,
-    /// install 时被覆盖的本线程旧 workspace 值（push 的返回值），Drop 恢复。
-    previous_workspace: Option<Option<String>>,
-}
-
-impl Drop for ActorToolScopeGuard {
-    fn drop(&mut self) {
-        RUNTIME_CTX.with(|slot| *slot.borrow_mut() = self.previous.runtime.clone());
-        ACTOR_TOOL_MANAGER.with(|slot| *slot.borrow_mut() = self.previous.manager.clone());
-        AGENT_MODE.with(|slot| slot.set(self.previous.mode));
-        crate::authorization::set_subagent_sandbox(self.previous.sandbox);
-        if let Some(previous_workspace) = self.previous_workspace.take() {
-            crate::pop_thread_workspace(previous_workspace);
-        }
-        if let Some(policy) = &self.previous.policy {
-            crate::tool_side_fold::set_thread_policy(policy.clone());
-        }
-    }
 }
 
 /// Initialize the process-global tool manager.

@@ -81,10 +81,8 @@ impl QaqhService {
         qaqh_workspace::runtime::init_tools("daemon", &[], vec![]);
         // 业务库:SQLite WAL 单权威(报告一 §7)。打不开就停止启动,不降级。
         let owners = Arc::new(
-            qaqh_session::owner::OwnerDirectory::open(
-                qaqh_types::platform::data_dir().join("qaqh.db"),
-            )
-            .expect("open business database"),
+            qaqh_session::owner::OwnerDirectory::open(sessions.data_dir().join("qaqh.db"))
+                .expect("open business database"),
         );
         let mut registry = AgentRegistry::new(Arc::clone(&owners));
         registry.set_max_depth(config.subagent.max_depth as usize);
@@ -152,13 +150,9 @@ impl QaqhService {
             .ok_or_else(|| "dsaccount manager unavailable".to_string())
     }
 
-    /// 挂载 Ringing 运行时（worker 事件双投）。
+    /// Attach the session content store.
     pub fn attach_ringing(&self, hub: Arc<RingingHub>) {
-        let _ = self.hub.set(hub.clone());
-        self.registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .attach_ringing(hub);
+        let _ = self.hub.set(hub);
     }
 
     /// Test/ops hook: override the subagent tree depth limit.
@@ -184,7 +178,7 @@ impl QaqhService {
         &self.owners
     }
 
-    /// 转发 Ringing 命令到 agent worker（wire 判别后由 worker reader 解析）。
+    /// Dispatch a trusted Ringing command directly to the session loop.
     pub fn send_ringing_command(
         &self,
         session_id: &str,
@@ -205,25 +199,24 @@ impl QaqhService {
         session_id: &str,
         _causation_id: Option<&str>,
     ) -> Result<(), String> {
-        self.registry()?.close(session_id);
-        // D-3：关闭即终止该会话的取消标记。worker 优雅收尾可能已把它置假
-        // （actor 线程 clear_cancel），但整项移除才能让 SESSION_CANCELS 与
-        // 活跃会话同阶（种子频繁进出的 daemon 长期运行不无界增长）。
-        qaqh_workspace::remove_session_cancel(session_id);
-        // 临时会话（子代理）用完即走：关闭后删除会话目录，磁盘零残留。
-        // 目录已不存在（重复 close / 已被清理）时静默跳过，保持幂等。
         if self
             .session_meta(session_id)
             .is_some_and(|meta| meta.ephemeral)
         {
-            match self.sessions.delete(session_id) {
-                Ok(()) => {
-                    self.remove_workspace_membership(session_id)?;
-                    log::info!("[session] ephemeral session {session_id} cleaned up (auto-unload)")
-                }
-                Err(e) if e.contains("Session not found") => {}
-                Err(e) => log::warn!("[session] ephemeral cleanup {session_id} failed: {e}"),
+            for loop_ in self.registry()?.loops_for_tree(session_id) {
+                loop_.abandon();
             }
+            let service = self.clone();
+            let owned = session_id.to_string();
+            tokio::runtime::Handle::try_current()
+                .map_err(|error| format!("ephemeral cleanup requires the daemon runtime: {error}"))?
+                .spawn(async move {
+                    if let Err(error) = service.delete_session(&owned).await {
+                        log::error!("ephemeral session {owned} cleanup failed: {error}");
+                    }
+                });
+        } else {
+            self.registry()?.close(session_id);
         }
         // 阶段 3b：SessionStateChanged{Closed} 的 v1 广播已删（A1：wire 零消费方）。
         self.release_session_process_state(session_id);
@@ -232,22 +225,18 @@ impl QaqhService {
         Ok(())
     }
 
-    /// Clear process-local image and worker registrations after the worker joins.
+    /// Release process-local image data when the loop is unloaded.
     fn release_session_process_state(&self, session_id: &str) {
         // 图片注册表按 seed 键控存 base64（read_image 的上传缓存）。resume
         // 路径（state/lifecycle.rs）会从持久化消息历史重建，关闭期清空
         // 不破坏 image_index 语义。
         qaqh_workspace::read_image::reset_images(session_id);
-        if let Some(hub) = self.hub.get() {
-            hub.mark_worker_dead(session_id);
-        }
     }
 
-    /// E: idle 卸载空闲会话 worker。
+    /// 卸载空闲会话循环。
     /// `idle_secs` <= 0 时为 no-op（配置禁用）。对每个被卸载的 seed 做常驻
     /// 状态清理（Closed 广播已删，A1：wire 零消费方）。
-    /// 返回被卸载的 seed 列表。registry.close 是阻塞 join——调用方
-    /// （daemon 周期任务）必须置于 spawn_blocking。
+    /// Return unloaded session ids; filesystem/database cleanup runs off the async workers.
     pub fn unload_idle_sessions(&self, idle_secs: u64) -> Vec<String> {
         if idle_secs == 0 {
             return Vec::new();
@@ -272,12 +261,6 @@ impl QaqhService {
         let mut component_count = 0usize;
         if let Ok(registry) = self.registry.lock() {
             for component in registry.memory_components() {
-                component_count += 1;
-                monitor.update_component(component);
-            }
-        }
-        if let Some(hub) = self.hub.get() {
-            for component in hub.memory_components() {
                 component_count += 1;
                 monitor.update_component(component);
             }
@@ -357,9 +340,8 @@ impl QaqhService {
         Ok(())
     }
 
-    /// 恢复会话并把它设为当前 active seed。
+    /// Load the existing business session. Client selection is client-owned.
     pub fn resume_session(&self, session_id: &str) -> Result<(), String> {
-        self.sessions.set_active_session(session_id);
         self.registry()?
             .get_or_spawn(session_id)
             .map_err(|error| error.to_string())
@@ -393,26 +375,52 @@ impl QaqhService {
             .map_err(|error| error.to_string())
     }
 
-    /// 彻底删除会话（左侧列表 × 语义）：先关实例（若运行，幂等）再删
-    /// 磁盘目录与索引。会话不存在返回 Err（由 daemon 拦截层按幂等处理）。
-    pub fn delete_session(
-        &self,
-        session_id: &str,
-        causation_id: Option<&str>,
-    ) -> Result<(), String> {
-        let _ = self.close_session(session_id, causation_id);
-        self.sessions.delete(session_id)?;
-        self.remove_workspace_membership(session_id)
-    }
-
-    fn remove_workspace_membership(&self, session_id: &str) -> Result<(), String> {
-        let session_id = session_id.to_string();
-        self.owners
-            .db()
-            .write_blocking(move |conn| {
-                qaqh_session::db::workspace::remove_session(conn, &session_id)
-            })
-            .map_err(|error| error.to_string())
+    /// Cancel and await actual turn tasks before deleting their business rows.
+    pub async fn delete_session(&self, session_id: &str) -> Result<(), String> {
+        let loops = {
+            let registry = self.registry()?;
+            let loops = registry.loops_for_tree(session_id);
+            for loop_ in &loops {
+                loop_.abandon();
+            }
+            loops
+        };
+        for loop_ in loops {
+            loop_.shutdown().await;
+        }
+        let service = self.clone();
+        let root = session_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            // Keep command admission serialized until the rows are gone.
+            let mut registry = service.registry()?;
+            registry.close(&root);
+            let owned = root.clone();
+            let tree = service
+                .owners
+                .db()
+                .read_blocking(move |conn| qaqh_session::db::store::session_tree(conn, &owned))
+                .map_err(|error| error.to_string())?;
+            for id in &tree {
+                registry.exec_sessions().shutdown_session(id)?;
+                service
+                    .owners
+                    .get_or_create(id)
+                    .flush()
+                    .map_err(|error| error.to_string())?;
+            }
+            let ids = service
+                .owners
+                .delete_session_tree(&root)
+                .map_err(|error| error.to_string())?;
+            registry.forget_sessions(&ids);
+            for id in ids {
+                service.sessions.delete(&id)?;
+                service.release_session_process_state(&id);
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("session deletion task: {error}"))?
     }
 
     /// 服务面唯一入口：wire `(method, params)` 在这里解码一次，然后按领域分派。
@@ -479,13 +487,6 @@ impl QaqhService {
     }
 
     /// F4: 死 worker 重生（daemon 周期任务调用；内部自带退避与关闭保护）。
-    pub fn respawn_dead_agents(&self) {
-        self.registry
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .respawn_dead_agents();
-    }
-
     /// True while stopping the daemon would interrupt work or abandon an
     /// interaction waiting for its lease owner. Used by lifecycle takeover so
     /// an updater cannot race a newly-started turn.
@@ -511,7 +512,7 @@ impl QaqhService {
         (has_active_work, activities)
     }
 
-    /// Write a session metadata patch (actor first, journal fallback).
+    /// Submit session metadata through its owner pump.
     pub(crate) fn write_meta(
         &self,
         session_id: &str,
@@ -684,7 +685,11 @@ impl QaqhService {
             let managed_cwd = meta.cwd.as_deref().is_some_and(|cwd| {
                 qaqh_types::platform::is_managed_session_workspace(std::path::Path::new(cwd))
             });
-            let mut workspace_id = if managed_cwd { None } else { stored_workspace_id };
+            let mut workspace_id = if managed_cwd {
+                None
+            } else {
+                stored_workspace_id
+            };
             if workspace_id.is_none()
                 && !managed_cwd
                 && !meta.ephemeral
@@ -879,10 +884,7 @@ pub(crate) fn session_canonical_cwd(
     owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
     requested: Option<&str>,
-) -> Result<(String, String), String> {
-    let model = qaqh_config::Config::load()
-        .map(|config| config.model)
-        .unwrap_or_else(|_| "unknown".to_string());
+) -> Result<String, String> {
     // Creation must not read the request back out of metadata that genesis has
     // not written yet: the explicit path wins and is resolved exactly once
     // (report 2026-10-31 §11.1 F09). An invalid path is rejected, never
@@ -906,7 +908,7 @@ pub(crate) fn session_canonical_cwd(
                 path.display()
             ));
         }
-        return Ok((path.to_string_lossy().into_owned(), model));
+        return Ok(path.to_string_lossy().into_owned());
     }
     let bound = crate::registry::spawn::session_cwd(owners, session_id);
     let cwd = match bound {
@@ -941,7 +943,7 @@ pub(crate) fn session_canonical_cwd(
             path.to_string_lossy().into_owned()
         }
     };
-    Ok((cwd, model))
+    Ok(cwd)
 }
 
 /// Strip the Windows verbatim prefix that `canonicalize` adds.
@@ -1087,8 +1089,7 @@ mod plan_service_tests {
         let previous =
             qaqh_workspace::push_thread_workspace(Some(workspace.to_string_lossy().into_owned()));
 
-        let sessions = qaqh_session::SessionManager::try_global();
-        let outcome = plan_action_against_workspace(sessions.is_some(), &plan_path);
+        let outcome = plan_action_against_workspace(&plan_path);
 
         let rewritten = std::fs::read_to_string(&plan_path).expect("read plan");
         qaqh_workspace::pop_thread_workspace(previous);
@@ -1101,10 +1102,7 @@ mod plan_service_tests {
 
     /// 直接驱动 `plan_action` 的写回段（`qaqh_dir` 依赖 session 目录，测试
     /// 只关心文件尾形态，故在此复刻同一路径解析并断言输出）。
-    fn plan_action_against_workspace(
-        _sessions_ready: bool,
-        plan_path: &std::path::Path,
-    ) -> Result<(), String> {
+    fn plan_action_against_workspace(plan_path: &std::path::Path) -> Result<(), String> {
         let content = std::fs::read_to_string(plan_path).map_err(|e| e.to_string())?;
         let item_id = "item-1";
         let action = "approve";

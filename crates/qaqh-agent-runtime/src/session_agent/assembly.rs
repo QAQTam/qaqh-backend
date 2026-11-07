@@ -275,7 +275,6 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         session_id,
         Arc::new(Mutex::new(tool_manager)),
         policy,
-        None,
         owner.lifecycle(),
         exec_sessions,
     ));

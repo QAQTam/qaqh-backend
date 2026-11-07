@@ -434,10 +434,7 @@ impl ToolManager {
 
     /// Freeze the tool set for one session.
     ///
-    /// 只改工具集，**不碰任何进程级全局**：此前这里顺带 `set_current_session`，
-    /// 于是「谁最后 spawn，全局当前会话就是谁」——spawn 线程上没有 actor 上下文，
-    /// 该写会落到 `qaqh_permission::CURRENT_SESSION`。会话身份现在只来自
-    /// `ToolCallContext::session_id`（执行期）与 actor thread-local（ambient 兼容视图）。
+    /// 只改工具集。会话身份由 ToolCallContext 提供，并在工具执行作用域中绑定。
     pub fn apply_init(&mut self, allowed_tools: Vec<String>) {
         self.set_allowed(allowed_tools);
     }
@@ -983,16 +980,16 @@ mod tests {
     }
 
     #[test]
-    fn tool_setup_never_writes_process_global_session() {
+    fn tool_setup_preserves_the_execution_session() {
         // 会话装配（apply_init）与运行期切换（set_allowed）都只动工具集；
-        // 进程级 CURRENT_SESSION 留给显式的 ambient 调用方，不再被 spawn 覆写。
+        // 执行上下文中的会话身份不受工具集变更影响。
         let mut mgr = ToolManager::new();
         mgr.register_probe(probe("exec"));
         crate::set_current_session("explicit-ambient");
         mgr.apply_init(vec![]);
         mgr.set_allowed(vec!["exec".to_string()]);
         assert_eq!(
-            *crate::CURRENT_SESSION.lock().unwrap(),
+            crate::current_session(),
             Some("explicit-ambient".to_string())
         );
     }

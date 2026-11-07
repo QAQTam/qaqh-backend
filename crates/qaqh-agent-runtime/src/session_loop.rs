@@ -33,8 +33,7 @@ use crate::progress::{AttemptBlocks, ProgressSink, ProgressStream};
 use crate::provider_job::{self, Evidence, ProviderOutcome, ProviderRequestSpec};
 use crate::session_agent::prompt;
 use crate::tool_job::{
-    ToolAdmission, ToolApprovalGrant, ToolFailure, ToolOutput, ToolPort, ToolRequest,
-    WorkspaceToolPort,
+    ToolAdmission, ToolApprovalGrant, ToolFailure, ToolRequest, WorkspaceToolPort,
 };
 use qaqh_ringing_contract::fact::ProviderFinish;
 
@@ -59,6 +58,7 @@ pub struct SessionLoop {
 }
 
 struct LoopInner {
+    closed: bool,
     queue: VecDeque<ConversationSendMessage>,
     active: Option<ActiveTurn>,
     permissions: HashMap<String, oneshot::Sender<PermissionAnswer>>,
@@ -109,6 +109,8 @@ struct ActiveTurn {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoopError {
+    #[error("session loop is closed")]
+    Closed,
     #[error(transparent)]
     Db(#[from] qaqh_session::db::DbError),
 }
@@ -130,6 +132,7 @@ impl SessionLoop {
             spec: RwLock::new(spec),
             cwd: RwLock::new(cwd),
             inner: Mutex::new(LoopInner {
+                closed: false,
                 queue: VecDeque::new(),
                 active: None,
                 permissions: HashMap::new(),
@@ -189,6 +192,7 @@ impl SessionLoop {
     /// 实例生命周期解耦;回合任务感知取消后自行把挂起交互按 Cancelled 结算。
     pub fn abandon(&self) {
         let mut inner = self.lock();
+        inner.closed = true;
         if let Some(active) = inner.active.as_ref() {
             let _ = active.cancel.send(true);
         }
@@ -207,33 +211,27 @@ impl SessionLoop {
             InputPurpose::Steer | InputPurpose::Interject
         );
         let mut inner = self.lock();
+        if inner.closed {
+            return Err(LoopError::Closed);
+        }
         if let Some(active) = inner.active.as_mut() {
             if merges_into_round {
                 let turn = self.owner_input_block(&active.turn_id, &input);
-                drop(inner);
-                // 落块异步;合并清单同步登记,下一轮 provider 调用前消费。
-                let owner = Arc::clone(&self.owner);
-                spawn_task(async move {
-                    owner.append_block(turn).await.ok();
-                });
-                let mut inner = self.lock();
-                if let Some(active) = inner.active.as_mut() {
-                    active.steers.push(input.text);
-                }
+                self.owner.queue_block(turn)?;
+                active.steers.push(input.text);
                 return Ok(());
             }
             inner.queue.push_back(input);
             return Ok(());
         }
-        drop(inner);
         // QueueOnly 语义(契约):投递但不触发回合——入队,等下一个回合
         // 开始时作为输入块落盘。
         if matches!(input.input_purpose, InputPurpose::QueueOnly) {
-            self.lock().queue.push_back(input);
+            inner.queue.push_back(input);
             return Ok(());
         }
-        self.spawn_turn(input);
-        Ok(())
+        drop(inner);
+        self.spawn_turn(input)
     }
 
     /// 取消活动回合(给出的 turn_id 不匹配时忽略,返回是否生效)。
@@ -302,6 +300,7 @@ impl SessionLoop {
 
     /// 关停:取消活动回合并等待任务退出。
     pub async fn shutdown(self: Arc<Self>) {
+        self.abandon();
         let task = {
             let mut inner = self.lock();
             let Some(active) = inner.active.take() else {
@@ -319,14 +318,22 @@ impl SessionLoop {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn spawn_turn(self: &Arc<Self>, input: ConversationSendMessage) {
+    fn spawn_turn(self: &Arc<Self>, input: ConversationSendMessage) -> Result<(), LoopError> {
+        let mut inner = self.lock();
+
+        if inner.closed {
+            return Err(LoopError::Closed);
+        }
+        if inner.active.is_some() {
+            inner.queue.push_back(input);
+            return Ok(());
+        }
         let loop_ = Arc::clone(self);
         let task = spawn_task(async move {
             loop_.run_turn(input).await;
         });
         self.last_activity_ms
             .store(unix_now_ms().max(0) as u64, Ordering::Release);
-        let mut inner = self.lock();
         let turn_id = format!("turn_{}", generate_ulid());
         let (cancel, _) = watch::channel(false);
         inner.active = Some(ActiveTurn {
@@ -336,6 +343,7 @@ impl SessionLoop {
             pending_interactions: Vec::new(),
             task,
         });
+        Ok(())
     }
 
     fn owner_input_block(&self, turn_id: &str, input: &ConversationSendMessage) -> TimelineEntry {
@@ -739,7 +747,7 @@ impl SessionLoop {
                 )))
             });
         Ok(match joined {
-            Ok(output) => (true, tool_output_text(&output)),
+            Ok(output) => (true, output),
             // port 已在 execute 内结算生命周期;这里只取回传文本。
             Err(failure) => (false, failure_message(&failure)),
         })
@@ -1206,7 +1214,7 @@ impl SessionLoop {
         if let Some(input) = next {
             // 队首输入直接开新回合(不经 send_input:QueueOnly 项已在队内,
             // 续接即处理)。
-            self.spawn_turn(input);
+            let _ = self.spawn_turn(input);
         }
     }
 
@@ -1383,16 +1391,12 @@ async fn wait_for_turn_cancel(cancel: &mut watch::Receiver<bool>) {
     }
 }
 
-fn tool_output_text(output: &ToolOutput) -> String {
-    String::from_utf8_lossy(&output.output).into_owned()
-}
-
 fn failure_message(failure: &ToolFailure) -> String {
     match failure {
         ToolFailure::Denied(reason)
         | ToolFailure::NotStarted(reason)
         | ToolFailure::AfterStart(reason) => reason.clone(),
-        ToolFailure::TerminalError { message, .. } => message.clone(),
+        ToolFailure::TerminalError(message) => message.clone(),
     }
 }
 

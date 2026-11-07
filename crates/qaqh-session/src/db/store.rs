@@ -1,6 +1,7 @@
 //! 业务表直查函数:全部接收 `&Connection`,由调用方在 `Db::write`/`Db::read`
 //! 闭包内组合成短事务。不做 Repository 抽象。
 
+use super::DbError;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, OptionalExtension, params};
@@ -80,6 +81,50 @@ pub fn create_session(conn: &mut Connection, session: &NewSession) -> rusqlite::
         ],
     )?;
     Ok(())
+}
+
+pub fn session_tree(conn: &Connection, root: &str) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "WITH RECURSIVE tree(id) AS (SELECT session_id FROM sessions WHERE session_id = ?1 \
+         UNION SELECT s.session_id FROM sessions s JOIN tree ON s.parent_session_id = tree.id) \
+         SELECT id FROM tree",
+    )?;
+    stmt.query_map([root], |row| row.get::<_, String>(0))?
+        .collect()
+}
+
+/// Delete a business session and its descendants in one transaction.
+pub fn delete_session_tree(conn: &mut Connection, root: &str) -> Result<Vec<String>, DbError> {
+    let tx = conn.transaction()?;
+    let ids = session_tree(&tx, root)?;
+    if ids.is_empty() {
+        return Err(DbError::SessionNotFound {
+            session_id: root.to_string(),
+        });
+    }
+    for id in &ids {
+        for table in [
+            "blocks",
+            "tool_calls",
+            "exec_sessions",
+            "interactions",
+            "turns",
+        ] {
+            tx.execute(&format!("DELETE FROM {table} WHERE session_id = ?1"), [id])?;
+        }
+        tx.execute("DELETE FROM team_tasks WHERE root_session_id = ?1", [id])?;
+        tx.execute(
+            "DELETE FROM board_channels WHERE root_session_id = ?1",
+            [id],
+        )?;
+        tx.execute(
+            "DELETE FROM board_subscriptions WHERE root_session_id = ?1",
+            [id],
+        )?;
+        tx.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
+    }
+    tx.commit()?;
+    Ok(ids)
 }
 
 /// Spawn 期登记:行不存在则插入默认行,已存在则不动(幂等)。
@@ -340,6 +385,12 @@ pub fn update_session_columns(
         push_column("skills_json", Some(json));
     }
     push_column("frozen_annotation", patch.frozen_annotation.clone());
+    if matches!(
+        patch.model_selection,
+        Some(qaqh_types::SettingValue::Inherit)
+    ) {
+        sets.push("model_selection = NULL".to_string());
+    }
     if let Some(flag) = patch.archived {
         values.push(Box::new(i64::from(flag)) as Box<dyn rusqlite::ToSql>);
         sets.push(format!("archived = ?{}", values.len()));

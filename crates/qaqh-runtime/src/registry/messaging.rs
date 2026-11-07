@@ -8,7 +8,7 @@ use crate::error::{QaqhError, QaqhResult};
 use qaqh_agent_runtime::session_loop::PermissionAnswer;
 
 impl AgentRegistry {
-    /// 发送 Ringing worker 命令帧（携带 `wire` 判别字段；worker reader 按 wire 解析）。
+    /// Deliver a trusted Ringing command to the native session loop.
     pub fn send_ringing(
         &mut self,
         session_id: &str,
@@ -27,20 +27,30 @@ impl AgentRegistry {
                 metadata.agent_path
             ).into());
         }
-        self.ensure_loaded_for_command(session_id)?;
-        if matches!(&env.command, qaqh_ringing::RingingCommand::ConversationSendMessage(_))
-            && self.instances.get(session_id).is_some_and(|instance| matches!(instance.kind, AgentKind::Session))
-        {
-            let owned = session_id.to_string();
-            let selection = self.owners.db().read_blocking(move |conn| {
-                qaqh_session::db::store::session_row(conn, &owned)
-            }).map_err(QaqhError::message)?
-                .and_then(|row| row.model_selection)
-                .ok_or_else(|| QaqhError::invalid("请先为此会话选择服务商和模型"))?;
-            let config = qaqh_config::watch::authoritative()
-                .ok_or_else(|| QaqhError::invalid("模型目录不可用"))?;
-            qaqh_profile::resolve_model_selection(&config.profiles_catalog, &selection)
-                .map_err(QaqhError::message)?;
+        if !self.instances.contains_key(session_id) {
+            match &env.command {
+                qaqh_ringing::RingingCommand::ConversationSendMessage(_) => {
+                    self.ensure_loaded_for_command(session_id)?;
+                }
+                qaqh_ringing::RingingCommand::AgentReloadConfig
+                | qaqh_ringing::RingingCommand::ConversationCancel { .. }
+                | qaqh_ringing::RingingCommand::SessionShutdown => return Ok(()),
+                _ => {
+                    return Err(QaqhError::not_found(format!(
+                        "session {session_id} is not loaded"
+                    )));
+                }
+            }
+        }
+        if matches!(
+            &env.command,
+            qaqh_ringing::RingingCommand::ConversationSendMessage(_)
+        ) {
+            qaqh_agent_runtime::agent::session_config::session_effective_config(
+                &self.owners,
+                session_id,
+            )
+            .map_err(QaqhError::message)?;
         }
         // A config reload replaces the provider *and* the tool environment:
         // the provider swap alone leaves the loop running the new model against
@@ -51,12 +61,10 @@ impl AgentRegistry {
             qaqh_ringing::RingingCommand::AgentReloadConfig
         )
         .then(|| {
-            let (mut config, _) =
-                qaqh_agent_runtime::agent::session_config::session_effective_config(
-                    Some(&self.owners),
-                    session_id,
-                )
-                .ok_or_else(|| format!("effective config unavailable for {session_id}"))?;
+            let mut config = qaqh_agent_runtime::agent::session_config::session_effective_config(
+                &self.owners,
+                session_id,
+            )?;
             let kind = self
                 .instances
                 .get(session_id)
@@ -110,18 +118,13 @@ impl AgentRegistry {
             Ok::<_, String>((provider, policy, allowed_tools, global_allowed_tools))
         });
         let write = |instance: &AgentInstance| -> QaqhResult<()> {
-            let AgentTransport::Loop { loop_ } = &instance.transport;
+            let loop_ = &instance.loop_;
             match &env.command {
                 qaqh_ringing::RingingCommand::ConversationSendMessage(input) => loop_
                     .send_input(input.clone())
                     .map_err(|e| format!("loop input error: {e}").into()),
                 qaqh_ringing::RingingCommand::ConversationCancel { turn_id } => {
-                    // 目标校验先行:stale/错目标的取消不预置会话级取消标记
-                    // (在途工具不得被滞留的旧请求中止)。
-                    let matched = loop_.cancel_turn(turn_id.as_deref());
-                    if matched || turn_id.is_none() {
-                        qaqh_workspace::set_session_cancel(session_id, true);
-                    }
+                    loop_.cancel_turn(turn_id.as_deref());
                     Ok(())
                 }
                 qaqh_ringing::RingingCommand::InteractionAskRespond {
@@ -170,37 +173,14 @@ impl AgentRegistry {
                 .into()),
             }
         };
-        if write(self.instances.get(session_id).expect("spawned instance")).is_ok() {
-            // T-1-4：父会话取消传播到它派生的子 seed。放在投递成功之后——
-            // 取消帧确实进入了父 worker 才谈得上「取消已经发生」。registry
-            // 是 Ringing 命令的唯一咽喉（daemon RPC、宿主直连、广播都经此），
-            // 因此这里也是唯一能同时触达 hub（mark_worker_dead）与子实例
-            // cmd_tx 的位置。
-            if matches!(
-                &env.command,
-                qaqh_ringing::RingingCommand::ConversationCancel { .. }
-            ) {
-                self.cancel_subagent_children(session_id);
-            }
-            return Ok(());
+        write(self.instances.get(session_id).expect("loaded instance"))?;
+        if matches!(
+            &env.command,
+            qaqh_ringing::RingingCommand::ConversationCancel { .. }
+        ) {
+            self.cancel_subagent_children(session_id);
         }
-        let kind = self
-            .instances
-            .get(session_id)
-            .map(AgentInstance::kind_name)
-            .unwrap_or(AgentKind::Session);
-        let parent = self.supervisor.parent_of(session_id);
-        self.close(session_id);
-        match kind {
-            AgentKind::Session => self.get_or_spawn(session_id)?,
-            AgentKind::Subagent(spec) => {
-                self.spawn_subagent_inprocess(session_id, spec)?;
-                if let Some(parent) = parent {
-                    self.link_subagent(&parent, session_id)?;
-                }
-            }
-        }
-        write(self.instances.get(session_id).expect("respawned instance"))
+        Ok(())
     }
 
     /// 向所有活跃 worker（含子代理）广播同一条 Ringing 命令。

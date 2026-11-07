@@ -120,10 +120,9 @@ pub static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 pub use qaqh_permission::{
-    CANCEL, CURRENT_SESSION, CURRENT_WORKSPACE, PLAN_BLOCKED, clear_actor_context, clear_cancel,
-    current_session, current_workspace, display_path, is_actor_context, is_cancel,
-    pop_thread_workspace, push_thread_workspace, remove_session_cancel, resolve_workspace_path,
-    set_actor_context, set_cancel, set_current_session, set_session_cancel, set_workspace,
+    PLAN_BLOCKED, clear_actor_context, clear_cancel, current_session, current_workspace,
+    display_path, is_actor_context, is_cancel, pop_thread_workspace, push_thread_workspace,
+    resolve_workspace_path, set_actor_context, set_cancel, set_current_session, set_workspace,
 };
 
 pub use qaqh_tool_core::{

@@ -505,8 +505,48 @@ impl ExecSessionManager {
             state.shutting_down = true;
             state.sessions.values().cloned().collect::<Vec<_>>()
         };
+        self.stop_and_wait(&sessions, ExecStopReason::Shutdown);
+    }
+
+    /// Terminate only this conversation's processes before its rows are removed.
+    pub fn shutdown_session(&self, owner_session_id: &str) -> Result<(), String> {
+        let sessions = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .sessions
+            .values()
+            .filter(|session| session.owner_session_id == owner_session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        self.stop_and_wait(&sessions, ExecStopReason::Terminate);
         for session in &sessions {
-            self.request_stop(session, ExecStopReason::Shutdown);
+            if session
+                .core
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .exit
+                .is_none()
+            {
+                return Err(format!(
+                    "execution session {} exit is unconfirmed",
+                    session.id
+                ));
+            }
+        }
+        self.inner
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .sessions
+            .retain(|_, session| session.owner_session_id != owner_session_id);
+        Ok(())
+    }
+
+    fn stop_and_wait(&self, sessions: &[Arc<ManagedSession>], reason: ExecStopReason) {
+        for session in sessions {
+            self.request_stop(session, reason);
         }
         let shutdown_deadline = Instant::now() + Duration::from_secs(3);
         for session in sessions {
@@ -524,7 +564,7 @@ impl ExecSessionManager {
             drop(core);
             #[cfg(any(unix, windows))]
             if needs_forced_finalize {
-                force_shutdown_finalize(Arc::clone(&self.inner), &session);
+                force_shutdown_finalize(Arc::clone(&self.inner), session);
             }
         }
     }
@@ -1485,6 +1525,32 @@ mod tests {
                 "global output offsets must be contiguous"
             );
         }
+        manager.shutdown();
+    }
+
+    #[test]
+    fn shutdown_session_stops_only_its_owned_processes() {
+        let manager = ExecSessionManager::new();
+        let a = manager
+            .start(
+                request("sleep 30", 20, None),
+                Arc::new(RecordingPublisher::default()),
+            )
+            .expect("start A");
+        assert!(matches!(a.outcome, ToolCallOutcome::Yielded { .. }));
+        let mut b_request = request("sleep 30", 20, None);
+        b_request.owner_session_id = "OTHER-SESSION".into();
+        let b = manager
+            .start(b_request, Arc::new(RecordingPublisher::default()))
+            .expect("start B");
+        assert!(matches!(b.outcome, ToolCallOutcome::Yielded { .. }));
+        manager
+            .shutdown_session("SES-EXEC-TEST")
+            .expect("confirmed stop");
+        assert!(manager.list("SES-EXEC-TEST").is_empty());
+        let other = manager.list("OTHER-SESSION");
+        assert_eq!(other.len(), 1);
+        assert!(matches!(other[0].state, ExecSessionState::Running));
         manager.shutdown();
     }
 
