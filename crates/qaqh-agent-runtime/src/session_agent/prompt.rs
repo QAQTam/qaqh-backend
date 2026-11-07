@@ -1,22 +1,15 @@
-//! Production prompt and provider assembly for the thin session agent.
-//!
-//! The thin owner commits its prefix explicitly: the stable inputs are
-//! materialized here as one durable `FrozenPrefix` message, which is then
-//! reused byte-for-byte as the cacheable request prefix. (The legacy loop
-//! rebuilt the prompt from `AgentState` every turn; that path is gone.)
+//! Deterministic system prompt rebuilt at each turn from current configuration.
 
 use std::path::Path;
 
 use crate::provider_job::ProviderRequestSpec;
 
-/// Maximum bytes of project instructions injected into the frozen prefix.
+/// Maximum bytes of project instructions in the system prompt.
 const MAX_AGENTS_BYTES: usize = 16 * 1024;
 
 /// Build the deterministic system prompt for one session.
 ///
-/// It only contains stable inputs (workspace, model, declared tools, project
-/// instructions). Per-turn state must not appear here: the message is committed
-/// once and reused as the cacheable request prefix.
+/// Contains workspace, model, declared tools and current project instructions.
 pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
     let mut prompt = String::new();
     prompt.push_str(

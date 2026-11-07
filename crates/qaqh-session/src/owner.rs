@@ -65,6 +65,17 @@ enum OwnerMsg {
     ExecSessionSettle(Box<ExecSessionSettlement>),
 }
 
+/// Metadata writes share the session pump and revision boundary.
+#[derive(Debug, thiserror::Error)]
+pub enum MetadataPatchError {
+    #[error("session {session_id} not found")]
+    NotFound { session_id: String },
+    #[error("settings revision conflict: expected {expected}, current {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
+    #[error("{0}")]
+    Storage(String),
+}
+
 /// 会话 owner:回合、timeline、工具生命周期、执行会话与交互的业务顺序决定者。
 pub struct SessionOwner {
     session_id: String,
@@ -242,16 +253,25 @@ impl SessionOwner {
         .await
     }
 
-    /// 追加 timeline 块:业务表 + TimelineAppended 事件。
-    pub async fn append_block(&self, entry: TimelineEntry) -> Result<(), DbError> {
+    fn block_request(&self, entry: TimelineEntry) -> Result<OwnerRequest, DbError> {
         let block = timeline_block(&self.session_id, &entry)?;
-        self.submit_request(move |pump| {
+        Ok(Box::new(move |pump| {
             pump.db
                 .write_blocking(move |conn| store::append_block(conn, &block))?;
             pump.emit(SessionEvent::TimelineAppended { entry });
             Ok(())
-        })
-        .await
+        }))
+    }
+
+    /// Commit and publish a timeline block before returning.
+    pub async fn append_block(&self, entry: TimelineEntry) -> Result<(), DbError> {
+        self.submit_request(self.block_request(entry)?).await
+    }
+
+    /// Enqueue a block before releasing synchronous input admission.
+    pub fn queue_block(&self, entry: TimelineEntry) -> Result<(), DbError> {
+        self.send_request(self.block_request(entry)?);
+        Ok(())
     }
 
     /// 交互升起:interaction 行 + InteractionRequested 事件。
@@ -418,29 +438,6 @@ impl SessionOwner {
         .await
     }
 
-    /// 会话标题变更:业务行落库 + SessionMetaChanged 事件(rename 的唯一写口)。
-    pub async fn set_title(&self, title: &str) -> Result<(), DbError> {
-        let owned = self.session_id.clone();
-        let row_title = title.to_string();
-        let event_title = (!title.is_empty()).then(|| title.to_string());
-        self.submit_request(move |pump| {
-            pump.db.write_blocking(move |conn| {
-                store::update_session_columns(
-                    conn,
-                    &owned,
-                    &store::SessionColumnPatch {
-                        title: Some(row_title),
-                        ..Default::default()
-                    },
-                )
-                .map(|_| ())
-            })?;
-            pump.emit(SessionEvent::SessionMetaChanged { title: event_title });
-            Ok(())
-        })
-        .await
-    }
-
     /// 权限/Ask/plan 交互挂起:declared → awaiting_interaction(统一覆盖
     /// permission、Ask、plan;具体种类由关联 InteractionView 表达)。
     pub async fn tool_awaiting_interaction(
@@ -474,6 +471,55 @@ impl SessionOwner {
             })
         })
         .await
+    }
+
+    /// Wait until preceding lifecycle reports have been committed and published.
+    pub fn flush(&self) -> Result<(), DbError> {
+        let (tx, rx) = mpsc::channel();
+        self.send_request(move |_| {
+            let _ = tx.send(());
+            Ok(())
+        });
+        rx.recv().map_err(|_| DbError::ExecutorStopped)
+    }
+
+    /// Commit a metadata patch on the same pump as turn and tool facts.
+    pub fn update_metadata(
+        &self,
+        patch: store::SessionColumnPatch,
+    ) -> Result<u64, MetadataPatchError> {
+        let session_id = self.session_id.clone();
+        let (tx, rx) = mpsc::channel();
+        self.send_request(move |pump| {
+            let expected = patch.expected_settings_revision;
+            let title = patch.title.clone();
+            let owned = session_id.clone();
+            let result = pump
+                .db
+                .write_blocking(move |conn| {
+                    let changed = store::update_session_columns(conn, &owned, &patch)?;
+                    let revision = store::session_settings_revision(conn, &owned)?;
+                    Ok::<_, DbError>((changed, revision))
+                })
+                .map_err(|error| MetadataPatchError::Storage(error.to_string()))
+                .and_then(|(changed, revision)| {
+                    let actual =
+                        revision.ok_or_else(|| MetadataPatchError::NotFound { session_id })?;
+                    if changed == 0 {
+                        if let Some(expected) = expected {
+                            return Err(MetadataPatchError::RevisionConflict { expected, actual });
+                        }
+                    }
+                    Ok(actual)
+                });
+            if result.is_ok() && title.is_some() {
+                pump.emit(SessionEvent::SessionMetaChanged { title });
+            }
+            let _ = tx.send(result);
+            Ok(())
+        });
+        rx.recv()
+            .map_err(|_| MetadataPatchError::Storage("owner pump stopped".into()))?
     }
 
     fn send_request(
@@ -1219,6 +1265,21 @@ impl OwnerDirectory {
 
     pub fn db(&self) -> &Arc<Db> {
         &self.db
+    }
+
+    pub fn delete_session_tree(&self, session_id: &str) -> Result<Vec<String>, DbError> {
+        let root = session_id.to_string();
+        let ids = self
+            .db
+            .write_blocking(move |conn| store::delete_session_tree(conn, &root))?;
+        let mut owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        for id in &ids {
+            owners.remove(id);
+        }
+        Ok(ids)
     }
 
     pub fn get_or_create(&self, session_id: &str) -> Arc<SessionOwner> {

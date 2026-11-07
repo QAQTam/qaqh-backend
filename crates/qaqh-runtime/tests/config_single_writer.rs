@@ -21,9 +21,9 @@ fn daemon_config_actions_share_one_write_port() {
     // SAFETY: integration-test process is single-purpose; the env is read by
     // ConfigStore::default_location during the test and reset by process exit.
     unsafe { std::env::set_var("QAQH_DATA_DIR", &root) };
-
-    qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
-    let service = QaqhService::init(qaqh_session::SessionManager::global());
+    let service = QaqhService::init(std::sync::Arc::new(qaqh_session::SessionManager::new(
+        qaqh_types::platform::data_dir(),
+    )));
 
     // 载荷用**当前**契约键风格（K2 camelCase）。这里原先是 snake_case，
     // 靠 `qaqh-config-api` 的 `alias` 才能解析进 ConfigPatch——该兼容臂已按

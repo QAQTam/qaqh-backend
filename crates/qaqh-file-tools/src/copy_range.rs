@@ -605,10 +605,7 @@ mod tests {
             args["target_anchor"] = serde_json::json!(a);
         }
         // 注入 workspace（避免依赖全局 CURRENT_WORKSPACE）
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&dir.to_string_lossy().to_string());
+        qaqh_permission::set_workspace(&dir.to_string_lossy().to_string());
         let result = exec_copy_range(&args);
         if result.is_success() {
             Ok(result.model_text().to_string())
@@ -844,10 +841,7 @@ mod tests {
         let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws.to_string_lossy().to_string());
+        qaqh_permission::set_workspace(&ws.to_string_lossy().to_string());
 
         // 先 read 一次，让账本持有「copy 之前」的基线指纹（键 = 绝对路径）。
         let read_result = crate::file_query::exec_read(&serde_json::json!({"path": abs_tgt}));
@@ -865,10 +859,7 @@ mod tests {
         );
         // copy_range 的目标路径用相对形态：缺陷正是「相对路径与绝对路径两套键」，
         // 绝对参数路径在 resolve 后与账本键同形，无法暴露该缺陷。
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws.to_string_lossy().to_string());
+        qaqh_permission::set_workspace(&ws.to_string_lossy().to_string());
 
         // copy_range 追加一行（写工具改动了文件）。
         let result = exec_copy_range(&serde_json::json!({
@@ -928,10 +919,7 @@ mod tests {
 
         let (_dir, workspace) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
         let _guard = WS_LOCK.lock().unwrap();
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone_from(&workspace.to_string_lossy().to_string());
+        qaqh_permission::set_workspace(&workspace.to_string_lossy().to_string());
         let result = exec_copy_range(&serde_json::json!({
             "source_path": "src.rs",
             "source_start": "copied",

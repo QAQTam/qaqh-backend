@@ -103,117 +103,68 @@ impl AgentRegistry {
         self.armed_collectors.remove(child_id);
     }
 
-    pub fn close(&mut self, session_id: &str) {
-        let descendants = self.supervisor.begin_unload(session_id);
-        for child in descendants {
-            let parent = self.supervisor.parent_of(&child);
-            self.finish_for_unload(&child, parent.as_deref());
-            self.supervisor.unlink(&child);
-            self.armed_collectors.remove(&child);
+    pub(crate) fn forget_sessions(&mut self, ids: &[String]) {
+        for id in ids {
+            self.agent_catalog.remove(id);
+            self.residency.remove(id);
+            self.spawn_configs.remove(id);
+            self.subagent_outcomes.remove(id);
+            self.outbound_attempts.remove(id);
+            self.armed_collectors.remove(id);
+            self.quota_ledgers.remove(id);
         }
-
-        let parent = self.supervisor.parent_of(session_id);
-        self.finish_for_unload(session_id, parent.as_deref());
-        self.supervisor.unlink(session_id);
-        self.supervisor.parent_unload_ack(session_id);
-        self.armed_collectors.remove(session_id);
     }
 
-    /// Signal, observe terminal, then join one worker. For a child, the parent
-    /// edge is closed before the join, which is the P2-5 ordering contract.
-    pub(super) fn finish_for_unload(&mut self, session_id: &str, parent: Option<&str>) {
-        self.set_agent_residency(session_id, ListedAgentResidency::Unloaded);
-        if let Some(parent) = parent {
-            self.supervisor.cancel_sent(parent, session_id);
-        }
-        let Some(mut instance) = self.instances.remove(session_id) else {
-            if let Some(parent) = parent {
-                self.supervisor.child_terminal(parent, session_id);
-                self.supervisor.parent_subagent_finished(parent, session_id);
-                self.supervisor.child_joined(parent, session_id);
-            }
-            qaqh_workspace::remove_session_cancel(session_id);
-            return;
-        };
-
-        instance.signal_shutdown();
-        if !instance.wait_until_stopped(session_id) {
-            log::warn!("[registry] worker {session_id} did not stop before join timeout");
-        }
-        if let Some(parent) = parent {
-            self.supervisor.child_terminal(parent, session_id);
-            self.supervisor.parent_subagent_finished(parent, session_id);
-        }
-        instance.finish_shutdown();
-        if let Some(parent) = parent {
-            self.supervisor.child_joined(parent, session_id);
-        }
-        qaqh_workspace::remove_session_cancel(session_id);
-    }
-
-    /// P2-5 测试/运维只读视图：parent/child 生命周期事件顺序。
-    #[doc(hidden)]
-    pub fn subagent_lifecycle_trace(&self) -> Vec<String> {
+    pub(crate) fn loops_for_tree(
+        &self,
+        root: &str,
+    ) -> Vec<Arc<qaqh_agent_runtime::session_loop::SessionLoop>> {
         self.supervisor
-            .trace()
-            .iter()
-            .map(|event| match event {
-                LifecycleEvent::EdgeLinked { parent, child } => {
-                    format!("edge_linked:{parent}:{child}")
-                }
-                LifecycleEvent::EdgeUnlinked { parent, child } => {
-                    format!("edge_unlinked:{parent}:{child}")
-                }
-                LifecycleEvent::ParentUnloadRequested { parent } => {
-                    format!("parent_unload_requested:{parent}")
-                }
-                LifecycleEvent::ChildCancelSent { parent, child } => {
-                    format!("child_cancel_sent:{parent}:{child}")
-                }
-                LifecycleEvent::ChildTerminal { parent, child } => {
-                    format!("child_terminal:{parent}:{child}")
-                }
-                LifecycleEvent::ParentSubagentFinished { parent, child } => {
-                    format!("parent_subagent_finished:{parent}:{child}")
-                }
-                LifecycleEvent::ChildJoined { parent, child } => {
-                    format!("child_joined:{parent}:{child}")
-                }
-                LifecycleEvent::ParentUnloadAck { parent } => {
-                    format!("parent_unload_ack:{parent}")
-                }
+            .descendants_postorder(root)
+            .into_iter()
+            .chain(std::iter::once(root.to_string()))
+            .filter_map(|id| {
+                self.instances
+                    .get(&id)
+                    .map(|instance| Arc::clone(&instance.loop_))
             })
             .collect()
     }
 
+    pub fn close(&mut self, session_id: &str) {
+        let descendants = self.supervisor.descendants_postorder(session_id);
+        for child in descendants {
+            self.finish_for_unload(&child);
+            self.supervisor.unlink(&child);
+            self.armed_collectors.remove(&child);
+        }
+
+        self.finish_for_unload(session_id);
+        self.supervisor.unlink(session_id);
+        self.armed_collectors.remove(session_id);
+    }
+
+    /// Detach the loop and request cancellation; its turn settles through the owner.
+    pub(super) fn finish_for_unload(&mut self, session_id: &str) {
+        self.set_agent_residency(session_id, ListedAgentResidency::Unloaded);
+        if let Some(instance) = self.instances.remove(session_id) {
+            instance.shutdown();
+        }
+    }
+
     /// T-1-4：把父会话的取消传播到它派生的全部子 seed（递归覆盖孙代）。
     ///
-    /// 子代理的取消入口与父会话一致：会话键控取消标记（子 seed 在途工具在
-    /// 轮询点立即中止）+ `ConversationCancel` 命令（子 Loop 收尾当前回合并
-    /// 发布 `ConversationCancelled`）。子代理同时从 `live_workers` 摘除：父
-    /// 取消后它不再是活 worker，bootstrap 的孤儿收尾必须能收掉它遗留的
-    /// running 状态，否则前端会把它投影为仍在运行。
+    /// 直接取消子循环的活动回合，由循环结算工具、交互和回合状态。
     ///
     /// 只对**已在册**的子实例投递命令——绝不 `get_or_spawn`：已取消/已退出
     /// 的子代理不得因为一次取消传播而被重新拉起。
     pub(super) fn cancel_subagent_children(&mut self, parent: &str) {
         let children = self.children_of(parent);
         for child in children {
-            self.supervisor.cancel_sent(parent, &child);
-            qaqh_workspace::set_session_cancel(&child, true);
-            if let Some(hub) = self.hub.as_ref() {
-                hub.mark_worker_dead(&child);
-            }
-            let delivered = match self.instances.get(&child) {
-                Some(AgentInstance {
-                    transport: AgentTransport::Loop { loop_ },
-                    ..
-                }) => {
-                    loop_.cancel_turn(None);
-                    true
-                }
-                None => false,
-            };
+            let delivered = self
+                .instances
+                .get(&child)
+                .is_some_and(|instance| instance.loop_.cancel_turn(None));
             log::info!(
                 "[subagent] parent cancel {parent} propagated to child {child} (delivered={delivered})"
             );
@@ -235,7 +186,7 @@ impl AgentRegistry {
             .instances
             .iter()
             .filter_map(|(session_id, instance)| {
-                let AgentTransport::Loop { loop_ } = &instance.transport;
+                let loop_ = &instance.loop_;
                 (loop_.activity_state() == qaqh_ringing_contract::fact::ActivityState::Idle
                     && loop_.idle_secs() >= idle_secs)
                     .then(|| session_id.clone())
@@ -246,9 +197,7 @@ impl AgentRegistry {
             let idle = self
                 .instances
                 .get(&session_id)
-                .map(|instance| match &instance.transport {
-                    AgentTransport::Loop { loop_ } => loop_.idle_secs(),
-                })
+                .map(|instance| instance.loop_.idle_secs())
                 .unwrap_or(0);
             log::info!("[registry] idle unload seed={session_id} idle={idle}s");
             self.close(&session_id);
@@ -259,8 +208,7 @@ impl AgentRegistry {
 
     pub fn shutdown_all(&mut self) {
         self.shutting_down = true;
-        // Close roots through the supervisor so every child tree follows
-        // terminal -> edge finish -> join -> parent ack.
+        // Unload descendants before their parent loops.
         let mut roots: Vec<String> = self
             .instances
             .keys()
@@ -275,80 +223,6 @@ impl AgentRegistry {
         for session_id in roots {
             self.close(&session_id);
         }
-        // Defensive fallback for an instance whose edge state was already
-        // removed before shutdown.
-        let leftovers: Vec<AgentInstance> = self
-            .instances
-            .drain()
-            .map(|(_, instance)| instance)
-            .collect();
-        for instance in leftovers {
-            instance.shutdown();
-        }
         self.exec_sessions.shutdown();
-    }
-
-    /// F4: 拉起所有已退出且非优雅关闭的 worker。由 daemon 侧周期任务调用；
-    /// 带 1 秒退避防止崩溃-重启风暴。优雅关闭（收到 Shutdown 帧后退出、
-    /// 或被 `close`/`shutdown_all` 主动结束）的实例不会重启。
-    pub fn respawn_dead_agents(&mut self) {
-        if self.shutting_down {
-            return;
-        }
-        let dead: Vec<(String, AgentKind)> = self
-            .instances
-            .iter()
-            .filter(|(_, instance)| instance.is_dead())
-            .filter(|(session_id, _)| {
-                self.supervisor.parent_of(session_id).is_none_or(|parent| {
-                    !self
-                        .instances
-                        .get(&parent)
-                        .is_some_and(AgentInstance::is_dead)
-                })
-            })
-            .map(|(session_id, instance)| (session_id.clone(), instance.kind_name()))
-            .collect();
-        for (session_id, kind) in dead {
-            // 退避：同一 seed 最近 1 秒内刚 spawn 过（例如刚拉起又立刻崩溃）
-            // 则跳过本轮，避免无意义的重启风暴。
-            if self
-                .last_spawn
-                .get(&session_id)
-                .is_some_and(|at| at.elapsed() < std::time::Duration::from_secs(1))
-            {
-                log::warn!(
-                    "[AGENT:{session_id}] worker exited immediately after spawn; backing off"
-                );
-                continue;
-            }
-            if !self.children_of(&session_id).is_empty() {
-                log::warn!(
-                    "[AGENT:{session_id}] dead parent detected; closing child tree before respawn"
-                );
-            }
-            self.close(&session_id);
-            log::warn!("[AGENT:{session_id}] in-process worker died; respawning");
-            // B9/R2：worker 存活登记在 spawn 之前完成。
-            if let Some(hub) = self.hub.as_ref() {
-                hub.mark_worker_live(&session_id);
-            }
-            let spawned = match kind {
-                AgentKind::Session => self.spawn(&session_id, None),
-                AgentKind::Subagent(spec) => self.spawn_subagent_inprocess(&session_id, spec),
-            };
-            if let Err(error) = spawned {
-                log::error!("[AGENT:{session_id}] respawn failed: {error}");
-            }
-        }
-    }
-
-    /// Test/ops hook: whether the worker's loop thread has exited without
-    /// having been reaped by `close` or `respawn_dead_agents`.
-    #[doc(hidden)]
-    pub fn worker_finished(&self, session_id: &str) -> bool {
-        self.instances
-            .get(session_id)
-            .is_some_and(AgentInstance::is_dead)
     }
 }

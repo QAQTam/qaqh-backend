@@ -12,15 +12,7 @@ pub(crate) use axum_impl::test_hooks::TestHooks;
 pub use axum_impl::{AppState, build_router};
 
 #[cfg(test)]
-/// 进程级 SessionManager 初始化守卫。
-///
-/// `SessionManager::init` 内部是 `OnceLock::set().expect(...)`——同一测试
-/// 二进制的多个用例共享进程，谁先谁后不确定，裸调 `init` 必然 `already
-/// initialized` panic。所有测试模块统一走这里，只初始化一次。
-///
-/// 同时做**测试数据根隔离**：默认指向进程唯一的临时目录，避免测试在真实
-/// `<USERPROFILE>\.qaqh` 里建会话（泄漏的会话会进 `session.list` 干扰前端）。
-/// 调用方显式设了 `QAQH_DATA_DIR` 时不覆盖。
+/// Isolate daemon test resources from the user's data root.
 #[cfg(test)]
 fn init_session_manager() {
     static INIT: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -38,7 +30,6 @@ fn init_session_manager() {
             }
             std::env::set_var("QAQH_ALLOW_TEST_DATA_ROOT", "1");
         }
-        qaqh_session::SessionManager::init(qaqh_types::platform::data_dir())
     });
 }
 
@@ -56,7 +47,9 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
     let service = TEST_SERVICE
         .get_or_init(|| {
             init_session_manager();
-            qaqh_runtime::QaqhService::init(qaqh_session::SessionManager::global())
+            qaqh_runtime::QaqhService::init(std::sync::Arc::new(qaqh_session::SessionManager::new(
+                qaqh_types::platform::data_dir(),
+            )))
         })
         .clone();
     let hub = std::sync::Arc::new(qaqh_ringing_runtime::RingingHub::with_database(

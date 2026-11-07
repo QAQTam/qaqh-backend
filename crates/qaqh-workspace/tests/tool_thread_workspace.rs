@@ -1,19 +1,45 @@
-//! BUG-2026-09-12-05 回归：actor 线程设置的会话工作区必须对派生工具线程可见。
-//!
-//! 事故模型（docs/archive/2026-09/report/2026-09-12-会话cwd未传导工具线程grep越界-report.md）：
-//! `dae42c7` 让 actor 上下文跳过物理 cd 后，会话 cwd 只存在于 actor 线程 TLS；
-//! 工具线程的 `current_workspace()` 回退到恒空的进程全局，相对路径全部锚到
-//! daemon 进程 cwd。修复 = `ActorToolScope` 携带 workspace 快照跨线程搬运。
-//!
-//! 测试只触碰 thread-local 槽位（每个测试独立线程），无进程全局共享状态。
+mod support;
+
+// BUG-2026-09-12-05 回归：actor 线程设置的会话工作区必须对派生工具线程可见。
+//
+// 事故模型（docs/archive/2026-09/report/2026-09-12-会话cwd未传导工具线程grep越界-report.md）：
+// `dae42c7` 让 actor 上下文跳过物理 cd 后，会话 cwd 只存在于 actor 线程 TLS；
+// 工具线程的 `current_workspace()` 回退到恒空的进程全局，相对路径全部锚到
+// daemon 进程 cwd。修复 = `ToolExecutionScope` 携带 workspace 快照跨线程搬运。
+//
+// 测试只触碰 thread-local 槽位（每个测试独立线程），无进程全局共享状态。
 
 use qaqh_workspace::{
     clear_actor_context, current_workspace, pop_thread_workspace, push_thread_workspace,
-    runtime::ActorToolScope, set_actor_context,
+    runtime::ToolExecutionScope, set_actor_context,
 };
 
+#[test]
+fn execution_scope_shares_cancellation_and_restores_the_previous_context() {
+    let a = support::context("/workspace-a");
+    let cancel_a = a.cancellation.clone();
+    let b = support::context("/workspace-b");
+    let outer = ToolExecutionScope::capture(a);
+    let inner = ToolExecutionScope::capture(b);
+    clear_actor_context();
+    {
+        let _outer = outer.install();
+        cancel_a.cancel();
+        assert!(qaqh_workspace::is_cancel());
+        {
+            let _inner = inner.install();
+            assert!(!qaqh_workspace::is_cancel());
+            assert_eq!(current_workspace(), "/workspace-b");
+        }
+        assert!(qaqh_workspace::is_cancel());
+        assert_eq!(current_workspace(), "/workspace-a");
+    }
+    assert!(!qaqh_workspace::is_cancel());
+    assert!(current_workspace().is_empty());
+}
+
 /// 在"actor 线程"上设置工作区，随后在派生 OS 线程（工具线程同构）上读取。
-/// 修复前：派生线程读到空/进程全局，断言失败；修复后：ActorToolScope 搬运。
+/// 修复前：派生线程读到空/进程全局，断言失败；修复后：ToolExecutionScope 搬运。
 #[test]
 fn spawned_tool_thread_sees_actor_workspace_via_scope() {
     let ws_a = tempfile::tempdir().unwrap();
@@ -28,7 +54,7 @@ fn spawned_tool_thread_sees_actor_workspace_via_scope() {
             .name("bug05-actor".into())
             .spawn(move || {
                 set_actor_context(&actor_ws, session_id);
-                let scope = ActorToolScope::capture();
+                let scope = ToolExecutionScope::capture(support::context(current_workspace()));
 
                 // actor 线程派生"工具线程"，capture 后 install 跨线程搬运
                 let handle = std::thread::Builder::new()
@@ -75,7 +101,7 @@ fn scope_guard_restores_previous_thread_workspace_on_drop() {
                 // 使 guard drop 的恢复目标可观测。
                 let scope = {
                     push_thread_workspace(Some(a.clone()));
-                    let scope = ActorToolScope::capture();
+                    let scope = ToolExecutionScope::capture(support::context(current_workspace()));
                     pop_thread_workspace(Some(b.clone()));
                     scope
                 };

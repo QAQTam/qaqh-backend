@@ -1,13 +1,13 @@
-//! Supervised provider runner and response bundle builder for committed model intents.
+//! Provider requests, streaming progress and terminal classification.
 //!
-//! Not connected to the production session lifecycle. The blocking gate call
+//! The blocking gate call
 //! remains owned until it actually returns, including after cancellation.
 //!
 //! The runner never reports "cancelled" as a terminal business result. Anything
 //! that happens after the gate call has begun is `StartedUnknown` until a
 //! terminal response from the provider stream is observed and classified.
 
-use qaqh_ringing_contract::fact::{ContentHash, ProviderFinish, RequestIdentity};
+use qaqh_ringing_contract::fact::ProviderFinish;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 use std::{
     collections::HashMap,
@@ -103,84 +103,6 @@ impl ProviderRequestSpec {
     pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
         self.effort = Some(effort.into());
         self
-    }
-}
-
-/// Compute the deterministic request identity for one model attempt.
-///
-/// Every component that affects the outbound wire request is bound into a
-/// content hash so a change in provider surface, parameters, tool catalog or
-/// frozen prefix produces a distinct `RequestIdentity`.
-pub fn compute_request_identity(
-    attempt: u32,
-    messages: &[Message],
-    spec: &ProviderRequestSpec,
-) -> RequestIdentity {
-    let provider_kind = match spec.provider.kind {
-        qaqh_gate::ProviderKind::Chat => "chat",
-        qaqh_gate::ProviderKind::Responses => "responses",
-        qaqh_gate::ProviderKind::Messages => "messages",
-        qaqh_gate::ProviderKind::Gemini => "gemini",
-    };
-    let provider_fingerprint = serde_json::json!({
-        "kind": provider_kind,
-        "credential_source": spec.credential,
-        "model": &spec.provider.model,
-        "base_url": &spec.provider.base_url,
-        "chat_path": &spec.provider.chat_path,
-        "responses_path": &spec.provider.responses_path,
-        "anthropic_path": &spec.provider.anthropic_path,
-        "gemini_path": &spec.provider.gemini_path,
-        "thinking_mode": format!("{:?}", spec.provider.thinking_mode),
-        "cache_field": format!("{:?}", spec.provider.cache_field),
-        "include_stream_usage": spec.provider.include_stream_usage,
-        "supports_thinking": spec.provider.supports_thinking,
-        "thinking_budget_large": spec.provider.thinking_budget_large,
-        "supports_reasoning_effort": spec.provider.supports_reasoning_effort,
-        "effort_allowlist": &spec.provider.effort_allowlist,
-        "tool_call_content_null": spec.provider.tool_call_content_null,
-        "supports_reasoning_content": spec.provider.supports_reasoning_content,
-        "require_provider_parameters": spec.provider.require_provider_parameters,
-        "do_sample": spec.provider.do_sample,
-        "supports_tail_system": spec.provider.supports_tail_system,
-        "responses_compat": {
-            "web_search": spec.provider.responses_compat.web_search,
-            "echo_web_search_call": spec.provider.responses_compat.echo_web_search_call,
-            "send_include": spec.provider.responses_compat.send_include,
-            "effort_max": &spec.provider.responses_compat.effort_max,
-            "supports_user": spec.provider.responses_compat.supports_user,
-            "search_function_alias": &spec.provider.responses_compat.search_function_alias,
-            "echo_reasoning_content": spec.provider.responses_compat.echo_reasoning_content,
-            "siwc_plan": spec.provider.responses_compat.siwc_plan,
-        }
-    });
-    let provider_digest = json_hash(&provider_fingerprint);
-    let params_digest = json_hash(&serde_json::json!({
-        "max_tokens": spec.max_tokens,
-        "effort": &spec.effort,
-    }));
-    let tool_catalog_digest = json_hash(&spec.tools);
-    let prefix: Vec<&Message> = messages
-        .iter()
-        .take_while(|msg| matches!(msg.role.as_str(), "system" | "developer"))
-        .collect();
-    let prefix_digest = json_hash(&prefix);
-    let request_digest = json_hash(&serde_json::json!({
-        "attempt": attempt,
-        "provider_digest": provider_digest.as_str(),
-        "params_digest": params_digest.as_str(),
-        "tool_catalog_digest": tool_catalog_digest.as_str(),
-        "prefix_digest": prefix_digest.as_str(),
-        "messages": messages,
-    }));
-    RequestIdentity {
-        attempt,
-        model: spec.provider.model.clone(),
-        provider_digest,
-        params_digest,
-        tool_catalog_digest,
-        prefix_digest,
-        request_digest,
     }
 }
 
@@ -411,8 +333,7 @@ fn stream_once(
     }
 }
 
-/// Run a committed model intent and verify that its `RequestIdentity` matches
-/// the exact `ProviderRequestSpec` and frozen context before touching the wire.
+/// Resolve the selected account credential immediately before dispatch.
 fn resolve_provider_credential(
     mut spec: ProviderRequestSpec,
 ) -> Result<ProviderRequestSpec, String> {
@@ -539,11 +460,6 @@ fn classify(stop_reason: Option<&str>, message: &Message) -> (ProviderFinish, Op
             Some(format!("unrecognized provider stop reason: {other}")),
         ),
     }
-}
-
-fn json_hash<T: serde::Serialize + ?Sized>(value: &T) -> ContentHash {
-    let bytes = serde_json::to_vec(value).expect("serialize canonical digest input");
-    ContentHash::new(crate::tool_job::sha256_hex(&bytes))
 }
 
 /// Nothing was submitted to the provider under this identity.

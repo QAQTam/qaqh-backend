@@ -1227,6 +1227,7 @@ mod tests {
             cancellation,
             progress: None,
             exec_progress: None,
+            exec_host: None,
             official_web: None,
             source: crate::tool_api::ToolCallSource::Model,
         };

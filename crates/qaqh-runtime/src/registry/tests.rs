@@ -56,29 +56,35 @@ fn probe_output_missing_program_is_none() {
     assert!(probe_output(command, Duration::from_millis(200)).is_none());
 }
 
-/// spawn/reopen 循环不动已登记的业务基线:业务行在 SQLite,循环实例重建
-/// 对既有数据零写入(不重复插行、血缘保持)。
+/// A missing model selection cannot silently start the global/default model.
 #[tokio::test]
-async fn spawn_and_reopen_preserves_the_session_baseline() {
-    let root = tempfile::tempdir().expect("tempdir");
-    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
-        root.path().join("sessions"),
-        root.path().join(".active_session"),
-    ));
-    let session_id = sessions.allocate_session().expect("allocate");
-    let mut registry = AgentRegistry::new(test_owner_dir());
-    for _ in 0..2 {
-        registry
-            .spawn_new(&session_id)
-            .expect("spawn existing baseline");
-        registry.close(&session_id);
-    }
-    // 业务库:会话行已登记(幂等),且未被 spawn 重复插入。
-    let parent = registry
-        .owners
-        .session_parent(&session_id)
+async fn spawn_failure_preserves_the_session_baseline() {
+    let owners = test_owner_dir();
+    owners
+        .ensure_session("strict-model", None, false)
         .expect("business row");
-    assert_eq!(parent, None, "root session has no parent");
+    owners
+        .get_or_create("strict-model")
+        .update_metadata(qaqh_session::db::store::SessionColumnPatch {
+            model_selection: Some(qaqh_types::SettingValue::Use {
+                value: qaqh_types::ModelSelection {
+                    provider_id: "missing-provider-for-regression".into(),
+                    model_id: "missing-model".into(),
+                    options: Default::default(),
+                },
+            }),
+            ..Default::default()
+        })
+        .expect("invalid selection fixture");
+    let mut registry = AgentRegistry::new(owners);
+    for _ in 0..2 {
+        assert!(registry.spawn_new("strict-model").is_err());
+        assert!(!registry.is_running("strict-model"));
+    }
+    assert_eq!(
+        registry.owners.session_parent("strict-model").expect("row"),
+        None
+    );
 }
 
 /// 结果面:collector 经 `SubagentHost::finish_subagent` 落到 agent 状态上,
@@ -93,11 +99,8 @@ fn list_agents_reports_recorded_outcome_and_residency() {
             .unwrap_or_default()
             .as_nanos()
     ));
-    let sessions = Arc::new(qaqh_session::SessionManager::new_for_test(
-        root_dir.join("sessions"),
-        root_dir.join(".active_session"),
-    ));
-    let root = sessions.allocate_session().expect("allocate root session");
+    let sessions = Arc::new(qaqh_session::SessionManager::new(root_dir.clone()));
+    let root = sessions.allocate_session();
     let child = SessionId::new("0198f1a0-0000-7000-8000-000000000011");
     let child_path = AgentPath::parse_absolute("/root/review").expect("child path");
     let now = unix_ms();

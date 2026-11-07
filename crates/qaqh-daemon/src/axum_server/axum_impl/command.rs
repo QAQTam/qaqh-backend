@@ -1,11 +1,5 @@
-//! axum_impl::command — 命令面（幂等指纹 + 进程内命令入口 `execute_command`）。
-//!
-//! hub-fact-bus spec 阶段 1（命令面去圈）：v2 HTTP handler 与 driver
-//! claim/release 都直调 `execute_command`，v2→v1 信封重序列化圈与 v1 HTTP
-//! handler 面已删除。命令入口只收 v2 信封、只吐 v2 ack；HTTP 状态码由调用方
-//! 从 `(StatusCode, RingingV2CommandAck)` 组装。
+//! Admitted session-command dispatch and shared receipt constructors.
 
-use super::test_hooks::InteractionFault;
 use super::*;
 
 /// Rejected 命令回执构造器（命令入口所有拒绝路径的单一构造点）。
@@ -50,37 +44,6 @@ pub(crate) fn command_fingerprint(envelope: &RingingV2CommandEnvelope) -> String
     qaqh_types::sha256_hex(payload.as_bytes())
 }
 
-/// 命令所需的最低 scope。`SessionAttach` 只建立归属（不触碰会话 actor）→ `View`；
-/// 其余一律 `Interact`。admin 由 `Identity::scope()` 返回 `Admin` 恒通过。
-fn required_scope_for_command(envelope: &RingingV2CommandEnvelope) -> Scope {
-    match &envelope.command {
-        qaqh_ringing::RingingCommand::SessionAttach {} => Scope::View,
-        qaqh_ringing::RingingCommand::ProviderList { .. }
-        | qaqh_ringing::RingingCommand::ProviderUpsert { .. }
-        | qaqh_ringing::RingingCommand::ProviderDelete { .. }
-        | qaqh_ringing::RingingCommand::ProviderModelUpsert { .. }
-        | qaqh_ringing::RingingCommand::ProviderModelDelete { .. }
-        | qaqh_ringing::RingingCommand::ModelSelectionSetDefault { .. } => Scope::Admin,
-        _ => Scope::Interact,
-    }
-}
-
-/// 命令的归属目标会话。
-///
-/// 优先取显式 `envelope.session_id`；会话生命周期命令的目标在其自身字段里。
-/// 建立归属的命令（`SessionCreate`/`SessionResume`/`SessionAttach`）返回 `None`
-/// ——它们是「先 attach 再操作」的入口，必须豁免 owns 检查，否则移动端永远
-/// 无法取得任何会话的归属。
-fn command_ownership_target(envelope: &RingingV2CommandEnvelope) -> Option<&str> {
-    match &envelope.command {
-        qaqh_ringing::RingingCommand::SessionCreate { .. }
-        | qaqh_ringing::RingingCommand::SessionResume {}
-        | qaqh_ringing::RingingCommand::SessionAttach {} => return None,
-        _ => {}
-    }
-    envelope.session_id().filter(|s| !s.is_empty())
-}
-
 /// daemon 鉴权身份 → 内部信封 actor（S6 归因）。
 ///
 /// admin → `user`/`"user"`（保持改造前语义）；device → `api`/`device_id`
@@ -111,163 +74,14 @@ fn identity_worker_actor(
     }
 }
 
-/// 进程内命令入口（spec 阶段 1.1）。
-///
-/// 承接原 v1 `handle_command` 的解析后逻辑，但不做 HTTP body 组装：
-/// - 信封直接收 v2，不再有 v2→v1 JSON 重序列化圈；
-/// - 返回 `(StatusCode, RingingV2CommandAck)`，ack → Response 由调用方组装；
-/// - lease 归属校验仍发生在命令入口（不变量 4），调用方无需提前检查。
-pub(crate) async fn execute_command(
+/// Dispatch an admitted command; authorization and receipts are owned by commands.
+pub(crate) async fn dispatch_session(
     state: &AppState,
-    headers: &HeaderMap,
+    session_id: &str,
     identity: &Identity,
-    mut envelope: RingingV2CommandEnvelope,
+    envelope: RingingV2CommandEnvelope,
 ) -> (StatusCode, RingingV2CommandAck) {
-    // scope：按命令分级。`SessionAttach` 仅建立会话归属、不触碰 actor（见
-    // `ControlCommand::SessionAttach` 文档），view 档即可——否则 view 档设备永远
-    // 无法 attach，视察型 app（spec §7）作废。其余命令（消息/审批应答/driver
-    // claim/release/close/...）需 interact。admin 全权。
-    let required = required_scope_for_command(&envelope);
-    if !identity.scope().at_least(required) {
-        return (
-            StatusCode::FORBIDDEN,
-            reject_ack(
-                envelope.command_id.clone(),
-                "insufficient_scope",
-                format!("command requires {required:?} scope"),
-            ),
-        );
-    }
-    // 解析调用方 lease 并绑定身份：device 的 lease 必须由本设备建立（防拿他人 cs
-    // 冒充其 lease）。无 lease / 未绑定 / 已过期 → 401。
-    let Some(session_id) = super::v2::caller_lease_bound_to_identity(state, headers, identity)
-    else {
-        return (
-            StatusCode::UNAUTHORIZED,
-            reject_ack(
-                String::new(),
-                "lease_required",
-                "open a Ringing v2 client session first".into(),
-            ),
-        );
-    };
-    if let Err(code) = envelope.validate() {
-        return (
-            StatusCode::BAD_REQUEST,
-            reject_ack(
-                envelope.command_id.clone(),
-                code,
-                "invalid Ringing v2 command envelope".into(),
-            ),
-        );
-    }
-    // 非 admin：命令只能作用于本 lease 拥有的会话。建立归属的生命周期命令
-    // （create/resume/attach）豁免——移动端照常先 attach 再操作。admin（桌面壳 /
-    // CLI / TUI / 探针）全程豁免，行为不变。
-    if !identity.is_admin()
-        && let Some(target) = command_ownership_target(&envelope)
-    {
-        let owns = state
-            .leases
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .owns_session(&session_id, target);
-        if !owns {
-            return (
-                StatusCode::FORBIDDEN,
-                reject_ack(
-                    envelope.command_id.clone(),
-                    "forbidden_not_owner",
-                    "lease does not own the target session".into(),
-                ),
-            );
-        }
-    }
-    state
-        .test_hooks
-        .apply_command_ack_fault(&envelope.command)
-        .await;
-    // idempotency
-    let fingerprint = command_fingerprint(&envelope);
-    // §5：回执 owner 是稳定身份键（device_id / admin 自报 instance id），
-    // 不是临时 client_session_id——换连接后同一 command_id 仍可对账、重复
-    // 提交返回原回执；不同设备冒用同一 command_id 仍被指纹守卫拒绝。
-    let owner_key = state
-        .leases
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .instance_for_session(&session_id)
-        .unwrap_or_else(|| session_id.clone());
-    let duplicate_check = {
-        let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
-        match pending.record_fingerprint_for_session(&envelope.command_id, &fingerprint, &owner_key)
-        {
-            Ok(v) => Ok(!v),
-            Err(()) => Err(()),
-        }
-    };
-    if duplicate_check.is_err() {
-        return (
-            StatusCode::CONFLICT,
-            reject_ack(
-                envelope.command_id.clone(),
-                "duplicate_command_mismatch",
-                "command_id was already used with another payload".into(),
-            ),
-        );
-    }
-    let duplicate = duplicate_check.expect("error branch already returned CONFLICT above");
-    if duplicate {
-        return (
-            StatusCode::OK,
-            accept_ack(
-                envelope.command_id.clone(),
-                Some("duplicate command_id (already accepted)".into()),
-            ),
-        );
-    }
-    if let Some(fault) = state.test_hooks.take_interaction_fault(&envelope.command) {
-        match fault {
-            InteractionFault::PermissionDeny => {
-                if let qaqh_ringing::RingingCommand::ToolPermissionRespond {
-                    approved,
-                    trust_folder,
-                    ..
-                } = &mut envelope.command
-                {
-                    *approved = false;
-                    *trust_folder = false;
-                }
-            }
-            InteractionFault::PermissionHang => {
-                if matches!(
-                    &envelope.command,
-                    qaqh_ringing::RingingCommand::ToolPermissionRespond { .. }
-                ) {
-                    std::future::pending::<()>().await;
-                }
-            }
-            InteractionFault::AskDismiss => {
-                if let qaqh_ringing::RingingCommand::InteractionAskRespond {
-                    interaction_id, ..
-                } = &envelope.command
-                {
-                    envelope.command = qaqh_ringing::RingingCommand::InteractionAskDismiss {
-                        interaction_id: interaction_id.clone(),
-                    };
-                }
-            }
-            InteractionFault::AskHang => {
-                if matches!(
-                    &envelope.command,
-                    qaqh_ringing::RingingCommand::InteractionAskRespond { .. }
-                ) {
-                    std::future::pending::<()>().await;
-                }
-            }
-        }
-    }
-    // ── 路由：生命周期命令在 daemon 侧就地处理，其余进 worker 命令通道 ──
+    // 生命周期命令在 daemon 侧处理，其余直接交给会话循环。
     match route(&envelope.command, envelope.session_id()) {
         Route::Close {
             session: close_session,
@@ -281,9 +95,7 @@ pub(crate) async fn execute_command(
                     "SessionClose requires seed",
                 );
             }
-            // D-4：close 是阻塞 join（worker loop + reader 线程），必须放
-            // spawn_blocking，避免占用 tokio worker 线程并长时间持有
-            // registry 锁阻塞其它 RPC。
+            // 关闭涉及 registry 和持久化状态，放到阻塞任务中处理。
             let close_result = {
                 let service = state.service.clone();
                 let session_id = close_session.clone();
@@ -335,30 +147,19 @@ pub(crate) async fn execute_command(
                     format!("Session{op} requires seed"),
                 );
             }
-            // D-4：archive 内含 close（阻塞 join），delete 同理；整体移入
-            // spawn_blocking。unarchive（拉起 worker）一并序列化到阻塞线程，
-            // 保持同一 command 的执行线程语义一致。
-            let result: Result<(), String> = {
+            let result = if op == "delete" {
+                state.service.delete_session(&target).await
+            } else {
                 let service = state.service.clone();
                 let target = target.clone();
                 let command_id = envelope.command_id.clone();
                 tokio::task::spawn_blocking(move || match op {
-                    "archive" => service
-                        .archive_session(&target, Some(&command_id))
-                        .map_err(|e| e.to_string()),
-                    "unarchive" => service
-                        .unarchive_session(&target)
-                        .map_err(|e| e.to_string()),
-                    "delete" => {
-                        let _ = service.close_session(&target, Some(&command_id));
-                        service
-                            .delete_session(&target, Some(&command_id))
-                            .map_err(|e| e.to_string())
-                    }
+                    "archive" => service.archive_session(&target, Some(&command_id)),
+                    "unarchive" => service.unarchive_session(&target),
                     _ => unreachable!(),
                 })
                 .await
-                .unwrap_or_else(|e| Err(format!("session op join error: {e}")))
+                .unwrap_or_else(|error| Err(format!("session operation task: {error}")))
             };
             if let Err(error) = result {
                 return fail(

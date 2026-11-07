@@ -480,10 +480,7 @@ mod tests {
             }
         }
         // 测试直接注入 workspace（避免依赖全局 CURRENT_WORKSPACE）
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws.to_string());
+        qaqh_permission::set_workspace(&ws.to_string());
         let result = exec_apply_patch(&args);
         if let Some(err) = &result.error {
             return serde_json::json!({
@@ -713,10 +710,7 @@ mod tests {
 +whatever
 *** End Patch
 ";
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws.to_string());
+        qaqh_permission::set_workspace(&ws.to_string());
         let result = exec_apply_patch(&serde_json::json!({ "patch": patch }));
         let envelope = result.render_xml_envelope();
         assert!(
@@ -776,10 +770,7 @@ mod tests {
             patch.push_str(&format!("*** Update File: d{i}.txt\n@@\n-v{i}\n+V{i}\n"));
         }
         patch.push_str("*** Update File: zz.txt\n@@\n-ABSENT LINE\n+whatever\n*** End Patch\n");
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone_from(&ws.to_string());
+        qaqh_permission::set_workspace(&ws.to_string());
         let result = exec_apply_patch(&serde_json::json!({ "patch": patch }));
         let envelope = result.render_xml_envelope();
         assert!(
@@ -821,10 +812,7 @@ mod tests {
     fn success_receipt_matches_codex_shape() {
         let (_dir, workspace) = repo_with_commit(&[]);
         let patch = "*** Begin Patch\n*** Add File: codex-receipt.txt\n+hello\n*** End Patch\n";
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone_from(&workspace);
+        qaqh_permission::set_workspace(&workspace);
         let result = exec_apply_patch(&serde_json::json!({"patch": patch}));
         assert!(result.is_success(), "{}", result.model_text());
         assert!(
@@ -847,10 +835,7 @@ mod tests {
 
         let (_dir, workspace) = repo_with_commit(&[("a.txt", "old\n")]);
         let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone_from(&workspace);
+        qaqh_permission::set_workspace(&workspace);
         let result = exec_apply_patch(&serde_json::json!({"patch": patch}));
         assert!(result.is_success(), "{}", result.model_text());
         assert_eq!(result.data["files"], serde_json::json!(1));
@@ -883,10 +868,7 @@ mod tests {
     /// 在指定 workspace 里跑一次 apply/dry_run，返回原始 [`crate::ToolResult`]
     /// （`run_in` 只给 data，读不到展示面的 `diff`）。
     fn apply_result_in(workspace: &str, patch: &str, dry_run: bool) -> crate::ToolResult {
-        crate::CURRENT_WORKSPACE
-            .write()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone_from(&workspace.to_string());
+        qaqh_permission::set_workspace(&workspace.to_string());
         exec_apply_patch(&serde_json::json!({ "patch": patch, "dry_run": dry_run }))
     }
 

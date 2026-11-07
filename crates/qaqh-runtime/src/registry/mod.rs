@@ -15,11 +15,10 @@ pub struct SubagentSpawnSpec {
     pub permission_level: u8,
 }
 use crate::agent_catalog::AgentCatalog;
-use crate::subagent_supervisor::{LifecycleEvent, SubagentSupervisor};
+use crate::subagent_supervisor::SubagentSupervisor;
 use qaqh_agent_runtime::quota_ledger::{
     QuotaKind, QuotaLedger, QuotaLimits, QuotaReservation, ReleaseReason,
 };
-use qaqh_ringing_runtime::RingingHub;
 
 static SYSTEM_PATH: OnceLock<String> = OnceLock::new();
 
@@ -235,14 +234,7 @@ fn background_command(program: &str) -> Command {
     command
 }
 
-/// How an agent worker is attached to this daemon process.
-enum AgentTransport {
-    /// owner 驱动的回合循环(`qaqh_agent_runtime::session_loop`)。
-    Loop {
-        loop_: Arc<qaqh_agent_runtime::session_loop::SessionLoop>,
-    },
-}
-
+#[derive(Clone)]
 enum AgentKind {
     Session,
     Subagent(SubagentSpawnSpec),
@@ -250,7 +242,7 @@ enum AgentKind {
 
 pub struct AgentInstance {
     session_id: String,
-    transport: AgentTransport,
+    loop_: Arc<qaqh_agent_runtime::session_loop::SessionLoop>,
     kind: AgentKind,
 }
 
@@ -292,12 +284,8 @@ pub struct AgentRegistry {
     /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。
     owners: Arc<qaqh_session::owner::OwnerDirectory>,
     exec_sessions: Arc<qaqh_agent_runtime::ExecSessionManager>,
-    /// Ringing 运行时；None = 未启用 legacy worker-only 模式。
-    hub: Option<Arc<RingingHub>>,
     /// daemon 正在关闭：worker 退出是预期的，禁止自动重生。
     shutting_down: bool,
-    /// 最近一次 spawn 时间（防崩溃-重启风暴：同一 seed 1 秒内不重复拉起）。
-    last_spawn: HashMap<String, std::time::Instant>,
     /// P2-5：daemon 级 parent/child edge 与 unload 顺序状态机。
     supervisor: SubagentSupervisor,
     /// Subagent V2：逻辑 agent metadata；worker handle 仍由 `instances` 管理。
@@ -343,9 +331,7 @@ impl AgentRegistry {
             instances: HashMap::new(),
             owners,
             exec_sessions: Arc::new(qaqh_agent_runtime::ExecSessionManager::new()),
-            hub: None,
             shutting_down: false,
-            last_spawn: HashMap::new(),
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
             residency: HashMap::new(),
@@ -364,11 +350,6 @@ impl AgentRegistry {
     pub fn exec_sessions(&self) -> Arc<qaqh_agent_runtime::ExecSessionManager> {
         Arc::clone(&self.exec_sessions)
     }
-
-    /// 挂载 Ringing 运行时。Ringing worker 事件只进入 native hub。
-    pub fn attach_ringing(&mut self, hub: Arc<RingingHub>) {
-        self.hub = Some(hub);
-    }
 }
 
 mod lifecycle;
@@ -377,37 +358,12 @@ mod queries;
 pub(crate) mod spawn;
 
 impl AgentInstance {
-    fn is_dead(&self) -> bool {
-        // 回合循环无独立执行线程可崩:任务失败由循环自身收尾,实例常驻。
-        false
-    }
-
-    fn wait_until_stopped(&self, _session_id: &str) -> bool {
-        true
-    }
-
     fn kind_name(&self) -> AgentKind {
-        match &self.kind {
-            AgentKind::Session => AgentKind::Session,
-            AgentKind::Subagent(spec) => AgentKind::Subagent(spec.clone()),
-        }
+        self.kind.clone()
     }
 
-    fn signal_shutdown(&mut self) {
-        let AgentTransport::Loop { loop_ } = &self.transport;
-        loop_.abandon();
-        qaqh_workspace::set_session_cancel(&self.session_id, true);
-    }
-
-    /// Unload 收尾:owner 泵线程持有全部落库职责,实例 drop 即完成,
-    /// 无线程可 join。回合任务感知取消后自行结算挂起交互并结束。
-    fn finish_shutdown(&mut self) {
-        log::info!("stopped agent {}", self.session_id);
-    }
-
-    fn shutdown(mut self) {
-        self.signal_shutdown();
-        self.finish_shutdown();
+    fn shutdown(self) {
+        self.loop_.abandon();
     }
 }
 

@@ -1,9 +1,4 @@
-//! daemon → agent command message (passed by value through the in-process channel).
-//!
-//! 曾经的 framed OS pipe 线格式（schema/version/`wire` 判别、direction、
-//! 16MB frame cap) retired with `Loop::new_ipc`; the production path uses
-//! typed `Loop::from_channels` messages. This envelope keeps command identity
-//! and trusted actor context at the worker boundary.
+//! Trusted in-process command identity and actor context for the session loop.
 
 use serde::{Deserialize, Serialize};
 
