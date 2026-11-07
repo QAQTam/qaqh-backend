@@ -74,7 +74,7 @@ impl AgentRegistry {
     ) -> QaqhResult<AgentMetadata> {
         self.owners
             .ensure_session(session_id, None, false)
-            .map_err(|error| format!("ensure business session row for {session_id}: {error}"))?;
+            .map_err(QaqhError::message)?;
         self.agent_catalog
             .register_root_with_alias(
                 SessionId::new(session_id.to_string()),
@@ -85,15 +85,22 @@ impl AgentRegistry {
     }
 
     pub fn get_or_spawn(&mut self, session_id: &str) -> QaqhResult<()> {
+        let owned = session_id.to_string();
+        if !self
+            .owners
+            .db()
+            .read_blocking(move |conn| qaqh_session::db::store::session_exists(conn, &owned))
+            .map_err(QaqhError::message)?
+        {
+            return Err(QaqhError::not_found(format!(
+                "session {session_id} not found"
+            )));
+        }
         self.ensure_root_metadata(session_id)?;
         if self.instances.contains_key(session_id) {
             return Ok(());
         }
-        // B9/R2：worker 存活登记在 spawn 之前完成。
-        if let Some(hub) = self.hub.as_ref() {
-            hub.mark_worker_live(session_id);
-        }
-        self.spawn(session_id, None)?;
+        self.spawn_session_inprocess(session_id)?;
         Ok(())
     }
 
@@ -101,17 +108,10 @@ impl AgentRegistry {
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}").into());
         }
-        self.spawn_with(session_id, Some(session_id), &[])
+        self.spawn_session_inprocess(session_id)
     }
 
-    /// Spawn an isolated subagent worker **inside the daemon process**.
-    ///
-    /// Knife-1 step 1 removes `Command::new(current_exe)` and the child-process
-    /// leg of the subagent path.
-    ///
-    /// The subagent 是一个普通会话 agent（`qaqh_agent_runtime::session_agent`
-    /// 驱动），跑在 daemon 进程内的独立 actor 线程上；其命令/事件通道与
-    /// pipe wire 是同一套 typed envelope，所以 daemon 侧的发布逻辑不用改。
+    /// Assemble a child session loop with an explicit tool and model configuration.
     pub fn spawn_subagent(
         &mut self,
         session_id: &str,
@@ -157,6 +157,9 @@ impl AgentRegistry {
             .map(|ctx| ctx.active_session)
             .unwrap_or_default();
         if parent_session.is_empty() {
+            self.owners
+                .ensure_session(session_id, None, options.ephemeral)
+                .map_err(QaqhError::message)?;
             return self.spawn_subagent_internal(
                 session_id,
                 &parent_session,
@@ -250,6 +253,15 @@ impl AgentRegistry {
                         .into_owned()
                 }),
         };
+        let parent_id = parent_session_id.to_string();
+        let parent_selection = self
+            .owners
+            .db()
+            .read_blocking(move |conn| qaqh_session::db::store::session_row(conn, &parent_id))
+            .map_err(QaqhError::message)?
+            .ok_or_else(|| QaqhError::not_found("subagent parent session not found"))?
+            .model_selection
+            .map(|value| qaqh_types::SettingValue::Use { value });
         // 业务权威先行:子会话行落 SQLite(血缘 = 父会话, cwd 一并落库)。
         self.owners
             .ensure_session(session_id, Some(parent_session_id), options.ephemeral)
@@ -272,7 +284,7 @@ impl AgentRegistry {
                             profile: None,
                             mode: None,
                             tool_mode: None,
-                            model_selection: None,
+                            model_selection: parent_selection,
                             custom_tools: None,
                             skills: None,
                             frozen_annotation: None,
@@ -422,15 +434,12 @@ impl AgentRegistry {
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}").into());
         }
-        self.last_spawn
-            .insert(session_id.to_string(), std::time::Instant::now());
 
-        let (mut agent_config, _session_profile) =
-            qaqh_agent_runtime::agent::session_config::session_effective_config(
-                Some(&self.owners),
-                session_id,
-            )
-            .unwrap_or_default();
+        let mut agent_config = qaqh_agent_runtime::agent::session_config::session_effective_config(
+            &self.owners,
+            session_id,
+        )
+        .map_err(QaqhError::message)?;
         if let Some(model) = &spec.model {
             agent_config.model = model.clone();
         }
@@ -461,54 +470,26 @@ impl AgentRegistry {
             session_id.to_string(),
             AgentInstance {
                 session_id: session_id.to_string(),
-                transport: AgentTransport::Loop { loop_ },
+                loop_,
                 kind: AgentKind::Subagent(spec.clone()),
             },
         );
         self.spawn_configs.insert(session_id.to_string(), spec);
         self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
-        if let Some(hub) = self.hub.as_ref() {
-            hub.mark_worker_live(session_id);
-        }
         log::info!("[subagent] spawned session loop for subagent={session_id}");
         Ok(())
     }
 
-    pub(super) fn spawn(&mut self, session_id: &str, new_session: Option<&str>) -> QaqhResult<()> {
-        self.spawn_with(session_id, new_session, &[])
-    }
-
-    pub(super) fn spawn_with(
-        &mut self,
-        session_id: &str,
-        new_session: Option<&str>,
-        extra_args: &[String],
-    ) -> QaqhResult<()> {
-        self.spawn_session_inprocess(session_id, new_session, extra_args)
-    }
-
-    pub(super) fn spawn_session_inprocess(
-        &mut self,
-        session_id: &str,
-        _new_session: Option<&str>,
-        _extra_args: &[String],
-    ) -> QaqhResult<()> {
+    pub(super) fn spawn_session_inprocess(&mut self, session_id: &str) -> QaqhResult<()> {
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}").into());
         }
-        self.last_spawn
-            .insert(session_id.to_string(), std::time::Instant::now());
-        // 业务权威登记:根会话行不存在则补默认行(create_new 直 spawn 的路径)。
-        self.owners
-            .ensure_session(session_id, None, false)
-            .map_err(|error| format!("ensure business session row for {session_id}: {error}"))?;
 
-        let (agent_config, _session_profile) =
-            qaqh_agent_runtime::agent::session_config::session_effective_config(
-                Some(&self.owners),
-                session_id,
-            )
-            .unwrap_or_default();
+        let agent_config = qaqh_agent_runtime::agent::session_config::session_effective_config(
+            &self.owners,
+            session_id,
+        )
+        .map_err(QaqhError::message)?;
 
         let ws_dir = ensure_session_workspace(&self.owners, session_id)?;
         let session = crate::session_meta::read(&self.owners, session_id)
@@ -530,7 +511,7 @@ impl AgentRegistry {
             session_id.to_string(),
             AgentInstance {
                 session_id: session_id.to_string(),
-                transport: AgentTransport::Loop { loop_ },
+                loop_,
                 kind: AgentKind::Session,
             },
         );

@@ -31,9 +31,9 @@ fn empty_or_masked_api_key_keeps_existing_secret() {
     let root = temp_root("keep");
     // SAFETY: integration-test process is single-purpose; env is reset by exit.
     unsafe { std::env::set_var("QAQH_DATA_DIR", &root) };
-
-    qaqh_session::SessionManager::init(qaqh_types::platform::data_dir());
-    let service = QaqhService::init(qaqh_session::SessionManager::global());
+    let service = QaqhService::init(std::sync::Arc::new(qaqh_session::SessionManager::new(
+        qaqh_types::platform::data_dir(),
+    )));
 
     // 1) initial save with a real key
     service

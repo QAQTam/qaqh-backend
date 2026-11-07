@@ -501,8 +501,7 @@ pub(crate) async fn handle_approval_respond_v2(
         command,
     )
     .with_client_identity(instance_key, caller);
-    let (status, ack) = execute_command(&state, &headers, &identity, envelope).await;
-    json_response(status, &ack)
+    execute_command(&state, &headers, &identity, envelope).await
 }
 
 /// 从 canonical interaction 的 `request` 取回 permission 详情正文，映射回旧 v1

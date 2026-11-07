@@ -118,7 +118,7 @@ thread_local! {
 /// 切换**当前线程**的折叠策略（如进入/退出极限模式）。
 ///
 /// 只影响调用线程：actor 线程的工具工作线程经
-/// [`ActorToolScope::install`](crate::runtime::ActorToolScope::install) 继承
+/// [`ToolExecutionScope::install`](crate::runtime::ToolExecutionScope::install) 继承
 /// actor 的策略。需要进程级行为的调用方不存在，也不应新增。
 pub fn set_thread_policy(policy: Arc<dyn ToolResultFoldPolicy>) {
     CURRENT_POLICY.with(|slot| *slot.borrow_mut() = policy);

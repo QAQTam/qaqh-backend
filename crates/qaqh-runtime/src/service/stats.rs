@@ -2,8 +2,6 @@
 
 use serde_json::Value;
 
-use std::io::BufRead;
-
 use super::common::err;
 use crate::ringing::service_methods::SessionToolActivity;
 
@@ -17,13 +15,13 @@ struct ToolActivityRow {
 }
 
 /// `session.dashboard`:任务卡来自 todo 状态投影,recent_edits 来自
-/// code_stats.jsonl 的去重尾部(最近优先)。B08 权威 DTO,handler 直出
+/// SQLite 工具结果的代码变更投影(最近优先)。handler 直出
 /// typed 结构,序列化即 wire 形状。
 pub(crate) fn dashboard(
+    owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
 ) -> Result<crate::ringing::service_methods::SessionDashboard, String> {
     use crate::ringing::service_methods::{SessionDashboard, SessionDashboardTask};
-    let dir = qaqh_types::platform::sessions_dir().join(session_id);
     let tasks: Vec<SessionDashboardTask> = qaqh_workspace::todo::todo_status_value(session_id)
         .ok()
         .and_then(|v| {
@@ -40,21 +38,20 @@ pub(crate) fn dashboard(
             })
         })
         .unwrap_or_default();
-    let mut edits = std::fs::File::open(dir.join("code_stats.jsonl"))
-        .ok()
-        .into_iter()
-        .flat_map(|file| std::io::BufReader::new(file).lines().map_while(Result::ok))
-        .filter_map(|line| {
-            serde_json::from_str::<Value>(&line)
-                .ok()?
-                .get("file")?
-                .as_str()
-                .map(str::to_string)
+    let owned = session_id.to_string();
+    let edits = owners
+        .db()
+        .read_blocking(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT json_extract(code_delta_json, '$.file') AS file FROM tool_calls \
+             WHERE session_id = ?1 AND code_delta_json IS NOT NULL \
+             AND json_extract(code_delta_json, '$.file') IS NOT NULL \
+             GROUP BY file ORDER BY MAX(finished_at_ms) DESC LIMIT 10",
+            )?;
+            stmt.query_map([owned], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
         })
-        .collect::<Vec<_>>();
-    edits.reverse();
-    edits.dedup();
-    edits.truncate(10);
+        .map_err(|error| error.to_string())?;
     Ok(SessionDashboard {
         tasks,
         recent_edits: edits,

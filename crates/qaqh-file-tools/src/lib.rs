@@ -59,8 +59,7 @@ pub static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
 /// 权限引擎与其进程级全局状态（current_workspace/session、cancel 等）。
 pub use qaqh_permission::permission;
 pub use qaqh_permission::{
-    CURRENT_WORKSPACE, current_session, current_workspace, is_cancel, resolve_workspace_path,
-    set_workspace,
+    current_session, current_workspace, is_cancel, resolve_workspace_path, set_workspace,
 };
 
 /// 时间与错误信封助手（门面同名函数的单一事实源版本）。

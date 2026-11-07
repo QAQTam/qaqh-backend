@@ -50,7 +50,7 @@ pub mod v2;
 
 pub(crate) use auth::{get_session_id, is_authorized, lease_required_json, unauthorized};
 pub(crate) use authz::{Identity, require_scope};
-pub(crate) use command::execute_command;
+pub(crate) use commands::execute_command;
 pub(crate) use content::{handle_content_get, handle_content_upload};
 pub(crate) use control::{activity, handle_stop, handle_stop_if_idle, health, not_found};
 pub(crate) use service_api::handle_service;

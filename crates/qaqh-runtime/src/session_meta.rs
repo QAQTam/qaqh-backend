@@ -66,15 +66,7 @@ pub(crate) fn patch_with_settings_revision(
     patch_columns(owners, session_id, patch, Some(expected_revision))
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum MetadataPatchError {
-    #[error("session {session_id} not found")]
-    NotFound { session_id: String },
-    #[error("settings revision conflict: expected {expected}, current {actual}")]
-    RevisionConflict { expected: u64, actual: u64 },
-    #[error("{0}")]
-    Storage(String),
-}
+pub(crate) use qaqh_session::owner::MetadataPatchError;
 
 fn patch_columns(
     owners: &qaqh_session::owner::OwnerDirectory,
@@ -108,35 +100,7 @@ fn patch_columns(
         expected_settings_revision: expected_revision,
         increment_settings_revision,
     };
-    let owned = session_id.to_string();
-    let (changed, current) = owners
-        .db()
-        .write_blocking(move |conn| {
-            let changed = qaqh_session::db::store::update_session_columns(conn, &owned, &columns)?;
-            let current = qaqh_session::db::store::session_settings_revision(conn, &owned)?;
-            Ok::<_, qaqh_session::db::DbError>((changed, current))
-        })
-        .map_err(|error| {
-            MetadataPatchError::Storage(format!(
-                "business session update for {session_id}: {error}"
-            ))
-        })?;
-    if changed == 0 {
-        let Some(actual) = current else {
-            return Err(MetadataPatchError::NotFound {
-                session_id: session_id.to_string(),
-            });
-        };
-        if let Some(expected) = expected_revision {
-            return Err(MetadataPatchError::RevisionConflict { expected, actual });
-        }
-        return Err(MetadataPatchError::NotFound {
-            session_id: session_id.to_string(),
-        });
-    }
-    current.ok_or_else(|| MetadataPatchError::NotFound {
-        session_id: session_id.to_string(),
-    })
+    owners.get_or_create(session_id).update_metadata(columns)
 }
 
 /// Commit a title change to the business row.
@@ -146,20 +110,12 @@ pub(crate) fn set_title(
     title: &str,
     _source: TitleSource,
 ) -> Result<(), String> {
-    let owned = session_id.to_string();
-    let title = title.to_string();
     owners
-        .db()
-        .write_blocking(move |conn| {
-            qaqh_session::db::store::update_session_columns(
-                conn,
-                &owned,
-                &qaqh_session::db::store::SessionColumnPatch {
-                    title: Some(title),
-                    ..Default::default()
-                },
-            )
+        .get_or_create(session_id)
+        .update_metadata(qaqh_session::db::store::SessionColumnPatch {
+            title: Some(title.to_string()),
+            ..Default::default()
         })
-        .map_err(|error| format!("business title update for {session_id}: {error}"))?;
-    Ok(())
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }

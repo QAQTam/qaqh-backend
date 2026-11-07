@@ -23,6 +23,34 @@ mod tests {
     use crate::db::store;
     use crate::owner::{OwnerDirectory, ToolSettlement};
 
+    #[test]
+    fn deleting_a_session_tree_removes_business_rows_without_resource_directories() {
+        let (_dir, owners) = test_owner_dir();
+        owners.ensure_session("root", None, false).expect("root");
+        owners
+            .ensure_session("child", Some("root"), true)
+            .expect("child");
+        owners.ensure_session("other", None, false).expect("other");
+        owners
+            .db()
+            .write_blocking(|conn| {
+                store::put_session_content(conn, "child", "content", "text/plain", b"body", false)
+            })
+            .expect("content");
+        let removed = owners.delete_session_tree("root").expect("delete tree");
+        assert_eq!(removed.len(), 2);
+        owners
+            .db()
+            .read_blocking(|conn| {
+                assert!(!store::session_exists(conn, "root")?);
+                assert!(!store::session_exists(conn, "child")?);
+                assert!(store::session_exists(conn, "other")?);
+                assert!(store::get_session_content(conn, "child", "content")?.is_none());
+                Ok::<_, crate::db::DbError>(())
+            })
+            .expect("business state");
+    }
+
     fn test_owner_dir() -> (tempfile::TempDir, Arc<OwnerDirectory>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let owners =
@@ -507,7 +535,12 @@ mod tests {
                 .await
                 .expect("create session");
             let mut rx = owner.subscribe();
-            owner.set_title("renamed").await.expect("set title");
+            owner
+                .update_metadata(store::SessionColumnPatch {
+                    title: Some("renamed".into()),
+                    ..Default::default()
+                })
+                .expect("set title");
             match recv_event(&mut rx) {
                 SessionEvent::SessionMetaChanged { title } => {
                     assert_eq!(title.as_deref(), Some("renamed"));

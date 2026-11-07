@@ -1,9 +1,9 @@
 //! Ringing runtime state beside the session owner.
 //!
 //! Binary session content is stored in the same SQLite database as the session
-//! rows. This hub keeps only process-local worker and interaction bookkeeping.
+//! rows. Loop residency belongs to the registry; this hub only stores content.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use qaqh_session::db::{Db, DbError, store};
 
@@ -11,8 +11,6 @@ use qaqh_session::db::{Db, DbError, store};
 pub struct RingingHub {
     epoch: String,
     db: Arc<Db>,
-    /// Workers currently owned by the registry.
-    live_workers: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -30,37 +28,7 @@ impl RingingHub {
         Self {
             epoch: epoch.into(),
             db,
-            live_workers: Mutex::new(std::collections::HashSet::new()),
         }
-    }
-
-    pub fn mark_worker_live(&self, session_id: &str) {
-        self.live_workers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .insert(session_id.to_string());
-    }
-
-    pub fn mark_worker_dead(&self, session_id: &str) {
-        self.live_workers
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .remove(session_id);
-    }
-
-    pub fn memory_components(&self) -> Vec<qaqh_memwatch::ComponentMemory> {
-        let live_workers = self
-            .live_workers
-            .lock()
-            .map(|workers| workers.len() as u64)
-            .unwrap_or_default();
-        vec![qaqh_memwatch::ComponentMemory {
-            name: "ringing.live_workers".into(),
-            item_count: live_workers,
-            payload_bytes: None,
-            heap_estimate_bytes: None,
-            ..Default::default()
-        }]
     }
 
     pub fn epoch(&self) -> &str {

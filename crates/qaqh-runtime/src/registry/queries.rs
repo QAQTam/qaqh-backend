@@ -36,9 +36,8 @@ impl AgentRegistry {
             qaqh_memwatch::ComponentMemory {
                 name: "agent_registry.lifecycle_maps".into(),
                 item_count: self
-                    .last_spawn
+                    .residency
                     .len()
-                    .saturating_add(self.residency.len())
                     .saturating_add(self.quota_ledgers.len())
                     .saturating_add(self.outbound_attempts.len())
                     .saturating_add(self.armed_collectors.len())
@@ -75,7 +74,7 @@ impl AgentRegistry {
         session_id: &str,
     ) -> Option<Arc<qaqh_agent_runtime::session_loop::SessionLoop>> {
         self.instances.get(session_id).map(|instance| {
-            let AgentTransport::Loop { loop_ } = &instance.transport;
+            let loop_ = &instance.loop_;
             Arc::clone(loop_)
         })
     }
@@ -174,7 +173,7 @@ impl AgentRegistry {
         if residency == ListedAgentResidency::Loaded
             && let Some(instance) = self.instances.get(agent.agent_id.as_str())
         {
-            let AgentTransport::Loop { loop_ } = &instance.transport;
+            let loop_ = &instance.loop_;
             return Ok(if loop_.waiting_user() {
                 ListedAgentStatus::WaitingUser
             } else {
@@ -265,7 +264,7 @@ impl AgentRegistry {
         instance: &AgentInstance,
         now: u64,
     ) -> qaqh_ringing_contract::SessionActivity {
-        let AgentTransport::Loop { loop_ } = &instance.transport;
+        let loop_ = &instance.loop_;
         let state = if loop_.waiting_user() {
             qaqh_ringing_contract::SessionActivityState::WaitingUser
         } else {
