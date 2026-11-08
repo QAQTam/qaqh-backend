@@ -1,0 +1,8 @@
+{
+  "name": "@qaqh/native-client",
+  "version": "0.1.0",
+  "license": "MIT OR Apache-2.0",
+  "description": "Native Ringing V2 client for HarmonyOS",
+  "main": "index.ets",
+  "types": "libs/index.d.ts"
+}

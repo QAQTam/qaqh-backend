@@ -35,6 +35,7 @@ members = [
     "crates/qaqh-mcp",
     "crates/qaqh-lsp",
     "crates/qaqh-ffi",
+    "crates/qaqh-harmony-napi",
     "crates/sbx-nt",
     "crates/sbx-win",
     "crates/sbx-cli",
