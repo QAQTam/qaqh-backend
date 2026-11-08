@@ -131,15 +131,7 @@ impl ClientV2Subscription {
 impl Client {
     /// `POST /ringing/v2/clients/open`.
     pub async fn open_v2(&self) -> Result<RingingV2OpenResponse> {
-        self.open_v2_with_instance_id(uuid::Uuid::new_v4().to_string())
-            .await
-    }
-
-    pub async fn open_v2_with_instance_id(
-        &self,
-        client_instance_id: impl Into<String>,
-    ) -> Result<RingingV2OpenResponse> {
-        let client_instance_id = client_instance_id.into();
+        let client_instance_id = self.inner.session.client_instance_id();
         let request = RingingV2OpenRequest::new(client_instance_id.clone());
         let path = format!("{RINGING_V2_BASE_PATH}/clients/open");
         let response = self
@@ -155,7 +147,7 @@ impl Client {
         }
         let response: RingingV2OpenResponse = response.json().await?;
         let state = ClientV2SessionState::from_open(client_instance_id, response.clone())?;
-        self.inner.session.adopt_v2_state(state).await;
+        self.inner.session.adopt(state).await;
         Ok(response)
     }
 

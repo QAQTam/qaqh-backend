@@ -12,6 +12,7 @@ pub mod events;
 pub mod fact;
 pub mod state;
 pub mod team;
+pub mod todo;
 pub mod ulid;
 pub mod workspace;
 

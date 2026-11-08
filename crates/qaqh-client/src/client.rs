@@ -152,6 +152,8 @@ pub struct RemoteEndpoint {
 }
 
 pub struct ClientOptions {
+    /// Logical shell identity, stable across lease negotiation and durable retries.
+    pub client_instance_id: String,
     pub handlers: ClientHandlers,
     /// Spawn `qaqh-daemon run` when no discovery file exists yet.
     pub launch_daemon_if_missing: bool,
@@ -179,6 +181,7 @@ impl Default for ClientHandlers {
 impl Default for ClientOptions {
     fn default() -> Self {
         Self {
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
             handlers: ClientHandlers::default(),
             launch_daemon_if_missing: false,
             daemon_path: None,
@@ -315,6 +318,7 @@ impl Client {
             base_url.clone(),
             token.clone(),
             http.clone(),
+            options.client_instance_id.clone(),
         ));
         // 远端直连模式不得从本机 `daemon.json` 刷新凭据（会覆盖成另一台机器
         // 的记录）；只有本地发现模式才允许 daemon 重启后的自愈。
@@ -660,6 +664,24 @@ impl Client {
         media_type: &str,
         data: Vec<u8>,
     ) -> Result<ContentRef> {
+        let uploaded = self.upload_content_raw(session_id, media_type, data).await?;
+        Ok(ContentRef::new(ContentHash::new(format!(
+            "sha256:{}",
+            uploaded.content_id
+        ))))
+    }
+
+    /// [`Self::upload_content`] 的原始响应出口：daemon 返回的
+    /// `RingingV2ContentUploadResponse`（`content_id`/`media_type`/`sha256`/
+    /// `size`/`truncated`）整体交给调用方。桌面壳的附件 wire 需要
+    /// `media_type`/`size`/`truncated` 做展示，不能像旧出口那样把响应压缩成
+    /// 一个 hash 引用后把其余字段丢掉。
+    pub async fn upload_content_raw(
+        &self,
+        session_id: &str,
+        media_type: &str,
+        data: Vec<u8>,
+    ) -> Result<RingingV2ContentUploadResponse> {
         let boundary = format!("qaqh-{}", uuid::Uuid::new_v4());
         let mut body = Vec::with_capacity(data.len() + 256);
         let mut push_field = |name: &str, value: &[u8]| {
@@ -698,11 +720,34 @@ impl Client {
                 path: "/ringing/v2/content".into(),
             });
         }
-        let uploaded: RingingV2ContentUploadResponse = response.json().await?;
-        Ok(ContentRef::new(ContentHash::new(format!(
-            "sha256:{}",
-            uploaded.content_id
-        ))))
+        Ok(response.json().await?)
+    }
+
+    /// `GET /ringing/v2/sessions/{seed}/approvals` 的原始 JSON 出口。
+    ///
+    /// 响应形状取决于令牌档位：admin 档看到 canonical
+    /// [`RingingV2PendingApprovals`](qaqh_ringing::v2::RingingV2PendingApprovals)
+    /// （`pending_permission` / `pending_interaction`），device 档看到 opaque
+    /// challenges。分档判定是**壳层的展示策略**（桌面端要求 admin 档、拒绝
+    /// device 档），所以这里保留原始 `Value`、不替壳层做选择。
+    pub async fn pending_approvals_raw(&self, session_id: &str) -> Result<Value> {
+        let session_header = self.session_id_header().await?;
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/approvals");
+        let response = self
+            .inner
+            .http
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .header("X-QAQH-Client-Session-Id", session_header)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path,
+            });
+        }
+        Ok(response.json().await?)
     }
 
     /// 设备配对：申请一次性配对令牌（`POST /ringing/v2/pairing/tokens`，Admin）。

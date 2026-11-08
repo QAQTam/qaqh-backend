@@ -14,9 +14,10 @@ use crate::service::stats::{activity, dashboard};
 
 pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResult<Value> {
     match command {
-        SessionCommand::SessionList(_) => {
-            QaqhError::to_value("session list", service.list_sessions()?)
-        }
+        SessionCommand::SessionList(args) => QaqhError::to_value(
+            "session list",
+            service.list_sessions(args.include_archived)?,
+        ),
         SessionCommand::SessionMeta(args) => {
             let session_id = args.session_id;
             let Some(meta) = service.session_meta(&session_id) else {
@@ -173,7 +174,8 @@ fn create_session(
             .map_err(QaqhError::message)?;
     let model_selection = input
         .model_selection
-        .ok_or_else(|| QaqhError::invalid("请选择服务商和模型"))?;
+        .or_else(|| catalog.document().default_model_selection.clone())
+        .ok_or_else(|| QaqhError::invalid("请先在电脑端设置默认服务商和模型"))?;
     qaqh_profile::resolve_model_selection(catalog.document(), &model_selection)
         .map_err(QaqhError::message)?;
     let custom_tools = input.custom_tools.unwrap_or_default();

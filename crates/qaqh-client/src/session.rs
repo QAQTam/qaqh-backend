@@ -19,6 +19,7 @@ pub(crate) struct Credentials {
 
 /// Ringing v2 session: open + background lease renewal.
 pub struct RingingSession {
+    client_instance_id: String,
     /// 可热更新：daemon 重启会换端口与随机 token，靠 [`Self::refresh_discovery`]
     /// 原地换值。旧的不可变实现只会拿着死端点/旧 token 永久重试，客户端再也
     /// 回不去（TUI 侧 BUG-2026-09-14-01 的同款根因）。
@@ -56,9 +57,10 @@ const OPEN_TIMEOUT_SECS: u64 = 10;
 const RENEW_TIMEOUT_SECS: u64 = 10;
 
 impl RingingSession {
-    pub fn new(base_url: String, token: String, http: reqwest::Client) -> Self {
+    pub fn new(base_url: String, token: String, http: reqwest::Client, client_instance_id: String) -> Self {
         let (session_ctx, _) = watch::channel(None);
         Self {
+            client_instance_id,
             credentials: std::sync::RwLock::new(Credentials {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 token,
@@ -72,7 +74,7 @@ impl RingingSession {
     }
 
     pub fn client_instance_id(&self) -> String {
-        uuid::Uuid::new_v4().to_string()
+        self.client_instance_id.clone()
     }
 
     /// 当前凭据快照。**拷贝出锁**——调用方常在 `await` 前使用，持有
@@ -171,11 +173,6 @@ impl RingingSession {
             state.client_session_id.clone(),
         )));
         Ok(state)
-    }
-
-    /// 显式 v2 握手路径（`Client::open_v2`）写入的状态。
-    pub(crate) async fn adopt_v2_state(&self, state: crate::v2::ClientV2SessionState) {
-        *self.state.lock().await = Some(state);
     }
 
     /// Subscribe to the current `(server_epoch, client_session_id)`.
@@ -368,7 +365,7 @@ mod tests {
 
     fn session(base_url: &str, token: &str) -> RingingSession {
         crate::client::ensure_crypto_provider();
-        RingingSession::new(base_url.into(), token.into(), reqwest::Client::new())
+        RingingSession::new(base_url.into(), token.into(), reqwest::Client::new(), "test-instance".into())
     }
 
     /// 默认**不得**采纳本机 `daemon.json`。
@@ -390,6 +387,9 @@ mod tests {
     /// 尾随斜杠归一化：否则会拼出 `http://host:port//ringing/v2/...`。
     #[test]
     fn constructor_normalizes_trailing_slash() {
+        let identity = session("http://127.0.0.1:9/", "t");
+        assert_eq!(identity.client_instance_id(), "test-instance");
+        assert_eq!(identity.client_instance_id(), identity.client_instance_id());
         assert_eq!(
             session("http://127.0.0.1:9/", "t").credentials().base_url,
             "http://127.0.0.1:9"
@@ -403,12 +403,19 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("qaqh-refresh-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("create data dir");
         // pid 必填且必须「存活」——record 的 pid 判活是这条路径的准入条件。
+        // 其余字段是 DaemonDiscovery 的必填形状（缺一个 parse 就拒绝）。
         let record = serde_json::json!({
             "endpoint": "http://127.0.0.1:5555",
             "token": "new-token",
             "pid": std::process::id(),
             "server_epoch": "ep-new",
             "protocol_version": 1,
+            "daemon_version": "3.0.0-test",
+            "build_id": "test-build",
+            "channel": "dev",
+            "executable": "/tmp/qaqh-daemon-test",
+            "lan_endpoint": null,
+            "tls_fingerprint": null,
         });
         std::fs::write(
             dir.join("daemon.json"),
