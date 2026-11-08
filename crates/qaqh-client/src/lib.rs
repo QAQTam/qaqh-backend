@@ -38,9 +38,9 @@ pub use qaqh_ringing::RingingV2ResyncRequired;
 /// 壳层（TUI / 桌面）不直接依赖 `qaqh-ringing`，这三个类型必须经本 crate 出口给出去，
 /// 否则壳层就只能手解 JSON——那正是本客户端存在的理由要反对的事。
 pub use qaqh_ringing::v2::{
-    RingingV2ApprovalRespondRequest, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
-    RingingV2DeviceChallenges, RingingV2DeviceWire, RingingV2PairResponse,
-    RingingV2PairTokenResponse,
+    RingingV2ApprovalRespondRequest, RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind,
+    RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DeviceWire,
+    RingingV2PairResponse, RingingV2PairTokenResponse,
 };
 pub use qaqh_ringing::{
     COMMAND_CONTRACT_REVISION, CommandPrecondition, CommandTarget, ProviderUpsertDto,

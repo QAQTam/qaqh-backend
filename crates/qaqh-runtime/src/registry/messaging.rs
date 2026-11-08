@@ -138,6 +138,10 @@ impl AgentRegistry {
                     loop_.respond_interaction(interaction_id, ans);
                     Ok(())
                 }
+                qaqh_ringing::RingingCommand::InteractionAskDismiss { interaction_id } => {
+                    loop_.dismiss_ask(interaction_id);
+                    Ok(())
+                }
                 qaqh_ringing::RingingCommand::ToolPermissionRespond {
                     tool_call_id,
                     approved,

@@ -638,12 +638,17 @@ impl QaqhService {
     /// 返回类型化值后，**新增字段的唯一途径是改类型**：想在回包里塞个临时键，
     /// 必须先拆掉类型才行。形状锁在 `qaqh-types` 的
     /// `session_list_entry_wire_keys_are_locked`。
-    fn list_sessions(&self) -> QaqhResult<Vec<qaqh_types::SessionListEntry>> {
+    fn list_sessions(
+        &self,
+        include_archived: bool,
+    ) -> QaqhResult<Vec<qaqh_types::SessionListEntry>> {
         let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         let rows = self
             .owners
             .db()
-            .read_blocking(|conn| qaqh_session::db::store::list_sessions(conn, false, 256))
+            .read_blocking(|conn| {
+                qaqh_session::db::store::list_sessions(conn, include_archived, 256)
+            })
             .map_err(QaqhError::message)?;
         let mut workspace_ids = self
             .owners

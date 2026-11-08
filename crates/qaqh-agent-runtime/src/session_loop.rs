@@ -27,6 +27,7 @@ use qaqh_ringing_contract::state::{
 use qaqh_ringing_contract::ulid::generate_ulid;
 use qaqh_session::owner::{SessionOwner, ToolSettlement};
 use qaqh_types::{ContentBlock, Message, ToolResult as ToolResultPayload, UsageInfo};
+use qaqh_workspace::ask_user::normalize_ask_user;
 use tokio::sync::{oneshot, watch};
 
 use crate::progress::{AttemptBlocks, ProgressSink, ProgressStream};
@@ -42,6 +43,11 @@ use qaqh_ringing_contract::fact::ProviderFinish;
 pub struct PermissionAnswer {
     pub approved: bool,
     pub trust_folder: bool,
+}
+
+enum AskReply {
+    Answers(Vec<(String, String)>),
+    Dismissed,
 }
 
 /// 回合循环:一个会话一个实例;回合互斥、输入排队、交互登记都在这里。
@@ -62,7 +68,7 @@ struct LoopInner {
     queue: VecDeque<ConversationSendMessage>,
     active: Option<ActiveTurn>,
     permissions: HashMap<String, oneshot::Sender<PermissionAnswer>>,
-    asks: HashMap<String, oneshot::Sender<Vec<(String, String)>>>,
+    asks: HashMap<String, oneshot::Sender<AskReply>>,
 }
 
 /// 回合任务统一 spawn 口:daemon 在 tokio 上下文里直接 spawn;CLI/测试等
@@ -271,8 +277,14 @@ impl SessionLoop {
     ) -> bool {
         let sender = self.lock().asks.remove(interaction_id);
         sender
-            .map(|sender| sender.send(answers).is_ok())
+            .map(|sender| sender.send(AskReply::Answers(answers)).is_ok())
             .unwrap_or(false)
+    }
+
+    pub fn dismiss_ask(&self, interaction_id: &str) {
+        if let Some(sender) = self.lock().asks.remove(interaction_id) {
+            let _ = sender.send(AskReply::Dismissed);
+        }
     }
 
     /// 配置重载后同步 provider、工具目录与执行策略(下一轮生效)。
@@ -861,6 +873,21 @@ impl SessionLoop {
         input: &serde_json::Value,
         cancel_rx: &watch::Receiver<bool>,
     ) -> Result<(bool, String), LoopError> {
+        let ask = match normalize_ask_user(input) {
+            Ok(ask) => ask,
+            Err(error) => {
+                self.settle_failed(
+                    call_id,
+                    "ask",
+                    Some(input.to_string()),
+                    error.code,
+                    &error.message,
+                );
+                return Ok((false, error.message));
+            }
+        };
+        let text = serde_json::to_string(&ask)
+            .map_err(|error| qaqh_session::db::DbError::Corrupt(error.to_string()))?;
         let interaction_id = InteractionId::new(format!("int_{}", generate_ulid()));
         let (tx, rx) = oneshot::channel();
         {
@@ -875,9 +902,7 @@ impl SessionLoop {
             call_id: Some(ToolCallId::new(call_id.to_string())),
             turn_id: Some(turn.clone()),
             kind: InteractionKind::Ask,
-            request: ContentValue::Inline {
-                text: input.to_string(),
-            },
+            request: ContentValue::Inline { text },
             choices: vec![],
             expires_at_ms: None,
             resolution: None,
@@ -888,11 +913,11 @@ impl SessionLoop {
             .await
             .ok();
         let mut cancel_rx = cancel_rx.clone();
-        let answers = tokio::select! {
-            answers = rx => answers.ok(),
+        let reply = tokio::select! {
+            reply = rx => reply.ok(),
             _ = wait_for_turn_cancel(&mut cancel_rx) => None,
         };
-        let Some(answers) = answers else {
+        let Some(AskReply::Answers(answers)) = reply else {
             {
                 let mut inner = self.lock();
                 inner.asks.remove(interaction_id.as_ref());
@@ -902,26 +927,31 @@ impl SessionLoop {
                         .retain(|pending| pending != &interaction_id);
                 }
             }
+            let turn_cancelled = *cancel_rx.borrow();
+            let (decision, status, reason) = if matches!(reply, Some(AskReply::Dismissed)) {
+                (
+                    Some(InteractionDecision::Dismissed),
+                    InteractionEndStatus::Resolved,
+                    qaqh_types::ToolCancellationReason::InteractionDismissed,
+                )
+            } else {
+                (
+                    None,
+                    InteractionEndStatus::Cancelled,
+                    qaqh_types::ToolCancellationReason::TurnCancel,
+                )
+            };
             self.owner
-                .interaction_resolved(&interaction_id, None, InteractionEndStatus::Cancelled)
+                .interaction_resolved(&interaction_id, decision, status)
                 .await
                 .ok();
-            if !*cancel_rx.borrow() && !self.waiting_user() {
+            if !turn_cancelled && !self.waiting_user() {
                 self.owner
                     .set_turn_phase(turn.as_ref(), qaqh_ringing_contract::TurnPhase::Running)
                     .await
                     .ok();
             }
-            self.settle_cancelled(
-                call_id,
-                "ask",
-                None,
-                if *cancel_rx.borrow() {
-                    qaqh_types::ToolCancellationReason::TurnCancel
-                } else {
-                    qaqh_types::ToolCancellationReason::InteractionDismissed
-                },
-            );
+            self.settle_cancelled(call_id, "ask", None, reason);
             return Ok((false, "cancelled".into()));
         };
         let text = answers
