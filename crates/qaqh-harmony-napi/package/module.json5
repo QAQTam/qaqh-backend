@@ -1,0 +1,7 @@
+{
+  "module": {
+    "name": "qaqh_native_client",
+    "type": "har",
+    "deviceTypes": ["phone", "tablet"]
+  }
+}

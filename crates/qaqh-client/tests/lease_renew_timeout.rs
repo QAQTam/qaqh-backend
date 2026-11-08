@@ -104,6 +104,7 @@ fn new_session(base_url: &str) -> Arc<RingingSession> {
         base_url.to_string(),
         "test-token".into(),
         http,
+        "test-instance".into(),
     ))
 }
 

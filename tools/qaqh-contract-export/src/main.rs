@@ -357,7 +357,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     write_fixture(
         stage,
         "service-session-list-params.json",
-        &SessionListParams {},
+        &SessionListParams { include_archived: false },
     )?;
     write_fixture(
         stage,
