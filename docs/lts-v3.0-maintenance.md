@@ -35,6 +35,14 @@
 **漂移事故参照**:model-config 重构删除 `SessionSettingsPatch.profile` 时,TS 严格消费者在 CI 抓到漂移
 —— LTS 上这类漂移 = 发布阻断,必须回退实现而非改夹具。
 
+**机器闸门**:`.github/workflows/lts-api-guard.yml`(push LTS / PR → LTS 触发)运行
+`scripts/check-lts-api-surface.py`,把 HEAD 的契约导出物与 `docs/api-surface/v3.0/` 金标准逐字节比对
+(manifest 中随提交变化的 `source_revision/source_dirty` 除外),并冻结 HTTP 路由表与 qaqh-client facade 清单。
+CI 红 = 拒绝该改动;金标准只允许在两种情况下再生成:① 新 LTS 线(如 v3.1)切出时;
+② LTS 上明确批准的契约修订(此时它已不是"冻结"而是"换锁",需 bump revision 并重切 tag)。
+再生成命令:`QAQH_SOURCE_REVISION=$(git rev-parse HEAD) QAQH_SOURCE_DIRTY=0 cargo run -p qaqh-contract-export -- export --out <tmp> --release`,
+随后把产物复制进金标准目录、连同 `snapshots/routes.txt`、`snapshots/facade.txt` 一并提交。
+
 ## 2. 标准补丁发版流程(LTS-v3.0)
 
 ```bash

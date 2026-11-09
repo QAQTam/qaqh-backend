@@ -1,0 +1,9 @@
+{
+  "status": "connected",
+  "sharing": true,
+  "profiles": 1,
+  "usageUrl": "https://example.invalid/usage",
+  "apiBase": "https://example.invalid/v1",
+  "profileId": "profile-fixture",
+  "label": "Synthetic"
+}

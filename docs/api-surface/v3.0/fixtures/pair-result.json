@@ -1,0 +1,7 @@
+{
+  "device_id": "device-fixture",
+  "device_token": "SYNTHETIC_NOT_A_CREDENTIAL",
+  "scope": "view",
+  "daemon_version": "3.0.20261110-g1842986",
+  "protocol_version": 2
+}
