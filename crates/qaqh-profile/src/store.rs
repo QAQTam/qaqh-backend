@@ -1,14 +1,13 @@
-//! profiles.toml 持久化存储与安全原子修改（彻底消除全局污染）。
+//! providers.toml 持久化存储与安全原子修改。
 //!
 //! 核心安全策略：
-//! 1. `create_profile` / `update_profile` 严格只作用于单个 Profile 实体，绝不碰 `default_profile`；
-//! 2. `delete_provider` 前校验外键完整性，杜绝悬挂引用；
-//! 3. 采用 tmp-write + rename 原子写入，防止断电导致配置损坏。
+//! 1. `delete_provider` / `delete_model` 前校验引用完整性（default_model_selection），杜绝悬挂引用；
+//! 2. 采用 tmp-write + rename 原子写入，防止断电导致配置损坏。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
-use crate::model::{ModelDef, ModelSelection, ProfileDef, ProfilesDocument, ProviderDef};
+use crate::model::{ModelDef, ModelSelection, ProfilesDocument, ProviderDef};
 
 #[derive(Debug, Error)]
 pub enum ProfileStoreError {
@@ -18,16 +17,10 @@ pub enum ProfileStoreError {
     TomlDe(#[from] toml::de::Error),
     #[error("配置文件序列化错误: {0}")]
     TomlSer(#[from] toml::ser::Error),
-    #[error("Profile「{0}」已存在")]
-    ProfileAlreadyExists(String),
-    #[error("Profile「{0}」不存在")]
-    ProfileNotFound(String),
     #[error("引用的 Provider「{0}」不存在")]
     ProviderNotFound(String),
     #[error("Provider「{0}」仍被 Profile「{1}」引用，无法删除")]
     ProviderInUse(String, String),
-    #[error("无法删除当前全局默认 Profile「{0}」，请先指定新的默认预设")]
-    CannotDeleteDefaultProfile(String),
     #[error("模型 {0}/{1} 正被选择引用")]
     ModelInUse(String, String),
     #[error("模型 {0}/{1} 未注册")]
@@ -115,64 +108,6 @@ impl ProfilesStore {
         Ok(())
     }
 
-    /// 创建一个全新的 Profile 预设（【绝对零污染】：完全不改变全局默认预设指针）
-    pub fn create_profile(&mut self, id: String, def: ProfileDef) -> Result<(), ProfileStoreError> {
-        let trimmed_id = id.trim();
-        if trimmed_id.is_empty() {
-            return Err(ProfileStoreError::ProfileNotFound("id 不能为空".to_string()));
-        }
-        if self.doc.profiles.contains_key(trimmed_id) {
-            return Err(ProfileStoreError::ProfileAlreadyExists(trimmed_id.to_string()));
-        }
-        if !self.doc.providers.contains_key(&def.provider) {
-            return Err(ProfileStoreError::ProviderNotFound(def.provider.clone()));
-        }
-
-        self.doc.profiles.insert(trimmed_id.to_string(), def);
-        self.touch();
-        self.save()?;
-        Ok(())
-    }
-
-    /// 更新一个已存在的 Profile
-    pub fn update_profile(&mut self, id: &str, def: ProfileDef) -> Result<(), ProfileStoreError> {
-        if !self.doc.profiles.contains_key(id) {
-            return Err(ProfileStoreError::ProfileNotFound(id.to_string()));
-        }
-        if !self.doc.providers.contains_key(&def.provider) {
-            return Err(ProfileStoreError::ProviderNotFound(def.provider.clone()));
-        }
-
-        self.doc.profiles.insert(id.to_string(), def);
-        self.touch();
-        self.save()?;
-        Ok(())
-    }
-
-    /// 删除一个 Profile（不能是当前的全局默认）
-    pub fn delete_profile(&mut self, id: &str) -> Result<(), ProfileStoreError> {
-        if self.doc.default_profile.as_deref() == Some(id) {
-            return Err(ProfileStoreError::CannotDeleteDefaultProfile(id.to_string()));
-        }
-        if self.doc.profiles.remove(id).is_none() {
-            return Err(ProfileStoreError::ProfileNotFound(id.to_string()));
-        }
-        self.touch();
-        self.save()?;
-        Ok(())
-    }
-
-    /// 显式切换全局默认 Profile 指针
-    pub fn set_default_profile(&mut self, id: &str) -> Result<(), ProfileStoreError> {
-        if !self.doc.profiles.contains_key(id) {
-            return Err(ProfileStoreError::ProfileNotFound(id.to_string()));
-        }
-        self.doc.default_profile = Some(id.to_string());
-        self.touch();
-        self.save()?;
-        Ok(())
-    }
-
     /// 新增或更新一个 Provider
     pub fn upsert_provider(&mut self, id: String, def: ProviderDef) -> Result<(), ProfileStoreError> {
         if let Some(selection) = &self.doc.default_model_selection
@@ -187,15 +122,10 @@ impl ProfilesStore {
         Ok(())
     }
 
-    /// 删除一个 Provider（先检查是否有 Profile 在引用）
+    /// 删除一个 Provider（先检查 default_model_selection 是否在引用）
     pub fn delete_provider(&mut self, id: &str) -> Result<(), ProfileStoreError> {
         if self.doc.default_model_selection.as_ref().is_some_and(|selection| selection.provider_id == id) {
             return Err(ProfileStoreError::ProviderInUse(id.to_string(), "default_model_selection".into()));
-        }
-        for (prof_id, prof) in &self.doc.profiles {
-            if prof.provider == id {
-                return Err(ProfileStoreError::ProviderInUse(id.to_string(), prof_id.clone()));
-            }
         }
         if !self.doc.providers.contains_key(id) {
             return Err(ProfileStoreError::ProviderNotFound(id.to_string()));
@@ -236,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cannot_delete_default_profile() {
+    fn test_load_or_create_starts_empty() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("profiles.toml");
 

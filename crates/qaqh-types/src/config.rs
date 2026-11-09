@@ -5,10 +5,12 @@ use std::path::PathBuf;
 
 // ── Config persistence ──
 
+/// 全局策略持久层。deny_unknown_fields：模型配置统一后，config.toml 里的
+/// 旧端点族键（api_key/model/base_url/max_tokens/…）一律解析失败并提示
+/// 重新配置——不做静默兼容（模型配置统一重构 Spec §3.5）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct PersistentConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
@@ -109,6 +111,7 @@ pub struct PersistentExecConfig {
 /// 端点族字段（model/baseUrl/apiKey/maxTokens）已退役：子代理的模型选择
 /// 唯一真源是 providers.toml 目录 + 会话行的 model_selection，不再有第二份。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 pub struct PersistentSubagentConfig {
     /// Max time in seconds before the subagent is killed. `None` = default.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -251,9 +254,14 @@ impl ConfigStore {
 
     /// Load and deserialize the config. Returns `None` if the file doesn't
     /// exist or is invalid TOML.
-    pub fn load(&self) -> Option<PersistentConfig> {
-        let data = std::fs::read_to_string(&self.path).ok()?;
-        toml::from_str(&data).ok()
+    /// 读配置：文件不存在 = Ok(None)；解析失败 = Err（绝不静默按缺省跑）。
+    pub fn load(&self) -> Result<Option<PersistentConfig>, String> {
+        let Ok(data) = std::fs::read_to_string(&self.path) else {
+            return Ok(None);
+        };
+        toml::from_str(&data).map(Some).map_err(|error| {
+            format!("config.toml 无法解析——配置格式已更新或文件损坏，请重新配置: {error}")
+        })
     }
 
     /// Atomically write the config to disk using temp-file + rename.
