@@ -235,6 +235,7 @@ impl RingingCommand {
             self,
             Self::SessionCreate { .. }
                 | Self::ProviderList { .. }
+                | Self::ProviderPresets { .. }
                 | Self::ProviderUpsert { .. }
                 | Self::ProviderDelete { .. }
                 | Self::ProviderModelUpsert { .. }
@@ -775,27 +776,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn session_create_round_trips_profile_and_effort() {
+    fn session_create_round_trips_model_selection() {
         let command = RingingCommand::SessionCreate {
             cwd: Some("/workspace".into()),
             title: Some("Session".into()),
-            profile: Some("default".into()),
-            effort: Some("high".into()),
-            model_selection: None,
+            model_selection: Some(qaqh_types::ModelSelection::default()),
             tool_mode: None,
             custom_tools: None,
         };
         let value = serde_json::to_value(command).expect("serialize command");
-        assert_eq!(value["profile"], "default");
-        assert_eq!(value["effort"], "high");
+        assert!(value["modelSelection"].is_object(), "{value}");
 
         let decoded: RingingCommand = serde_json::from_value(value).expect("deserialize command");
         match decoded {
             RingingCommand::SessionCreate {
-                profile, effort, ..
+                model_selection, ..
             } => {
-                assert_eq!(profile.as_deref(), Some("default"));
-                assert_eq!(effort.as_deref(), Some("high"));
+                assert!(model_selection.is_some());
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -814,10 +811,7 @@ mod tests {
                 session_id: "ses_01ARZ3NDEKTSV4RRFFQ69G5FAV".into(),
             },
             command: RingingCommand::SessionSettingsPatch {
-                patch: SessionSettingsPatch {
-                    mode: Some("plan".into()),
-                    ..Default::default()
-                },
+                patch: SessionSettingsPatch::default(),
             },
             preconditions: vec![],
         };
@@ -831,22 +825,18 @@ mod tests {
     }
 
     #[test]
-    fn session_settings_patch_round_trips_profile_and_effort() {
+    fn session_settings_patch_round_trips_tools() {
         let command = RingingCommand::SessionSettingsPatch {
             patch: SessionSettingsPatch {
-                profile: Some("reviewer".into()),
-                effort: Some("high".into()),
+                tools: Some(ToolsSettingPatch::All),
                 ..Default::default()
             },
         };
         let value = serde_json::to_value(&command).expect("serialize settings patch");
-        assert_eq!(value["patch"]["profile"], "reviewer");
-        assert_eq!(value["patch"]["effort"], "high");
         let decoded: RingingCommand = serde_json::from_value(value).expect("decode patch");
         match decoded {
             RingingCommand::SessionSettingsPatch { patch } => {
-                assert_eq!(patch.profile.as_deref(), Some("reviewer"));
-                assert_eq!(patch.effort.as_deref(), Some("high"));
+                assert_eq!(patch.tools, Some(ToolsSettingPatch::All));
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -917,14 +907,14 @@ mod tests {
             payload_fingerprint: "fp".into(),
             terminal_event_id: Some("evt-2".into()),
             error_code: Some("interaction_already_resolved".into()),
-            result: Some(RingingV2CommandResult::PlanReviewResolved {
+            result: Some(RingingV2CommandResult::PermissionResolved {
                 interaction_id: "i2".into(),
                 approved: false,
             }),
             sync_result: None,
         };
         let json = serde_json::to_value(&status).expect("serialize");
-        assert_eq!(json["result"]["kind"], "plan_review_resolved");
+        assert_eq!(json["result"]["kind"], "permission_resolved");
         assert_eq!(json["result"]["approved"], false);
         let back: RingingV2CommandStatus = serde_json::from_value(json).expect("deserialize");
         assert_eq!(back, status);
