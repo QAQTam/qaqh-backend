@@ -117,15 +117,6 @@ pub struct SpawnSubagentOutput {
     spawn_tools: Vec<String>,
     #[serde(skip)]
     #[schemars(skip)]
-    spawn_model: Option<String>,
-    #[serde(skip)]
-    #[schemars(skip)]
-    spawn_base_url: Option<String>,
-    #[serde(skip)]
-    #[schemars(skip)]
-    spawn_max_tokens: Option<u32>,
-    #[serde(skip)]
-    #[schemars(skip)]
     spawn_ephemeral: bool,
     #[serde(skip)]
     #[schemars(skip)]
@@ -163,9 +154,6 @@ impl ToolProjection for SpawnSubagentOutput {
             parent_agent_path: self.parent_agent_path.clone(),
             child_agent_path: self.child_agent_path.clone(),
             spawn_tools: self.spawn_tools.clone(),
-            spawn_model: self.spawn_model.clone(),
-            spawn_base_url: self.spawn_base_url.clone(),
-            spawn_max_tokens: self.spawn_max_tokens,
             spawn_ephemeral: self.spawn_ephemeral,
             spawn_timeout_secs: self.spawn_timeout_secs,
         }]
@@ -977,22 +965,14 @@ fn handle_spawn_subagent(
     let task = args.task_description;
     let context = args.context.unwrap_or_default();
 
-    // 模型面只暴露 4 个参数；工具白名单 / 模型 / base-url / max-tokens /
-    // 超时默认值一律取自用户设置（cfg.subagent.*，前端设置页可调），
-    // 空值=继承主代理。
-    let (tools, model_override, base_url_override, max_tokens, cfg_timeout) =
-        qaqh_config::Config::load()
-            .ok()
-            .map(|cfg| {
-                (
-                    cfg.subagent.default_tools.clone(),
-                    cfg.subagent.model.clone(),
-                    cfg.subagent.base_url.clone(),
-                    cfg.subagent.max_tokens,
-                    cfg.subagent.timeout_secs,
-                )
-            })
-            .unwrap_or_default();
+    // 模型面只暴露 4 个参数；工具白名单 / 超时默认值取自用户设置
+    // （cfg.subagent.*，前端设置页可调）。模型选择的唯一真源是
+    // providers.toml 目录 + 会话行 model_selection：子代理缺省继承父会话
+    // 的选择，不存在 model/base-url/max-tokens 覆盖链。
+    let (tools, cfg_timeout) = qaqh_config::Config::load()
+        .ok()
+        .map(|cfg| (cfg.subagent.default_tools.clone(), cfg.subagent.timeout_secs))
+        .unwrap_or_default();
     let timeout_secs = args
         .timeout_secs
         .unwrap_or(cfg_timeout.max(1))
@@ -1015,22 +995,6 @@ fn handle_spawn_subagent(
     } else {
         Some(parent_workspace.into_owned())
     };
-    let model = if model_override.is_empty() {
-        None
-    } else {
-        Some(model_override.as_str())
-    };
-    let base_url = if base_url_override.is_empty() {
-        None
-    } else {
-        Some(base_url_override.as_str())
-    };
-    let max_tokens_opt = if max_tokens == 0 || max_tokens == 4096 {
-        None
-    } else {
-        Some(max_tokens)
-    };
-
     // ── 1. Create the child actor only. The task is delivered by the runtime
     // after the canonical `SubagentSpawned` edge is committed. ──
     let host = host().ok_or_else(|| {
@@ -1045,9 +1009,7 @@ fn handle_spawn_subagent(
             parent_session_id: &ctx.session_id,
             requested_name: &name,
             tools: &tools,
-            model,
-            base_url,
-            max_tokens: max_tokens_opt,
+            selection: None,
             workspace: workspace.as_deref(),
             // P1-⑤：子代理档位继承父会话，不再回落全局 permission_tier。
             permission_level: ctx.permission_level as u8,
@@ -1093,9 +1055,6 @@ fn handle_spawn_subagent(
         timeout_secs,
         parent_session_id: ctx.session_id.clone(),
         spawn_tools: tools.clone(),
-        spawn_model: model.map(str::to_string),
-        spawn_base_url: base_url.map(str::to_string),
-        spawn_max_tokens: max_tokens_opt,
         spawn_ephemeral: false,
         spawn_timeout_secs: timeout_secs,
     })
@@ -1770,9 +1729,6 @@ mod tests {
             timeout_secs: 120,
             parent_session_id: "root-seed".to_string(),
             spawn_tools: vec![],
-            spawn_model: None,
-            spawn_base_url: None,
-            spawn_max_tokens: None,
             spawn_ephemeral: false,
             spawn_timeout_secs: 120,
         };

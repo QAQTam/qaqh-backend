@@ -11,20 +11,10 @@ use std::sync::{Mutex, OnceLock};
 /// These are defaults applied when spawning sub-agents. The `spawn_subagent`
 /// tool schema only exposes `task_description` / `agent_name` / `context` /
 /// `timeout_secs`; the remaining fields are set through settings, not per-call.
+/// 端点族字段（model/baseUrl/apiKey/maxTokens）已退役：子代理的模型选择
+/// 唯一真源是 providers.toml 目录 + 会话行 model_selection。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SubagentConfig {
-    /// Override model. Empty = inherit from parent agent config.
-    #[serde(default)]
-    pub model: String,
-    /// Override API base URL. Empty = inherit.
-    #[serde(default)]
-    pub base_url: String,
-    /// Override API key. Empty = inherit.
-    #[serde(default)]
-    pub api_key: String,
-    /// Max output tokens for subagent responses. Default: 4096.
-    #[serde(default = "default_subagent_max_tokens")]
-    pub max_tokens: u32,
     /// Maximum lifetime in seconds before the subagent is killed. Default: 120.
     #[serde(default = "default_subagent_timeout")]
     pub timeout_secs: u64,
@@ -42,9 +32,6 @@ pub struct SubagentConfig {
     pub message_outbound_per_sender: u64,
 }
 
-fn default_subagent_max_tokens() -> u32 {
-    4096
-}
 fn default_subagent_timeout() -> u64 {
     120
 }
@@ -61,10 +48,6 @@ fn default_subagent_message_outbound() -> u64 {
 impl Default for SubagentConfig {
     fn default() -> Self {
         Self {
-            model: String::new(),
-            base_url: String::new(),
-            api_key: String::new(),
-            max_tokens: 4096,
             timeout_secs: 120,
             default_tools: vec!["read".into(), "exec_command".into()],
             max_depth: 1,
@@ -805,35 +788,6 @@ impl Config {
             }
             // ── Subagent defaults ──
             if let Some(ref mut s) = pc.subagent {
-                if let Some(ref m) = s.model
-                    && !m.is_empty()
-                {
-                    cfg.subagent.model = m.clone();
-                }
-                if let Some(ref u) = s.base_url
-                    && !u.is_empty()
-                {
-                    cfg.subagent.base_url = u.clone();
-                }
-                if let Some(k) = s.api_key.clone()
-                    && !k.is_empty()
-                {
-                    if k == CONFIG_MARKER {
-                        cfg.subagent.api_key =
-                            secrets.load(SecretSlot::Subagent).unwrap_or_default();
-                    } else {
-                        match secrets.set(SecretSlot::Subagent, &k) {
-                            Ok(()) => needs_rewrite = true,
-                            Err(e) => log::warn!(
-                                "[config] migrate subagent api key to secret store failed: {e}; keeping plaintext until retry"
-                            ),
-                        }
-                        cfg.subagent.api_key = k;
-                    }
-                }
-                if let Some(mt) = s.max_tokens {
-                    cfg.subagent.max_tokens = mt;
-                }
                 if let Some(ts) = s.timeout_secs {
                     cfg.subagent.timeout_secs = ts;
                 }
@@ -964,11 +918,6 @@ falling back to 1 (read-only)"
                 if is_plain(&fresh.api_key) {
                     fresh.api_key = Some(CONFIG_MARKER.to_owned());
                 }
-                if let Some(ref mut s) = fresh.subagent
-                    && is_plain(&s.api_key)
-                {
-                    s.api_key = Some(CONFIG_MARKER.to_owned());
-                }
                 if let Some(ref mut s) = fresh.subagent {
                     if let Some(ref mut tools) = s.default_tools {
                         *tools = migrate_legacy_exec_tool_names(tools);
@@ -1026,14 +975,6 @@ falling back to 1 (read-only)"
                 .set(SecretSlot::Main, &self.api_key)
                 .map_err(|e| format!("failed to store main api key: {e}"))?;
         }
-        if self.subagent.api_key.is_empty() {
-            let _ = secrets.delete(SecretSlot::Subagent);
-        } else {
-            secrets
-                .set(SecretSlot::Subagent, &self.subagent.api_key)
-                .map_err(|e| format!("failed to store subagent api key: {e}"))?;
-        }
-
         let pc = PersistentConfig {
             api_key: if self.api_key.is_empty() {
                 None
@@ -1049,22 +990,6 @@ falling back to 1 (read-only)"
             theme: self.theme.clone(),
             notifications_enabled: self.notifications_enabled,
             subagent: Some(PersistentSubagentConfig {
-                model: if self.subagent.model.is_empty() {
-                    None
-                } else {
-                    Some(self.subagent.model.clone())
-                },
-                base_url: if self.subagent.base_url.is_empty() {
-                    None
-                } else {
-                    Some(self.subagent.base_url.clone())
-                },
-                api_key: if self.subagent.api_key.is_empty() {
-                    None
-                } else {
-                    Some(CONFIG_MARKER.to_owned())
-                },
-                max_tokens: Some(self.subagent.max_tokens),
                 timeout_secs: Some(self.subagent.timeout_secs),
                 default_tools: if self.subagent.default_tools.is_empty() {
                     None

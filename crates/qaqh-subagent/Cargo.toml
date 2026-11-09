@@ -6,6 +6,7 @@ license.workspace = true
 description = "QAQ-Harness subagent tool — spawn isolated Ringing sub-sessions for focused tasks"
 
 [dependencies]
+qaqh-types = { path = "../qaqh-types" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-ringing = { path = "../qaqh-ringing" }

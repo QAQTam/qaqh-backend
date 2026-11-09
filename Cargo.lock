@@ -3409,6 +3409,7 @@ dependencies = [
  "qaqh-ringing",
  "qaqh-ringing-contract",
  "qaqh-tool-core",
+ "qaqh-types",
  "qaqh-workspace",
  "schemars 1.2.3",
  "serde",

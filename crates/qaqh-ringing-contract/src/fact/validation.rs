@@ -495,18 +495,6 @@ impl FactPayload {
                         }
                         validate_byte_limit("spawn_config.tools", tool, 256)?;
                     }
-                    if let Some(model) = &config.model {
-                        validate_byte_limit("spawn_config.model", model, 4 * 1024)?;
-                    }
-                    if let Some(base_url) = &config.base_url {
-                        validate_byte_limit("spawn_config.base_url", base_url, 4 * 1024)?;
-                    }
-                    if config.max_tokens == Some(0) {
-                        return Err(ValidationError::InvalidField {
-                            field: "spawn_config.max_tokens",
-                            message: "must be greater than zero".to_owned(),
-                        });
-                    }
                     if !(1..=3600).contains(&config.timeout_secs) {
                         return Err(ValidationError::InvalidField {
                             field: "spawn_config.timeout_secs",

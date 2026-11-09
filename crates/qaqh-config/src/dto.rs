@@ -28,11 +28,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
         notifications_enabled: cfg.notifications_enabled.unwrap_or(true),
         compliance_enabled: cfg.compliance_enabled,
         subagent: SubagentDto {
-            model: cfg.subagent.model.clone(),
-            base_url: cfg.subagent.base_url.clone(),
-            api_key: masked_or_empty(&cfg.subagent.api_key),
-            api_key_set: !cfg.subagent.api_key.is_empty(),
-            max_tokens: u64::from(cfg.subagent.max_tokens),
             timeout_secs: cfg.subagent.timeout_secs,
             default_tools: cfg.subagent.default_tools.clone(),
             max_depth: u64::from(cfg.subagent.max_depth),
@@ -100,12 +95,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
 /// 值域校验先行；逐字段守卫语义见模块文档。
 pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> {
     patch.validate()?;
-    // 历史「空串 = 保持」语义：过滤掩码与空串，仅显式新值放行。
-    let meaningful = |s: &Option<String>| {
-        s.as_deref()
-            .is_some_and(|v| !v.is_empty() && v != "****")
-            .then(|| s.clone().expect("checked some"))
-    };
     if let Some(v) = patch.auto_compact_threshold {
         cfg.auto_compact_threshold = v;
     }
@@ -141,18 +130,6 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         cfg.sandbox.enabled = enabled;
     }
     if let Some(sub) = &patch.subagent {
-        if let Some(v) = meaningful(&sub.model) {
-            cfg.subagent.model = v;
-        }
-        if let Some(v) = meaningful(&sub.base_url) {
-            cfg.subagent.base_url = v;
-        }
-        if let Some(v) = meaningful(&sub.api_key) {
-            cfg.subagent.api_key = v;
-        }
-        if let Some(v) = sub.max_tokens {
-            cfg.subagent.max_tokens = u32::try_from(v).unwrap_or(u32::MAX);
-        }
         if let Some(v) = sub.timeout_secs {
             cfg.subagent.timeout_secs = v;
         }
