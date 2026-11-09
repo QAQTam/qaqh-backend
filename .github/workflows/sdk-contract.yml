@@ -3,7 +3,7 @@ name: Rust SDK contract
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, LTS-v3.0]
   workflow_dispatch:
 
 jobs:
