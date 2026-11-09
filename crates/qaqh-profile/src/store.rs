@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn test_store_creation_and_zero_side_effect() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("profiles.toml");
+        let path = dir.path().join("providers.toml");
 
         let mut store = ProfilesStore::load_or_create(&path).expect("create store");
         assert!(store.document().default_model_selection.is_none());
@@ -168,7 +168,7 @@ mod tests {
     #[test]
     fn test_load_or_create_starts_empty() {
         let dir = tempdir().expect("tempdir");
-        let path = dir.path().join("profiles.toml");
+        let path = dir.path().join("providers.toml");
 
         let store = ProfilesStore::load_or_create(&path).expect("create store");
         assert!(store.document().default_model_selection.is_none());
