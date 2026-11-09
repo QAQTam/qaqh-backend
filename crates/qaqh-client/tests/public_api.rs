@@ -5,7 +5,7 @@
 
 use qaqh_client::{
     CommandPrecondition, CommandTarget, InputPurpose, RingingCommand, RingingV2CommandEnvelope,
-    SessionSettingsPatch,
+    SessionSettingsPatch, ToolsSettingPatch,
 };
 
 #[test]
@@ -23,8 +23,8 @@ fn settings_command_uses_the_single_ringing_envelope() {
         },
         RingingCommand::SessionSettingsPatch {
             patch: SessionSettingsPatch {
-                profile: Some("reviewer".into()),
-                ..Default::default()
+                tools: Some(ToolsSettingPatch::All),
+                model_selection: None,
             },
         },
     )
