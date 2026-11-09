@@ -1,5 +1,5 @@
 use qaqh_workspace::tool_api::{
-    AgentMode, CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
+    CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
 };
 
 pub fn context(workspace: impl Into<std::path::PathBuf>) -> ToolCallContext {
@@ -7,7 +7,6 @@ pub fn context(workspace: impl Into<std::path::PathBuf>) -> ToolCallContext {
         call_id: "scope-test".into(),
         session_id: "scope-session".into(),
         workspace_root: workspace.into(),
-        mode: AgentMode::Code,
         permission_level: qaqh_workspace::PermissionLevel::from_u8(3),
         sandbox: SandboxMode::Main,
         sandbox_spec: SandboxSpec::disabled(),

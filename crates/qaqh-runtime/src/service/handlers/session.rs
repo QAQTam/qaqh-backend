@@ -158,8 +158,6 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
 struct CreateSessionInput {
     cwd: Option<String>,
     title: Option<String>,
-    profile: Option<String>,
-    effort: Option<String>,
     tool_mode: Option<String>,
     custom_tools: Option<Vec<String>>,
     model_selection: Option<qaqh_types::ModelSelection>,
@@ -195,8 +193,6 @@ fn create_session(
                 .as_deref()
                 .map(str::trim)
                 .filter(|t| !t.is_empty()),
-            profile: input.profile.as_deref(),
-            effort: input.effort.as_deref(),
             tool_mode,
             custom_tools,
             model_selection,
@@ -222,8 +218,6 @@ impl QaqhService {
         &self,
         cwd: Option<String>,
         title: Option<String>,
-        profile: Option<String>,
-        effort: Option<String>,
         model_selection: Option<qaqh_types::ModelSelection>,
         tool_mode: Option<String>,
         custom_tools: Option<Vec<String>>,
@@ -233,8 +227,6 @@ impl QaqhService {
             CreateSessionInput {
                 cwd,
                 title,
-                profile,
-                effort,
                 tool_mode,
                 custom_tools,
                 model_selection,
@@ -247,15 +239,13 @@ impl QaqhService {
 struct CreateRowInput<'a> {
     cwd: Option<&'a str>,
     title: Option<&'a str>,
-    profile: Option<&'a str>,
-    effort: Option<&'a str>,
     tool_mode: Option<String>,
     custom_tools: Option<Vec<String>>,
     model_selection: qaqh_types::ModelSelection,
 }
 
-/// 会话创建的第一站:一次性落 SQLite 业务行(cwd/model/profile/effort/
-/// tool_mode/model_selection/title)。行存在即 spawn 可读,无 meta.json 中间态。
+/// 会话创建的第一站:一次性落 SQLite 业务行(cwd/model/tool_mode/
+/// model_selection/title)。行存在即 spawn 可读,无 meta.json 中间态。
 fn create_business_row(
     service: &QaqhService,
     session_id: &str,
@@ -269,9 +259,6 @@ fn create_business_row(
         title_source: input.title.map(|_| "user".to_string()),
         cwd: Some(canonical_cwd),
         model: Some(input.model_selection.model_id.clone()),
-        effort: input.effort.filter(|e| !e.is_empty()).map(str::to_string),
-        profile: input.profile.filter(|p| !p.is_empty()).map(str::to_string),
-        mode: None,
         tool_mode: input.tool_mode,
         model_selection: Some(input.model_selection),
         custom_tools: input.custom_tools,

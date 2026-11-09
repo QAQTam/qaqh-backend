@@ -118,7 +118,6 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: "todo-contract".into(),
         permission_level: 1,
-        mode: 0,
         workspace_root: None,
     };
 

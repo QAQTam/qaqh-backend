@@ -2975,6 +2975,7 @@ dependencies = [
  "axum",
  "futures-util",
  "log",
+ "qaqh-acp",
  "qaqh-config",
  "qaqh-mcp",
  "qaqh-process-tools",

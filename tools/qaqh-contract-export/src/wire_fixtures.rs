@@ -54,13 +54,6 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             },
         ),
         (
-            "plan",
-            RingingV2CommandResult::PlanReviewResolved {
-                interaction_id: "interaction-fixture".into(),
-                approved: true,
-            },
-        ),
-        (
             "permission",
             RingingV2CommandResult::PermissionResolved {
                 interaction_id: "interaction-fixture".into(),

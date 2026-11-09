@@ -840,20 +840,16 @@ fn validate_recovery_ref(
 fn validate_metadata_patch(patch: &SessionMetadataPatch) -> Result<(), ValidationError> {
     // 空 patch 无意义（replay 也分不清「没写」和「写成默认值」）。这里必须
     // 枚举**全部**字段：漏掉任何一个都会让「只改那个字段」的合法 patch 被
-    // 当成空 patch 拒收（历史上漏了 profile/effort/mode/tool_mode/
-    // custom_tools/skills/frozen_annotation/ephemeral/usage，导致只写
-    // ephemeral 的子会话创世被拒）。
+    // 当成空 patch 拒收（历史上漏了 tool_mode/custom_tools/skills/
+    // frozen_annotation/ephemeral/usage，导致只写 ephemeral 的子会话创世被拒）。
     let empty = patch.cwd.is_none()
         && patch.model.is_none()
         && patch.archived.is_none()
         && patch.search_visibility.is_none()
         && patch.parent_session_id.is_none()
         && patch.schema_caps.is_none()
-        && patch.profile.is_none()
         && patch.model_selection.is_none()
         && patch.requested_model_selection.is_none()
-        && patch.effort.is_none()
-        && patch.mode.is_none()
         && patch.tool_mode.is_none()
         && patch.custom_tools.is_none()
         && patch.skills.is_none()

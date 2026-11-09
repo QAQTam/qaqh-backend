@@ -10,7 +10,7 @@ use ts_rs::TS;
 
 use crate::fact::{
     ActivityState, AssistantBlockKind, BlockId, ContentValue, ExecSessionId, InputId,
-    InteractionDecision, InteractionId, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId, TurnMode,
+    InteractionDecision, InteractionId, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId,
 };
 use crate::state::{
     DriverState, ExecSessionView, InteractionView, SubagentView, TimelineEntry, ToolCallState,
@@ -58,7 +58,6 @@ pub enum SessionEvent {
     TurnStarted {
         turn_id: TurnId,
         input_id: Option<InputId>,
-        mode: Option<TurnMode>,
     },
     /// 回合非终态 phase 迁移(waiting_user/cancelling/running);终态由
     /// TurnEnded 表达,不发 phase=null 事件。

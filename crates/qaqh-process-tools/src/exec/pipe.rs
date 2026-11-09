@@ -257,6 +257,8 @@ pub(crate) fn pipe_available_bytes(handle: std::os::windows::io::RawHandle) -> O
         ) -> i32;
     }
     let mut avail: u32 = 0;
+    // SAFETY: handle 是 std 管道 stdio 的有效匿名管道句柄（同上方 extern 块
+    // SAFETY），本次只查询 total_bytes_avail，输出指针均指向栈上变量。
     let ok = unsafe {
         PeekNamedPipe(
             handle,

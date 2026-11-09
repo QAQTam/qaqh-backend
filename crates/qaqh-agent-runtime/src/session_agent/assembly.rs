@@ -152,7 +152,6 @@ pub fn tool_policy(
     .with_trusted_roots(trusted_dirs.iter().cloned());
     ToolPolicySnapshot {
         workspace_root,
-        mode: qaqh_workspace::tool_api::AgentMode::Code,
         permission_level,
         sandbox,
         trusted_dirs,

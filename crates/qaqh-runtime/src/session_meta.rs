@@ -25,12 +25,6 @@ pub(crate) fn read(
         title: Some(row.title).filter(|title| !title.is_empty()),
         cwd: row.cwd,
         model: row.model.unwrap_or_default(),
-        effort: row.effort,
-        profile: row.profile,
-        mode: row
-            .mode
-            .and_then(|mode| mode.parse::<u8>().ok())
-            .unwrap_or(0),
         tool_mode: row.tool_mode.unwrap_or_default(),
         model_selection: row.model_selection,
         settings_revision: row.settings_revision,
@@ -75,9 +69,6 @@ fn patch_columns(
     expected_revision: Option<u64>,
 ) -> Result<u64, MetadataPatchError> {
     let increment_settings_revision = patch.model.is_some()
-        || patch.effort.is_some()
-        || patch.profile.is_some()
-        || patch.mode.is_some()
         || patch.tool_mode.is_some()
         || patch.model_selection.is_some()
         || patch.custom_tools.is_some()
@@ -87,9 +78,6 @@ fn patch_columns(
         title: None,
         cwd: patch.cwd.clone(),
         model: patch.model.clone(),
-        effort: patch.effort.clone(),
-        profile: patch.profile.clone(),
-        mode: patch.mode.map(|mode| mode.to_string()),
         tool_mode: patch.tool_mode.clone(),
         model_selection: patch.model_selection.clone(),
         custom_tools: patch.custom_tools.clone(),

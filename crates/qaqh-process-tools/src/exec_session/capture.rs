@@ -142,7 +142,9 @@ impl Capture {
         let mut rest = text;
         while !rest.is_empty() {
             let bytes = utf8_prefix_len(rest, MAX_EVENT_BYTES);
-            let piece = &rest[..bytes];
+            let piece = rest
+                .get(..bytes)
+                .expect("utf8_prefix_len 一定落在字符边界且不超过长度");
             let start_offset = self.next_offset;
             self.next_offset += bytes as u64;
             let chunk = OutputChunk {
@@ -155,7 +157,9 @@ impl Capture {
             self.store_model_pending(chunk.clone());
             self.append_preview(piece);
             emitted.push(chunk);
-            rest = &rest[bytes..];
+            rest = rest
+                .get(bytes..)
+                .expect("utf8_prefix_len 一定落在字符边界且不超过长度");
         }
         emitted
     }
@@ -175,7 +179,10 @@ impl Capture {
         }
 
         if tail_start < chunk.text.len() {
-            let suffix = &chunk.text[tail_start..];
+            let suffix = chunk
+                .text
+                .get(tail_start..)
+                .expect("tail_start 来自 utf8_prefix_len，一定落在字符边界");
             let mut tail_chunk = chunk.clone();
             tail_chunk.start_offset += tail_start as u64;
             tail_chunk.text = suffix.to_owned();

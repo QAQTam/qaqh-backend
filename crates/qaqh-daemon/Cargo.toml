@@ -7,6 +7,7 @@ description = "Headless QAQ-Harness application daemon"
 build = "build.rs"
 
 [dependencies]
+qaqh-acp = { path = "../qaqh-acp" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }

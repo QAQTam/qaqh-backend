@@ -159,9 +159,11 @@ mod tests {
     fn auto_promotion_can_be_opted_out() {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: 全测试经 SERIAL 互斥串行，无并发线程读取环境变量。
         unsafe { std::env::set_var("QAQH_SBX_REDIRECT", "0") };
         let spec = SandboxSpec::workspace_write(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
         assert_eq!(resolve_windows_backend(&spec).expect("auto"), None);
+        // SAFETY: 同上，持有 SERIAL 锁后才改动环境。
         unsafe { std::env::remove_var("QAQH_SBX_REDIRECT") };
     }
 }

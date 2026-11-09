@@ -1068,7 +1068,6 @@ mod tests {
                     call_id: "id-1".to_owned(),
                     session_id: "s1".to_owned(),
                     workspace_root: std::path::PathBuf::from("/tmp/ws"),
-                    mode: crate::tool_api::AgentMode::Code,
                     permission_level: crate::permission::PermissionLevel::ReadOnly,
                     sandbox: crate::tool_api::SandboxMode::Main,
                     sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(

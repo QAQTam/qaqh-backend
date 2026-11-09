@@ -15,6 +15,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use qaqh_ringing::v2::{RingingV2ClientKind, RingingV2ClientView};
+
 const RENEW_TTL_MS: u64 = 30_000;
 
 fn lease_ttl_ms() -> u64 {
@@ -42,6 +44,8 @@ pub struct RingingLeaseStore {
 #[derive(Debug, Clone)]
 struct Connection {
     expiry: Instant,
+    /// open 时自报的种类(presence/诊断;不参与信任判定)。
+    kind: Option<RingingV2ClientKind>,
 }
 
 impl RingingLeaseStore {
@@ -51,7 +55,12 @@ impl RingingLeaseStore {
 
     /// 登记一条新连接。同一身份的既有连接**不受影响**（§3：多窗口互不失效），
     /// 各连接独立按 TTL 过期。open 是低频协商路径，顺带做一次过期 GC。
-    pub fn open(&mut self, client_session_id: String, instance_key: String) {
+    pub fn open(
+        &mut self,
+        client_session_id: String,
+        instance_key: String,
+        kind: Option<RingingV2ClientKind>,
+    ) {
         self.expire_connections();
         self.instance_of
             .insert(client_session_id.clone(), instance_key.clone());
@@ -59,8 +68,39 @@ impl RingingLeaseStore {
             client_session_id,
             Connection {
                 expiry: Instant::now() + Duration::from_millis(lease_ttl_ms()),
+                kind,
             },
         );
+    }
+
+    /// 活跃连接快照（过期即排除；按 `client_session_id` 排序保证输出稳定）。
+    /// 归属按稳定身份记账，`attached_sessions` 是该身份名下的会话数。
+    pub fn active_clients(&self) -> Vec<RingingV2ClientView> {
+        let now = Instant::now();
+        let mut views: Vec<_> = self
+            .connections
+            .iter()
+            .filter(|(_, connection)| connection.expiry >= now)
+            .map(|(client_session_id, connection)| {
+                let instance_key = self
+                    .instance_of
+                    .get(client_session_id)
+                    .cloned()
+                    .unwrap_or_default();
+                RingingV2ClientView {
+                    client_session_id: client_session_id.clone(),
+                    attached_sessions: self
+                        .ownership
+                        .get(&instance_key)
+                        .map_or(0, |sessions| sessions.len()),
+                    client_kind: connection.kind,
+                    expires_in_ms: (connection.expiry - now).as_millis() as u64,
+                    instance_key,
+                }
+            })
+            .collect();
+        views.sort_by(|a, b| a.client_session_id.cmp(&b.client_session_id));
+        views
     }
 
     /// attach 建立会话归属——**记在身份名下**，不随连接过期/更换失效（§4：
@@ -217,7 +257,19 @@ mod tests {
     #[test]
     fn lease_lifecycle_ttl_renew_expiry() {
         let mut store = RingingLeaseStore::new();
-        store.open("cs-1".into(), "ci-1".into());
+        store.open(
+            "cs-1".into(),
+            "ci-1".into(),
+            Some(RingingV2ClientKind::Tui),
+        );
+        assert_eq!(
+            store
+                .active_clients()
+                .iter()
+                .map(|client| (client.client_session_id.as_str(), client.client_kind))
+                .collect::<Vec<_>>(),
+            [("cs-1", Some(RingingV2ClientKind::Tui))]
+        );
         assert!(store.is_active("ci-1"));
         assert!(store.is_active_session("cs-1"));
         assert!(!store.is_active_session("unknown"));
@@ -230,10 +282,10 @@ mod tests {
     #[test]
     fn same_identity_keeps_multiple_connections_and_ownership() {
         let mut store = RingingLeaseStore::new();
-        store.open("cs-1".into(), "device-1".into());
+        store.open("cs-1".into(), "device-1".into(), None);
         assert!(store.attach_session("cs-1", "seed-a"));
         // §3：同身份第二连接（第二窗口）不失效第一连接，也不清归属。
-        store.open("cs-2".into(), "device-1".into());
+        store.open("cs-2".into(), "device-1".into(), None);
         assert!(store.is_active_session("cs-1"));
         assert!(store.is_active_session("cs-2"));
         // §4：归属在身份名下——两条连接都能读到同一归属。
@@ -245,7 +297,7 @@ mod tests {
     #[test]
     fn reconnect_restores_access_without_reattach() {
         let mut store = RingingLeaseStore::new();
-        store.open("cs-1".into(), "device-1".into());
+        store.open("cs-1".into(), "device-1".into(), None);
         assert!(store.attach_session("cs-1", "seed-a"));
 
         // §2：连接过期（移动端后台挂起）只摘 presence，归属保留。
@@ -254,16 +306,16 @@ mod tests {
         assert!(!store.renew("cs-1"));
 
         // 重开连接：无需重放 attach，读写授权立即恢复。
-        store.open("cs-2".into(), "device-1".into());
+        store.open("cs-2".into(), "device-1".into(), None);
         assert!(store.owns_session("cs-2", "seed-a"));
     }
 
     #[test]
     fn revoke_device_drops_all_connections_and_ownership() {
         let mut store = RingingLeaseStore::new();
-        store.open("cs-1".into(), "device-1".into());
-        store.open("cs-2".into(), "device-1".into());
-        store.open("cs-other".into(), "device-2".into());
+        store.open("cs-1".into(), "device-1".into(), None);
+        store.open("cs-2".into(), "device-1".into(), None);
+        store.open("cs-other".into(), "device-2".into(), None);
         assert!(store.attach_session("cs-1", "seed-a"));
         assert!(store.attach_session("cs-2", "seed-b"));
         assert!(store.attach_session("cs-other", "seed-a"));
@@ -282,8 +334,8 @@ mod tests {
     #[test]
     fn attach_requires_a_live_connection_and_other_devices_are_isolated() {
         let mut store = RingingLeaseStore::new();
-        store.open("cs-1".into(), "device-1".into());
-        store.open("cs-2".into(), "device-2".into());
+        store.open("cs-1".into(), "device-1".into(), None);
+        store.open("cs-2".into(), "device-2".into(), None);
         assert!(store.attach_session("cs-1", "seed-a"));
         assert!(!store.attach_session("", "seed-a"), "空 session 拒绝");
 
@@ -296,7 +348,7 @@ mod tests {
         assert!(store.owns_session("cs-1", "seed-a"));
 
         // detach 摘的是身份级归属。
-        store.open("cs-3".into(), "device-1".into());
+        store.open("cs-3".into(), "device-1".into(), None);
         store.detach_session("cs-3", "seed-a");
         assert!(!store.owns_session("cs-3", "seed-a"));
     }

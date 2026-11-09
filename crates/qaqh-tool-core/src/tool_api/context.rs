@@ -40,16 +40,6 @@ pub enum ToolCallSource {
     },
 }
 
-/// 代理运行模式（执行上下文的私有类型，不属于 Ringing 命令目录）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum AgentMode {
-    /// 编码模式（默认）。
-    #[default]
-    Code,
-    /// 计划模式（写类工具受限）。
-    Plan,
-}
-
 /// Validated command invocation passed to the session-owned execution host.
 #[derive(Debug, Clone)]
 pub struct ExecCommandRequest {
@@ -150,8 +140,6 @@ pub struct ToolCallContext {
     pub session_id: String,
     /// 工作区根（执行器强制注入；工具不得读线程局部）。
     pub workspace_root: PathBuf,
-    /// 运行模式。
-    pub mode: AgentMode,
     /// 生效权限档位。
     pub permission_level: PermissionLevel,
     /// 生效沙箱模式。
@@ -214,7 +202,6 @@ mod tests {
             call_id: "call_1".to_owned(),
             session_id: "d9a1a320".to_owned(),
             workspace_root: PathBuf::from("/tmp/ws"),
-            mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadOnly,
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::workspace_write(PathBuf::from("/tmp/ws")),
@@ -227,7 +214,6 @@ mod tests {
             official_web: None,
             source: ToolCallSource::Model,
         };
-        assert_eq!(ctx.mode, AgentMode::Code);
         assert_eq!(ctx.source, ToolCallSource::Model);
         assert_eq!(
             ctx.sandbox_spec().writable_roots,
@@ -241,7 +227,6 @@ mod tests {
             call_id: "call_1".to_owned(),
             session_id: "d9a1a320".to_owned(),
             workspace_root: PathBuf::from("/tmp/ws"),
-            mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadOnly,
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::disabled(),

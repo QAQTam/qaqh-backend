@@ -197,7 +197,6 @@ impl RingingCommand {
                 | Self::InteractionAskDismiss { .. }
                 | Self::DriverClaim { .. }
                 | Self::DriverRelease { .. }
-                | Self::PlanReviewRespond { .. }
                 | Self::ToolPermissionRespond { .. }
                 | Self::WorkspaceSet { .. }
                 | Self::WorkspaceMoveSession { .. }
@@ -243,11 +242,6 @@ impl RingingCommand {
                 | Self::ModelSelectionSetDefault { .. }
                 | Self::ConfigSave { .. }
                 | Self::ConfigSetPermissionLevel { .. }
-                | Self::ProfileCreate { .. }
-                | Self::ProfileSetDefault { .. }
-                | Self::ProfileApply { .. }
-                | Self::ProfileSaveCurrent { .. }
-                | Self::ProfileDelete { .. }
                 | Self::WorkspaceCreate { .. }
                 | Self::DiagnosticsMemoryStart { .. }
                 | Self::DiagnosticsMemoryStop { .. }
@@ -261,12 +255,6 @@ impl RingingCommand {
 pub struct SessionSettingsPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_selection: Option<SettingValue<qaqh_types::ModelSelection>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsSettingPatch>,
 }
@@ -310,6 +298,34 @@ pub enum SecretWrite {
     Clear,
 }
 
+/// v2 客户端自报种类(open 时声明;与 `client_instance_id` 同语义:纯
+/// presence/诊断,不参与任何信任判定)。未声明即不出现在 wire 上。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum RingingV2ClientKind {
+    Tui,
+    Desktop,
+    /// ACP 桥(Zed 等 ACP 宿主拉起的 stdio 进程)。
+    Acp,
+}
+
+/// `clients.list` 的单条活跃连接视图。归属按稳定身份记账,同一身份的
+/// 多条连接(多窗口)各占一行。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct RingingV2ClientView {
+    pub client_session_id: String,
+    /// 稳定身份(device token 反推的 `device_id`,admin 为自报 id)。
+    pub instance_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_kind: Option<RingingV2ClientKind>,
+    /// 该身份名下 attach 的会话数。
+    pub attached_sessions: usize,
+    /// 距 lease 过期剩余毫秒;调用方以此决定展示与轮询节奏。
+    pub expires_in_ms: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct RingingV2OpenRequest {
@@ -321,6 +337,8 @@ pub struct RingingV2OpenRequest {
     pub command_contract_revision: String,
     /// 客户端预期的读模型/事件词表代际;同样 open 阶段预检。
     pub session_contract_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_kind: Option<RingingV2ClientKind>,
 }
 
 impl RingingV2OpenRequest {
@@ -331,7 +349,14 @@ impl RingingV2OpenRequest {
             client_instance_id: client_instance_id.into(),
             command_contract_revision: COMMAND_CONTRACT_REVISION.to_string(),
             session_contract_revision: SESSION_CONTRACT_REVISION.to_string(),
+            client_kind: None,
         }
+    }
+
+    /// 声明客户端种类(presence/诊断;不参与信任判定)。
+    pub fn with_kind(mut self, kind: RingingV2ClientKind) -> Self {
+        self.client_kind = Some(kind);
+        self
     }
 
     /// Schema/version/revision gate mirroring the daemon open handler's
@@ -681,11 +706,6 @@ pub enum RingingV2CommandResult {
     AskResolved {
         interaction_id: String,
         outcome: RingingV2AskOutcome,
-    },
-    /// plan review was resolved by the command that owns this receipt.
-    PlanReviewResolved {
-        interaction_id: String,
-        approved: bool,
     },
     /// tool permission was resolved by the command that owns this receipt.
     PermissionResolved {

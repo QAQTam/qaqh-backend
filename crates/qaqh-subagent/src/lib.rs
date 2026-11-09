@@ -1811,7 +1811,6 @@ mod tests {
             call_id: "call-subagent".to_string(),
             session_id: "parent-seed".to_string(),
             workspace_root: std::path::PathBuf::from("/tmp/workspace"),
-            mode: qaqh_tool_core::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::permission::PermissionLevel::SkipPermissions,
             sandbox: qaqh_tool_core::tool_api::SandboxMode::Main,
             sandbox_spec: qaqh_tool_core::tool_api::SandboxSpec::workspace_write(

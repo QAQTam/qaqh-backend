@@ -79,7 +79,7 @@ pub(crate) async fn handle_open_v2(
         .leases
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .open(client_session_id.clone(), instance_key);
+        .open(client_session_id.clone(), instance_key, request.client_kind);
     let response = RingingV2OpenResponse {
         schema: RINGING_SCHEMA.into(),
         version: RINGING_V2_VERSION,
@@ -375,19 +375,10 @@ pub(crate) async fn handle_pending_approvals_v2(
         },
         None => None,
     };
-    // 引擎的模态优先级是 plan 先于 ask（PlanReview 挂起期间 ask 尚不可应答），
-    // 而同一挂起内 fact 的落盘序是 ask 在 plan 之前——选取必须按引擎优先级
-    // 而非 fact 顺序，否则 ask 卡会遮住真正可应答的 plan 卡。
     let interaction = interactions
         .iter()
         .filter(pending)
-        .find(|interaction| interaction.kind == InteractionKind::Plan)
-        .or_else(|| {
-            interactions
-                .iter()
-                .filter(pending)
-                .find(|interaction| interaction.kind == InteractionKind::Ask)
-        });
+        .find(|interaction| interaction.kind == InteractionKind::Ask);
     let pending_interaction = match interaction {
         Some(interaction) => {
             let details = match interaction_body_value(&state, &session_id, &interaction.request) {
@@ -801,8 +792,7 @@ fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<Interact
             Some(InteractionTarget::CallId(tool_call_id))
         }
         qaqh_ringing::RingingCommand::InteractionAskRespond { interaction_id, .. }
-        | qaqh_ringing::RingingCommand::InteractionAskDismiss { interaction_id }
-        | qaqh_ringing::RingingCommand::PlanReviewRespond { interaction_id, .. } => {
+        | qaqh_ringing::RingingCommand::InteractionAskDismiss { interaction_id } => {
             Some(InteractionTarget::InteractionId(interaction_id))
         }
         _ => None,
@@ -870,18 +860,6 @@ fn command_result_for(
             Some(RingingV2CommandResult::AskResolved {
                 interaction_id,
                 outcome: RingingV2AskOutcome::Dismissed,
-            })
-        }
-        (InteractionKind::Plan, InteractionDecision::Approved) => {
-            Some(RingingV2CommandResult::PlanReviewResolved {
-                interaction_id,
-                approved: true,
-            })
-        }
-        (InteractionKind::Plan, InteractionDecision::Rejected) => {
-            Some(RingingV2CommandResult::PlanReviewResolved {
-                interaction_id,
-                approved: false,
             })
         }
         _ => None,

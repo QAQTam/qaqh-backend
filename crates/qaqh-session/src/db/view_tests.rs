@@ -29,9 +29,6 @@ mod tests {
                     title_source: None,
                     cwd: None,
                     model: None,
-                    effort: None,
-                    profile: None,
-                    mode: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
@@ -102,9 +99,6 @@ mod tests {
                         title_source: Some("user".into()),
                         cwd: None,
                         model: None,
-                        effort: None,
-                        profile: None,
-                        mode: None,
                         tool_mode: None,
                         model_selection: None,
                         custom_tools: None,
@@ -113,7 +107,7 @@ mod tests {
                         ephemeral: false,
                     },
                 )?;
-                store::start_turn(conn, "T1", "SES1", Some("IN1"), Some(r#""plan""#))?;
+                store::start_turn(conn, "T1", "SES1", Some("IN1"))?;
                 store::append_block(
                     conn,
                     &store::NewBlock {

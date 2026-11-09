@@ -6,6 +6,7 @@ use tokio::sync::{Mutex, watch};
 
 use crate::discovery::DiscoveryExt;
 use crate::error::{ClientError, Result};
+use qaqh_ringing::v2::RingingV2ClientKind;
 
 /// 当前 daemon 端点与 Bearer token。
 ///
@@ -20,6 +21,8 @@ pub(crate) struct Credentials {
 /// Ringing v2 session: open + background lease renewal.
 pub struct RingingSession {
     client_instance_id: String,
+    /// open 时自报的客户端种类(presence/诊断;不参与信任判定)。
+    client_kind: Option<RingingV2ClientKind>,
     /// 可热更新：daemon 重启会换端口与随机 token，靠 [`Self::refresh_discovery`]
     /// 原地换值。旧的不可变实现只会拿着死端点/旧 token 永久重试，客户端再也
     /// 回不去（TUI 侧 BUG-2026-09-14-01 的同款根因）。
@@ -57,10 +60,17 @@ const OPEN_TIMEOUT_SECS: u64 = 10;
 const RENEW_TIMEOUT_SECS: u64 = 10;
 
 impl RingingSession {
-    pub fn new(base_url: String, token: String, http: reqwest::Client, client_instance_id: String) -> Self {
+    pub fn new(
+        base_url: String,
+        token: String,
+        http: reqwest::Client,
+        client_instance_id: String,
+        client_kind: Option<RingingV2ClientKind>,
+    ) -> Self {
         let (session_ctx, _) = watch::channel(None);
         Self {
             client_instance_id,
+            client_kind,
             credentials: std::sync::RwLock::new(Credentials {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 token,
@@ -137,9 +147,14 @@ impl RingingSession {
             // 排队）而响应迟迟不来——无超时会让 open 永久挂起，进而卡死桥的
             // rebuild 循环（rebuilding 永不复位，所有请求被拒）。
             .timeout(std::time::Duration::from_secs(OPEN_TIMEOUT_SECS))
-            .json(&qaqh_ringing::RingingV2OpenRequest::new(
-                client_instance_id.clone(),
-            ))
+            .json(&{
+                let request =
+                    qaqh_ringing::RingingV2OpenRequest::new(client_instance_id.clone());
+                match self.client_kind {
+                    Some(kind) => request.with_kind(kind),
+                    None => request,
+                }
+            })
             .send()
             .await?;
         if !response.status().is_success() {
@@ -365,7 +380,13 @@ mod tests {
 
     fn session(base_url: &str, token: &str) -> RingingSession {
         crate::client::ensure_crypto_provider();
-        RingingSession::new(base_url.into(), token.into(), reqwest::Client::new(), "test-instance".into())
+        RingingSession::new(
+            base_url.into(),
+            token.into(),
+            reqwest::Client::new(),
+            "test-instance".into(),
+            None,
+        )
     }
 
     /// 默认**不得**采纳本机 `daemon.json`。
