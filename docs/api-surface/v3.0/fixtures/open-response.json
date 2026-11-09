@@ -1,0 +1,19 @@
+{
+  "schema": "qaqh.Ringing",
+  "version": 2,
+  "accepted": true,
+  "client_session_id": "client-session-fixture",
+  "server_epoch": "fixture-epoch",
+  "lease_ttl_ms": 30000,
+  "renew_interval_ms": 10000,
+  "capabilities": {
+    "subscribe": true,
+    "interact": true,
+    "service": true,
+    "content": true,
+    "single_stream": true,
+    "pairing": false
+  },
+  "command_contract_revision": "ringing-commands-7",
+  "session_contract_revision": "ringing-session-2"
+}
