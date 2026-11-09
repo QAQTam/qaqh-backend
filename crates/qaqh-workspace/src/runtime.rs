@@ -3,7 +3,7 @@
 //! Knife-1 step 2: per-actor state moved from process-wide `static`s into
 //! **thread-local** slots. Each in-process actor runs its Loop on its own daemon
 //! thread and tool execution is synchronous on that actor thread, so
-//! [`RUNTIME_CTX`], [`ACTOR_TOOL_MANAGER`], [`AGENT_MODE`], the sandbox flag and
+//! [`RUNTIME_CTX`], [`ACTOR_TOOL_MANAGER`], the sandbox flag and
 //! the tool-result fold policy live per-thread and give concurrent actors real
 //! isolation without `ACTOR_SERIAL`. 工具运行的显式上下文经 `ToolCallContext`
 //! 显式传递，不再落成线程局部视图。 The process-level [`TOOL_MANAGER`] stays as
@@ -11,7 +11,6 @@
 //! CLI).
 
 use qaqh_types::ToolDef;
-use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -41,11 +40,6 @@ thread_local! {
     static ACTOR_TOOL_MANAGER: std::cell::RefCell<Option<Arc<Mutex<crate::ToolManager>>>> = const { std::cell::RefCell::new(None) };
 }
 
-// Agent operating mode: 0=Code(默认), 1=Plan, 2=Code(旧编码兼容). Per-actor.
-thread_local! {
-    static AGENT_MODE: Cell<u8> = const { Cell::new(0) };
-}
-
 pub fn set_context(session: &str, permission_level: u8) {
     crate::set_current_session(session);
     RUNTIME_CTX.with(|ctx| {
@@ -62,15 +56,6 @@ pub fn clear_context() {
 
 pub fn context() -> Option<RuntimeContext> {
     RUNTIME_CTX.with(|ctx| ctx.borrow().clone())
-}
-
-pub fn set_mode(mode: u8) {
-    AGENT_MODE.with(|slot| slot.set(mode));
-}
-
-/// Snapshot the current agent mode for an explicit runtime context.
-pub fn current_mode() -> u8 {
-    AGENT_MODE.with(|slot| slot.get())
 }
 
 /// Worker scope carrying one explicit tool context plus the non-SDK runtime
@@ -138,14 +123,6 @@ impl ToolExecutionScope {
                 }),
             )
         });
-        let previous_mode = AGENT_MODE.with(|slot| {
-            let prev = slot.get();
-            slot.set(match self.context.mode {
-                crate::tool_api::AgentMode::Plan => 1,
-                crate::tool_api::AgentMode::Code => 0,
-            });
-            prev
-        });
         let previous_sandbox = crate::authorization::is_subagent_sandbox();
         crate::authorization::set_subagent_sandbox(matches!(
             self.context.sandbox,
@@ -156,7 +133,6 @@ impl ToolExecutionScope {
             previous_policy,
             previous_execution,
             previous_runtime,
-            previous_mode,
             previous_sandbox,
         }
     }
@@ -169,7 +145,6 @@ pub struct ToolExecutionScopeGuard {
     previous_policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
     previous_execution: Option<qaqh_permission::ExecutionContext>,
     previous_runtime: Option<RuntimeContext>,
-    previous_mode: u8,
     previous_sandbox: bool,
 }
 
@@ -183,7 +158,6 @@ impl Drop for ToolExecutionScopeGuard {
         RUNTIME_CTX.with(|slot| {
             *slot.borrow_mut() = self.previous_runtime.take();
         });
-        AGENT_MODE.with(|slot| slot.set(self.previous_mode));
         crate::authorization::set_subagent_sandbox(self.previous_sandbox);
     }
 }
@@ -197,8 +171,6 @@ impl Drop for ToolExecutionScopeGuard {
 pub struct ToolCtx {
     pub session_id: String,
     pub permission_level: u8,
-    /// Agent operating mode (0=Code, 1=Plan, 2=Code legacy alias) recorded at dispatch time.
-    pub mode: u8,
     /// Workspace root for this execution. `None` = keep the current process
     /// workspace (the in-process agent path).
     pub workspace_root: Option<String>,
@@ -206,12 +178,11 @@ pub struct ToolCtx {
 
 impl ToolCtx {
     /// Context for an already-admitted caller (CLI/tests): full permission,
-    /// Code mode, current process workspace.
+    /// current process workspace.
     pub fn admitted(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
             permission_level: 3,
-            mode: 0,
             workspace_root: None,
         }
     }
@@ -220,13 +191,11 @@ impl ToolCtx {
 /// RAII guard restoring the thread's previous ambient context.
 pub struct ToolCtxGuard {
     previous: Option<RuntimeContext>,
-    restore_mode: u8,
 }
 
 impl Drop for ToolCtxGuard {
     fn drop(&mut self) {
         RUNTIME_CTX.with(|ctx| *ctx.borrow_mut() = self.previous.take());
-        AGENT_MODE.with(|slot| slot.set(self.restore_mode));
     }
 }
 
@@ -242,15 +211,7 @@ pub fn install_tool_ctx(ctx: &ToolCtx) -> ToolCtxGuard {
         });
         previous
     });
-    let restore_mode = AGENT_MODE.with(|slot| {
-        let previous = slot.get();
-        slot.set(ctx.mode);
-        previous
-    });
-    ToolCtxGuard {
-        previous,
-        restore_mode,
-    }
+    ToolCtxGuard { previous }
 }
 
 /// 运行时重设工具白名单（工具模式 Standard/Minimal/Custom 的入口）。

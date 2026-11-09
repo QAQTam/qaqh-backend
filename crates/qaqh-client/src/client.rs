@@ -19,9 +19,10 @@ use crate::types::{CommandOptions, ContentRef, RingingCommand, RingingCommandAck
 use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
 use qaqh_ringing::v2::{
-    RingingV2CommandAck, RingingV2CommandStatus, RingingV2ContentUploadResponse,
-    RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2PairRequest, RingingV2PairResponse,
-    RingingV2PairTokenRequest, RingingV2PairTokenResponse,
+    RingingV2ClientKind, RingingV2CommandAck, RingingV2CommandStatus,
+    RingingV2ContentUploadResponse, RingingV2DeviceWire, RingingV2DevicesResponse,
+    RingingV2PairRequest, RingingV2PairResponse, RingingV2PairTokenRequest,
+    RingingV2PairTokenResponse,
 };
 use qaqh_ringing::RINGING_V2_BASE_PATH;
 use qaqh_ringing_contract::fact::ContentHash;
@@ -154,6 +155,8 @@ pub struct RemoteEndpoint {
 pub struct ClientOptions {
     /// Logical shell identity, stable across lease negotiation and durable retries.
     pub client_instance_id: String,
+    /// open 时自报的客户端种类(presence/诊断;不参与信任判定)。
+    pub client_kind: Option<RingingV2ClientKind>,
     pub handlers: ClientHandlers,
     /// Spawn `qaqh-daemon run` when no discovery file exists yet.
     pub launch_daemon_if_missing: bool,
@@ -182,6 +185,7 @@ impl Default for ClientOptions {
     fn default() -> Self {
         Self {
             client_instance_id: uuid::Uuid::new_v4().to_string(),
+            client_kind: None,
             handlers: ClientHandlers::default(),
             launch_daemon_if_missing: false,
             daemon_path: None,
@@ -319,6 +323,7 @@ impl Client {
             token.clone(),
             http.clone(),
             options.client_instance_id.clone(),
+            options.client_kind,
         ));
         // 远端直连模式不得从本机 `daemon.json` 刷新凭据（会覆盖成另一台机器
         // 的记录）；只有本地发现模式才允许 daemon 重启后的自愈。

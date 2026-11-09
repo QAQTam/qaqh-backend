@@ -7,7 +7,8 @@ mod types;
 pub use types::{
     COMMAND_CONTRACT_REVISION, SESSION_CONTRACT_REVISION, CommandPrecondition, CommandTarget,
     ProviderUpsertDto, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
-    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
+    RingingV2Capabilities, RingingV2ClientKind, RingingV2ClientView, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandResult,
     RingingV2CommandStatus, RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind,
     RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DeviceWire,
     RingingV2DevicesResponse, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,

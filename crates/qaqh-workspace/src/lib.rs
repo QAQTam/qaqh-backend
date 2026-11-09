@@ -110,7 +110,7 @@ pub use qaqh_types::{
 // ── Global state ──
 
 // ── 全局状态：已随权限引擎拆至 qaqh-permission（P2 拆分，研究文档 §4-c）。
-// 进程级会话/工作区/取消状态 + actor thread-local + PLAN_BLOCKED 经下方
+// 进程级会话/工作区/取消状态 + actor thread-local 经下方
 // re-export 保持 `qaqh_workspace::X` 路径兼容；TEST_RUNTIME_SERIAL 仅服务
 // 门面自身测试（journal/confirm_apply/copy_range），留在此处。
 
@@ -120,8 +120,8 @@ pub static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
 pub use qaqh_permission::{
-    PLAN_BLOCKED, clear_actor_context, clear_cancel, current_session, current_workspace,
-    display_path, is_actor_context, is_cancel, pop_thread_workspace, push_thread_workspace,
+    clear_actor_context, clear_cancel, current_session, current_workspace, display_path,
+    is_actor_context, is_cancel, pop_thread_workspace, push_thread_workspace,
     resolve_workspace_path, set_actor_context, set_cancel, set_current_session, set_workspace,
 };
 
@@ -149,8 +149,6 @@ pub enum ToolError {
     PermissionDenied { reason: String },
     /// Operation cancelled by user.
     Cancelled,
-    /// Blocked by operating mode (e.g. PLAN mode blocks write/exec).
-    BlockedByMode { mode: String, tool: String },
     /// Invalid or malformed arguments.
     InvalidArgs { message: String },
     /// IO / filesystem error.
@@ -203,9 +201,6 @@ impl std::fmt::Display for ToolError {
             }
             Self::Cancelled => {
                 write!(f, "[CANCELLED]")
-            }
-            Self::BlockedByMode { mode, tool } => {
-                write!(f, "[BLOCKED] {mode} mode: '{tool}' is not allowed")
             }
             Self::InvalidArgs { message } => {
                 write!(f, "[ERROR] invalid arguments: {message}")
@@ -264,7 +259,6 @@ impl ToolError {
             Self::SessionMismatch => "session_mismatch",
             Self::PermissionDenied { .. } => "permission_denied",
             Self::Cancelled => "cancelled",
-            Self::BlockedByMode { .. } => "blocked_by_mode",
             Self::InvalidArgs { .. } => "invalid_arguments",
             Self::Io { .. } => "io_error",
             Self::ResourceMismatch => "resource_mismatch",
@@ -286,7 +280,6 @@ impl ToolError {
             Self::SessionMismatch => (false, None),
             Self::PermissionDenied { .. } => (false, None),
             Self::Cancelled => (false, None),
-            Self::BlockedByMode { .. } => (false, None),
             Self::InvalidArgs { .. } => (false, None),
             Self::Io { .. } => (false, None),
             Self::ResourceMismatch => (false, None),

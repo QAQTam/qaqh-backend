@@ -447,11 +447,6 @@ impl QaqhService {
         match command {
             RingingCommand::ConfigSave { .. }
             | RingingCommand::ConfigSetPermissionLevel { .. }
-            | RingingCommand::ProfileCreate { .. }
-            | RingingCommand::ProfileSetDefault { .. }
-            | RingingCommand::ProfileApply { .. }
-            | RingingCommand::ProfileSaveCurrent { .. }
-            | RingingCommand::ProfileDelete { .. }
             | RingingCommand::DiagnosticsMemoryStart { .. }
             | RingingCommand::DiagnosticsMemoryStop { .. } => {
                 handlers::system::handle_ringing(self, command)
@@ -670,12 +665,6 @@ impl QaqhService {
                 title: Some(row.title).filter(|title| !title.is_empty()),
                 cwd: row.cwd,
                 model: row.model.unwrap_or_default(),
-                effort: row.effort,
-                profile: row.profile,
-                mode: row
-                    .mode
-                    .and_then(|mode| mode.parse::<u8>().ok())
-                    .unwrap_or(0),
                 tool_mode: row.tool_mode.unwrap_or_default(),
                 model_selection: row.model_selection,
                 settings_revision: row.settings_revision,

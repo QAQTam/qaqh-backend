@@ -62,7 +62,7 @@ mod tests {
     use crate::permission::PermissionLevel;
     use crate::permission::ToolCategory;
     use crate::tool_api::{
-        AgentMode, CancellationToken, OutputBudget, SandboxMode, SandboxSpec, ToolCallSource,
+        CancellationToken, OutputBudget, SandboxMode, SandboxSpec, ToolCallSource,
         ToolCapabilities, ToolExposure, ToolName, ToolSource,
     };
 
@@ -106,7 +106,6 @@ mod tests {
             call_id: "c1".to_owned(),
             session_id: "s1".to_owned(),
             workspace_root: std::path::PathBuf::from("/tmp/dyn-ws"),
-            mode: AgentMode::Code,
             permission_level: PermissionLevel::ReadOnly,
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::workspace_write(std::path::PathBuf::from("/tmp/dyn-ws")),

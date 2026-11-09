@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 
 use qaqh_ringing_contract::fact::{
-    ActivityState, InteractionDecision, SessionId, ToolCallId, ToolMetrics, TurnId, TurnMode,
+    ActivityState, InteractionDecision, SessionId, ToolCallId, ToolMetrics, TurnId,
 };
 use qaqh_ringing_contract::state::{
     ExecSessionState, ExecSessionView, InteractionResolution, InteractionView, SessionState,
@@ -204,7 +204,7 @@ fn rusqlite_error(error: rusqlite::Error) -> DbError {
 
 fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbError> {
     let mut stmt = conn.prepare(
-        "SELECT turn_id, input_id, mode, phase, status, outcome_json FROM turns
+        "SELECT turn_id, input_id, phase, status, outcome_json FROM turns
          WHERE session_id = ?1 ORDER BY seq",
     )?;
     let rows = stmt.query_map([session_id], |row| {
@@ -212,14 +212,13 @@ fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbEr
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<String>>(2)?,
-            row.get::<_, Option<String>>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, Option<String>>(5)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
         ))
     })?;
     rows.map(|row| {
-        let (turn_id, input_id, mode, phase, status, outcome_json) = row?;
-        turn_view(turn_id, input_id, mode, phase, status, outcome_json)
+        let (turn_id, input_id, phase, status, outcome_json) = row?;
+        turn_view(turn_id, input_id, phase, status, outcome_json)
     })
     .collect()
 }
@@ -231,7 +230,7 @@ fn load_turn(
 ) -> Result<Option<TurnView>, DbError> {
     let row = conn
         .query_row(
-            "SELECT turn_id, input_id, mode, phase, status, outcome_json
+            "SELECT turn_id, input_id, phase, status, outcome_json
              FROM turns WHERE session_id = ?1 AND turn_id = ?2",
             rusqlite::params![session_id, turn_id],
             |row| {
@@ -239,15 +238,14 @@ fn load_turn(
                     row.get::<_, String>(0)?,
                     row.get::<_, Option<String>>(1)?,
                     row.get::<_, Option<String>>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
                 ))
             },
         )
         .optional()?;
-    row.map(|(turn_id, input_id, mode, phase, status, outcome_json)| {
-        turn_view(turn_id, input_id, mode, phase, status, outcome_json)
+    row.map(|(turn_id, input_id, phase, status, outcome_json)| {
+        turn_view(turn_id, input_id, phase, status, outcome_json)
     })
     .transpose()
 }
@@ -255,7 +253,6 @@ fn load_turn(
 fn turn_view(
     turn_id: String,
     input_id: Option<String>,
-    mode: Option<String>,
     phase: Option<String>,
     status: String,
     outcome_json: Option<String>,
@@ -270,13 +267,6 @@ fn turn_view(
             })?)
         }
         _ => None,
-    };
-    let mode = match mode {
-        Some(text) => Some(
-            serde_json::from_str::<TurnMode>(&text)
-                .map_err(|error| DbError::Corrupt(format!("turn {turn_id} mode: {error}")))?,
-        ),
-        None => None,
     };
     let phase = match outcome {
         Some(_) => None,
@@ -295,7 +285,6 @@ fn turn_view(
     Ok(TurnView {
         turn_id: TurnId::new(turn_id),
         input_id: input_id.map(qaqh_ringing_contract::fact::InputId::new),
-        mode,
         phase,
         outcome,
     })

@@ -12,7 +12,7 @@ use crate::fact::{
     ActivityState, ActorRef, AssistantBlockKind, BlockId, ContentRef, ContentValue, ExecSessionId,
     InputId, InputPurpose, InteractionChoice, InteractionDecision, InteractionId, InteractionKind,
     InterruptReason, SessionId, SubagentTerminalStatus, ToolCallId, ToolCallOutcome, ToolMetrics,
-    TurnError, TurnId, TurnMode, TurnTerminal, UsageInfo,
+    TurnError, TurnId, TurnTerminal, UsageInfo,
 };
 
 /// 会话当前状态的唯一权威快照。`seq` 是"下一个将分配的事件序号"(exclusive
@@ -91,8 +91,6 @@ pub struct TurnView {
     pub turn_id: TurnId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_id: Option<InputId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<TurnMode>,
     /// 非终态 phase;有 outcome 时必须为 None。等待迁移靠事件,不靠前端定时器。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<TurnPhase>,

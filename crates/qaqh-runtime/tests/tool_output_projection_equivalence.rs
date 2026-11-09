@@ -32,7 +32,6 @@ fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: session_id.into(),
         permission_level: 1,
-        mode: 0,
         workspace_root: None,
     };
     let executed = qaqh_workspace::execution::execute_with_context(

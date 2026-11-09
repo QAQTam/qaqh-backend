@@ -74,13 +74,6 @@ pub struct SessionMeta {
     pub updated_at: u64,
     pub model: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
-    /// 会话选定的 BYOK profile（`config.toml` 的 `[profiles.<name>]`）。
-    /// `None`/空 = 跟随全局 `active_profile`。它决定本会话的
-    /// endpoint/model/wire，以及（若该 profile 自带密钥）用哪把 key。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_selection: Option<ModelSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model_selection: Option<ModelSelection>,
@@ -102,11 +95,7 @@ pub struct SessionMeta {
     /// marker has been applied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_covered_through_msg_id: Option<u64>,
-    /// Agent operating mode: 0=Code(默认), 1=Plan, 2=Code(旧编码兼容).
-    /// Persisted so PLAN/CODE mode survives agent restart within the same session.
-    #[serde(default)]
-    pub mode: u8,
-    /// 工具模式：standard | minimal | custom（PLAN-TOOL-MODES.md）。
+    /// 工具模式：standard | minimal | custom。
     /// 空串 = standard（旧 session 零迁移兼容）；custom 时 `custom_tools` 生效。
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_mode: String,
@@ -340,7 +329,7 @@ mod tests {
     fn session_list_entry_wire_keys_are_locked() {
         let entry = SessionListEntry {
             meta: fully_populated_meta(),
-            status: SessionRunStatus::Working,
+            status: SessionRunStatus::Running,
             workspace_id: Some("w1".into()),
         };
         let wire = serde_json::to_value(&entry).expect("serialize");
@@ -403,7 +392,7 @@ mod tests {
     fn session_list_entry_recovers_fields_the_hand_parse_dropped() {
         let entry = SessionListEntry {
             meta: fully_populated_meta(),
-            status: SessionRunStatus::Working,
+            status: SessionRunStatus::Running,
             workspace_id: Some("w1".into()),
         };
         let wire = serde_json::to_value(&entry).expect("serialize");
@@ -421,7 +410,7 @@ mod tests {
         assert_eq!(back.meta.cache_reported_requests, 7);
 
         // 运行期字段是**类型上的字段**，不再靠 `value["running"]`。
-        assert_eq!(back.status, SessionRunStatus::Working);
+        assert_eq!(back.status, SessionRunStatus::Running);
         assert_eq!(back.workspace_id.as_deref(), Some("w1"));
 
         // 往返无损（flatten 下 Option/skip_serializing_if 语义不得变）。
@@ -446,20 +435,23 @@ mod tests {
     #[test]
     fn session_run_status_wire_vocabulary_is_locked() {
         assert_eq!(
-            serde_json::to_value(SessionRunStatus::WaitingPermission).unwrap(),
-            serde_json::json!("waiting_permission")
+            serde_json::to_value(SessionRunStatus::WaitingUser).unwrap(),
+            serde_json::json!("waiting_user")
         );
         assert_eq!(
             serde_json::to_value(SessionRunStatus::NotRunning).unwrap(),
             serde_json::json!("not_running")
         );
         assert_eq!(
-            serde_json::from_value::<SessionRunStatus>(serde_json::json!("waiting_plan")).unwrap(),
-            SessionRunStatus::WaitingPlan
+            serde_json::from_value::<SessionRunStatus>(serde_json::json!("running")).unwrap(),
+            SessionRunStatus::Running
         );
         // 没有 `#[serde(other)]` 兜底臂：未知取值必须**响亮地失败**而不是
         // 静默降级成一个错的状态（对齐 InteractionKind 的决策记录）。
-        assert!(serde_json::from_value::<SessionRunStatus>(serde_json::json!("running")).is_err());
+        // 用已从词表移除的 `waiting_plan` 作反例。
+        assert!(
+            serde_json::from_value::<SessionRunStatus>(serde_json::json!("waiting_plan")).is_err()
+        );
     }
 
     /// 展示标题口径（G2 一并定死，三端共用）。

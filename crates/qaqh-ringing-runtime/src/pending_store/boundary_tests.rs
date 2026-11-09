@@ -200,8 +200,8 @@ fn receipts_reconcile_across_reopen_for_same_identity_but_not_other_identities()
     // §3/§5：owner 是稳定身份键，同一设备的连接（含重开后的新 cs）并存且
     // 都能对账；不同设备的身份冒用同一 command_id 仍被指纹守卫拒绝。
     let mut leases = super::super::lease_store::RingingLeaseStore::new();
-    leases.open("cs-1".into(), OWNER.into());
-    leases.open("cs-2".into(), OWNER.into());
+    leases.open("cs-1".into(), OWNER.into(), None);
+    leases.open("cs-2".into(), OWNER.into(), None);
     assert!(leases.is_active_session("cs-1"), "同身份多连接并存（§3）");
     assert!(leases.is_active_session("cs-2"));
     // 同身份重复提交（同 command_id + 同指纹 + 同 owner）→ 原回执（非错误）。

@@ -282,7 +282,6 @@ pub struct InputAccepted {
 pub struct TurnStarted {
     pub turn_id: TurnId,
     pub input_id: InputId,
-    pub mode: TurnMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recovery_ref: Option<RecoveryRef>,
 }
@@ -684,10 +683,6 @@ pub struct SessionMetadataPatch {
     pub parent_session_id: Option<SessionId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema_caps: Option<Vec<String>>,
-    /// Session-level BYOK profile. Empty string clears it (follow the global
-    /// `active_profile`); absent leaves it untouched.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
     /// 会话模型选择（新 BYOK 目录体系）：`Use` 设定，`Inherit` 清除并跟随
     /// 全局 `default_model_selection`；缺省 = 不动。旧 profile 名体系废除后
     /// 这是唯一的会话级模型选择通道。
@@ -696,12 +691,6 @@ pub struct SessionMetadataPatch {
     /// 客户端最近一次显式请求的选择（审计位）；清除语义同上。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_model_selection: Option<SettingValue<qaqh_types::ModelSelection>>,
-    /// Reasoning effort override. Empty string clears it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
-    /// 0 = code, 1 = plan.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<u8>,
     /// standard | minimal | custom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_mode: Option<String>,
@@ -804,7 +793,6 @@ pub enum RecoveryAction {
     TurnStarted {
         turn_id: TurnId,
         input_id: InputId,
-        mode: TurnMode,
         recovery_ref: RecoveryRef,
     },
     ToolFinished {
@@ -899,15 +887,6 @@ pub enum InputPurpose {
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum TurnMode {
-    Normal,
-    Plan,
-    Ask,
-}
-
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum AssistantBlockKind {
     Reasoning,
     Answer,
@@ -980,7 +959,6 @@ pub enum ToolTerminalStatus {
 #[serde(rename_all = "snake_case")]
 pub enum InteractionKind {
     Ask,
-    Plan,
     Permission,
 }
 

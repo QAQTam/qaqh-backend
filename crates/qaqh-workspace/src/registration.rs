@@ -31,7 +31,6 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // P2(d)：向工具组 crate 注入门面线程态钩子（OnceLock 幂等，首个注册者生效）。
     // 回调在调用线程执行，thread-local（runtime ctx / fold policy）语义与拆分前一致。
     qaqh_file_tools::hooks::set_ambient_provider(|| qaqh_file_tools::hooks::AmbientRuntime {
-        mode: crate::runtime::current_mode(),
         permission_level: crate::runtime::context()
             .map(|context| context.permission_level)
             .unwrap_or(0),

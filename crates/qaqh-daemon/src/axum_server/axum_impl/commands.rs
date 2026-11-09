@@ -343,8 +343,6 @@ async fn dispatch(
         RingingCommand::SessionCreate {
             cwd,
             title,
-            profile,
-            effort,
             model_selection,
             tool_mode,
             custom_tools,
@@ -352,8 +350,6 @@ async fn dispatch(
             let created = match service.create_session_command(
                 cwd.clone(),
                 title.clone(),
-                profile.clone(),
-                effort.clone(),
                 model_selection.clone(),
                 tool_mode.clone(),
                 custom_tools.clone(),
@@ -551,11 +547,6 @@ async fn dispatch(
         }
         RingingCommand::ConfigSave { .. }
         | RingingCommand::ConfigSetPermissionLevel { .. }
-        | RingingCommand::ProfileCreate { .. }
-        | RingingCommand::ProfileSetDefault { .. }
-        | RingingCommand::ProfileApply { .. }
-        | RingingCommand::ProfileSaveCurrent { .. }
-        | RingingCommand::ProfileDelete { .. }
         | RingingCommand::WorkspaceSet { .. }
         | RingingCommand::WorkspaceCreate { .. }
         | RingingCommand::WorkspaceRename { .. }

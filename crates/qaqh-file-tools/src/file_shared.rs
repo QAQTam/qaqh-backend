@@ -71,6 +71,7 @@ fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
+    // SAFETY: 两个宽字符串缓冲以 NUL 结尾且在调用期间存活，MoveFileExW 只读。
     unsafe {
         MoveFileExW(
             PCWSTR::from_raw(source.as_ptr()),

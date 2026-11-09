@@ -5,26 +5,29 @@ use std::path::{Path, PathBuf};
 use qaqh_ringing::{
     CommandTarget, RingingCommand, RingingCommandAck, RingingCommandAckStatus, RingingCommandState,
     RingingCommandStatus, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
-    RingingV2Capabilities, RingingV2CommandAck, RingingV2CommandEnvelope, RingingV2CommandResult,
-    RingingV2CommandStatus, RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind,
-    RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DriverClaimResponse,
-    RingingV2DriverReleaseResponse, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
-    RingingV2PendingInteractionView, RingingV2PendingPermissionView, RingingV2ResyncRequired,
-    RingingV2SyncResult,
+    RingingV2Capabilities, RingingV2ClientKind, RingingV2ClientView, RingingV2CommandAck,
+    RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
+    RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
+    RingingV2DeviceChallenges, RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse,
+    RingingV2ExistingResult, RingingV2LeaseRenewResponse, RingingV2OpenRequest,
+    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteractionView,
+    RingingV2PendingPermissionView, RingingV2ResyncRequired, RingingV2SyncResult,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use ts_rs::{Config, TS};
 
 const FORMAT_VERSION: u32 = 1;
-const GENERATOR_VERSION: &str = "qaqh-contract-export/0.1.0";
+const GENERATOR_VERSION: &str = "qaqh-contract-export/0.2.0";
 
 mod account_fixtures;
 #[cfg(test)]
 mod artifact_tests;
 mod client_fixtures;
 mod coverage;
+// cs_backend must run after the ts-rs type export: it parses the generated
+// TypeScript subset and re-encodes the same wire contract as C# sources.
+mod cs_backend;
 mod validation;
 mod wire_fixtures;
 
@@ -225,16 +228,17 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixtures(stage)?;
     coverage::write(stage)?;
+    cs_backend::write(stage)?;
     write_manifest(stage)?;
     Ok(())
 }
 
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
-        ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
+        ClientsListParams, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
         ExecSessionListParams, ExecSessionListResult, FsEntry, FsListParams, FsReadParams,
-        FsReadResult, PlanItemStatusView, PlanReadItem, PlanReadParams, ProfileListParams,
-        ProfileListSnapshot, SessionActivityParams, SessionDashboard, SessionDashboardParams,
+        FsReadResult, PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams,
+        SessionDashboard, SessionDashboardParams,
         SessionDashboardTask, SessionGetActivityParams, SessionListParams, SessionMetaParams,
         SessionToolActivity, SessionTurnParams, SkillCatalogDiagnostic, SkillCatalogEntry,
         SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoCountsSnapshot,
@@ -314,6 +318,20 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "service-daemon-version-result.json",
         &env!("CARGO_PKG_VERSION").to_owned(),
+    )?;
+    // `clients.list` 是 daemon 基础设施查询（活跃 lease 视图）；条目形状即
+    // `RingingV2ClientView`，与 devices/pair fixtures 同一合成身份。
+    write_fixture(stage, "service-clients-list-params.json", &ClientsListParams {})?;
+    write_fixture(
+        stage,
+        "service-clients-list-result.json",
+        &vec![RingingV2ClientView {
+            client_session_id: "client-session-fixture".to_owned(),
+            instance_key: "device-fixture".to_owned(),
+            client_kind: Some(RingingV2ClientKind::Desktop),
+            attached_sessions: 1,
+            expires_in_ms: 30_000,
+        }],
     )?;
     write_fixture(
         stage,
@@ -477,33 +495,6 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "service-config-load-result.json",
         &qaqh_config_api::ConfigDto::default(),
-    )?;
-    write_fixture(
-        stage,
-        "service-profile-list-params.json",
-        &ProfileListParams {},
-    )?;
-    write_fixture(
-        stage,
-        "service-profile-list-result.json",
-        &ProfileListSnapshot {
-            profiles: [(
-                "synthetic-profile".to_owned(),
-                qaqh_config_api::ProfileSummaryDto {
-                    name: "synthetic-profile".to_owned(),
-                    model: "synthetic-model".to_owned(),
-                    base_url: "https://provider.invalid/v1".to_owned(),
-                    wire: "chat".to_owned(),
-                    effort: Some("high".to_owned()),
-                    context_length: 128_000,
-                    max_tokens: 8_192,
-                    api_key_set: false,
-                    credential: "api_key".to_owned(),
-                },
-            )]
-            .into_iter()
-            .collect(),
-        },
     )?;
     write_fixture(
         stage,
@@ -747,6 +738,8 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         RingingCommandStatus,
         RingingV2AskOutcome,
         RingingV2Capabilities,
+        RingingV2ClientKind,
+        RingingV2ClientView,
         RingingV2CommandAck,
         RingingV2CommandEnvelope,
         RingingV2CommandResult,
@@ -797,6 +790,7 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_types::ToolInterruptionReason,
         qaqh_ringing_contract::TeamResponse,
         qaqh_ringing_runtime::pending_store::ReceiptPolicy,
+        qaqh_runtime::ringing::service_methods::ClientsListParams,
         qaqh_runtime::ringing::service_methods::DaemonVersionParams,
         qaqh_runtime::ringing::service_methods::FsEntry,
         qaqh_runtime::ringing::service_methods::FsListParams,
@@ -816,7 +810,6 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::WorkspaceListParams,
         qaqh_runtime::ringing::service_methods::ConfigLoadParams,
         qaqh_runtime::ringing::service_methods::DiagnosticsMemorySnapshotParams,
-        qaqh_runtime::ringing::service_methods::ProfileListParams,
         qaqh_runtime::ringing::service_methods::SessionDashboardParams,
         qaqh_runtime::ringing::service_methods::SessionDashboard,
         qaqh_runtime::ringing::service_methods::SessionDashboardTask,
@@ -836,7 +829,6 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_memwatch::ComponentMemory,
         qaqh_memwatch::PhaseSample,
         qaqh_memwatch::PhaseKind,
-        qaqh_runtime::ringing::service_methods::ProfileListSnapshot,
         qaqh_ringing_contract::SessionActivity,
         qaqh_ringing_contract::SessionActivityState,
         qaqh_ringing_contract::WorkspaceEntry,
@@ -850,7 +842,6 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // ── 配置 DTO 面（config.load / config.save 的读写形状）──
         qaqh_config_api::ConfigDto,
         qaqh_config_api::ConfigPatch,
-        qaqh_config_api::ProfileSummaryDto,
         qaqh_config_api::SubagentDto,
         qaqh_config_api::SubagentPatch,
         qaqh_config_api::ExecDto,
@@ -1021,6 +1012,10 @@ fn validate_layout(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         "service-map.ts",
         "coverage.json",
         "fixtures/README.md",
+        // C# contract surface must ship alongside the TypeScript one.
+        "cs/ContractConstants.cs",
+        "cs/ContractJson.cs",
+        "cs/RingingV2OpenResponse.cs",
     ] {
         if !stage.join(required).is_file() {
             return Err(format!("missing required artifact {required}").into());

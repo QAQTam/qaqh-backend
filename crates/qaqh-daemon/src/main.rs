@@ -3,6 +3,7 @@
 mod axum_server;
 mod server;
 mod tls;
+mod zed_integration;
 
 use std::io::{Read, Write};
 
@@ -89,7 +90,17 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some("run") | None => {
+        Some("acp") => {
+            // Zed 等 ACP 宿主拉起的 stdio 桥:stdout 是 JSON-RPC 协议通道,
+            // 诊断一律走 stderr/文件日志,不得污染 stdout。
+            let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+            let result = runtime.block_on(qaqh_acp::run_stdio());
+            if let Err(error) = result {
+                eprintln!("qaqh-daemon: {error}");
+                std::process::exit(1);
+            }
+        }
+        Some("run") | Some("--acp") | None => {
             // Preserve the complete interactive PATH for workers; OS/toolchain
             // probing runs once here at daemon startup (populates prompt.rs
             // OS_INFO/TOOLS_INFO for {{OS}}/{{TOOLS}} in the system prompt).
@@ -99,6 +110,23 @@ fn main() {
             install_bundled_skills();
             let capabilities = qaqh_sandbox::configure_from_current_exe();
             log::info!("sandbox capabilities: {capabilities:?}");
+            if args.iter().any(|arg| arg == "--acp") {
+                // 本地一次性接线:把 agent_servers 条目写进 Zed 设置(若 Zed
+                // 在装)。失败只报告,daemon 照常启动。
+                match std::env::current_exe() {
+                    Ok(exe) => match zed_integration::install(&exe) {
+                        Ok(report) => {
+                            println!("Zed 接入:{report}");
+                            log::info!("[zed] {report}");
+                        }
+                        Err(message) => {
+                            println!("Zed 接入未完成:{message}");
+                            log::warn!("[zed] {message}");
+                        }
+                    },
+                    Err(error) => println!("Zed 接入未完成:无法定位本二进制: {error}"),
+                }
+            }
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(server::run());
             // MCP 优雅收尾（同上）：显式 shutdown_all，防子进程孤儿。
@@ -112,7 +140,7 @@ fn main() {
         Some("mcp") => std::process::exit(mcp_cli(&args[1..])),
         Some(command) => {
             eprintln!(
-                "unknown command: {command}; expected run, server, status, stop, todo, or mcp"
+                "unknown command: {command}; expected run [--acp], acp, server, status, stop, todo, or mcp"
             );
             std::process::exit(2);
         }

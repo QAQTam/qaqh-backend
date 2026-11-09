@@ -27,9 +27,6 @@ pub struct NewSession {
     pub title_source: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    pub effort: Option<String>,
-    pub profile: Option<String>,
-    pub mode: Option<String>,
     pub tool_mode: Option<String>,
     pub model_selection: Option<qaqh_types::ModelSelection>,
     pub custom_tools: Option<Vec<String>>,
@@ -42,10 +39,10 @@ pub fn create_session(conn: &mut Connection, session: &NewSession) -> rusqlite::
     let now = now_ms();
     conn.execute(
         "INSERT INTO sessions
-            (session_id, parent_session_id, title, title_source, cwd, model, effort,
-             profile, mode, tool_mode, model_selection, custom_tools_json, skills_json,
+            (session_id, parent_session_id, title, title_source, cwd, model, tool_mode,
+             model_selection, custom_tools_json, skills_json,
              frozen_annotation, ephemeral, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?16)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13)",
         params![
             session.session_id,
             session.parent_session_id,
@@ -53,9 +50,6 @@ pub fn create_session(conn: &mut Connection, session: &NewSession) -> rusqlite::
             session.title_source,
             session.cwd,
             session.model,
-            session.effort,
-            session.profile,
-            session.mode,
             session.tool_mode,
             session
                 .model_selection
@@ -139,9 +133,9 @@ pub fn ensure_session(
     let now = now_ms();
     conn.execute(
         "INSERT INTO sessions
-            (session_id, parent_session_id, title, title_source, cwd, model, effort,
-             profile, mode, tool_mode, ephemeral, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?1, 'user', NULL, NULL, NULL, NULL, NULL, NULL, ?3, ?4, ?4)
+            (session_id, parent_session_id, title, title_source, cwd, model, tool_mode,
+             ephemeral, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?1, 'user', NULL, NULL, NULL, ?3, ?4, ?4)
          ON CONFLICT(session_id) DO NOTHING",
         params![session_id, parent_session_id, i64::from(ephemeral), now],
     )?;
@@ -162,9 +156,6 @@ pub struct SessionRow {
     pub title: String,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    pub effort: Option<String>,
-    pub profile: Option<String>,
-    pub mode: Option<String>,
     pub tool_mode: Option<String>,
     pub model_selection: Option<qaqh_types::ModelSelection>,
     pub custom_tools: Vec<String>,
@@ -179,7 +170,7 @@ pub struct SessionRow {
 
 pub fn session_row(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<SessionRow>> {
     conn.query_row(
-        "SELECT session_id, title, cwd, model, effort, profile, mode, tool_mode,
+        "SELECT session_id, title, cwd, model, tool_mode,
                 model_selection, custom_tools_json, skills_json, frozen_annotation,
                 settings_revision, archived, ephemeral, created_at_ms, updated_at_ms
          FROM sessions WHERE session_id = ?1",
@@ -190,26 +181,23 @@ pub fn session_row(conn: &Connection, session_id: &str) -> rusqlite::Result<Opti
                 title: row.get(1)?,
                 cwd: row.get(2)?,
                 model: row.get(3)?,
-                effort: row.get(4)?,
-                profile: row.get(5)?,
-                mode: row.get(6)?,
-                tool_mode: row.get(7)?,
+                tool_mode: row.get(4)?,
                 model_selection: row
-                    .get::<_, Option<String>>(8)?
+                    .get::<_, Option<String>>(5)?
                     .and_then(|json| serde_json::from_str(&json).ok()),
                 custom_tools: row
-                    .get::<_, Option<String>>(9)?
+                    .get::<_, Option<String>>(6)?
                     .and_then(|json| serde_json::from_str(&json).ok())
                     .unwrap_or_default(),
                 skills: row
-                    .get::<_, Option<String>>(10)?
+                    .get::<_, Option<String>>(7)?
                     .and_then(|json| serde_json::from_str(&json).ok()),
-                frozen_annotation: row.get(11)?,
-                settings_revision: row.get::<_, i64>(12)?.max(0) as u64,
-                archived: row.get::<_, i64>(13)? != 0,
-                ephemeral: row.get::<_, i64>(14)? != 0,
-                created_at_ms: row.get(15)?,
-                updated_at_ms: row.get(16)?,
+                frozen_annotation: row.get(8)?,
+                settings_revision: row.get::<_, i64>(9)?.max(0) as u64,
+                archived: row.get::<_, i64>(10)? != 0,
+                ephemeral: row.get::<_, i64>(11)? != 0,
+                created_at_ms: row.get(12)?,
+                updated_at_ms: row.get(13)?,
             })
         },
     )
@@ -265,9 +253,6 @@ pub struct SessionListRow {
     pub title: String,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    pub effort: Option<String>,
-    pub profile: Option<String>,
-    pub mode: Option<String>,
     pub tool_mode: Option<String>,
     pub model_selection: Option<qaqh_types::ModelSelection>,
     pub settings_revision: u64,
@@ -284,8 +269,8 @@ pub fn list_sessions(
     limit: u32,
 ) -> rusqlite::Result<Vec<SessionListRow>> {
     let mut stmt = conn.prepare(
-        "SELECT session_id, parent_session_id, title, cwd, model, effort, profile,
-                mode, tool_mode, model_selection, settings_revision,
+        "SELECT session_id, parent_session_id, title, cwd, model,
+                tool_mode, model_selection, settings_revision,
                 (SELECT COUNT(*) FROM turns WHERE turns.session_id = sessions.session_id)
                     AS turn_count,
                 archived, ephemeral, created_at_ms, updated_at_ms
@@ -301,19 +286,16 @@ pub fn list_sessions(
             title: row.get(2)?,
             cwd: row.get(3)?,
             model: row.get(4)?,
-            effort: row.get(5)?,
-            profile: row.get(6)?,
-            mode: row.get(7)?,
-            tool_mode: row.get(8)?,
+            tool_mode: row.get(5)?,
             model_selection: row
-                .get::<_, Option<String>>(9)?
+                .get::<_, Option<String>>(6)?
                 .and_then(|json| serde_json::from_str(&json).ok()),
-            settings_revision: row.get::<_, i64>(10)?.max(0) as u64,
-            turn_count: row.get(11)?,
-            archived: row.get::<_, i64>(12)? != 0,
-            ephemeral: row.get::<_, i64>(13)? != 0,
-            created_at_ms: row.get(14)?,
-            updated_at_ms: row.get(15)?,
+            settings_revision: row.get::<_, i64>(7)?.max(0) as u64,
+            turn_count: row.get(8)?,
+            archived: row.get::<_, i64>(9)? != 0,
+            ephemeral: row.get::<_, i64>(10)? != 0,
+            created_at_ms: row.get(11)?,
+            updated_at_ms: row.get(12)?,
         })
     })?;
     rows.collect()
@@ -326,9 +308,6 @@ pub struct SessionColumnPatch {
     pub title: Option<String>,
     pub cwd: Option<String>,
     pub model: Option<String>,
-    pub effort: Option<String>,
-    pub profile: Option<String>,
-    pub mode: Option<String>,
     pub tool_mode: Option<String>,
     pub model_selection: Option<qaqh_types::SettingValue<qaqh_types::ModelSelection>>,
     pub custom_tools: Option<Vec<String>>,
@@ -357,9 +336,6 @@ pub fn update_session_columns(
     push_column("title", patch.title.clone());
     push_column("cwd", patch.cwd.clone());
     push_column("model", patch.model.clone());
-    push_column("effort", patch.effort.clone());
-    push_column("profile", patch.profile.clone());
-    push_column("mode", patch.mode.clone());
     push_column("tool_mode", patch.tool_mode.clone());
     push_column(
         "model_selection",
@@ -518,7 +494,6 @@ pub fn start_turn(
     turn_id: &str,
     session_id: &str,
     input_id: Option<&str>,
-    mode: Option<&str>,
 ) -> rusqlite::Result<()> {
     let seq: i64 = conn.query_row(
         "SELECT COALESCE(MAX(seq), 0) + 1 FROM turns WHERE session_id = ?1",
@@ -526,9 +501,9 @@ pub fn start_turn(
         |row| row.get(0),
     )?;
     conn.execute(
-        "INSERT INTO turns (turn_id, session_id, seq, input_id, mode, phase, status, started_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'running', 'active', ?6)",
-        params![turn_id, session_id, seq, input_id, mode, now_ms()],
+        "INSERT INTO turns (turn_id, session_id, seq, input_id, phase, status, started_at_ms)
+         VALUES (?1, ?2, ?3, ?4, 'running', 'active', ?5)",
+        params![turn_id, session_id, seq, input_id, now_ms()],
     )?;
     Ok(())
 }

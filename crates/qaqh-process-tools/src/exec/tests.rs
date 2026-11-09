@@ -57,7 +57,6 @@ fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::Tool
         call_id: "exec-shell-config-test".to_string(),
         session_id: "exec-shell-config-seed".to_string(),
         workspace_root: workspace_root.clone(),
-        mode: crate::tool_api::AgentMode::Code,
         permission_level: crate::permission::PermissionLevel::SkipPermissions,
         sandbox: crate::tool_api::SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
@@ -1291,8 +1290,7 @@ fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
             workspace_root: crate::permission::resolve_target_path(std::path::PathBuf::from(
                 &workspace,
             )),
-            mode: crate::tool_api::AgentMode::Code,
-            permission_level: crate::permission::PermissionLevel::ReadOnly,
+                permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
                 workspace,

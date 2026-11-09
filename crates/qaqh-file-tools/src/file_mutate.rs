@@ -12,7 +12,7 @@ use super::file_shared::{
 };
 use crate::ToolRisk;
 use crate::tool_api::{
-    AgentMode, CancellationToken, SandboxMode, ToolBody, ToolCallContext, ToolCallSource,
+    CancellationToken, SandboxMode, ToolBody, ToolCallContext, ToolCallSource,
     ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError,
     ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
@@ -885,10 +885,6 @@ pub fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext
         call_id: call_id.to_string(),
         session_id: crate::current_session().unwrap_or_default(),
         workspace_root: workspace_root.clone(),
-        mode: match ambient.mode {
-            1 => AgentMode::Plan,
-            _ => AgentMode::Code,
-        },
         permission_level: crate::permission::PermissionLevel::from_u8(ambient.permission_level),
         sandbox: if ambient.subagent_sandbox {
             SandboxMode::Subagent
@@ -969,7 +965,6 @@ mod tests {
             call_id: "test-call".to_string(),
             session_id: "test-session".to_string(),
             workspace_root: root.to_path_buf(),
-            mode: AgentMode::Code,
             permission_level: TestPermissionLevel::ReadOnly,
             sandbox: TestSandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),

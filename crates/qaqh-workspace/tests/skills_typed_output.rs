@@ -24,7 +24,6 @@ fn skill_activate_typed_activation_carries_effect_and_same_source_output() {
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: "skills-typed".into(),
         permission_level: 3,
-        mode: 0,
         workspace_root: Some(workspace.path().to_string_lossy().into_owned()),
     };
 
