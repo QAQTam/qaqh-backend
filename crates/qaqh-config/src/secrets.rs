@@ -53,11 +53,7 @@ fn validate_mcp_secret_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Profile 密钥槽名校验：与 MCP secret 名同规（非空、仅 `[a-z0-9_-]`、≤64）。
-///
-/// profile 名是 config.toml `[profiles.<name>]` 的 TOML 键，可以是任意可引用
-/// 的键名；进不了本字符集的 profile 不能自带密钥——`load_profile_key` 返回
-/// `None`，于是该 profile 继承 main 密钥。
+/// 槽位 id 校验（provider id 等命名槽共用）：非空、仅 `[a-z0-9_-]`、≤64。
 fn validate_profile_secret_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 {
         return Err(format!("profile 名长度必须 1..=64（得到 {name:?}）"));
@@ -284,36 +280,6 @@ impl SecretStore {
         .map(|_| ())
     }
 
-    // ── 命名 profile 密钥（`[secrets.profiles.<name>]` map 段）──
-    //
-    // 与 MCP 命名 secret 同款加密/权限/跨进程事务机制，只是段名不同。
-    // profile 名额外受限（[`validate_profile_secret_name`]）：进不了 secrets.toml
-    // 的 profile 名不能自带密钥，只能继承 main。
-
-    /// Load a profile's own key (decrypts). `None` when the profile has no own
-    /// key, the name is not representable in `secrets.toml`, or decryption
-    /// fails (same no-fallback policy as slots).
-    pub fn load_profile_key(&self, name: &str) -> Option<String> {
-        if validate_profile_secret_name(name).is_err() {
-            return None;
-        }
-        self.load_named_slot("profiles", name)
-    }
-
-    /// Encrypt and store a profile's own key (idempotent).
-    pub fn set_profile_key(&self, name: &str, plaintext: &str) -> Result<(), String> {
-        validate_profile_secret_name(name)?;
-        self.set_named_slot("profiles", name, plaintext)
-    }
-
-    /// Remove a profile's own key (idempotent).
-    pub fn delete_profile_key(&self, name: &str) -> Result<(), String> {
-        validate_profile_secret_name(name)?;
-        self.delete_named_slot("profiles", name)
-    }
-
-    // ── 命名 provider 密钥（`[secrets.providers.<provider_id>]` map 段）──
-    //
     // 新 BYOK 目录体系（ProfilesDocument）的凭据槽。明文只进本文件加密存储，
     // providers.toml 只落 "set" 标记；id 字符集约束与 profile 名一致。
 
@@ -579,6 +545,7 @@ fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
+    // SAFETY: 两个宽字符串缓冲以 NUL 结尾且在调用期间存活，MoveFileExW 只读。
     unsafe {
         MoveFileExW(
             PCWSTR::from_raw(source.as_ptr()),
@@ -617,6 +584,8 @@ fn encrypt(plain: &[u8]) -> Result<String, String> {
         pbData: plain.as_ptr() as *mut u8,
     };
     let mut out_blob = CRYPT_INTEGER_BLOB::default();
+    // SAFETY: in_blob 指向存活的 plain 缓冲，out_blob 由本次调用填充，
+    // 读出后立即 LocalFree，无悬垂。
     unsafe {
         CryptProtectData(
             &in_blob,
@@ -649,6 +618,8 @@ fn decrypt(raw: &str) -> Result<String, String> {
         pbData: blob.as_ptr() as *mut u8,
     };
     let mut out_blob = CRYPT_INTEGER_BLOB::default();
+    // SAFETY: in_blob 指向存活的 blob 缓冲，out_blob 由本次调用填充，
+    // 读出后立即 LocalFree，无悬垂。
     unsafe {
         CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob)
             .map_err(|e| format!("CryptUnprotectData failed: {e}"))?;

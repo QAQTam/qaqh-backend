@@ -52,10 +52,6 @@ pub enum RingingCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        profile: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        effort: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         model_selection: Option<qaqh_profile::ModelSelection>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_mode: Option<String>,
@@ -108,15 +104,6 @@ pub enum RingingCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_epoch: Option<u64>,
     },
-    #[serde(rename = "plan.review.respond")]
-    PlanReviewRespond {
-        interaction_id: String,
-        approved: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        message: Option<String>,
-        #[serde(default)]
-        autonomous: bool,
-    },
     #[serde(rename = "tool.permission.respond")]
     ToolPermissionRespond {
         tool_call_id: String,
@@ -160,40 +147,6 @@ pub enum RingingCommand {
     ConfigSave { patch: serde_json::Value },
     #[serde(rename = "config.set_permission_level")]
     ConfigSetPermissionLevel { level: u8 },
-    #[serde(rename = "profile.create")]
-    ProfileCreate {
-        name: String,
-        model: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        provider: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        base_url: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        wire: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning_effort: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        context_length: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_tokens: Option<u32>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        api_key: Option<String>,
-    },
-    #[serde(rename = "profile.set_default")]
-    ProfileSetDefault {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        id: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        name: Option<String>,
-    },
-    #[serde(rename = "profile.apply")]
-    ProfileApply { name: String },
-    #[serde(rename = "profile.save_current")]
-    ProfileSaveCurrent { name: String },
-    #[serde(rename = "profile.delete")]
-    ProfileDelete { name: String },
     #[serde(rename = "workspace.set")]
     WorkspaceSet { path: String },
     #[serde(rename = "workspace.create")]
@@ -256,7 +209,6 @@ impl RingingCommand {
             Self::InteractionAskDismiss { .. } => "interaction.ask.dismiss",
             Self::DriverClaim { .. } => "driver.claim",
             Self::DriverRelease { .. } => "driver.release",
-            Self::PlanReviewRespond { .. } => "plan.review.respond",
             Self::ToolPermissionRespond { .. } => "tool.permission.respond",
             Self::ExecSessionInterrupt {} => "exec_session.interrupt",
             Self::ExecSessionTerminate {} => "exec_session.terminate",
@@ -268,11 +220,6 @@ impl RingingCommand {
             Self::ModelSelectionSetDefault { .. } => "model.selection.set_default",
             Self::ConfigSave { .. } => "config.save",
             Self::ConfigSetPermissionLevel { .. } => "config.set_permission_level",
-            Self::ProfileCreate { .. } => "profile.create",
-            Self::ProfileSetDefault { .. } => "profile.set_default",
-            Self::ProfileApply { .. } => "profile.apply",
-            Self::ProfileSaveCurrent { .. } => "profile.save_current",
-            Self::ProfileDelete { .. } => "profile.delete",
             Self::WorkspaceSet { .. } => "workspace.set",
             Self::WorkspaceCreate { .. } => "workspace.create",
             Self::WorkspaceRename { .. } => "workspace.rename",

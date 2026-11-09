@@ -401,7 +401,7 @@ impl SessionLoop {
             .message_id
             .clone()
             .unwrap_or_else(|| format!("input_{}", generate_ulid()));
-        if let Err(error) = self.owner.start_turn(&turn_id, Some(input_id), None).await {
+        if let Err(error) = self.owner.start_turn(&turn_id, Some(input_id)).await {
             log::error!("[loop] {} start turn failed: {error}", self.session_id);
             self.finish_active(&turn_id).await;
             return;

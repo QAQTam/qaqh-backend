@@ -215,19 +215,8 @@ impl QaqhService {
         patch: SessionSettingsPatch,
         expected_revision: u64,
     ) -> QaqhResult<u64> {
-        let SessionSettingsPatch {
-            model_selection,
-            profile,
-            effort,
-            mode,
-            tools,
-        } = &patch;
-        if model_selection.is_none()
-            && profile.is_none()
-            && effort.is_none()
-            && mode.is_none()
-            && tools.is_none()
-        {
+        let SessionSettingsPatch { model_selection, tools } = &patch;
+        if model_selection.is_none() && tools.is_none() {
             return Err(QaqhError::invalid(
                 "session.settings.patch: at least one setting is required",
             ));
@@ -245,31 +234,6 @@ impl QaqhService {
             }
             meta.model_selection = Some(selection.clone());
             meta.requested_model_selection = Some(selection.clone());
-        }
-        if let Some(profile) = profile {
-            if !profile.is_empty()
-                && !qaqh_config::watch::authoritative()
-                    .is_some_and(|cfg| cfg.profiles.contains_key(profile))
-            {
-                return Err(QaqhError::not_found(format!(
-                    "profile '{profile}' not found"
-                )));
-            }
-            meta.profile = Some(profile.clone());
-        }
-        if let Some(effort) = effort {
-            meta.effort = Some(effort.clone());
-        }
-        if let Some(mode) = mode {
-            meta.mode = Some(match mode.as_str() {
-                "code" => 0,
-                "plan" => 1,
-                other => {
-                    return Err(QaqhError::invalid(format!(
-                        "session.settings.patch: unknown mode {other:?} (code|plan)"
-                    )));
-                }
-            });
         }
         if let Some(tools) = tools {
             apply_tools_patch(&mut meta, tools)?;

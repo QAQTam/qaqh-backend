@@ -18,7 +18,7 @@ use qaqh_ringing_contract::events::{
 };
 use qaqh_ringing_contract::fact::{
     BlockId, ContentValue, InputId, InteractionDecision, InteractionId, ToolCallId,
-    ToolCallOutcome, ToolMetrics, TurnId, TurnMode,
+    ToolCallOutcome, ToolMetrics, TurnId,
 };
 use qaqh_ringing_contract::state::{
     CodeDelta, ExecSessionView, InteractionView, SessionState, TimelineEntry, ToolCallState,
@@ -170,31 +170,19 @@ impl SessionOwner {
         &self,
         turn_id: &str,
         input_id: Option<String>,
-        mode: Option<TurnMode>,
     ) -> Result<(), DbError> {
         let turn_id = turn_id.to_string();
-        let mode_json = mode
-            .map(|mode| serde_json::to_string(&mode))
-            .transpose()
-            .map_err(|error| DbError::Corrupt(format!("turn {turn_id} mode: {error}")))?;
         let session_id = self.session_id.clone();
         let input_id_for_row = input_id.clone();
         self.submit_request(move |pump| {
             let row_turn_id = turn_id.clone();
             pump.db.write_blocking(move |conn| {
-                store::start_turn(
-                    conn,
-                    &row_turn_id,
-                    &session_id,
-                    input_id_for_row.as_deref(),
-                    mode_json.as_deref(),
-                )
+                store::start_turn(conn, &row_turn_id, &session_id, input_id_for_row.as_deref())
             })?;
             let turn = TurnId::new(turn_id.clone());
             pump.emit(SessionEvent::TurnStarted {
                 turn_id: turn.clone(),
                 input_id: input_id.map(InputId::new),
-                mode,
             });
             pump.emit(SessionEvent::TurnPhaseChanged {
                 turn_id: turn.clone(),
@@ -1340,9 +1328,6 @@ impl OwnerDirectory {
                     title: None,
                     cwd: None,
                     model: None,
-                    effort: None,
-                    profile: None,
-                    mode: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,

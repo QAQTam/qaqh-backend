@@ -73,6 +73,22 @@ pub(crate) async fn handle_service(
         }
     }
     let method = name.trim_matches('/');
+    if method == "clients.list" {
+        // daemon 基础设施查询:lease store 是连接 presence,归 axum 层所有,
+        // 不进 runtime dispatch。结果由 typed Vec 直接序列化,形状由类型保证
+        // (与 validate_typed_result 同源 DTO)。
+        let clients = state
+            .leases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .active_clients();
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::to_vec(&clients).unwrap_or_default(),
+        )
+            .into_response();
+    }
     match service_methods::dispatch(&state.service, method, &params) {
         Ok(value) => (
             StatusCode::OK,

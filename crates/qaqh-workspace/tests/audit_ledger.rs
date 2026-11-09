@@ -79,7 +79,6 @@ fn audit_ledger_traces_calls_end_to_end() {
     let locked = qaqh_workspace::runtime::ToolCtx {
         session_id: "audit-ledger".to_string(),
         permission_level: 1,
-        mode: 0,
         workspace_root: None,
     };
     let denied = call(
@@ -92,21 +91,6 @@ fn audit_ledger_traces_calls_end_to_end() {
         !denied.success,
         "read-only tier write must require approval"
     );
-
-    // ③ PLAN 模式前置阻断（edit 在 PLAN_BLOCKED 名单内）。
-    let plan = qaqh_workspace::runtime::ToolCtx {
-        session_id: "audit-ledger".to_string(),
-        permission_level: 3,
-        mode: 1,
-        workspace_root: None,
-    };
-    let blocked = call(
-        "edit",
-        serde_json::json!({"path": env.workspace.join("plan.txt"), "old_str": "a", "new_str": "b"}),
-        "call-3",
-        &plan,
-    );
-    assert!(!blocked.success, "PLAN mode must block edit");
 
     // ④ 失败终态：读不存在的文件 → 执行到终态但 status=error。
     let missing = call(
@@ -126,8 +110,8 @@ fn audit_ledger_traces_calls_end_to_end() {
         .collect();
     assert_eq!(
         records.len(),
-        5,
-        "write intent + terminal + rejected + blocked + failed read must be audited: {raw}"
+        4,
+        "write intent + terminal + rejected + failed read must be audited: {raw}"
     );
 
     // ①a 高风险写入的 intent barrier：先落 durable intent，再进入 handler。

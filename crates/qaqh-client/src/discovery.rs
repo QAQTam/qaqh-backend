@@ -274,7 +274,10 @@ fn spawn_daemon_detached() -> Result<()> {
 /// **且永不回退到拉起 daemon**。任何 shell 都得手工删文件才恢复（真机复现：
 /// 记录 pid 已死、端口无人监听，TUI 仍直连该端口报错）。
 #[cfg(windows)]
+#[allow(unsafe_code)]
 pub fn process_is_running(pid: u32) -> bool {
+    // SAFETY: 仅申请 PROCESS_QUERY_LIMITED_INFORMATION 查询权；pid 无效时
+    // 返回 null，由下方检查后走 false 路径。
     let handle = unsafe {
         windows_sys::Win32::System::Threading::OpenProcess(
             windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
@@ -285,11 +288,14 @@ pub fn process_is_running(pid: u32) -> bool {
     if handle.is_null() {
         return false;
     }
+    // SAFETY: handle 来自上方 OpenProcess 成功路径（非 null），且只写出
+    // 一个 u32 到栈上变量。
     let exit_code = unsafe {
         let mut code: u32 = 0;
         windows_sys::Win32::System::Threading::GetExitCodeProcess(handle, &mut code);
         code
     };
+    // SAFETY: 关闭本函数自己打开的 handle，之后不再使用。
     unsafe {
         let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
     }

@@ -214,7 +214,7 @@ mod tests {
     use super::*;
     use crate::ToolRisk;
     use crate::permission::ToolCategory;
-    use crate::tool_api::{AgentMode, CancellationToken, SandboxMode, ToolContentBlock};
+    use crate::tool_api::{CancellationToken, SandboxMode, ToolContentBlock};
 
     #[derive(Debug, Deserialize, JsonSchema)]
     /// 回显参数。
@@ -269,7 +269,6 @@ mod tests {
             call_id: "c1".to_owned(),
             session_id: "s1".to_owned(),
             workspace_root: std::path::PathBuf::from("/tmp/ws"),
-            mode: AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(

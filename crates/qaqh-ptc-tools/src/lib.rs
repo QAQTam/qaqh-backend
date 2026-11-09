@@ -440,7 +440,6 @@ mod tests {
             call_id: "call_1".to_owned(),
             session_id: "session_1".to_owned(),
             workspace_root: std::path::PathBuf::from("/tmp"),
-            mode: qaqh_tool_core::tool_api::AgentMode::Code,
             permission_level: qaqh_policy::PermissionLevel::WorkspaceWrite,
             sandbox: qaqh_tool_core::SandboxMode::Main,
             sandbox_spec: qaqh_tool_core::SandboxSpec::workspace_write(std::path::PathBuf::from(

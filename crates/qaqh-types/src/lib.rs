@@ -37,8 +37,8 @@ pub use api_types::UsageInfo;
 pub use code_delta::CodeDeltaRecord;
 pub use config::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
-    PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig, PersistentProfiles,
-    PersistentSandboxConfig, PersistentSubagentConfig, ProfileConfig, ProfileStore,
+    PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
+    PersistentSandboxConfig, PersistentSubagentConfig,
 };
 pub use context_usage::{
     ContextUsage, clear_api_context_usage, current_api_context_usage, note_api_context_usage,

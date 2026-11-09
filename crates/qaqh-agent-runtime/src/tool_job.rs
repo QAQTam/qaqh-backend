@@ -230,7 +230,6 @@ pub enum ToolFailure {
 #[derive(Clone, Debug)]
 pub struct ToolPolicySnapshot {
     pub workspace_root: PathBuf,
-    pub mode: qaqh_workspace::tool_api::AgentMode,
     pub permission_level: qaqh_workspace::PermissionLevel,
     pub sandbox: qaqh_workspace::tool_api::SandboxMode,
     pub trusted_dirs: HashSet<PathBuf>,
@@ -248,7 +247,6 @@ impl ToolPolicySnapshot {
         );
         Self {
             workspace_root,
-            mode: qaqh_workspace::tool_api::AgentMode::Code,
             permission_level: qaqh_workspace::PermissionLevel::WorkspaceWrite,
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             trusted_dirs: HashSet::new(),
@@ -407,15 +405,6 @@ impl WorkspaceToolPort {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
 
-        if policy.mode == qaqh_workspace::tool_api::AgentMode::Plan
-            && qaqh_workspace::PLAN_BLOCKED.contains(&request.tool_name.as_str())
-        {
-            return Err(ToolFailure::Denied(format!(
-                "tool '{}' is blocked in PLAN mode",
-                request.tool_name
-            )));
-        }
-
         let category = self
             .manager
             .lock()
@@ -437,7 +426,6 @@ impl WorkspaceToolPort {
             call_id: request.call_id.clone(),
             session_id: self.session_id.clone(),
             workspace_root: policy.workspace_root.clone(),
-            mode: policy.mode,
             permission_level: policy.permission_level,
             sandbox: policy.sandbox,
             // The snapshot already carries the resolved spec (config switch

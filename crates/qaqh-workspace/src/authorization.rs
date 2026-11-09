@@ -315,10 +315,6 @@ fn legacy_tool_call_context(
         call_id: invocation.call_id.clone(),
         session_id: invocation.session_id.clone(),
         workspace_root: workspace_root.to_path_buf(),
-        mode: match crate::runtime::current_mode() {
-            1 => crate::tool_api::AgentMode::Plan,
-            _ => crate::tool_api::AgentMode::Code,
-        },
         permission_level: crate::permission::PermissionLevel::from_u8(permission_level),
         sandbox: if is_subagent_sandbox() {
             SandboxMode::Subagent

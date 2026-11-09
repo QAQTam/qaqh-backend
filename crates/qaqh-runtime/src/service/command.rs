@@ -89,8 +89,6 @@ pub enum SystemCommand {
     DiagnosticsMemorySnapshot(DiagnosticsMemorySnapshotArgs),
     #[serde(rename = "config.load")]
     ConfigLoad(ConfigLoadArgs),
-    #[serde(rename = "profile.list")]
-    ProfileList(ProfileListArgs),
 }
 
 /// `daemon.version`：无参数。
@@ -104,9 +102,6 @@ pub struct DiagnosticsMemorySnapshotArgs {
 
 #[derive(Debug, Default, Deserialize)]
 pub struct ConfigLoadArgs {}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct ProfileListArgs {}
 
 // ───────────────────────── Workspace ─────────────────────────
 

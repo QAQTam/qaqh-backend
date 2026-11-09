@@ -434,27 +434,6 @@ impl QaqhClient {
         .await
     }
 
-    /// `plan.review.respond`。
-    pub async fn respond_plan_review(
-        &self,
-        session_id: String,
-        interaction_id: String,
-        approved: bool,
-        message: Option<String>,
-        autonomous: bool,
-    ) -> Result<String, CoreError> {
-        self.send_command_json(
-            Some(session_id),
-            to_json_string(&RingingCommand::PlanReviewRespond {
-                interaction_id,
-                approved,
-                message,
-                autonomous,
-            })?,
-        )
-        .await
-    }
-
     /// `driver.claim`；`client_session_id` 由当前租约现取。
     pub async fn driver_claim(
         &self,

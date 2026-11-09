@@ -148,8 +148,8 @@ fn write_approvals(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         }),
         pending_interaction: Some(RingingV2PendingInteractionView {
             id: "int_fixture".into(),
-            kind: InteractionKind::Plan,
-            details: Some(serde_json::json!({"plan": "synthetic plan"})),
+            kind: InteractionKind::Ask,
+            details: Some(serde_json::json!({"question": "synthetic question"})),
         }),
     };
     super::write_fixture(stage, "approvals-pending.json", &pending)?;
@@ -171,9 +171,9 @@ fn write_event(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 interaction_id: qaqh_ringing_contract::fact::InteractionId::new("int_fixture"),
                 call_id: Some(qaqh_ringing_contract::fact::ToolCallId::new("call_fixture")),
                 turn_id: Some(qaqh_ringing_contract::fact::TurnId::new("turn_fixture")),
-                kind: InteractionKind::Plan,
+                kind: InteractionKind::Ask,
                 request: ContentValue::Inline {
-                    text: "approve the plan".into(),
+                    text: "a synthetic question".into(),
                 },
                 choices: Vec::new(),
                 expires_at_ms: None,

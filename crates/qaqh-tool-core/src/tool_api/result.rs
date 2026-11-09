@@ -155,7 +155,7 @@ mod tests {
 
     use super::*;
     use crate::tool_api::ToolProgress;
-    use crate::tool_api::context::{AgentMode, CancellationToken, SandboxMode};
+    use crate::tool_api::context::{CancellationToken, SandboxMode};
 
     #[test]
     fn success_maps_status_model_and_display_summary() {
@@ -307,7 +307,6 @@ mod tests {
         assert!(!token.is_cancelled());
         token.cancel();
         assert!(token.shared_flag().load(Ordering::SeqCst));
-        let _ = AgentMode::Code;
         let _ = SandboxMode::Main;
     }
 }

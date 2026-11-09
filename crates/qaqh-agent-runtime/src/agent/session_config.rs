@@ -39,8 +39,5 @@ pub fn session_effective_config(
     } else {
         String::new()
     };
-    if let Some(effort) = row.effort.filter(|value| !value.is_empty()) {
-        config.reasoning_effort = effort;
-    }
     Ok(config)
 }

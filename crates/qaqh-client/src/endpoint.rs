@@ -37,6 +37,8 @@ pub enum QueryRequest {
         session_id: String,
         turn_id: String,
     },
+    /// daemon 基础设施查询:活跃客户端 lease 视图(presence/诊断)。
+    ClientList,
     DaemonVersion,
     SessionGetActivity {
         session_id: String,
@@ -66,6 +68,7 @@ impl QueryRequest {
         &[
             "daemon.version",
             "session.list",
+            "clients.list",
             "session.activity",
             "config.load",
             "workspace.list",
@@ -124,6 +127,7 @@ impl QueryRequest {
                 session_id: session_id()?,
                 turn_id: params.get("turn_id")?.as_str()?.to_string(),
             },
+            "clients.list" => Self::ClientList,
             "session.get_activity" => Self::SessionGetActivity { session_id: session_id()? },
             "workspace.get" => Self::WorkspaceGet { session_id: session_id()? },
             "todo.list" => {
@@ -146,6 +150,7 @@ impl QueryRequest {
             Self::WorkspaceList => ("workspace.list", json!({})),
             Self::SkillsListTools => ("skills.list_tools", json!({})),
             Self::ProfileList => ("profile.list", json!({})),
+            Self::ClientList => ("clients.list", json!({})),
             Self::DaemonVersion => ("daemon.version", json!({})),
             Self::SessionGetActivity { session_id } => {
                 ("session.get_activity", json!({ "session_id": session_id }))

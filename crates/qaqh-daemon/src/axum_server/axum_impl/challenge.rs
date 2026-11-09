@@ -26,7 +26,6 @@ pub const MAX_PENDING_APPROVALS: usize = 16;
 pub enum ApprovalKind {
     ToolPermission,
     Ask,
-    Plan,
 }
 
 impl ApprovalKind {
@@ -35,7 +34,6 @@ impl ApprovalKind {
         match self {
             Self::ToolPermission => RingingV2DeviceApprovalKind::ToolPermission,
             Self::Ask => RingingV2DeviceApprovalKind::Ask,
-            Self::Plan => RingingV2DeviceApprovalKind::Plan,
         }
     }
 
@@ -44,7 +42,6 @@ impl ApprovalKind {
     fn from_interaction(kind: InteractionKind) -> Option<Self> {
         match kind {
             InteractionKind::Ask => Some(Self::Ask),
-            InteractionKind::Plan => Some(Self::Plan),
             InteractionKind::Permission => None,
         }
     }
@@ -250,30 +247,6 @@ pub fn command_for(
             }),
             _ => Err("invalid_decision"),
         },
-        ApprovalKind::Plan => {
-            let approved = match decision {
-                "approve" if challenge.details["details_unavailable"] == true => {
-                    return Err("interaction_details_unavailable");
-                }
-                "approve" => true,
-                "reject" => false,
-                _ => return Err("invalid_decision"),
-            };
-            let message = payload
-                .get("message")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
-            let autonomous = payload
-                .get("autonomous")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            Ok(RingingCommand::PlanReviewRespond {
-                interaction_id: challenge.source_id.clone(),
-                approved,
-                message,
-                autonomous,
-            })
-        }
     }
 }
 
@@ -364,7 +337,7 @@ mod tests {
     #[test]
     fn consume_is_one_shot_and_scope_checked() {
         let store = ChallengeStore::default();
-        let pending = interaction_pending("int_01ABC", InteractionKind::Plan);
+        let pending = interaction_pending("int_01ABC", InteractionKind::Ask);
         let views = store.issue_views("seed1", &pending).unwrap();
         let id = views[0].challenge_id.clone();
 
@@ -456,12 +429,11 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_ask_and_plan_details_block_submission_but_allow_rejection() {
+    fn unavailable_ask_details_block_submission_but_allow_rejection() {
         let store = ChallengeStore::default();
-        for (kind, blocked_decision, safe_decision) in [
-            (InteractionKind::Ask, "submit", "dismiss"),
-            (InteractionKind::Plan, "approve", "reject"),
-        ] {
+        for (kind, blocked_decision, safe_decision) in
+            [(InteractionKind::Ask, "submit", "dismiss")]
+        {
             let pending = RingingV2PendingApprovals {
                 pending_permission: None,
                 pending_interaction: Some(RingingV2PendingInteractionView {

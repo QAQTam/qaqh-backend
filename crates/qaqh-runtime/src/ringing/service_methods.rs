@@ -37,6 +37,12 @@ pub struct MethodInfo {
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct DaemonVersionParams {}
 
+/// `clients.list`:无参数。daemon 基础设施查询(活跃 lease 视图),
+/// 在 daemon 的 axum 层作答——lease store 是连接 presence,不属于会话业务。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ClientsListParams {}
+
 /// Remote filesystem browsing accepts an optional session scope that narrows
 /// access to that session's workspace; it is not a lease-bound session call.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -217,21 +223,6 @@ pub struct DiagnosticsMemorySnapshotParams {
     pub after_sequence: Option<u64>,
 }
 
-/// `profile.list` 无参数;结果为 legacy profiles 目录的摘要读模型。
-/// 该目录的持久化 schema 是 `qaqh_types::PersistentProfiles`(ProfileConfig),
-/// 与新 provider 目录(providers.toml)分属不同文件、不同 revision 体系
-/// (契约裁定 D3);default 指针在 config,不在本文件。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct ProfileListParams {}
-
-/// `profile.list` 结果:名字 → 摘要(非敏感;api_key 只有 set 标记)。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-pub struct ProfileListSnapshot {
-    pub profiles: std::collections::BTreeMap<String, qaqh_config_api::ProfileSummaryDto>,
-}
-
 /// `session.dashboard` 定位单条会话。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -367,6 +358,7 @@ macro_rules! validators {
 validators! {
     params:
         validate_daemon_version_params => DaemonVersionParams,
+        validate_clients_list_params => ClientsListParams,
         validate_fs_list_params => FsListParams,
         validate_fs_read_params => FsReadParams,
         validate_session_list_params => SessionListParams,
@@ -380,7 +372,6 @@ validators! {
         validate_workspace_list_params => WorkspaceListParams,
         validate_config_load_params => ConfigLoadParams,
         validate_diagnostics_memory_snapshot_params => DiagnosticsMemorySnapshotParams,
-        validate_profile_list_params => ProfileListParams,
         validate_session_dashboard_params => SessionDashboardParams,
         validate_skills_list_tools_params => SkillsListToolsParams,
         validate_todo_list_params => TodoListParams,
@@ -401,12 +392,12 @@ validators! {
         validate_workspace_list_result => Vec<qaqh_ringing_contract::WorkspaceEntry>,
         validate_config_dto_result => qaqh_config_api::ConfigDto,
         validate_memory_snapshot_result => qaqh_memwatch::MemorySnapshot,
-        validate_profile_document_result => ProfileListSnapshot,
         validate_session_dashboard_result => SessionDashboard,
         validate_string_list_result => Vec<String>,
         validate_todo_list_result => TodoListSnapshot,
         validate_todo_status_result => Option<TodoStatusSnapshot>,
         validate_plan_read_result => Vec<PlanReadItem>,
+        validate_clients_list_result => Vec<qaqh_ringing::v2::RingingV2ClientView>,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -421,6 +412,18 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_daemon_version_params,
         validate_result: validate_string_result,
+    },
+    TypedMethodInfo {
+        method: "clients.list",
+        params_type: "ClientsListParams",
+        result_type: "RingingV2ClientView[]",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: false,
+            admin_only: true,
+        },
+        validate_params: validate_clients_list_params,
+        validate_result: validate_clients_list_result,
     },
     TypedMethodInfo {
         method: "skills.catalog",
@@ -549,20 +552,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         },
         validate_params: validate_config_load_params,
         validate_result: validate_config_dto_result,
-    },
-    TypedMethodInfo {
-        method: "profile.list",
-        params_type: "ProfileListParams",
-        // legacy profiles 目录摘要(裁定 D3):持久化 schema 是
-        // PersistentProfiles,与新 provider 目录分立。
-        result_type: "ProfileListSnapshot",
-        info: MethodInfo {
-            kind: MethodKind::Read,
-            requires_session: false,
-            admin_only: false,
-        },
-        validate_params: validate_profile_list_params,
-        validate_result: validate_profile_document_result,
     },
     TypedMethodInfo {
         method: "session.dashboard",
@@ -751,6 +740,8 @@ const WRITE_ADMIN: MethodInfo = MethodInfo {
 pub const METHODS: &[(&str, MethodInfo)] = &[
     // daemon / 会话只读
     ("daemon.version", READ),
+    // daemon 基础设施(活跃 lease 视图):axum 层作答,见 service_api。
+    ("clients.list", READ_ADMIN),
     ("session.list", READ),
     ("session.meta", READ_SEEDED),
     ("session.activity", READ),
@@ -766,7 +757,6 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("fs.read", READ),
     // config / profile
     ("config.load", READ),
-    ("profile.list", READ),
     // Sign in with ChatGPT（套餐用量）。**全部 admin_only**：配对出来的设备
     // （view/interact）绝不得触发登录 / 切账户 / 登出——那等于让远端设备把
     // 新账户接进用户机器并改写本机凭据。方法名的单一真源在 qaqh_siwc::methods。

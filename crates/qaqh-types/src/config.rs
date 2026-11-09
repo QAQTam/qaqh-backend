@@ -2,46 +2,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::provider::{EndpointCompat, Wire};
 
 // ── Config persistence ──
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistentConfig {
-    /// 旧预设坐标 `(provider_id, endpoint)`：BYOK 后不再写出（读入仅用于一次性
-    /// 迁移——把预设解析成具体的 endpoint/wire/model/窗口，见 qaqh-config）。
-    #[serde(default, skip_serializing)]
-    pub provider_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// P1-C3 退役：不再写入磁盘（读兼容保留）；模型族字段以
-    /// `[profiles.<active>]` 为唯一持久化真相。
-    #[serde(skip_serializing)]
-    pub model: Option<String>,
-    /// P1-C3 退役：不再写入磁盘（读兼容保留）；模型族字段以
-    /// `[profiles.<active>]` 为唯一持久化真相。
-    #[serde(skip_serializing)]
-    pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    /// P1-C3 退役：不再写入磁盘（读兼容保留）；模型族字段以
-    /// `[profiles.<active>]` 为唯一持久化真相。
-    #[serde(skip_serializing)]
-    pub context_limit: Option<u32>,
-    /// Endpoint within the provider: "openai" | "anthropic" | ...
-    /// P1-C3 退役：不再写入磁盘（读兼容保留）；模型族字段以
-    /// `[profiles.<active>]` 为唯一持久化真相。
-    #[serde(skip_serializing)]
-    pub endpoint: Option<String>,
-    /// Reasoning effort: "high" or "max". Thinking is always enabled.
-    /// P1-C3 退役：不再写入磁盘（读兼容保留）；模型族字段以
-    /// `[profiles.<active>]` 为唯一持久化真相。
-    #[serde(skip_serializing)]
-    pub reasoning_effort: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profiles: Option<HashMap<String, ProfileConfig>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_profile: Option<String>,
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
@@ -261,79 +228,6 @@ pub struct PersistentLspServerConfig {
 // ── Profile / Preferences ──
 /// One BYOK endpoint record: the six fields the user owns, plus the optional
 /// request-shape notes for endpoints that deviate from their wire.
-/// Profiles are how the user keeps several endpoints (e.g. "fast" vs "deep")
-/// and switches between them. A profile may carry its own API key: the
-/// plaintext lives in `secrets.toml` under `[secrets.profiles.<name>]`, and
-/// only the opaque `"set"` marker is written to `api_key` here. `None` =
-/// inherit the main key.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct ProfileConfig {
-    /// Model identifier sent to the endpoint.
-    #[serde(default)]
-    pub model: String,
-    /// Max output tokens per turn.
-    #[serde(default)]
-    pub max_tokens: u32,
-    /// Reasoning effort: one of `low|medium|high|xhigh|max`, or `None` to use
-    /// the endpoint default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effort: Option<String>,
-    /// 端点声明的上下文窗口（输入 token）——**本地压缩的唯一分母**：
-    /// auto-compact 软阈值（`context_length × auto_compact_threshold`）与发送前
-    /// 硬 pre-flight 都由它推得。
-    #[serde(default)]
-    pub context_length: u32,
-    /// BYOK 的 endpoint：scheme + host + 可选前缀，不含 wire 自身路径。
-    #[serde(default)]
-    pub base_url: String,
-    /// Wire protocol spoken at that endpoint.
-    #[serde(default)]
-    pub wire: Wire,
-    /// Optional request-shape overrides. `None`/absent = the wire's defaults.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compat: Option<EndpointCompat>,
-    /// 该 profile 自带密钥的标记（`"set"`）；明文只在 `secrets.toml`，
-    /// 与顶层 `api_key` 同一约定。`None` = 继承 main 密钥。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// 凭据来源。`api_key`（缺省）= 既有 BYOK；`chatgpt_plan` = 用本机 ChatGPT 套餐额度。
-    #[serde(default)]
-    pub credential: crate::provider::CredentialSource,
-
-    // ── 读兼容（永不写出）：BYOK 前的预设坐标与双口径窗口 ──
-    /// 旧 `[profiles.*] endpoint = "openai"` —— 预设内的 endpoint id，
-    /// 仅 load 时用于查 legacy 预设表迁移成 `base_url` + `wire` + `compat`。
-    #[serde(default, rename = "endpoint", skip_serializing)]
-    pub preset_endpoint: Option<String>,
-    /// 旧用户口径上限（软阈值基数）。迁移时优先取 `context_window`，
-    /// 再退 `context_limit`，再退预设/内置缺省。
-    #[serde(default, skip_serializing)]
-    pub context_limit: Option<u32>,
-    /// 旧端点硬窗口。合并进 `context_length`（N-1 双口径已收敛）。
-    #[serde(default, skip_serializing)]
-    pub context_window: Option<u32>,
-}
-
-impl ProfileConfig {
-    /// The compat block the gate should use (wire defaults when unset).
-    pub fn compat_or_default(&self) -> EndpointCompat {
-        self.compat.clone().unwrap_or_default()
-    }
-
-    /// 单一压缩分母的迁移取值：`context_length` → `context_window` →
-    /// `context_limit` → `fallback`。老配置只有后两个键时行为不变。
-    pub fn resolved_context_length(&self, fallback: u32) -> u32 {
-        [
-            self.context_length,
-            self.context_window.unwrap_or(0),
-            self.context_limit.unwrap_or(0),
-        ]
-        .into_iter()
-        .find(|value| *value > 0)
-        .unwrap_or(fallback)
-    }
-}
-
 // ── ConfigStore: unified config I/O with atomic writes ──
 
 /// Unified config I/O with atomic writes.
@@ -415,72 +309,3 @@ impl ConfigStore {
 
 // ── ProfileStore: independent model presets store with atomic writes ──
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PersistentProfiles {
-    #[serde(default)]
-    pub profiles: HashMap<String, ProfileConfig>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ProfileStore {
-    path: PathBuf,
-}
-
-impl ProfileStore {
-    pub fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    pub fn default_location() -> Self {
-        Self::new(crate::platform::profiles_path())
-    }
-
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
-    }
-
-    pub fn exists(&self) -> bool {
-        self.path.exists()
-    }
-
-    pub fn load(&self) -> Option<PersistentProfiles> {
-        let data = std::fs::read_to_string(&self.path).ok()?;
-        toml::from_str(&data).ok()
-    }
-
-    pub fn save(&self, profiles: &PersistentProfiles) -> bool {
-        match toml::to_string_pretty(profiles) {
-            Ok(content) => self.write_content(&content),
-            Err(e) => {
-                eprintln!("ProfileStore: serialization failed: {e}");
-                false
-            }
-        }
-    }
-
-    pub fn write_content(&self, content: &str) -> bool {
-        let tmp = self.path.with_extension("toml.tmp");
-        if let Some(parent) = self.path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            eprintln!(
-                "ProfileStore: create_dir_all({}) failed: {e}",
-                parent.display()
-            );
-            return false;
-        }
-        if let Err(e) = std::fs::write(&tmp, content) {
-            eprintln!("ProfileStore: write({}) failed: {e}", tmp.display());
-            return false;
-        }
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
-            eprintln!(
-                "ProfileStore: rename({} -> {}) failed: {e}",
-                tmp.display(),
-                self.path.display()
-            );
-            return false;
-        }
-        true
-    }
-}

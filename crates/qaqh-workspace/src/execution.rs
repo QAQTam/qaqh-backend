@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::permission::PermissionLevel;
-use crate::tool_api::{AgentMode, CancellationToken, SandboxMode, ToolCallContext, ToolCallSource};
+use crate::tool_api::{CancellationToken, SandboxMode, ToolCallContext, ToolCallSource};
 
 /// Return type for tool execution with interrupt support.
 #[derive(Debug)]
@@ -62,10 +62,6 @@ pub fn execute_authorized(
             .map(|ctx| ctx.active_session.clone())
             .unwrap_or_else(|| call.session_id().to_string()),
         workspace_root: workspace_root.clone(),
-        mode: match crate::runtime::current_mode() {
-            1 => AgentMode::Plan,
-            _ => AgentMode::Code,
-        },
         permission_level,
         sandbox: if crate::authorization::is_subagent_sandbox() {
             SandboxMode::Subagent
@@ -169,26 +165,6 @@ pub fn execute_authorized_with_context(
             started,
         );
         return failure(&invocation.tool_name, crate::ToolError::Cancelled);
-    }
-
-    if context.mode == AgentMode::Plan
-        && crate::PLAN_BLOCKED.contains(&invocation.tool_name.as_str())
-    {
-        audit_rejected(
-            &invocation,
-            "rejected",
-            "blocked_by_mode",
-            Some("PLAN mode"),
-            pre_bind_level,
-            started,
-        );
-        return failure(
-            &invocation.tool_name,
-            crate::ToolError::BlockedByMode {
-                mode: "PLAN".into(),
-                tool: invocation.tool_name.clone(),
-            },
-        );
     }
 
     let ToolInvocation {
@@ -603,11 +579,6 @@ pub fn execute_with_context(
                 call_id: authorized.call_id().to_string(),
                 session_id: ctx.session_id.clone(),
                 workspace_root: context_workspace.clone(),
-                mode: if ctx.mode == 1 {
-                    AgentMode::Plan
-                } else {
-                    AgentMode::Code
-                },
                 permission_level,
                 sandbox: if crate::authorization::is_subagent_sandbox() {
                     SandboxMode::Subagent
@@ -774,7 +745,6 @@ mod tests {
         fn drop(&mut self) {
             crate::clear_actor_context();
             crate::runtime::clear_context();
-            crate::runtime::set_mode(0);
             crate::authorization::set_subagent_sandbox(false);
         }
     }
@@ -789,10 +759,6 @@ mod tests {
             serde_json::json!({
                 "session": ctx.session_id,
                 "workspace": ctx.workspace_root.to_string_lossy(),
-                "mode": match ctx.mode {
-                    crate::tool_api::AgentMode::Plan => 1,
-                    crate::tool_api::AgentMode::Code => 0,
-                },
                 "cancelled": ctx.cancellation.is_cancelled(),
             })
             .to_string(),
@@ -849,7 +815,6 @@ mod tests {
             call_id: "exec-progress-1".to_string(),
             session_id: "test_session".to_string(),
             workspace_root: workspace_root.clone(),
-            mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::SkipPermissions,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
@@ -1107,7 +1072,6 @@ mod tests {
         let _test_guard = setup_test_manager();
         let _actor_reset = ActorContextReset;
         crate::set_actor_context("/tmp/qaqh-legacy-ambient", "legacy-seed");
-        crate::runtime::set_mode(1);
         crate::authorization::set_subagent_sandbox(false);
 
         let workspace = tempfile::tempdir().unwrap();
@@ -1115,7 +1079,6 @@ mod tests {
             call_id: "explicit-context-1".to_string(),
             session_id: "explicit-seed".to_string(),
             workspace_root: workspace.path().to_path_buf(),
-            mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::SkipPermissions,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
@@ -1147,7 +1110,6 @@ mod tests {
             observed["workspace"],
             workspace.path().to_string_lossy().as_ref()
         );
-        assert_eq!(observed["mode"], 0);
         assert_eq!(observed["cancelled"], false);
         assert_eq!(
             crate::current_session().as_deref(),
@@ -1170,7 +1132,6 @@ mod tests {
             call_id: "sandbox-main".to_string(),
             session_id: "sandbox-seed".to_string(),
             workspace_root: workspace.path().to_path_buf(),
-            mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
@@ -1216,7 +1177,6 @@ mod tests {
             call_id: "explicit-cancel".to_string(),
             session_id: "test_session".to_string(),
             workspace_root: crate::runtime::active_workspace_root(),
-            mode: crate::tool_api::AgentMode::Code,
             permission_level: crate::permission::PermissionLevel::SkipPermissions,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(
@@ -1473,38 +1433,6 @@ mod tests {
             }
             _other => panic!("expected Authorized"),
         }
-    }
-
-    // ── Test 13: PLAN mode blocks destructive tools but not reads ──
-
-    #[test]
-    fn plan_mode_blocks_destructive_but_not_reads() {
-        let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 3);
-        let previous_mode = 0;
-        crate::runtime::set_mode(1);
-
-        let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let trusted = HashSet::new();
-
-        // `test_write` 不在 PLAN_BLOCKED 名单（`["edit", "exec_command", "write_stdin", "todo_update",
-        // "todo_write"]`，见 `crate::PLAN_BLOCKED`）中：PLAN 模式下仍放行，阻断只发生在名单内工具。
-        //
-        // 注意：`test_write` 是 Destructive + Write 的文件型工具，P0-2 之后
-        // 「缺 path」会被 `SafetyPolicy` fail-closed 拦下（与 PLAN 模式无关）。
-        // 本用例检验的是 PLAN 名单语义，故显式给出工区内 path 让安全闸门放行。
-        let mut inv = make_invocation("test_write", "plan-write");
-        inv.args = serde_json::json!({ "path": "." });
-        if let Admission::Authorized(auth) = admit(inv, 3, &ws, &trusted) {
-            let result = execute_authorized(auth, None);
-            assert!(
-                result.success,
-                "test_write not in PLAN_BLOCKED, should succeed even in plan mode: {}",
-                result.content
-            );
-        }
-
-        crate::runtime::set_mode(previous_mode);
     }
 
     // ── Test 14: Same permission decision for equivalent invocations ──

@@ -13,7 +13,7 @@ mod tests {
     };
     use qaqh_ringing_contract::fact::{
         ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionDecision,
-        InteractionId, InteractionKind, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId, TurnMode,
+        InteractionId, InteractionKind, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId,
     };
     use qaqh_ringing_contract::state::{
         CodeDelta, InteractionView, TimelineEntry, ToolCallState, ToolEffectInfo, TurnOutcome,
@@ -89,9 +89,6 @@ mod tests {
                     title_source: Some("user".into()),
                     cwd: None,
                     model: None,
-                    effort: None,
-                    profile: None,
-                    mode: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
@@ -105,7 +102,7 @@ mod tests {
 
             // 完整输入:回合 + 输入块。
             owner
-                .start_turn("T1", Some("IN1".into()), Some(TurnMode::Plan))
+                .start_turn("T1", Some("IN1".into()))
                 .await
                 .expect("start turn");
             owner
@@ -369,9 +366,6 @@ mod tests {
                     title_source: None,
                     cwd: None,
                     model: None,
-                    effort: None,
-                    profile: None,
-                    mode: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
@@ -445,9 +439,6 @@ mod tests {
                     title_source: None,
                     cwd: None,
                     model: None,
-                    effort: None,
-                    profile: None,
-                    mode: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
@@ -459,7 +450,7 @@ mod tests {
                 .expect("create session");
             let mut rx = owner.subscribe();
             owner
-                .start_turn("T1", None, None)
+                .start_turn("T1", None)
                 .await
                 .expect("start turn");
             owner
@@ -522,9 +513,6 @@ mod tests {
                     title_source: None,
                     cwd: None,
                     model: None,
-                    effort: None,
-                    profile: None,
-                    mode: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
@@ -570,9 +558,6 @@ mod tests {
                     title_source: None,
                     cwd: None,
                     model: None,
-                    effort: None,
-                    profile: None,
-                    mode: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,

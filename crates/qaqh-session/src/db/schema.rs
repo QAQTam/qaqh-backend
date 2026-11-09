@@ -20,9 +20,6 @@ CREATE TABLE sessions (
     title_source      TEXT,
     cwd               TEXT,
     model             TEXT,
-    effort            TEXT,
-    profile           TEXT,
-    mode              TEXT,
     tool_mode         TEXT,
     model_selection   TEXT,
     skills_json       TEXT,
@@ -41,7 +38,6 @@ CREATE TABLE turns (
     session_id     TEXT NOT NULL REFERENCES sessions(session_id),
     seq            INTEGER NOT NULL,
     input_id       TEXT,
-    mode           TEXT,
     phase          TEXT,
     status         TEXT NOT NULL,
     outcome_json   TEXT,
@@ -596,14 +592,14 @@ fn migrate_tool_call_row(input: MigrationInput<'_>) -> MigratedToolCall {
                     })
                     .unwrap_or_default();
                 let exec = exec_session_for(command, None, None);
-                let exec_session_id = Some(exec.exec_session_id.clone());
+                let exec_session_id = exec.exec_session_id.clone();
                 let outcome = ToolCallOutcome::Yielded {
-                    exec_session_id: ExecSessionId(exec_session_id.clone().unwrap()),
+                    exec_session_id: ExecSessionId(exec_session_id.clone()),
                 };
                 return make(
                     ToolCallState::Finished { outcome },
                     "finished",
-                    exec_session_id,
+                    Some(exec_session_id),
                     Some(exec),
                     true,
                 );
@@ -673,14 +669,14 @@ fn migrate_tool_call_row(input: MigrationInput<'_>) -> MigratedToolCall {
                 })
                 .unwrap_or_default();
             let exec = exec_session_for(command, None, None);
-            let exec_session_id = Some(exec.exec_session_id.clone());
+            let exec_session_id = exec.exec_session_id.clone();
             let outcome = ToolCallOutcome::Yielded {
-                exec_session_id: ExecSessionId(exec_session_id.clone().unwrap()),
+                exec_session_id: ExecSessionId(exec_session_id.clone()),
             };
             return make(
                 ToolCallState::Finished { outcome },
                 "finished",
-                exec_session_id,
+                Some(exec_session_id),
                 Some(exec),
                 false,
             );

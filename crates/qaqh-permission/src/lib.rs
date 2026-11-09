@@ -114,18 +114,6 @@ pub fn clear_cancel() {
 pub(crate) static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-/// Tools blocked in PLAN mode. 分类与 handler 声明的 category 对应
-/// （Read 类不入表；Write/Exec/Net 按语义列名）。
-pub const PLAN_BLOCKED: &[&str] = &[
-    "edit",
-    "exec_command",
-    "write_stdin",
-    // Todo v3：write/update 写类受 plan 阻断；todo_list 是读，plan 模式
-    // 需要查看任务清单，不放名单。
-    "todo_update",
-    "todo_write",
-];
-
 pub fn set_workspace(path: &str) {
     push_thread_workspace(Some(path.into()));
 }

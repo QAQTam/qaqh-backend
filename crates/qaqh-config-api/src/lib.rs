@@ -18,26 +18,7 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
-/// wire 的**唯一拼写**：这四个之一，别的一律拒绝。
-/// 为什么这份名单在这里而不是复用 `qaqh_types::Wire::parse`：本 crate 的 K1
-/// 不变量是「只依赖 serde」（三端设置页直接编译它）。所以这里是**一份镜像**，
-/// 但它是被闸门盯着的镜像——`qaqh-config` 的
-/// `canonical_wire_mirrors_qaqh_types` 测试逐个拼写与 `Wire::parse` +
-/// `Wire::as_str()` 对拍，任何一边改了名字而另一边没跟，测试先红。
-/// 2026-10 硬切：`openai` / `anthropic` / `claude` / `google` 等旧别名已删除；
-/// 未知拼写返回 `None`，写侧据此报 400（静默兜底正是「以为在用 A 协议、实际
-/// 打了 B」那类最难查的问题）。
-pub fn canonical_wire(value: &str) -> Option<&'static str> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "chat" => Some("chat"),
-        "responses" => Some("responses"),
-        "messages" => Some("messages"),
-        "gemini" => Some("gemini"),
-        _ => None,
-    }
-}
 
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
 /// TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见 crate 级兼容策略）。
@@ -45,29 +26,8 @@ pub fn canonical_wire(value: &str) -> Option<&'static str> {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigDto {
-    pub model: String,
-    /// BYOK 的 endpoint：scheme + host + 可选前缀（不含 wire 自身路径）。
-    pub base_url: String,
-    /// 该 endpoint 说的 wire，**规范拼写**：`chat` | `responses` | `messages` | `gemini`
-    /// （= `qaqh_types::Wire::as_str()`，也是写侧 [`canonical_wire`] 的返回值）。
-    /// 2026-10 之前这里写的是旧四名 `openai` / `anthropic`，与实际输出不一致：
-    /// 读侧回规范名、写侧只收旧名，于是每个客户端都得自带一层拼写桥。
-    /// 现在读写只收规范名，旧名仅由显式迁移入口处理。
-    pub wire: String,
-    /// 该 endpoint 的**凭据来源**：`api_key`（BYOK，缺省）| `chatgpt_plan`（本机
-    /// ChatGPT 套餐额度）| `deepseek_account`（本机 DeepSeek 账号余额）。
-    /// 显式声明而不是从「apiKey 是否为空」推导——隐式推导会把一个配置错误变成
-    /// 「静默用了别的额度」。`chatgpt_plan` 只与 `responses` wire + 官方 base_url
-    /// 配套；请求期的权威判定在 `qaqh-runtime` 的 `provider_for`。
-    pub credential: String,
-    pub max_tokens: u64,
-    /// 端点声明的上下文窗口——本地压缩的唯一分母（软阈值与硬 pre-flight 同源）。
-    pub context_length: u64,
-    pub reasoning_effort: String,
     pub auto_compact_threshold: f64,
     pub permission_level: u8,
-    /// 密钥永不出 daemon：空串 = 未配置、`"****"` = 已配置（掩码）。
-    pub api_key: String,
     pub lang: Option<String>,
     pub font_family: String,
     /// None/空 = 跟随系统。
@@ -75,12 +35,6 @@ pub struct ConfigDto {
     /// 语义缺省（开）由**产出侧**决定：`qaqh-config/src/dto.rs::to_dto` 里
     /// `unwrap_or(true)`。读侧不再兜底——见 `dto_rejects_a_partial_payload`。
     pub notifications_enabled: bool,
-    pub active_profile: String,
-    /// profile 名列表（管理 UI 用；不含敏感字段）。
-    pub profiles: Vec<String>,
-    /// profile 详细元数据（管理与切换 UI 用；不含敏感密钥）。
-    #[serde(default)]
-    pub profiles_detail: HashMap<String, ProfileSummaryDto>,
     pub compliance_enabled: bool,
     pub subagent: SubagentDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
@@ -101,22 +55,6 @@ pub struct ConfigDto {
     pub tool_allowlist_enabled: bool,
     /// Exact registered names; when enabled, an empty list disables all tools.
     pub tool_allowlist: Vec<String>,
-}
-
-/// 单个 Profile 摘要读模型（非敏感元数据）。
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileSummaryDto {
-    pub name: String,
-    pub model: String,
-    pub base_url: String,
-    pub wire: String,
-    pub effort: Option<String>,
-    pub context_length: u64,
-    pub max_tokens: u64,
-    pub api_key_set: bool,
-    pub credential: String,
 }
 
 /// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。
@@ -239,38 +177,16 @@ pub struct LspServerDto {
 
 /// 写模型：JSON Merge Patch（K3）。反序列化时缺失即 None = 不动；
 /// 序列化时跳过 None，保证 wire 上永不出现 `"field": null`。
-/// 刻意**不含**：profiles 名录（服务端派生）、active_profile（切换走
-/// `profile.apply`）、api_key_set（服务端派生）。BYOK 后没有 provider 目录可下发。
-/// `permissionLevel` 在 patch 中受 1..=3 值域校验（BUG-2026-09-13-15；三档制 2026-10-03）。
-/// 特例语义冻结：`apiKey`/`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
+/// 刻意**不含**：端点族字段（model/baseUrl/wire/credential/apiKey 等）——
+/// 端点与凭据的唯一真源是 providers.toml 目录，经 provider.* 命令面维护，
+/// 全局补丁写了也不生效；本写模型只承载全局策略。
+/// `permissionLevel` 受 1..=4 值域校验（BUG-2026-09-13-15）。
+/// 特例语义冻结：`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
 /// 保持现值（显式删除须专用接口）；其余字符串字段 Some(空串) = 显式置空。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ConfigPatch {
-    /// 主密钥：仅用户显式输入新值时 Some；掩码 `"****"`/空串 = 保持现值。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// 协议拼写只允许 [`canonical_wire`] 的四个规范名，旧别名一律拒绝。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wire: Option<String>,
-    /// 凭据来源：`api_key` | `chatgpt_plan` | `deepseek_account`。缺失 = 不动（K3）。
-    /// 从其他凭据切换到 DeepSeek 账号时，若省略 wire 且当前为 chat，默认改为
-    /// responses；显式 wire 与已有账号的后续更新不受影响。
-    /// 值域在 [`ConfigPatch::validate`] 收口；这里刻意**不**给「未知值退化成
-    /// api_key」的兜底——静默改变额度来源比报错难查得多。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context_length: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 值域 `[0,1]`；`0` = 关闭自动压缩。
     pub auto_compact_threshold: Option<f64>,
@@ -365,41 +281,6 @@ impl ConfigPatch {
                 "autoCompactThreshold 必须在 [0, 1] 区间（0=关闭），收到 {t}"
             ));
         }
-        if let Some(v) = self.max_tokens
-            && v == 0
-        {
-            return Err("maxTokens 必须大于 0".to_string());
-        }
-        if let Some(v) = self.context_length
-            && v == 0
-        {
-            return Err("contextLength 必须大于 0".to_string());
-        }
-        // 读写同一套规范名，判定交给 [`canonical_wire`]（`Wire::parse` 的镜像）。
-        if let Some(w) = &self.wire
-            && canonical_wire(w).is_none()
-        {
-            return Err(format!(
-                "wire 仅允许 chat|responses|messages|gemini，收到 {w}"
-            ));
-        }
-        if let Some(c) = &self.credential
-            && !matches!(c.as_str(), "api_key" | "chatgpt_plan" | "deepseek_account")
-        {
-            return Err(format!(
-                "credential 仅允许 api_key|chatgpt_plan|deepseek_account，收到 {c}"
-            ));
-        }
-        if let Some(e) = &self.reasoning_effort
-            && !matches!(
-                e.as_str(),
-                "low" | "medium" | "high" | "xhigh" | "max" | "ultra"
-            )
-        {
-            return Err(format!(
-                "reasoningEffort 仅允许 low|medium|high|xhigh|max|ultra，收到 {e}"
-            ));
-        }
         if let Some(level) = self.permission_level
             && !(1..=4).contains(&level)
         {
@@ -442,16 +323,13 @@ mod tests {
     #[test]
     fn dto_serializes_camel_case() {
         let dto = ConfigDto {
-            base_url: "https://x/v1".into(),
             auto_compact_threshold: 0.95,
             notifications_enabled: true,
             ..Default::default()
         };
         let s = serde_json::to_string(&dto).expect("serialize");
-        assert!(s.contains("\"baseUrl\""), "{s}");
         assert!(s.contains("\"autoCompactThreshold\""), "{s}");
         assert!(s.contains("\"notificationsEnabled\""), "{s}");
-        assert!(!s.contains("base_url"), "{s}");
     }
 
     /// 缺字段**必须失败**（原先这条叫 `dto_tolerates_missing_fields`，断言的
@@ -460,92 +338,23 @@ mod tests {
     /// 设置页会显示一堆空值而不是报错。失败比错值好。
     #[test]
     fn dto_rejects_a_partial_payload() {
-        let err = serde_json::from_value::<ConfigDto>(json!({ "model": "m" }))
+        let err = serde_json::from_value::<ConfigDto>(json!({ "lang": "zh" }))
             .expect_err("缺字段必须失败");
         assert!(err.to_string().contains("missing field"), "{err}");
     }
 
-    /// 写侧接受读模型的规范名，拒绝已删除的旧别名。
-    /// 这条挡的是「客户端各写一层拼写桥」：读回 `chat`、直发 `chat` 就该过；
-    /// 任何壳层都不需要再记「读规范名、写旧名」这件反直觉的事。
-    #[test]
-    fn patch_validation_accepts_canonical_and_rejects_legacy_wire_spellings() {
-        for spelling in ["chat", "messages", "responses", "gemini"] {
-            let patch = ConfigPatch {
-                wire: Some(spelling.into()),
-                ..Default::default()
-            };
-            patch
-                .validate()
-                .unwrap_or_else(|e| panic!("规范名 {spelling} 必须被接受：{e}"));
-            assert_eq!(
-                canonical_wire(spelling),
-                Some(spelling),
-                "规范名应映射到自身"
-            );
-        }
-        // 2026-10 硬切：旧拼写一律拒绝，不再充当别名。
-        for spelling in [
-            "openai",
-            "openai-compatible",
-            "chat_completions",
-            "anthropic",
-            "claude",
-            "google",
-        ] {
-            let patch = ConfigPatch {
-                wire: Some(spelling.into()),
-                ..Default::default()
-            };
-            assert!(
-                patch.validate().is_err(),
-                "旧拼写 {spelling:?} 必须被拒绝，而不是静默映射到别的协议"
-            );
-        }
-        // 大小写与首尾空白仍归一化（不是兼容，是输入卫生）。
-        ConfigPatch {
-            wire: Some("  CHAT ".into()),
-            ..Default::default()
-        }
-        .validate()
-        .expect("canonical spelling with padding must pass");
-        let err = ConfigPatch {
-            wire: Some("grpc".into()),
-            ..Default::default()
-        }
-        .validate()
-        .expect_err("未知 wire 必须拒");
-        assert!(err.contains("chat|responses|messages|gemini"), "{err}");
-    }
-
-    /// 完整读模型 fixture：字段形状为**当前** wire 形状（K2 camelCase），必须无损
-    /// 解析进 `ConfigDto`。注意 `permissionLevel: 4` 是旧四档值——读模型不做值域
-    /// 校验故照单解析，仅写路径 `ConfigPatch::validate` 拒 `4`（值域 1..=3）。
-    /// 历史：本 fixture 原为 2026-08-25 对运行中 daemon 的实拍（snake_case），
-    /// 靠 `alias` 与 struct 级 `#[serde(default)]` 才解析得动。按兼容政策
-    /// （spec §0b）这两样都已删除，故 fixture 改写为当前契约形状。
-    /// **顺手补了 `mcp`/`lsp`**：原先它俩根本不在 fixture 里，靠 struct 级 default
-    /// 顶成缺省——也就是说这条测试此前**没有真的在验「完整形状」**。补上后它才
-    /// 名副其实：字段缺一个就红。
+    /// 完整读模型 fixture：字段形状为当前契约形状（K2 camelCase），必须无损
+    /// 解析进 `ConfigDto`。端点族字段（model/baseUrl/wire/credential/apiKey/
+    /// profiles）已随全局配置退役——真源是 providers.toml 目录。
     #[test]
     fn dto_parses_the_full_wire_shape() {
         let payload = json!({
-            "model": "ox-alpha-free",
-            "baseUrl": "https://opencode.ai/zen/go/v1",
-            "wire": "openai",
-            "credential": "chatgpt_plan",
-            "maxTokens": 96000,
-            "contextLength": 1000000,
-            "reasoningEffort": "max",
             "autoCompactThreshold": 0.95,
             "permissionLevel": 4,
-            "apiKey": "****",
             "lang": null,
             "fontFamily": "",
             "theme": null,
             "notificationsEnabled": true,
-            "activeProfile": "default",
-            "profiles": ["default"],
             "complianceEnabled": false,
             "subagent": {
                 "model": "",
@@ -566,41 +375,14 @@ mod tests {
             "toolAllowlist": []
         });
         let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
-        assert_eq!(dto.context_length, 1_000_000);
-        assert_eq!(dto.wire, "openai");
-        assert_eq!(dto.credential, "chatgpt_plan");
-        assert_eq!(dto.reasoning_effort, "max");
+        assert_eq!(dto.permission_level, 4);
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
-        assert_eq!(dto.api_key, "****");
         assert_eq!(dto.subagent.timeout_secs, 120);
         assert_eq!(dto.subagent.default_tools, vec!["read".to_string()]);
         assert_eq!(dto.exec.default_shell.as_deref(), Some("bash"));
         assert!(dto.sandbox.enabled);
         assert_eq!(dto.session_idle_unload_secs, 900);
         assert!(!dto.mcp.enabled && !dto.lsp.enabled);
-    }
-
-    /// 凭据来源只有两个合法取值。写错必须在落盘前拦掉：静默退回 `api_key` 会让
-    /// 用户以为在用套餐、实际打的是自己的 key。
-    #[test]
-    fn patch_validate_rejects_an_unknown_credential() {
-        let ok = ConfigPatch {
-            credential: Some("chatgpt_plan".into()),
-            ..Default::default()
-        };
-        assert!(ok.validate().is_ok());
-
-        for bad in ["chatgpt", "chatgpt_plan ", "", "ApiKey"] {
-            let patch = ConfigPatch {
-                credential: Some(bad.into()),
-                ..Default::default()
-            };
-            let err = patch.validate().expect_err("未知取值必须拒绝");
-            assert!(
-                err.contains("api_key|chatgpt_plan|deepseek_account"),
-                "{bad} → {err}"
-            );
-        }
     }
 
     /// K3：空 Patch 序列化为 `{}`——wire 上不发 null、不发未改动字段。
@@ -613,8 +395,6 @@ mod tests {
     #[test]
     fn patch_roundtrip_with_nested_subagent() {
         let patch = ConfigPatch {
-            model: Some("m".into()),
-            context_length: Some(1_000_000),
             auto_compact_threshold: Some(0.95),
             subagent: Some(SubagentPatch {
                 timeout_secs: Some(240),
@@ -624,13 +404,11 @@ mod tests {
             ..Default::default()
         };
         let v = serde_json::to_value(&patch).expect("serialize");
-        assert_eq!(v["model"], json!("m"));
-        assert_eq!(v["contextLength"], json!(1_000_000));
         assert_eq!(v["autoCompactThreshold"], json!(0.95));
         assert_eq!(v["subagent"]["timeoutSecs"], json!(240));
         assert_eq!(v["subagent"]["defaultTools"], json!([]));
         // None 字段不得出现在 wire 上。
-        assert!(v.get("baseUrl").is_none());
+        assert!(v.get("model").is_none());
         assert!(v.get("theme").is_none());
         let back: ConfigPatch = serde_json::from_value(v).expect("deserialize");
         assert_eq!(back, patch);
@@ -639,11 +417,11 @@ mod tests {
         // serde 静默忽略，而 Patch 的每字段都是 Option——所以结果是「什么都没改」，
         // 不是报错。这正是 Patch 语义（缺失=不动）下的正确结果，不是漏洞。
         let legacy: ConfigPatch = serde_json::from_value(json!({
-            "context_limit": 500_000,
+            "max_tokens": 96_000,
             "subagent": { "timeout_secs": 60 }
         }))
         .expect("未知键不报错");
-        assert_eq!(legacy.context_length, None, "snake_case 键已不再生效");
+        assert_eq!(legacy.auto_compact_threshold, None, "snake_case 键已不再生效");
         assert_eq!(legacy.subagent.expect("subagent").timeout_secs, None);
     }
 
@@ -654,19 +432,6 @@ mod tests {
             ..Default::default()
         };
         assert!(bad.validate().is_err());
-        // `ultra` 曾在这里充当非法样本（旧值域 low|medium|high|xhigh|max）。
-        // 2026-10-14 起 `mutil-ai 0.6.0` 支持该档、值域随之放开，所以换成真正
-        // 越界的值，并把「ultra 合法」单独立一条——免得下次又被当反例改回来。
-        let bad_effort = ConfigPatch {
-            reasoning_effort: Some("bogus".into()),
-            ..Default::default()
-        };
-        assert!(bad_effort.validate().is_err());
-        let ultra = ConfigPatch {
-            reasoning_effort: Some("ultra".into()),
-            ..Default::default()
-        };
-        assert!(ultra.validate().is_ok());
         // 0.0 = 关闭自动压缩，合法（真机回归：开区间曾误杀禁用流）。
         let disabled = ConfigPatch {
             auto_compact_threshold: Some(0.0),
@@ -693,8 +458,6 @@ mod tests {
         }
         let good = ConfigPatch {
             auto_compact_threshold: Some(0.95),
-            reasoning_effort: Some("max".into()),
-            max_tokens: Some(96_000),
             ..Default::default()
         };
         assert!(good.validate().is_ok());
