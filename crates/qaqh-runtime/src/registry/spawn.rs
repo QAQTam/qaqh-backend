@@ -429,7 +429,7 @@ impl AgentRegistry {
             return Err(format!("agent already running for {session_id}").into());
         }
 
-        let mut agent_config = qaqh_agent_runtime::agent::session_config::session_effective_config(
+        let agent_config = qaqh_agent_runtime::agent::session_config::session_effective_config(
             &self.owners,
             session_id,
         )

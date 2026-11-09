@@ -364,14 +364,17 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
 pub fn exec_session_view(row: store::ExecSessionRow) -> Result<ExecSessionView, DbError> {
     let who = format!("exec session {}", row.exec_session_id);
     let state = parse_typed::<ExecSessionState>(&who, "state", &row.state_json)?;
+    // 库内 content_id 为裸 hex(schema 6→7 契约);wire ref 在此边界组装 `sha256:` 前缀。
     let output =
-        row.output_content_id.map(
-            |content_id| qaqh_ringing_contract::fact::ContentValue::Ref {
+        row.output_content_id.map(|content_id| {
+            qaqh_ringing_contract::fact::ContentValue::Ref {
                 content_ref: qaqh_ringing_contract::fact::ContentRef::new(
-                    qaqh_ringing_contract::fact::ContentHash::new(content_id),
+                    qaqh_ringing_contract::fact::ContentHash::new(store::canonical_content_ref(
+                        &content_id,
+                    )),
                 ),
-            },
-        );
+            }
+        });
     Ok(ExecSessionView {
         id: qaqh_ringing_contract::fact::ExecSessionId::new(row.exec_session_id),
         owner_session_id: SessionId::new(row.session_id),

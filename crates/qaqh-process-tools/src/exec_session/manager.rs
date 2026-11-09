@@ -210,6 +210,16 @@ impl ProcessControl {
             Self::Pipe(process) => process.kill_group(),
         }
     }
+
+    /// Post-reap console teardown: on Windows closes the ConPTY master so
+    /// the terminal source reaches EOF (see qaqh_pty::SpawnedSession).
+    fn close_terminal(&mut self) {
+        match self {
+            #[cfg(any(unix, windows))]
+            Self::Pty(process) => process.close_terminal(),
+            Self::Pipe(_) => {}
+        }
+    }
 }
 
 impl ExecSessionManager {
@@ -762,7 +772,7 @@ fn result_from_core(
             ExecSessionOutcome::Exited { exit_code: 0 } => ToolCallOutcome::Completed,
             ExecSessionOutcome::Exited { exit_code } => failed_outcome(
                 "exit_nonzero",
-                format!("command exited with code {exit_code}"),
+                format!("command exited with code {exit_code}{}", status_suffix(*exit_code)),
             ),
             ExecSessionOutcome::TimedOut { .. } => {
                 failed_outcome("timed_out", "command exceeded timeout_ms".into())
@@ -979,6 +989,13 @@ fn watch_process(inner: Arc<ManagerInner>, session: Arc<ManagedSession>, timeout
         core.exit = Some(exit.clone());
     }
     session.changed.notify_all();
+
+    // ConPTY 契约：子进程退出不产生输出管道 EOF（写端由 master 侧持有）。
+    // 收割即关终端，EOF 确定性到来；Unix 下是 no-op。
+    {
+        let mut process = session.process.lock().unwrap_or_else(|e| e.into_inner());
+        process.close_terminal();
+    }
 
     let mut eof_deadline = Instant::now() + OUTPUT_EOF_SETTLE;
     let mut escalated = false;
@@ -1409,6 +1426,17 @@ fn failed_outcome(code: &str, message: String) -> ToolCallOutcome {
             retryable: false,
             details_ref: None,
         },
+    }
+}
+
+/// 负退出码 = Windows NTSTATUS（0xC0000142 加载/控制台初始化失败、
+/// 0xC0000005 访问冲突…）。十进制 i32 对人不友好，补一个十六进制位型，
+/// 让「进程根本没跑起来」与「命令返回非零」在错误信息里可分辨。
+fn status_suffix(exit_code: i32) -> String {
+    if exit_code < 0 {
+        format!(" (0x{:08X})", exit_code as u32)
+    } else {
+        String::new()
     }
 }
 

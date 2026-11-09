@@ -279,4 +279,150 @@ mod tests {
             assert_eq!(rows[0].title, "测试会话");
         });
     }
+
+    /// 64-hex 占位摘要(裸形态)。
+    const BARE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const BARE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    #[test]
+    fn exec_settle_stores_bare_content_id_and_view_ref_is_prefixed() {
+        let db = test_db();
+        let expected = {
+            use sha2::{Digest, Sha256};
+            hex::encode(Sha256::digest(b"body"))
+        };
+        let expected_ref = format!("sha256:{expected}");
+        db.write_blocking(move |conn| {
+            store::create_session(
+                conn,
+                &store::NewSession {
+                    session_id: "SES-CONTENT".into(),
+                    parent_session_id: None,
+                    title: "content".into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                },
+            )?;
+            store::upsert_exec_session(
+                conn,
+                &store::ExecSessionRow {
+                    exec_session_id: "execs-1".into(),
+                    session_id: "SES-CONTENT".into(),
+                    origin_turn_id: Some("turn-1".into()),
+                    origin_call_id: Some("call-1".into()),
+                    tty: false,
+                    command: "echo body".into(),
+                    cwd: None,
+                    state_json: "{\"kind\":\"running\"}".into(),
+                    state_kind: "running".into(),
+                    started_at_ms: 10,
+                    finished_at_ms: None,
+                    next_offset: 0,
+                    output_complete: true,
+                    capture_omitted_bytes: 0,
+                    stream_dropped_bytes: 0,
+                    output_content_id: None,
+                    output_preview: String::new(),
+                    preview_start_offset: 0,
+                },
+            )?;
+            store::finish_exec_session(
+                conn,
+                "execs-1",
+                "{\"kind\":\"finished\",\"outcome\":{\"kind\":\"exited\",\"exit_code\":0}}",
+                20,
+                true,
+                None,
+                Some("body"),
+                false,
+                "preview",
+                0,
+            )?;
+            // 库内裸 hex:owners/get 按裸键命中(daemon GET 入口剥前缀后的形态)。
+            assert_eq!(
+                store::session_content_owners(conn, &expected)?,
+                ["SES-CONTENT"]
+            );
+            assert!(store::get_session_content(conn, "SES-CONTENT", &expected)?.is_some());
+            let row = store::exec_session_by_id(conn, "execs-1")?.expect("settled row");
+            assert_eq!(row.output_content_id.as_deref(), Some(expected.as_str()));
+            Ok::<(), crate::db::DbError>(())
+        })
+        .expect("exec settle round trip");
+
+        let row = db
+            .read_blocking(|conn| {
+                store::exec_session_by_id(conn, "execs-1")
+                    .map(|row| row.expect("settled row"))
+                    .map_err(crate::db::DbError::from)
+            })
+            .expect("read row");
+        let view = view::exec_session_view(row).expect("view");
+        let Some(ContentValue::Ref { content_ref }) = view.output else {
+            panic!("settled exec session must expose a ref output");
+        };
+        // wire ref 在视图边界补 `sha256:` 前缀(前端/SDK 校验的 canonical 形态)。
+        assert_eq!(content_ref.hash().as_str(), expected_ref);
+    }
+
+    #[test]
+    fn content_ids_normalize_on_write_and_legacy_prefixed_rows_still_resolve() {
+        let db = test_db();
+        db.write_blocking(|conn| {
+            store::create_session(
+                conn,
+                &store::NewSession {
+                    session_id: "SES-CID".into(),
+                    parent_session_id: None,
+                    title: "content ids".into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    skills: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                },
+            )?;
+            // wire 形态(`sha256:<hex>`)写入 → 库内归一为裸 hex,
+            // 不产生第二种主键形态。
+            store::put_session_content(
+                conn,
+                "SES-CID",
+                &format!("sha256:{BARE_A}"),
+                "text/plain",
+                b"x",
+                false,
+            )?;
+            let prefixed_rows: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM session_contents WHERE content_id LIKE 'sha256:%'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(prefixed_rows, 0);
+            assert!(store::get_session_content(conn, "SES-CID", BARE_A)?.is_some());
+            assert_eq!(store::session_content_owners(conn, BARE_A)?, ["SES-CID"]);
+
+            // 模拟绕过写入归一的历史遗留前缀行(如外部工具直写库)→
+            // 裸键读取按双形态兜底命中。
+            conn.execute(
+                "INSERT INTO session_contents (session_id, content_id, media_type, bytes, truncated)
+                 VALUES ('SES-CID', ?1, 'text/plain', x'79', 0)",
+                [&format!("sha256:{BARE_B}")],
+            )?;
+            assert!(store::get_session_content(conn, "SES-CID", BARE_B)?.is_some());
+            assert_eq!(store::session_content_owners(conn, BARE_B)?, ["SES-CID"]);
+            Ok::<(), crate::db::DbError>(())
+        })
+        .expect("content id normalization");
+    }
 }
