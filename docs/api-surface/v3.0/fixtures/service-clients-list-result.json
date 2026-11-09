@@ -1,0 +1,9 @@
+[
+  {
+    "client_session_id": "client-session-fixture",
+    "instance_key": "device-fixture",
+    "client_kind": "desktop",
+    "attached_sessions": 1,
+    "expires_in_ms": 30000
+  }
+]

@@ -1,0 +1,46 @@
+{
+  "schema": "qaqh.ringing.team/v1",
+  "session_id": "0199a0f0-0000-7000-8000-000000000001",
+  "team": {
+    "root_session_id": "0199a0f0-0000-7000-8000-000000000001",
+    "agents": [
+      {
+        "agent_id": "0199a0f0-0000-7000-8000-000000000001",
+        "agent_path": "/root",
+        "nickname": "main",
+        "status": "running",
+        "residency": "loaded"
+      },
+      {
+        "agent_id": "0199a0f0-0000-7000-8000-000000000002",
+        "agent_path": "/root/writer",
+        "nickname": "writer",
+        "status": "completed",
+        "residency": "unloaded",
+        "parent_agent_path": "/root"
+      }
+    ],
+    "unread_messages": [
+      {
+        "message_id": "msg-fixture",
+        "author": "/root/writer",
+        "recipient": "/root",
+        "task_id": "task-fixture",
+        "delivery": "queue",
+        "created_at_ms": 1759000000000
+      }
+    ],
+    "revision": 7,
+    "last_fact_seq": 42
+  },
+  "tasks": {
+    "team_id": null,
+    "revision": 0,
+    "last_fact_seq": 0,
+    "tasks": []
+  },
+  "board": {
+    "revision": 0,
+    "last_fact_seq": 0
+  }
+}

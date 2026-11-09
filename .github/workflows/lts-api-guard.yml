@@ -1,0 +1,31 @@
+name: LTS API guard
+
+on:
+  push:
+    branches: [LTS-v3.0]
+  pull_request:
+    branches: [LTS-v3.0]
+
+jobs:
+  freeze:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: qaqh-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qaqh-backend
+      # Sibling path dependency (../mutil-ai), pinned to the tested 0.7.0
+      # stream/custom-tool fixes used by the desktop build.
+      - uses: actions/checkout@v4
+        with:
+          repository: qaqtam/mutil-ai
+          ref: 4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4
+          path: mutil-ai
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: qaqh-backend
+      - name: Verify LTS API surface is frozen
+        run: python3 scripts/check-lts-api-surface.py

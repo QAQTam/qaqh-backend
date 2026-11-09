@@ -1,0 +1,13 @@
+{
+  "tasks": [
+    {
+      "id": "todo-fixture-1",
+      "subject": "synthetic task",
+      "description": "",
+      "status": "in_progress"
+    }
+  ],
+  "recent_edits": [
+    "/synthetic/workspace/src/main.rs"
+  ]
+}
