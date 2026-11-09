@@ -396,7 +396,7 @@ pub fn is_self_administration_path(path: &Path) -> bool {
     let candidate = normalize_lexically(&resolve_target_path(path.to_path_buf()));
     [
         qaqh_types::platform::config_path(),
-        qaqh_types::platform::profiles_path(),
+        qaqh_types::platform::providers_path(),
         data_dir.join("secrets.toml"),
         qaqh_types::platform::daemon_discovery_path(),
     ]
@@ -880,7 +880,7 @@ mod tests {
         let ws = std::env::temp_dir().join("qaqh-ws-admin");
         for path in [
             qaqh_types::platform::config_path(),
-            qaqh_types::platform::profiles_path(),
+            qaqh_types::platform::providers_path(),
             data.join("secrets.toml"),
             qaqh_types::platform::daemon_discovery_path(),
         ] {

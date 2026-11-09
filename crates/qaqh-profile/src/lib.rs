@@ -21,13 +21,11 @@ pub use store::{ProfilesStore, ProfileStoreError};
 
 use std::path::PathBuf;
 
-/// 获取默认 profiles.toml 路径（与 config.toml / secrets.toml 同目录）。
+/// 获取 providers.toml 权威落盘路径（与 config.toml / secrets.toml 同目录）。
 ///
-/// 旧 profile 名体系的落盘文件；新 BYOK 目录用 [`default_providers_path`]。
-/// 新 BYOK 目录（[`ProfilesDocument`]）的权威落盘路径。
-///
-/// `Config::load` 从这里装载 `profiles_catalog`，provider/model 的全部读写
-/// 必须落在这一个文件；旧 `profiles.toml` 属于已废除的 profile 名体系。
+/// 新 BYOK 目录（[`ProfilesDocument`]）的唯一存储文件：`Config::load` 从这里
+/// 装载 `profiles_catalog`，provider/model 的全部读写必须落在这一个文件；
+/// 旧 `profiles.toml` 属于已废除的 profile 名体系。
 pub fn default_providers_path() -> PathBuf {
-    qaqh_types::platform::config_path().with_file_name("providers.toml")
+    qaqh_types::platform::providers_path()
 }
