@@ -83,9 +83,7 @@ impl SubagentHost for QaqhService {
             parent_session_id,
             requested_name,
             tools,
-            model,
-            base_url,
-            max_tokens,
+            selection,
             workspace,
             permission_level,
         } = request;
@@ -102,9 +100,7 @@ impl SubagentHost for QaqhService {
             requested_name,
             crate::registry::SubagentSpawnOptions {
                 tools,
-                model,
-                base_url,
-                max_tokens,
+                selection,
                 // The requested workspace goes straight into the child's
                 // genesis fact; the session tree never re-derives it.
                 workspace: workspace.filter(|w| !w.is_empty() && *w != "."),

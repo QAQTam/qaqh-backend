@@ -164,11 +164,9 @@ pub enum RingingCommand {
         #[serde(default)]
         tools: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        model: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        base_url: Option<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_tokens: Option<u32>,
+        /// 显式指定子代理的 provider+model 选择；缺省继承父会话行的
+        /// model_selection。端点/密钥/max_tokens 一律由目录解析，禁止裸传。
+        selection: Option<qaqh_profile::ModelSelection>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<String>,
     },

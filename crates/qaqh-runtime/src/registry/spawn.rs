@@ -111,16 +111,16 @@ impl AgentRegistry {
         self.spawn_session_inprocess(session_id)
     }
 
-    /// Assemble a child session loop with an explicit tool and model configuration.
+    /// Assemble a child session loop with an explicit tool configuration.
+    /// 模型选择不在此传裸值：`selection` 缺省时子会话行继承父会话的选择，
+    /// 端点/密钥/max_tokens 由目录 + 会话行解析。
     pub fn spawn_subagent(
         &mut self,
         session_id: &str,
         tools: &[String],
-        model: Option<&str>,
-        base_url: Option<&str>,
-        max_tokens: Option<u32>,
+        selection: Option<&qaqh_types::ModelSelection>,
     ) -> QaqhResult<()> {
-        self.spawn_subagent_in_workspace(session_id, tools, model, base_url, max_tokens, None)
+        self.spawn_subagent_in_workspace(session_id, tools, selection, None)
     }
 
     /// Spawn a subagent with the workspace the caller explicitly requested.
@@ -133,18 +133,14 @@ impl AgentRegistry {
         &mut self,
         session_id: &str,
         tools: &[String],
-        model: Option<&str>,
-        base_url: Option<&str>,
-        max_tokens: Option<u32>,
+        selection: Option<&qaqh_types::ModelSelection>,
         workspace: Option<&str>,
     ) -> QaqhResult<()> {
         let persist = std::env::var("QAQH_SUBAGENT_PERSIST")
             .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
         let options = SubagentSpawnOptions {
             tools,
-            model,
-            base_url,
-            max_tokens,
+            selection,
             workspace,
             ephemeral: !persist,
             // legacy/bootstrap 无父会话上下文，回落全局 config（fail-closed 1）。
@@ -254,13 +250,19 @@ impl AgentRegistry {
                 }),
         };
         let parent_id = parent_session_id.to_string();
-        let parent_selection = self
+        let parent_row_selection = self
             .owners
             .db()
             .read_blocking(move |conn| qaqh_session::db::store::session_row(conn, &parent_id))
             .map_err(QaqhError::message)?
             .ok_or_else(|| QaqhError::not_found("subagent parent session not found"))?
             .model_selection
+            ;
+        // 显式指定的 selection 优先；否则子会话行继承父会话行的选择。
+        let child_selection = options
+            .selection
+            .cloned()
+            .or(parent_row_selection)
             .map(|value| qaqh_types::SettingValue::Use { value });
         // 业务权威先行:子会话行落 SQLite(血缘 = 父会话, cwd 一并落库)。
         self.owners
@@ -281,7 +283,7 @@ impl AgentRegistry {
                             cwd: Some(cwd),
                             model: None,
                             tool_mode: None,
-                            model_selection: parent_selection,
+                            model_selection: child_selection,
                             custom_tools: None,
                             skills: None,
                             frozen_annotation: None,
@@ -333,9 +335,7 @@ impl AgentRegistry {
     ) -> QaqhResult<()> {
         let SubagentSpawnOptions {
             tools,
-            model,
-            base_url,
-            max_tokens,
+            selection: _,
             workspace: _,
             ephemeral,
             permission_level,
@@ -362,9 +362,6 @@ impl AgentRegistry {
             session_id,
             SubagentSpawnSpec {
                 tools: tools.to_vec(),
-                model: model.map(str::to_string),
-                base_url: base_url.map(str::to_string),
-                max_tokens,
                 permission_level,
             },
         ) {
@@ -437,15 +434,6 @@ impl AgentRegistry {
             session_id,
         )
         .map_err(QaqhError::message)?;
-        if let Some(model) = &spec.model {
-            agent_config.model = model.clone();
-        }
-        if let Some(base_url) = &spec.base_url {
-            agent_config.base_url = base_url.clone();
-        }
-        if let Some(max_tokens) = spec.max_tokens {
-            agent_config.max_tokens = max_tokens;
-        }
 
         let ws_dir = ensure_session_workspace(&self.owners, session_id)?;
         let owner = self.owners.get_or_create(session_id);
