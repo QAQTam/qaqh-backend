@@ -1,17 +1,21 @@
-//! QAQ-Harness 模块化 Profile / Provider / Model 领域体系。
+//! QAQ-Harness 模块化 Provider / Model 领域体系。
 //!
 //! 对齐成熟业界规范（参考 ZCode），彻底根除“全局配置污染”：
-//! 1. 结构正交：Provider 维护端点与多 Models，Profile 组装可复用预设；
-//! 2. 存储隔离：写入单独的 `profiles.toml`，创建预设零全局副作用；
-//! 3. 权威解析：会话可自由绑定 Profile，未指定时纯净回退到全局默认预设。
+//! 1. 结构正交：Provider 维护端点与多 Models，全局默认是一枚
+//!    `default_model_selection` 指针（provider_id + model_id）；
+//! 2. 存储隔离：唯一落盘文件是 `providers.toml`（providers + active）；
+//! 3. 权威解析：会话/子代理按 ModelSelection 从目录 fail-fast 解析端点与凭据；
+//! 4. 内置预设是一张代码静态表（[`presets`]），选择预设即复制默认值进目录。
 
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod model;
+pub mod presets;
 pub mod resolver;
 pub mod store;
 
 pub use model::{ModelDef, ModelDefaults, ModelSelection, ProfilesDocument, ProviderDef};
+pub use presets::{provider_preset, ProviderPreset, PROVIDER_PRESETS};
 pub use resolver::{resolve_model_selection, EffectiveModelConfig, ModelResolveError};
 pub use store::{ProfilesStore, ProfileStoreError};
 

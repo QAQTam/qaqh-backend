@@ -21,15 +21,25 @@ use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
 pub fn provider_spec(
     config: &qaqh_config::Config,
     tools: Vec<qaqh_types::ToolDef>,
-) -> ProviderRequestSpec {
+) -> Result<ProviderRequestSpec, String> {
     let deepseek_account = config.credential == qaqh_types::CredentialSource::DeepseekAccount;
     let base_url = if deepseek_account {
         qaqh_dsaccount::protocol::INFERENCE_ORIGIN.to_string()
-    } else if config.base_url.is_empty() {
-        "https://api.openai.com/v1".to_string()
     } else {
         config.base_url.clone()
     };
+    if base_url.is_empty() {
+        return Err(format!(
+            "provider {}: endpoint base_url is empty; set it in providers.toml",
+            config.provider_id
+        ));
+    }
+    if config.max_tokens == 0 {
+        return Err(format!(
+            "provider {}: model {} has max_tokens = 0; fix the model definition in providers.toml",
+            config.provider_id, config.model
+        ));
+    }
     let api_key = if deepseek_account {
         ""
     } else {
@@ -61,7 +71,7 @@ pub fn provider_spec(
     if deepseek_account && config.wire == qaqh_types::Wire::Responses {
         apply_deepseek_responses_facts(&mut provider, &config.model);
     }
-    let mut spec = ProviderRequestSpec::new(provider, config.max_tokens.max(256))
+    let mut spec = ProviderRequestSpec::new(provider, config.max_tokens)
         .with_credential(config.credential);
     if !tools.is_empty() {
         spec = spec.with_tools(tools);
@@ -70,7 +80,7 @@ pub fn provider_spec(
     if !effort.is_empty() {
         spec = spec.with_effort(effort.to_string());
     }
-    spec
+    Ok(spec)
 }
 
 /// 把 `EndpointCompat` 投影到 wire 无关的 `ProviderConfig`。
@@ -261,7 +271,7 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
     let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
     tool_manager.set_global_allowed(global_allowed_tools);
     tool_manager.apply_init(allowed_tools);
-    let provider = provider_spec(config, tool_defs(&tool_manager));
+    let provider = provider_spec(config, tool_defs(&tool_manager))?;
     let policy = tool_policy(
         workspace_root.clone(),
         permission_level,

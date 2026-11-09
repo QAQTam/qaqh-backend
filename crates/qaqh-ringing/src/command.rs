@@ -121,6 +121,10 @@ pub enum RingingCommand {
     ExecSessionTerminate {},
     #[serde(rename = "provider.list")]
     ProviderList {},
+    /// 内置 provider 预设静态表（Spec §3.2）：设置页「选预设」的数据源，
+    /// 只读，选中的默认值由前端复制进 provider.upsert 落目录。
+    #[serde(rename = "provider.presets.list")]
+    ProviderPresets {},
     #[serde(rename = "provider.upsert")]
     ProviderUpsert {
         id: String,
@@ -211,6 +215,7 @@ impl RingingCommand {
             Self::ExecSessionInterrupt {} => "exec_session.interrupt",
             Self::ExecSessionTerminate {} => "exec_session.terminate",
             Self::ProviderList { .. } => "provider.list",
+            Self::ProviderPresets { .. } => "provider.presets.list",
             Self::ProviderUpsert { .. } => "provider.upsert",
             Self::ProviderDelete { .. } => "provider.delete",
             Self::ProviderModelUpsert { .. } => "provider.model.upsert",
