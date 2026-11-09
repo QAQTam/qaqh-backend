@@ -106,20 +106,10 @@ pub struct PersistentExecConfig {
 /// Persistence-friendly subagent config with all-Option fields.
 /// Stored as a subsection of the main config. All fields are `Option` so that
 /// partial overrides work — `None` = inherit from parent agent config.
+/// 端点族字段（model/baseUrl/apiKey/maxTokens）已退役：子代理的模型选择
+/// 唯一真源是 providers.toml 目录 + 会话行的 model_selection，不再有第二份。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct PersistentSubagentConfig {
-    /// Override model for subagent. `None` = inherit from parent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    /// Override base URL. `None` = inherit from parent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    /// Override API key. `None` = inherit from parent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    /// Override max output tokens. `None` = inherit from parent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
     /// Max time in seconds before the subagent is killed. `None` = default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,

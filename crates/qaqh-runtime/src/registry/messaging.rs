@@ -88,15 +88,6 @@ impl AgentRegistry {
                     )
                 }
                 AgentKind::Subagent(spec) => {
-                    if let Some(model) = &spec.model {
-                        config.model = model.clone();
-                    }
-                    if let Some(base_url) = &spec.base_url {
-                        config.base_url = base_url.clone();
-                    }
-                    if let Some(max_tokens) = spec.max_tokens {
-                        config.max_tokens = max_tokens;
-                    }
                     config.permission_level = spec.permission_level;
                     (
                         spec.tools.clone(),

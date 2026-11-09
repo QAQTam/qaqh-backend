@@ -278,9 +278,7 @@ fn create_business_row(
 pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) -> QaqhResult<Value> {
     let RingingCommand::SubagentSpawn {
         tools,
-        model,
-        base_url,
-        max_tokens,
+        selection,
         workspace,
     } = command
     else {
@@ -292,9 +290,7 @@ pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) ->
     spawn_subagent(
         service,
         tools,
-        model.as_deref(),
-        base_url.as_deref(),
-        *max_tokens,
+        selection.as_ref(),
         workspace.as_deref(),
     )
 }
@@ -302,13 +298,17 @@ pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) ->
 fn spawn_subagent(
     service: &QaqhService,
     tools: &[String],
-    model: Option<&str>,
-    base_url: Option<&str>,
-    max_tokens: Option<u32>,
+    selection: Option<&qaqh_types::ModelSelection>,
     workspace: Option<&str>,
 ) -> QaqhResult<Value> {
-    let model = model.filter(|model| !model.is_empty());
-    let base_url = base_url.filter(|base_url| !base_url.is_empty());
+    // 提交侧 fail-fast：显式 selection 必须能在当前目录解析（不存在/禁用/
+    // 缺档位即拒绝），与 session.settings.patch 同纪律。缺省 = 继承父会话行。
+    if let Some(selection) = selection {
+        let catalog = qaqh_config::watch::authoritative()
+            .map(|cfg| cfg.profiles_catalog.clone())
+            .unwrap_or_default();
+        qaqh_profile::resolve_model_selection(&catalog, selection).map_err(QaqhError::message)?;
+    }
     // 子代理继承主代理的 workspace：spawn 前把 workspace 作为 cwd 落进子会话
     // meta（`allocate_agent_session(workspace)` → `create_new_session(..., cwd, ...)`），
     // 子 worker 启动时经 `load_session_workspace` 读 meta.cwd，从而正确解析
@@ -325,7 +325,7 @@ fn spawn_subagent(
     service
         .registry()
         .map_err(QaqhError::message)?
-        .spawn_subagent_in_workspace(&session_id, tools, model, base_url, max_tokens, workspace)
+        .spawn_subagent_in_workspace(&session_id, tools, selection, workspace)
         .map_err(QaqhError::message)?;
     log::info!(
         "[subagent] spawned subagent worker seed={session_id} tools={}",

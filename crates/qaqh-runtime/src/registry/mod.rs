@@ -9,9 +9,6 @@ use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgent
 #[derive(Clone, Debug)]
 pub struct SubagentSpawnSpec {
     pub tools: Vec<String>,
-    pub model: Option<String>,
-    pub base_url: Option<String>,
-    pub max_tokens: Option<u32>,
     pub permission_level: u8,
 }
 use crate::agent_catalog::AgentCatalog;
@@ -257,9 +254,9 @@ pub struct SpawnedSubagentInfo {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SubagentSpawnOptions<'a> {
     pub(crate) tools: &'a [String],
-    pub(crate) model: Option<&'a str>,
-    pub(crate) base_url: Option<&'a str>,
-    pub(crate) max_tokens: Option<u32>,
+    /// 显式 provider+model 选择；`None` = 子会话行继承父会话行的选择。
+    /// 端点/密钥/max_tokens 一律由目录 + 会话行解析，不存在裸参数覆盖链。
+    pub(crate) selection: Option<&'a qaqh_types::ModelSelection>,
     /// Workspace the caller explicitly requested for the child session.
     /// `None` = inherit the parent workspace / default session root.
     pub(crate) workspace: Option<&'a str>,

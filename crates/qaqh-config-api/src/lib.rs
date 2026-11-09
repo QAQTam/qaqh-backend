@@ -57,16 +57,13 @@ pub struct ConfigDto {
     pub tool_allowlist: Vec<String>,
 }
 
-/// 子代理配置段（读模型）。api_key 语义同顶层：空串/"****" 掩码。
+/// 子代理配置段（读模型）。端点族字段（model/baseUrl/apiKey/maxTokens）
+/// 已退役——子代理模型选择唯一真源是 providers.toml 目录 + 会话行
+/// model_selection，经 provider.* 命令面与 session.settings.patch 维护。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentDto {
-    pub model: String,
-    pub base_url: String,
-    pub api_key: String,
-    pub api_key_set: bool,
-    pub max_tokens: u64,
     /// Maximum lifetime in seconds before the subagent is killed.
     /// 仅作用于模型调用的 `spawn_subagent` 工具路径（qaqh-subagent 的 collector
     /// deadline）；`subagent.spawn` RPC 路径不读它。
@@ -181,8 +178,6 @@ pub struct LspServerDto {
 /// 端点与凭据的唯一真源是 providers.toml 目录，经 provider.* 命令面维护，
 /// 全局补丁写了也不生效；本写模型只承载全局策略。
 /// `permissionLevel` 受 1..=4 值域校验（BUG-2026-09-13-15）。
-/// 特例语义冻结：`subagentApiKey` 沿用既有守卫——`"****"` 或空串 =
-/// 保持现值（显式删除须专用接口）；其余字符串字段 Some(空串) = 显式置空。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -238,14 +233,6 @@ pub struct SandboxPatch {
 #[serde(rename_all = "camelCase", default)]
 pub struct SubagentPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub api_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
     /// 允许空数组（= 全部工具可用）。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -289,11 +276,6 @@ impl ConfigPatch {
             ));
         }
         if let Some(sub) = &self.subagent {
-            if let Some(v) = sub.max_tokens
-                && v == 0
-            {
-                return Err("subagent.maxTokens 必须大于 0".to_string());
-            }
             if let Some(v) = sub.timeout_secs
                 && v == 0
             {
@@ -357,11 +339,6 @@ mod tests {
             "notificationsEnabled": true,
             "complianceEnabled": false,
             "subagent": {
-                "model": "",
-                "baseUrl": "",
-                "apiKey": "",
-                "apiKeySet": false,
-                "maxTokens": 4096,
                 "timeoutSecs": 120,
                 "defaultTools": ["read"]
             },
