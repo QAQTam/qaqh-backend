@@ -166,6 +166,10 @@ pub(crate) fn pty_exec(
         }
     }
 
+    // ConPTY：输出管道写端由 master 侧持有，子进程退出/组杀后必须显式关
+    // 终端，读线程才能见到 EOF；Unix 下是 no-op。
+    handle.close_terminal();
+
     // seal：有界等待读线程信号（EOF / kill 后 slave 关闭 → 通常立即返回；
     // 孙进程持 slave → SEAL_JOIN_BUDGET 到期放弃，truncated 保守提示）。
     // 对齐 direct.rs / ddcd606 契约：绝不调用 reader_handle.join()，防止孙进程持 slave 导致读线程阻塞时主线程永久挂死。

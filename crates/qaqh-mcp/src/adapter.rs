@@ -225,14 +225,16 @@ pub(crate) fn connect(name: &str, cfg: &McpServerConfig, secrets: &SecretStore) 
                 }
                 // PR-P2-2：unix domain socket 分发（url=unix:///path/to.sock）。
                 // HTTP 内部路径约定 "/mcp"（常见 unix-socket MCP server 根路径）。
-                if let Some(socket_path) = resolved.url.strip_prefix("unix://") {
+                // 绑定名带下划线前缀：Windows 构建不含 unix 分支，裸名会触发
+                // unused_variables 警告（unix 分支仍正常引用该绑定）。
+                if let Some(_socket_path) = resolved.url.strip_prefix("unix://") {
                     #[cfg(unix)]
                     {
                         log::info!(
-                            "[mcp] server {name}: connecting unix-socket transport (socket={socket_path})"
+                            "[mcp] server {name}: connecting unix-socket transport (socket={_socket_path})"
                         );
                         let transport =
-                            StreamableHttpClientTransport::from_unix_socket(socket_path, "/mcp");
+                            StreamableHttpClientTransport::from_unix_socket(_socket_path, "/mcp");
                         let service = NotifyBridge { name: name.clone() }
                             .serve_with_lifecycle(transport, auto_lifecycle())
                             .await?;

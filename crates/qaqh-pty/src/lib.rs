@@ -37,8 +37,10 @@
 //!
 //! # 平台状态
 //!
-//! Unix 使用 openpty，Windows 使用 portable-pty 的 ConPTY 后端；Windows
-//! ConPTY 运行行为仍需 Windows 主机验收。
+//! Unix 使用 openpty，Windows 使用 portable-pty 的 ConPTY 后端。注意两平台
+//! EOF 语义不同：Unix 的 master 读端在 slave 全关（子进程退出）后即 EOF；
+//! ConPTY 的输出管道写端由 master 侧持有，子进程退出**不会**产生 EOF，调用
+//! 方必须在收割子进程后显式 [`SpawnedSession::close_terminal`]。
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -114,6 +116,13 @@ enum SessionInner {
         killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
         #[cfg(windows)]
         interrupt_writer: std::sync::Arc<std::sync::Mutex<Box<dyn std::io::Write + Send>>>,
+        // ConPTY 的 master 是 HPCON 的唯一宿主，必须随会话存活：spawn 返回
+        // 即 drop = ClosePseudoConsole → conhost 关闭 → 子进程被终止且输出
+        // 丢失（"tty=true 无输出"的根因）。但它同时是输出管道写端的持有
+        // 者：子进程退出不会带来 EOF，收割后须经 close_terminal 显式关闭。
+        // Unix 的对应锚是 dup 出的 master_fd。
+        #[cfg(windows)]
+        master: Option<Box<dyn portable_pty::MasterPty + Send>>,
         #[cfg(unix)]
         master_fd: OwnedFd,
     },
@@ -141,6 +150,81 @@ impl std::io::Write for SharedPtyWriter {
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .flush()
+    }
+}
+
+/// Headless ConPTY host 的 DSR 应答义务：portable-pty 以
+/// PSUEDOCONSOLE_INHERIT_CURSOR 创建 conhost，conhost 启动后向输出管道发送
+/// `\x1b[6n`（光标位置查询）并阻塞等待应答。host 不是真终端，不应答则
+/// client 的控制台初始化永久卡死（表现为"命令永不退出"）。该包装在唯一
+/// 的读路径上剥离查询并回写应答，对上层完全透明（DSR 不进捕获/前端）。
+#[cfg(windows)]
+const CONHOST_DSR_QUERY: &[u8] = b"\x1b[6n";
+#[cfg(windows)]
+const CONHOST_DSR_RESPONSE: &[u8] = b"\x1b[1;1R";
+
+#[cfg(windows)]
+fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+#[cfg(windows)]
+struct DsrRespondingReader {
+    inner: Box<dyn std::io::Read + Send>,
+    writer: SharedPtyWriter,
+    pending: Vec<u8>,
+}
+
+#[cfg(windows)]
+impl DsrRespondingReader {
+    fn respond_to_dsr_queries(&mut self) {
+        while let Some(position) = find_subsequence(&self.pending, CONHOST_DSR_QUERY) {
+            self.pending.drain(..position + CONHOST_DSR_QUERY.len());
+            // 应答失败只可能是 conhost 已死：读端随即 EOF，无需在此上报。
+            let _ = std::io::Write::write_all(&mut self.writer, CONHOST_DSR_RESPONSE);
+            let _ = std::io::Write::flush(&mut self.writer);
+        }
+    }
+
+    /// read 边界可能把 DSR 撕成两半；交付前把疑似不完整前缀留在 pending，
+    /// 与下一块拼齐后再统一剥离。
+    fn trailing_partial_prefix(&self) -> usize {
+        for keep in (0..CONHOST_DSR_QUERY.len()).rev() {
+            if self.pending.ends_with(&CONHOST_DSR_QUERY[..keep]) {
+                return keep;
+            }
+        }
+        0
+    }
+}
+
+#[cfg(windows)]
+impl std::io::Read for DsrRespondingReader {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if buffer.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            self.respond_to_dsr_queries();
+            if !self.pending.is_empty() {
+                let deliverable = self.pending.len() - self.trailing_partial_prefix();
+                if deliverable > 0 {
+                    let count = deliverable.min(buffer.len());
+                    buffer[..count].copy_from_slice(&self.pending[..count]);
+                    self.pending.drain(..count);
+                    return Ok(count);
+                }
+            }
+            let mut scratch = [0u8; 8192];
+            match self.inner.read(&mut scratch) {
+                Ok(0) => return Ok(0),
+                Ok(count) => self.pending.extend_from_slice(&scratch[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
     }
 }
 
@@ -199,6 +283,10 @@ impl SpawnedSession {
     /// cancellation/deadlines instead of sleeping inside a blocked `write(2)`.
     /// The duplicated master descriptors share this flag; the output pump must
     /// retry `WouldBlock` while waiting for new output.
+    /// On Windows the ConPTY master has no fcntl semantics: PTY sessions are
+    /// always "nothing to configure" and the caller owns write cancellation
+    /// (the exec-session manager's input-write flight). Pipe sessions still
+    /// reject the call on both platforms.
     pub fn set_pty_writer_nonblocking(&self) -> std::io::Result<()> {
         #[cfg(unix)]
         if let SessionInner::Pty { master_fd, .. } = &self.inner {
@@ -215,10 +303,27 @@ impl SpawnedSession {
             }
             return Ok(());
         }
+        #[cfg(windows)]
+        if let SessionInner::Pty { .. } = &self.inner {
+            return Ok(());
+        }
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "qaqh-pty: nonblocking master is only available for PTY sessions",
         ))
+    }
+
+    /// Close the terminal side of a reaped session. On Windows this drops the
+    /// ConPTY master (`ClosePseudoConsole`) — the only holder of conhost and
+    /// the output-pipe write end — so the output pump observes EOF. Calling
+    /// it while the child is still alive destroys its console and kills it;
+    /// call it only after the process exited or the tree was killed. No-op on
+    /// Unix (EOF flows from slave closure) and for pipe sessions.
+    pub fn close_terminal(&mut self) {
+        #[cfg(windows)]
+        if let SessionInner::Pty { master, .. } = &mut self.inner {
+            *master = None;
+        }
     }
 }
 
@@ -390,15 +495,19 @@ fn pty_exit_of(status: &portable_pty::ExitStatus) -> SessionExit {
     let code = if status.signal().is_some() {
         None
     } else {
-        Some(i32::try_from(status.exit_code()).unwrap_or(-1))
+        Some(status.exit_code() as i32)
     };
     SessionExit { code }
 }
 
 #[cfg(windows)]
 fn pty_exit_of(status: &portable_pty::ExitStatus) -> SessionExit {
+    // 位型直转，不做范围转换：Windows 上非正常退出是 NTSTATUS
+    // （0xC0000142 = 加载/控制台初始化失败、0xC0000005 = 访问冲突…），
+    // 其高位置 1，`i32::try_from` 必然失败；此处若回落 -1，所有 NTSTATUS
+    // 都被拍成同一个 -1，故障现场（本次 ConPTY 事故）就此丢失。
     SessionExit {
-        code: Some(i32::try_from(status.exit_code()).unwrap_or(-1)),
+        code: Some(status.exit_code() as i32),
     }
 }
 
@@ -460,8 +569,12 @@ pub fn kill_session_group(session: &mut SpawnedSession) -> std::io::Result<()> {
     #[cfg(windows)]
     {
         match &mut session.inner {
-            SessionInner::Pty { killer, .. } => {
-                kill_windows_process_tree(session.pid).or_else(|_| killer.kill())
+            SessionInner::Pty { killer, master, .. } => {
+                let result = kill_windows_process_tree(session.pid).or_else(|_| killer.kill());
+                // 树已终止：关闭 ConPTY master，输出管道随即 EOF，读线程
+                // 不会被 HPCON 宿主钉死。
+                *master = None;
+                result
             }
             SessionInner::Unsupported => Err(std::io::Error::other(
                 "qaqh-pty: legacy session backend is not implemented on this platform",
@@ -479,10 +592,13 @@ pub fn kill_session_group(session: &mut SpawnedSession) -> std::io::Result<()> {
 
 #[cfg(windows)]
 fn kill_windows_process_tree(pid: u32) -> std::io::Result<()> {
+    use std::os::windows::process::CommandExt as _;
     use std::process::{Command, Stdio};
 
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let status = Command::new("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -628,12 +744,18 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
     #[cfg(unix)]
     let writer = raw_writer;
     #[cfg(windows)]
-    let (writer, interrupt_writer) = {
+    let (writer, interrupt_writer, reader) = {
         let shared_writer = std::sync::Arc::new(std::sync::Mutex::new(raw_writer));
         let interrupt_writer = std::sync::Arc::clone(&shared_writer);
+        let reader = DsrRespondingReader {
+            inner: reader,
+            writer: SharedPtyWriter(std::sync::Arc::clone(&shared_writer)),
+            pending: Vec::new(),
+        };
         (
             Box::new(SharedPtyWriter(shared_writer)) as Box<dyn std::io::Write + Send>,
             interrupt_writer,
+            Box::new(reader) as Box<dyn std::io::Read + Send>,
         )
     };
     let child = pair.slave.spawn_command(command).map_err(anyhow_to_io)?;
@@ -652,6 +774,8 @@ pub fn spawn_pty(spec: &SessionSpec) -> std::io::Result<SpawnedSession> {
         inner: SessionInner::Pty {
             child,
             killer,
+            #[cfg(windows)]
+            master: Some(pair.master),
             #[cfg(windows)]
             interrupt_writer,
             #[cfg(unix)]
@@ -790,6 +914,11 @@ pub fn spawn_pipe_split(spec: &SessionSpec) -> std::io::Result<SpawnedPipeSessio
 
 /// Spawn a split pipe session on Windows. `taskkill /T` is the escalation path
 /// for descendants; the process group also supports a graceful Ctrl+Break.
+///
+/// The daemon runs console-less (`CREATE_NO_WINDOW` at spawn), so every
+/// console-subsystem child must also carry `CREATE_NO_WINDOW`: without it,
+/// each exec allocates a fresh console that Windows Terminal renders — the
+/// "terminal flicker" seen on every `tty=false` command.
 #[cfg(windows)]
 pub fn spawn_pipe_split(spec: &SessionSpec) -> std::io::Result<SpawnedPipeSession> {
     use std::os::windows::process::CommandExt as _;
@@ -803,12 +932,13 @@ pub fn spawn_pipe_split(spec: &SessionSpec) -> std::io::Result<SpawnedPipeSessio
     }
 
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let mut command = Command::new(&spec.argv[0]);
     command
         .args(&spec.argv[1..])
         .env_clear()
         .envs(spec.env.iter().map(|(key, value)| (key, value)))
-        .creation_flags(CREATE_NEW_PROCESS_GROUP)
+        .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

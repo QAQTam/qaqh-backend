@@ -940,8 +940,13 @@ impl ProcessRegistry {
         #[cfg(windows)]
         {
             use std::process::Command;
+            // daemon 无控制台：taskkill 不带 CREATE_NO_WINDOW 时每次都会
+            // 闪一个新的终端窗口（Win11 由 Windows Terminal 承载）。
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             let _ = Command::new("taskkill")
                 .args(["/pid", &pid.to_string(), "/T", "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status();
         }
         #[cfg(not(windows))]
@@ -982,8 +987,11 @@ impl ProcessRegistry {
         #[cfg(windows)]
         {
             use std::process::Command;
+            use std::os::windows::process::CommandExt as _;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             let tree_killed = Command::new("taskkill")
                 .args(["/pid", &pid.to_string(), "/T", "/F"])
+                .creation_flags(CREATE_NO_WINDOW)
                 .status()
                 .is_ok_and(|status| status.success());
             if !tree_killed {
