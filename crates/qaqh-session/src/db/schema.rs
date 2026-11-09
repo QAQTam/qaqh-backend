@@ -3,14 +3,17 @@
 //! 版本策略:最小 schema 版本 + 明确的向前升级步骤;数据库比代码新直接报错,
 //! 不做运行时兼容适配。schema 6(spec-exec-session-lifecycle §9):工具调用
 //! 保存契约 state/outcome,新增 exec_sessions 表,turns 保存 phase;5→6 是
-//! 一次性升级,不在运行路径同时支持两套 schema。
+//! 一次性升级,不在运行路径同时支持两套 schema。schema 7:content id 形态
+//! 收口——`session_contents.content_id` / `exec_sessions.output_content_id`
+//! 库内统一裸 64-hex,wire ref `sha256:<hex>` 只在视图边界组装(见
+//! `store::bare_content_id` / `store::canonical_content_ref`)。
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::DbError;
 use super::store::now_ms;
 
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -254,8 +257,15 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
             });
         }
         // schema 5 → 6:一次性升级(spec §9.3),在新 daemon 对外服务前完成。
+        // 5 → 7 需要链式执行,否则 5 代库会跳过 6→7 的数据归一。
         Some(5) => {
             upgrade_5_to_6(&tx)?;
+            upgrade_6_to_7(&tx)?;
+        }
+        // schema 6 → 7:content id 形态收口(裸 hex),数据归一在新 daemon
+        // 对外服务前完成。
+        Some(6) => {
+            upgrade_6_to_7(&tx)?;
         }
         Some(found) if found < SCHEMA_VERSION => {
             return Err(DbError::SchemaTooOld {
@@ -460,6 +470,41 @@ fn upgrade_5_to_6(tx: &Transaction<'_>) -> Result<(), DbError> {
     log::info!(
         "[schema] upgraded 5→6: {migrated} tool calls migrated, {corrected_backgrounded} corrected to yielded by explicit backgrounded evidence"
     );
+    Ok(())
+}
+
+/// schema 6 → 7:content id 形态收口(裸 hex 归一)。
+///
+/// 背景:`session_contents.content_id` 与 `exec_sessions.output_content_id`
+/// 的库内 canonical 形态是裸 64-hex;6 代执行会话终态落库曾把带 `sha256:`
+/// 前缀的形态写进主键,而读取端(`GET /ringing/v2/content`,入口剥前缀)
+/// 按裸 hex 精确匹配 → 执行会话输出引用永远 404。本迁移一次性归一存量:
+///
+/// 1. 同会话内"裸 + 前缀"并存的重复行(同一摘要,字节必然相同)保留裸行、
+///    删除前缀行——否则随后的剥前缀 UPDATE 会撞 `(session_id, content_id)`
+///    主键;
+/// 2. 其余前缀行剥前缀改写(`substr(content_id, 8)`),`exec_sessions` 的
+///    输出引用列同步归一。
+///
+/// 视图边界(`store::canonical_content_ref`)负责给 wire ref 补回前缀。
+fn upgrade_6_to_7(tx: &Transaction<'_>) -> Result<(), DbError> {
+    tx.execute_batch(
+        r#"
+        DELETE FROM session_contents AS sc
+         WHERE sc.content_id LIKE 'sha256:%'
+           AND EXISTS (
+               SELECT 1 FROM session_contents b
+                WHERE b.session_id = sc.session_id
+                  AND b.content_id = substr(sc.content_id, 8)
+           );
+        UPDATE session_contents SET content_id = substr(content_id, 8)
+         WHERE content_id LIKE 'sha256:%';
+        UPDATE exec_sessions SET output_content_id = substr(output_content_id, 8)
+         WHERE output_content_id LIKE 'sha256:%';
+        "#,
+    )
+    .map_err(|error| DbError::Corrupt(format!("upgrade 6→7 normalize content ids: {error}")))?;
+    log::info!("[schema] upgraded 6→7: content ids normalized to bare hex");
     Ok(())
 }
 
@@ -770,10 +815,39 @@ mod tests {
         assert_eq!(title, "keep");
     }
 
+    /// 64-hex 占位摘要(裸形态)。
+    const BARE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const BARE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
     #[test]
     fn initialize_upgrades_v5_atomically_and_preserves_output_references() {
         let mut conn = Connection::open_in_memory().expect("open");
         conn.execute_batch(V5).expect("v5 fixture");
+        // v5 真实库必含 session_contents(schema 4→5 引入,且当时无升级路径、
+        // v5 一律全新建库)。fixture 补齐该表以覆盖 5→6→7 链式归一:
+        // 同会话"裸+前缀"并存的重复行去重,无裸兄弟的前缀行剥前缀。
+        conn.execute_batch(&format!(
+            "CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL DEFAULT '',
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+            INSERT INTO sessions VALUES ('session', 'v5', 1, 1);
+            CREATE TABLE session_contents (
+                session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+                content_id  TEXT NOT NULL,
+                media_type  TEXT NOT NULL,
+                bytes       BLOB NOT NULL,
+                truncated   INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (session_id, content_id)
+            );
+            INSERT INTO session_contents (session_id, content_id, media_type, bytes, truncated) VALUES
+                ('session', 'sha256:{BARE_A}', 'text/plain; charset=utf-8', x'647570', 0),
+                ('session', '{BARE_A}', 'text/plain', x'647570', 0),
+                ('session', 'sha256:{BARE_B}', 'text/plain', x'6f6e6c79', 0);"
+        ))
+        .expect("v5 session_contents");
         // 在 DDL 已执行后制造行读取失败,检查整次升级是否回滚。
         conn.execute("UPDATE tool_calls SET output_text = x'ff'", [])
             .expect("invalid text");
@@ -817,6 +891,25 @@ mod tests {
             .expect("historical exec session");
         assert_eq!(migrated.2, exec.0);
         assert!(exec.1.contains("upgrade_state_unknown"));
+        // 6→7 链式归一:同会话"裸+前缀"并存的行去重,孤立前缀行剥前缀。
+        let mut statement = conn
+            .prepare("SELECT content_id FROM session_contents ORDER BY content_id")
+            .expect("contents statement");
+        let contents: Vec<String> = statement
+            .query_map([], |row| row.get(0))
+            .expect("contents rows")
+            .collect::<Result<_, _>>()
+            .expect("contents collect");
+        drop(statement);
+        assert_eq!(contents, [BARE_A, BARE_B]);
+        let prefixed_outputs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM exec_sessions WHERE output_content_id LIKE 'sha256:%'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("exec outputs");
+        assert_eq!(prefixed_outputs, 0);
         initialize(&mut conn).expect("reopen after upgrade");
         let versions: (i64, u32) = conn
             .query_row(
@@ -826,6 +919,97 @@ mod tests {
             )
             .expect("committed version");
         assert_eq!(versions, (1, SCHEMA_VERSION));
+    }
+
+    // v6 形态最小 fixture:仅 6→7 归一所触碰的表与版本行(6 代库必含
+    // session_contents;exec_sessions 由 5→6 或全新建库保证存在)。
+    const V6: &str = r#"
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (6);
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE session_contents (
+            session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+            content_id  TEXT NOT NULL,
+            media_type  TEXT NOT NULL,
+            bytes       BLOB NOT NULL,
+            truncated   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (session_id, content_id)
+        );
+        CREATE TABLE exec_sessions (
+            exec_session_id   TEXT PRIMARY KEY,
+            session_id        TEXT NOT NULL,
+            state_json        TEXT NOT NULL,
+            state_kind        TEXT NOT NULL,
+            started_at_ms     INTEGER NOT NULL,
+            output_content_id TEXT,
+            updated_at_ms     INTEGER NOT NULL
+        );
+        INSERT INTO sessions VALUES ('s1', 'v6', 1, 1), ('s2', 'v6', 1, 1);
+        INSERT INTO session_contents (session_id, content_id, media_type, bytes, truncated) VALUES
+            ('s1', 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'text/plain; charset=utf-8', x'626f6479', 0),
+            ('s1', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'text/plain', x'626f6479', 0),
+            ('s2', 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'text/plain', x'626f6479', 0);
+        INSERT INTO exec_sessions
+            (exec_session_id, session_id, state_json, state_kind, started_at_ms, output_content_id, updated_at_ms)
+        VALUES ('execs-1', 's1', '{"kind":"finished","outcome":{"kind":"exited","exit_code":0}}', 'finished', 1,
+                'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1);
+    "#;
+
+    #[test]
+    fn initialize_upgrades_v6_and_normalizes_content_ids_to_bare_hex() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(V6).expect("v6 fixture");
+        initialize(&mut conn).expect("upgrade");
+        let versions: (i64, u32) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(version) FROM schema_version",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("version");
+        assert_eq!(versions, (1, SCHEMA_VERSION));
+
+        // s1 的"裸+前缀"并存行去重后保留裸行;s2 的孤立前缀行剥前缀;
+        // 跨会话同摘要互不影响(主键按 session_id 分离)。
+        let mut statement = conn
+            .prepare("SELECT session_id, content_id FROM session_contents ORDER BY content_id")
+            .expect("contents statement");
+        let contents: Vec<(String, String)> = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("contents rows")
+            .collect::<Result<_, _>>()
+            .expect("contents collect");
+        drop(statement);
+        assert_eq!(
+            contents,
+            [
+                ("s1".to_string(), BARE_A.to_string()),
+                ("s2".to_string(), BARE_B.to_string()),
+            ]
+        );
+        // exec_sessions 的输出引用同步归一;归一后按裸 hex 可命中
+        // (daemon GET 入口剥前缀后的查询形态)。
+        let exec_ref: Option<String> = conn
+            .query_row(
+                "SELECT output_content_id FROM exec_sessions WHERE exec_session_id = 'execs-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("exec ref");
+        assert_eq!(exec_ref.as_deref(), Some(BARE_A));
+        let hit: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM session_contents WHERE session_id = 's1' AND content_id = ?1",
+                [BARE_A],
+                |row| row.get(0),
+            )
+            .expect("bare lookup");
+        assert_eq!(hit, 1);
     }
 
     #[test]

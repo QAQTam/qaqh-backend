@@ -1602,7 +1602,7 @@ fn probe_exec_schema_shell_only_for_diagnosis() {
 
 // ── tty=true：PTY 后端（pty_exec，unix 专属）────────────────────────────
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn pty_args(value: serde_json::Value) -> super::handler::ExecArgs {
     serde_json::from_value(value).expect("exec args")
 }
@@ -1777,6 +1777,25 @@ fn tty_exec_streams_raw_ansi_to_progress_but_strips_it_for_the_model() {
     assert!(
         output.stdout.contains("PTY-RED") && !output.stdout.contains('\x1b'),
         "display 面同样剥 ANSI: {:?}",
+        output.stdout
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn tty_exec_runs_on_windows_conpty() {
+    let ctx = shell_test_context(None);
+    let output = run_exec(
+        &ctx,
+        pty_args(serde_json::json!({"command": "echo pty-tty-ok", "tty": true})),
+        None,
+        None,
+    )
+    .expect("tty exec");
+    assert_eq!(output.exit_code, Some(0), "output: {}", output.output);
+    assert!(
+        output.stdout.contains("pty-tty-ok"),
+        "stdout: {:?}",
         output.stdout
     );
 }

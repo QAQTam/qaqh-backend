@@ -1,5 +1,5 @@
 use crate::error::{ConfigError, ConfigResult};
-use crate::secrets::{SecretSlot, SecretStore};
+use crate::secrets::SecretStore;
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
@@ -935,7 +935,7 @@ falling back to 1 (read-only)"
 
     /// 显式路径版 save（与 [`Self::load_from_paths_with`] 对称；集成测试与
     /// 多实例/数据根重定向场景使用）。
-    pub fn save_with(&self, store: &ConfigStore, secrets: &SecretStore) -> ConfigResult<()> {
+    pub fn save_with(&self, store: &ConfigStore, _secrets: &SecretStore) -> ConfigResult<()> {
         // 凭据纪律：api_key 不经 config.save 落盘——provider 密钥的唯一写口
         // 是 provider.upsert 的 SecretWrite（providers.<id> 加密槽）；
         // cfg.api_key 是会话期解析值，绝不回写。

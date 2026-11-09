@@ -1091,13 +1091,15 @@ pub fn finish_exec_session(
         tx.rollback()?;
         return Ok(false);
     };
-    let generated_content_id = output_text.map(|text| {
-        use sha2::Digest as _;
-        format!(
-            "sha256:{}",
+    // 库内统一裸 hex(schema 6→7 契约):wire ref `sha256:<hex>` 由视图边界
+    // (`exec_session_view` / `exec_session_view_from_row`)组装。此前这里生成
+    // 带前缀形态并落入 (session_id, content_id) 主键,而读取端按剥前缀后的
+    // 裸 hex 精确匹配,执行会话输出引用因此永远 404。
+    let generated_content_id = output_text
+        .map(|text| {
+            use sha2::Digest as _;
             hex::encode(sha2::Sha256::digest(text.as_bytes()))
-        )
-    });
+        });
     let content_id = output_content_id.or(generated_content_id.as_deref());
     if let (Some(content_id), Some(text)) = (content_id, output_text) {
         put_session_content(
@@ -1316,8 +1318,26 @@ pub struct InteractionRow {
 // session content
 // ---------------------------------------------------------------------------
 
+/// 库内 canonical 形态:裸 64-hex,不带 `sha256:` 前缀。
+///
+/// wire 形态 `sha256:<hex>` 只在视图边界组装(见 `canonical_content_ref`)。
+/// 存储层与查询层(含 daemon 的 `GET /ringing/v2/content/{id}`,它在入口剥前缀)
+/// 统一按裸 hex 操作;历史上执行会话终态落库曾把带前缀形态写进主键,造成
+/// 读取端永远 404(schema 6→7 迁移归一存量)。
+pub fn bare_content_id(content_id: &str) -> &str {
+    content_id.strip_prefix("sha256:").unwrap_or(content_id)
+}
+
+/// wire 形态 ContentRef 字符串(`sha256:<hex>`);容忍已带前缀的输入。
+pub fn canonical_content_ref(content_id: &str) -> String {
+    format!("sha256:{}", bare_content_id(content_id))
+}
+
 /// Store binary content under the session that owns it. Bodies live in the
 /// business database and are removed with their session row.
+///
+/// `content_id` 一律归一为裸 hex 落库:传入 wire 形态(`sha256:<hex>`)会被剥掉
+/// 前缀,防止同一摘要以两种主键形态并存。
 pub fn put_session_content(
     conn: &Connection,
     session_id: &str,
@@ -1333,7 +1353,7 @@ pub fn put_session_content(
              media_type = excluded.media_type,
              bytes = excluded.bytes,
              truncated = excluded.truncated",
-        params![session_id, content_id, media_type, bytes, truncated],
+        params![session_id, bare_content_id(content_id), media_type, bytes, truncated],
     )?;
     Ok(())
 }
@@ -1343,10 +1363,12 @@ pub fn get_session_content(
     session_id: &str,
     content_id: &str,
 ) -> rusqlite::Result<Option<(String, Vec<u8>, bool)>> {
+    // 双形态兜底:查询键为裸 hex,同时兼容历史遗留的带前缀行
+    // (schema 6→7 迁移之外,如外部工具直写库)。
     conn.query_row(
         "SELECT media_type, bytes, truncated FROM session_contents
-         WHERE session_id = ?1 AND content_id = ?2",
-        params![session_id, content_id],
+         WHERE session_id = ?1 AND content_id IN (?2, 'sha256:' || ?2)",
+        params![session_id, bare_content_id(content_id)],
         |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0)),
     )
     .optional()
@@ -1378,9 +1400,12 @@ pub fn session_content_owners(
     conn: &Connection,
     content_id: &str,
 ) -> rusqlite::Result<Vec<String>> {
+    // 双形态兜底:与 get_session_content 一致,裸 hex 键同时匹配历史前缀行;
+    // 两行并存时 DISTINCT 保证同一会话只出现一次。
     let mut statement = conn.prepare(
-        "SELECT session_id FROM session_contents WHERE content_id = ?1 ORDER BY session_id",
+        "SELECT DISTINCT session_id FROM session_contents
+         WHERE content_id IN (?1, 'sha256:' || ?1) ORDER BY session_id",
     )?;
-    let rows = statement.query_map([content_id], |row| row.get(0))?;
+    let rows = statement.query_map([bare_content_id(content_id)], |row| row.get(0))?;
     rows.collect()
 }
