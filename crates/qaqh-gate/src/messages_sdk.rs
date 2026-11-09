@@ -636,7 +636,6 @@ pub fn chat_stream_messages(
     // 历史一律全量发送：gate 侧不做增量过滤，wire 级修补由 SDK normalize 负责。
     let mut request = ChatRequest::new(project_messages(messages, 0));
     request.tools = convert_tools(tools);
-    let mut max_toks = if max_tokens == 0 { 8192 } else { max_tokens };
     let effort_norm = crate::types::normalize_reasoning_effort(effort.as_deref());
     // Thinking budget: only when provider explicitly supports it. If effort
     // is None we do not force thinking — let the provider default.
@@ -644,14 +643,20 @@ pub fn chat_stream_messages(
         && let Some(e) = effort_norm.as_deref()
     {
         let budget = thinking_budget(e, provider.thinking_budget_large);
-        max_toks = max_toks.max(budget + 1024);
+        anyhow::ensure!(
+            max_tokens >= budget + 1024,
+            "model {model}: configured max_tokens {max_tokens} is below the thinking budget \
+             requirement {} (effort {e:?}); raise the model's max_output_tokens in providers.toml \
+             or lower the reasoning effort",
+            budget + 1024
+        );
         request.reasoning = Some(
             ReasoningConfig::new()
                 .mode(ReasoningMode::Enabled)
                 .budget_tokens(budget),
         );
     }
-    request.max_output_tokens = Some(max_toks);
+    request.max_output_tokens = Some(max_tokens);
 
     let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
     let (adapter, hub) = build_adapter(provider, model, &policy);
@@ -700,12 +705,13 @@ pub fn chat_sync_messages(
     let messages = normalize_skill_envelope(provider, messages)?;
     // 同流式路径：全量历史，无增量过滤。
     let mut request = ChatRequest::new(project_messages(messages, 0));
-    let mut max_toks = if max_tokens == 0 { 4096 } else { max_tokens };
-    if provider.supports_thinking {
-        // Keep a minimal budget headroom for sync thinking paths.
-        max_toks = max_toks.max(4096);
+    if provider.supports_thinking && max_tokens < 4096 {
+        return Err(format!(
+            "model {model}: configured max_tokens {max_tokens} is below the 4096 minimum \
+             for sync thinking; raise the model's max_output_tokens in providers.toml"
+        ));
     }
-    request.max_output_tokens = Some(max_toks);
+    request.max_output_tokens = Some(max_tokens);
 
     let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
     let (adapter, _hub) = build_adapter(provider, model, &policy);

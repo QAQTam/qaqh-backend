@@ -97,7 +97,7 @@ impl AgentRegistry {
                 }
             };
             let provider =
-                qaqh_agent_runtime::session_agent::assembly::provider_spec(&config, Vec::new());
+                qaqh_agent_runtime::session_agent::assembly::provider_spec(&config, Vec::new())?;
             let workspace_root = super::spawn::ensure_session_workspace(&self.owners, session_id)?;
             let policy = qaqh_agent_runtime::session_agent::assembly::tool_policy(
                 workspace_root,

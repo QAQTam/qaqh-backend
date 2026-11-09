@@ -37,8 +37,8 @@ pub struct ModelDef {
     /// 上下文窗口大小（Token 数），默认 128,000
     #[serde(default = "default_context_window")]
     pub context_window: u32,
-    /// 单次回合最大输出 Token 上限，默认 8,192
-    #[serde(default = "default_max_tokens", alias = "max_tokens")]
+    /// 单次回合最大输出 Token 上限。**必填**：缺失/为 0 在解析与选择时
+    /// 一律报错，不做 default/alias 兜底（模型配置统一重构 Spec §3.5）。
     pub max_output_tokens: u32,
     #[serde(default)]
     pub reasoning_levels: Vec<String>,
@@ -52,10 +52,6 @@ fn default_context_window() -> u32 {
     128_000
 }
 
-fn default_max_tokens() -> u32 {
-    8_192
-}
-
 fn default_enabled() -> bool { true }
 
 impl Default for ModelDef {
@@ -64,7 +60,7 @@ impl Default for ModelDef {
             enabled: true,
             display_name: None,
             context_window: default_context_window(),
-            max_output_tokens: default_max_tokens(),
+            max_output_tokens: 8_192,
             reasoning_levels: Vec::new(),
             capabilities: ModelCapabilities::default(),
             defaults: ModelDefaults::default(),

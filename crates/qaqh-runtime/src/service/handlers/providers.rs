@@ -78,6 +78,13 @@ impl QaqhService {
             .map_err(|error| QaqhError::invalid(format!("serialize catalog: {error}")))
     }
 
+    /// 内置预设静态表（Spec §3.2）：只读快照，预设 id → 默认 endpoint/协议/
+    /// 凭据类型。选择预设 = 前端把默认值复制进 provider.upsert 落自己的目录。
+    pub fn provider_presets(&self) -> QaqhResult<Value> {
+        serde_json::to_value(qaqh_profile::PROVIDER_PRESETS)
+            .map_err(|error| QaqhError::invalid(format!("serialize presets: {error}")))
+    }
+
     /// 新增或整体替换一个 Provider，目录 revision 由公共命令信封携带。
     pub fn provider_upsert(
         &self,
@@ -160,6 +167,11 @@ impl QaqhService {
         expected_revision: Option<u64>,
         model: ModelDef,
     ) -> QaqhResult<Value> {
+        if model.max_output_tokens == 0 {
+            return Err(QaqhError::invalid(format!(
+                "model {provider_id}/{model_id}: max_tokens must be greater than 0"
+            )));
+        }
         let mut store = load_catalog()?;
         check_revision(&store, expected_revision)?;
         store

@@ -306,6 +306,7 @@ fn required_scope(command: &RingingCommand) -> Scope {
         }
         // 全局配置 / provider 目录 / 默认模型选择：§8.6 → Admin。
         RingingCommand::ProviderList { .. }
+        | RingingCommand::ProviderPresets { .. }
         | RingingCommand::ProviderUpsert { .. }
         | RingingCommand::ProviderDelete { .. }
         | RingingCommand::ProviderModelUpsert { .. }
@@ -415,6 +416,9 @@ async fn dispatch(
         }
         RingingCommand::ProviderList { .. } => {
             service.provider_catalog().map(|value| (value, None))
+        }
+        RingingCommand::ProviderPresets { .. } => {
+            service.provider_presets().map(|value| (value, None))
         }
         RingingCommand::ExecSessionInterrupt {} | RingingCommand::ExecSessionTerminate {} => {
             let CommandTarget::ExecSession { id } = &envelope.target else {
