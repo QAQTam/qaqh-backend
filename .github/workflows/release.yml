@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    defaults:
+      run:
+        working-directory: qaqh-backend
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qaqh-backend
+      # Sibling path dependency (../mutil-ai), pinned to the tested 0.7.0
+      # stream/custom-tool fixes used by the desktop build.
+      - uses: actions/checkout@v4
+        with:
+          repository: qaqtam/mutil-ai
+          ref: 4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4
+          path: mutil-ai
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: qaqh-backend
+      - name: Build daemon (release)
+        run: cargo build --locked --release -p qaqh-daemon
+      - name: Package daemon
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/dist"
+          mkdir -p "$out"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            cp target/release/qaqh-daemon.exe "$out/"
+            cp version.txt qaqh-backend.lock.json "$out/"
+            7z a "$RUNNER_TEMP/qaqh-daemon-$TAG-windows-x64.zip" "$out/*" >/dev/null
+          else
+            cp target/release/qaqh-daemon "$out/"
+            cp version.txt qaqh-backend.lock.json "$out/"
+            tar -czf "$RUNNER_TEMP/qaqh-daemon-$TAG-linux-x64.tar.gz" -C "$out" .
+          fi
+      - name: Export version-locked SDK contract (linux only)
+        if: runner.os == 'Linux'
+        env:
+          TAG: ${{ github.ref_name }}
+          QAQH_SOURCE_REVISION: ${{ github.sha }}
+          QAQH_SOURCE_DIRTY: '0'
+        run: |
+          set -euo pipefail
+          cargo run -p qaqh-contract-export -- export --out "$RUNNER_TEMP/qaqh-sdk-contract" --release
+          (cd "$RUNNER_TEMP/qaqh-sdk-contract" && zip -qr "$RUNNER_TEMP/qaqh-sdk-contract-$TAG.zip" .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/qaqh-daemon-*-windows-x64.zip
+            ${{ runner.temp }}/qaqh-daemon-*-linux-x64.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: release-assets-contract
+          path: ${{ runner.temp }}/qaqh-sdk-contract-*.zip
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    needs: build
+    # workflow_dispatch is a build-only dry run; only tag pushes publish.
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-assets-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: QAQ-Harness ${{ github.ref_name }} LTS
+          body: |
+            QAQ-Harness LTS 发布 — 从 v3.0 起正式启用 GitHub 更新体系。
+
+            资产说明:
+            - `qaqh-daemon-*-x64.{zip,tar.gz}` — 后端守护进程(release 构建)+ 版本戳 + 后端版本锁
+            - `qaqh-sdk-contract-*.zip` — 版本锁定 SDK 契约导出(供 qaqh-sdk / qaqh-electron 消费)
+          files: dist/*
+          fail_on_unmatched_files: true
+          make_latest: true
