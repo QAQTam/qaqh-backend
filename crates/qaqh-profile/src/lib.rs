@@ -11,8 +11,8 @@ pub mod model;
 pub mod resolver;
 pub mod store;
 
-pub use model::{ModelDef, ModelDefaults, ModelSelection, ProfileDef, ProfilesDocument, ProviderDef};
-pub use resolver::{resolve_effective, resolve_model_selection, EffectiveExecutionProfile, EffectiveModelConfig, ModelResolveError, ProfileResolveError};
+pub use model::{ModelDef, ModelDefaults, ModelSelection, ProfilesDocument, ProviderDef};
+pub use resolver::{resolve_model_selection, EffectiveModelConfig, ModelResolveError};
 pub use store::{ProfilesStore, ProfileStoreError};
 
 use std::path::PathBuf;

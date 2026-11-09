@@ -1,5 +1,5 @@
 use crate::error::{ConfigError, ConfigResult};
-use crate::secrets::{CONFIG_MARKER, SecretSlot, SecretStore};
+use crate::secrets::{SecretSlot, SecretStore};
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
@@ -725,7 +725,7 @@ impl Config {
     pub fn load_from_paths_with(store: ConfigStore, secrets: SecretStore) -> ConfigResult<Self> {
         let mut cfg = Self::default();
 
-        let mut pc = store.load();
+        let mut pc = store.load().map_err(ConfigError::invalid)?;
         // 首次启动（文件不存在，而非解析失败）：落一份带注释的 BYOK 预设，
         // 让"配置在哪、要填哪六项"在磁盘上自解释，而不是静默跑在内存缺省值上。
         // 按 `exists()` 二次判定：损坏的用户文件走不到这里，绝不被模板覆盖。
@@ -735,37 +735,17 @@ impl Config {
                     "[config] 首次运行：已写入预设配置 {}",
                     store.path().display()
                 );
-                pc = store.load();
+                pc = store.load().map_err(ConfigError::invalid)?;
             }
         }
 
         let mut needs_rewrite = false;
-        // 审计 P0-1：API key 不落 config.toml 明文。
-        // - 标记 "set" → 从 secrets.toml 解密（失败 = 无 key，绝不回退旧明文）；
-        // - 旧明文（升级前配置）→ 迁移入 secrets.toml，config.toml 写回标记；
-        // - None/空 → 未配置。
-
         if let Some(mut pc) = pc {
             let provider_path = store.path().with_file_name("providers.toml");
             let provider_store = qaqh_profile::ProfilesStore::load_or_create(&provider_path)
                 .map_err(|error| ConfigError::invalid(format!("load providers.toml: {error}")))?;
             cfg.profiles_catalog = provider_store.document().clone();
             cfg.default_model_selection = cfg.profiles_catalog.default_model_selection.clone();
-            if let Some(k) = pc.api_key
-                && !k.is_empty()
-            {
-                if k == CONFIG_MARKER {
-                    cfg.api_key = secrets.load(SecretSlot::Main).unwrap_or_default();
-                } else {
-                    match secrets.set(SecretSlot::Main, &k) {
-                        Ok(()) => needs_rewrite = true,
-                        Err(e) => log::warn!(
-                            "[config] migrate main api key to secret store failed: {e}; keeping plaintext until retry"
-                        ),
-                    }
-                    cfg.api_key = k;
-                }
-            }
             if let Some(ref l) = pc.lang
                 && !l.is_empty()
             {
@@ -907,17 +887,9 @@ falling back to 1 (read-only)"
             // LSP env 的 `${secret:name}` 复用 mcp 校验（同 secrets.toml `[secrets.mcp]` 段）。
             validate_lsp_secret_refs(&cfg.lsp, &secrets)?;
 
-            // 迁移写回：config.toml 中旧明文已入 secret store，把明文替换为
-            // "set" 标记（重新 load 磁盘原值，只改"确为明文"的槽位——迁移
-            // 失败的槽位保持明文，下次 load 重试；已标记/未配置的原样保留）。
-            if needs_rewrite && let Some(mut fresh) = store.load() {
-                let is_plain = |k: &Option<String>| {
-                    k.as_deref()
-                        .is_some_and(|v| !v.is_empty() && v != CONFIG_MARKER)
-                };
-                if is_plain(&fresh.api_key) {
-                    fresh.api_key = Some(CONFIG_MARKER.to_owned());
-                }
+            // 迁移写回：config.toml 中旧工具名的默认白名单归一化为当前
+            // 正式词汇表（重新 load 磁盘原值，只改确需归一化的字段）。
+            if needs_rewrite && let Ok(Some(mut fresh)) = store.load() {
                 if let Some(ref mut s) = fresh.subagent {
                     if let Some(ref mut tools) = s.default_tools {
                         *tools = migrate_legacy_exec_tool_names(tools);
@@ -964,23 +936,10 @@ falling back to 1 (read-only)"
     /// 显式路径版 save（与 [`Self::load_from_paths_with`] 对称；集成测试与
     /// 多实例/数据根重定向场景使用）。
     pub fn save_with(&self, store: &ConfigStore, secrets: &SecretStore) -> ConfigResult<()> {
-        // 审计 P0-1：凭据先入 secret store；失败则中止保存（config.toml 永不
-        // 出现明文）。cfg.api_key 为空时删除对应 secret 槽位——2026-08 起
-        // config.save 不再把空串当"删除"（空串/掩码 = 保持现值，防前端误发空
-        // 清密钥），此处仅在配置本身被清空（如未来显式删除接口）时收尾删除。
-        if self.api_key.is_empty() {
-            let _ = secrets.delete(SecretSlot::Main);
-        } else {
-            secrets
-                .set(SecretSlot::Main, &self.api_key)
-                .map_err(|e| format!("failed to store main api key: {e}"))?;
-        }
+        // 凭据纪律：api_key 不经 config.save 落盘——provider 密钥的唯一写口
+        // 是 provider.upsert 的 SecretWrite（providers.<id> 加密槽）；
+        // cfg.api_key 是会话期解析值，绝不回写。
         let pc = PersistentConfig {
-            api_key: if self.api_key.is_empty() {
-                None
-            } else {
-                Some(CONFIG_MARKER.to_owned())
-            },
             lang: self.lang.clone(),
             font_family: if self.font_family.is_empty() {
                 None
@@ -1120,103 +1079,28 @@ mod secret_tests {
         ))
     }
 
+    /// Spec §3.5 测试类型 3：旧格式（顶层模型族键）在 load 时被拒绝，
+    /// 报错并提示重新配置；不自动转换，不静默忽略。
     #[test]
-    fn legacy_plaintext_migrates_to_secret_store() {
+    fn legacy_model_config_is_rejected_with_reconfigure_hint() {
         let dir = temp_dir();
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let config_path = dir.join("config.toml");
-        let secrets_path = dir.join("secrets.toml");
         std::fs::write(
             &config_path,
             "provider_id = \"deepseek\"\napi_key = \"sk-legacy-secret\"\n",
         )
         .expect("write legacy config");
 
-        let store = ConfigStore::new(config_path.clone());
-        let secrets = SecretStore::new(secrets_path.clone());
-        let cfg = Config::load_from_paths_with(store, secrets.clone()).expect("load");
-
-        // 运行时拿到明文（内存），secrets 已迁移，config.toml 不再有明文。
-        assert_eq!(cfg.api_key, "sk-legacy-secret");
-        assert!(secrets.has(SecretSlot::Main));
-        assert_eq!(
-            secrets.load(SecretSlot::Main).as_deref(),
-            Some("sk-legacy-secret")
-        );
-        let on_disk = std::fs::read_to_string(&config_path).expect("read back");
-        assert!(
-            !on_disk.contains("sk-legacy-secret"),
-            "plaintext must not remain"
-        );
-        assert!(on_disk.contains("api_key = \"set\""), "marker written back");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn marker_reads_secret_from_store() {
-        let dir = temp_dir();
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let config_path = dir.join("config.toml");
-        let secrets_path = dir.join("secrets.toml");
-        std::fs::write(&config_path, "api_key = \"set\"\n").expect("write marker config");
-        let secrets = SecretStore::new(secrets_path);
-        secrets
-            .set(SecretSlot::Main, "sk-from-store")
-            .expect("set secret");
-
         let store = ConfigStore::new(config_path);
-        let cfg = Config::load_from_paths_with(store, secrets).expect("load");
-        assert_eq!(cfg.api_key, "sk-from-store");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn save_writes_marker_not_plaintext() {
-        let dir = temp_dir();
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        let config_path = dir.join("config.toml");
-        let secrets_path = dir.join("secrets.toml");
-
-        let cfg = Config {
-            api_key: "sk-new-secret".to_owned(),
-            ..Default::default()
-        };
-        let store = ConfigStore::new(config_path.clone());
-        let secrets = SecretStore::new(secrets_path.clone());
-        cfg.save_with(&store, &secrets).expect("save");
-
-        let on_disk = std::fs::read_to_string(&config_path).expect("read back");
-        assert!(
-            !on_disk.contains("sk-new-secret"),
-            "plaintext must not be written"
-        );
-        assert!(on_disk.contains("api_key = \"set\""));
-        assert_eq!(
-            secrets.load(SecretSlot::Main).as_deref(),
-            Some("sk-new-secret")
-        );
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn empty_key_deletes_from_store() {
-        let dir = temp_dir();
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("create temp dir");
         let secrets = SecretStore::new(dir.join("secrets.toml"));
-        secrets.set(SecretSlot::Main, "sk-to-delete").expect("set");
-        assert!(secrets.has(SecretSlot::Main));
-
-        // service 层空串语义 → save 时 delete。
-        secrets.delete(SecretSlot::Main).expect("delete");
-        assert!(!secrets.has(SecretSlot::Main));
-        assert!(secrets.load(SecretSlot::Main).is_none());
+        let error = Config::load_from_paths_with(store, secrets)
+            .expect_err("旧格式配置必须被拒绝");
+        assert!(
+            error.to_string().contains("重新配置"),
+            "报错必须提示重新配置: {error}"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1243,18 +1127,6 @@ mod c3_migration_tests {
         let store = ConfigStore::new(dir.join("config.toml"));
         let secrets = SecretStore::new(dir.join("secrets.toml"));
         (dir, store, secrets)
-    }
-
-    fn top_level_absent(text: &str) -> bool {
-        // 顶层模型族键必须全部消失（[profiles.*] 内的同名键不算）。
-        let doc: toml::Value = toml::from_str(text).expect("parse toml");
-        doc.get("model").is_none()
-            && doc.get("base_url").is_none()
-            && doc.get("max_tokens").is_none()
-            && doc.get("context_limit").is_none()
-            && doc.get("endpoint").is_none()
-            && doc.get("reasoning_effort").is_none()
-            && doc.get("provider_id").is_none()
     }
 
     #[test]
@@ -1342,10 +1214,12 @@ mod c3_migration_tests {
             "预设只写一次"
         );
 
-        // 损坏的用户文件绝不被模板覆盖（exists 判定与解析失败分开）。
+        // 损坏的用户文件绝不被模板覆盖（exists 判定与解析失败分开）；
+        // 解析失败不再静默按缺省跑——明确报错（Spec §3.5），文件原样留盘等人修。
         std::fs::write(dir.join("config.toml"), "this is not = valid toml").expect("write junk");
-        let broken = Config::load_from_paths_with(store, secrets).expect("load survives junk");
-        assert!(broken.model.is_empty(), "解析失败时按缺省跑");
+        let error = Config::load_from_paths_with(store, secrets)
+            .expect_err("损坏的配置必须报错而不是静默回退");
+        assert!(error.to_string().contains("重新配置"), "{error}");
         assert_eq!(
             std::fs::read_to_string(dir.join("config.toml")).expect("read junk"),
             "this is not = valid toml",

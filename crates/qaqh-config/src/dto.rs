@@ -150,31 +150,20 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     Ok(())
 }
 
-fn masked_or_empty(key: &str) -> String {
-    if key.is_empty() {
-        String::new()
-    } else {
-        "****".to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// 穷举映射回归：改任一字段后此测试必须同步更新（K1 编译期+运行期双保险）。
     #[test]
-    fn to_dto_masks_secrets_and_projects_all_sections() {
+    fn to_dto_projects_all_sections() {
         let mut cfg = Config::default();
         cfg.auto_compact_threshold = 0.95;
-        cfg.subagent.api_key = "sk-sub".into();
+        cfg.subagent.timeout_secs = 300;
 
         let dto = to_dto(&cfg);
-        assert_eq!(dto.subagent.api_key, "****");
-        assert!(dto.subagent.api_key_set);
+        assert_eq!(dto.subagent.timeout_secs, 300);
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
-        let empty = to_dto(&Config::default());
-        assert!(!empty.subagent.api_key_set);
     }
 
     #[test]

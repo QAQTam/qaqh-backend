@@ -252,7 +252,10 @@ fn persistent_roundtrip_keeps_mcp_section() {
     let store = ConfigStore::new(path.clone());
     assert!(store.save(&pc), "save 应成功");
 
-    let loaded = store.load().expect("roundtrip 后应能读回");
+    let loaded = store
+        .load()
+        .expect("roundtrip 后应能读回")
+        .expect("roundtrip 后应有配置");
     let mcp = loaded.mcp.expect("mcp 段应保留");
     assert_eq!(mcp.enabled, Some(true));
     assert_eq!(mcp.idle_shutdown_secs, Some(120));
