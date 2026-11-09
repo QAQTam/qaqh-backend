@@ -785,7 +785,7 @@ mod tests {
             custom_tools: None,
         };
         let value = serde_json::to_value(command).expect("serialize command");
-        assert!(value["modelSelection"].is_object(), "{value}");
+        assert!(value["model_selection"].is_object(), "{value}");
 
         let decoded: RingingCommand = serde_json::from_value(value).expect("deserialize command");
         match decoded {
