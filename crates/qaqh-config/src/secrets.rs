@@ -21,17 +21,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Which credential slot a secret belongs to.
+/// 历史的 `Subagent` 槽随模型配置统一退役（子代理凭据走 provider 槽）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretSlot {
     Main,
-    Subagent,
 }
 
 impl SecretSlot {
     fn key(self) -> &'static str {
         match self {
             SecretSlot::Main => "main",
-            SecretSlot::Subagent => "subagent",
         }
     }
 }
@@ -756,21 +755,17 @@ mod tests {
         assert!(store.load(SecretSlot::Main).is_none());
 
         store.set(SecretSlot::Main, "sk-main").expect("set main");
-        store.set(SecretSlot::Subagent, "sk-sub").expect("set sub");
         assert!(store.has(SecretSlot::Main));
         assert_eq!(store.load(SecretSlot::Main).as_deref(), Some("sk-main"));
-        assert_eq!(store.load(SecretSlot::Subagent).as_deref(), Some("sk-sub"));
-        // 多槽位共存：重写 main 不丢 sub
+
         store
             .set(SecretSlot::Main, "sk-main-2")
             .expect("re-set main");
-        assert_eq!(store.load(SecretSlot::Subagent).as_deref(), Some("sk-sub"));
         assert_eq!(store.load(SecretSlot::Main).as_deref(), Some("sk-main-2"));
 
         store.delete(SecretSlot::Main).expect("delete main");
         assert!(!store.has(SecretSlot::Main));
         assert!(store.load(SecretSlot::Main).is_none());
-        assert_eq!(store.load(SecretSlot::Subagent).as_deref(), Some("sk-sub"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
