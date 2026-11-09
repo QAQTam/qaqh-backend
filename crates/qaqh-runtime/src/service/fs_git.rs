@@ -29,7 +29,7 @@ use crate::error::{QaqhError, QaqhResult};
 ///
 /// `fs.list`/`fs.read` 的合法用途是浏览会话工作区（前端远端文件选择器）。
 /// 数据根承载会话/配置目录，其下的 daemon 自身管理面（`config.toml`、
-/// `profiles.toml`、`secrets.toml`、`daemon.json`）仍由
+/// `providers.toml`、`secrets.toml`、`daemon.json`）仍由
 /// [`is_self_administration_path`] 单独拦掉；会话数据不再保护。
 pub(crate) fn allowed_roots(
     owners: &qaqh_session::owner::OwnerDirectory,

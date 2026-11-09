@@ -96,7 +96,7 @@ pub struct ProviderDef {
     pub models: BTreeMap<String, ModelDef>,
 }
 
-/// 完整的 profiles.toml 配置树
+/// 完整的 providers.toml 配置树
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 pub struct ProfilesDocument {

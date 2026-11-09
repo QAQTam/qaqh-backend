@@ -304,9 +304,10 @@ pub fn config_path() -> PathBuf {
     data_dir().join("config.toml")
 }
 
-/// qaqh profiles file path (independent model presets store).
-pub fn profiles_path() -> PathBuf {
-    data_dir().join("profiles.toml")
+/// BYOK 模型目录（providers.toml）权威路径：与 config.toml / secrets.toml
+/// 同目录；provider/model 的读写与 fs 白名单拦截共用此单一事实源。
+pub fn providers_path() -> PathBuf {
+    data_dir().join("providers.toml")
 }
 
 /// qaqh daemon discovery file path.

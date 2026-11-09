@@ -40,6 +40,26 @@ fn validate_provider_id(id: &str) -> QaqhResult<()> {
     }
 }
 
+/// base_url 必须是 http(s) 绝对 URL 且带主机名。只查形状不做连通性探测：
+/// 端点族纪律是提交侧 fail-fast，坏 URL 不留到第一回合才炸。
+fn validate_base_url(raw: &str) -> QaqhResult<()> {
+    let ok = raw.trim().split_once("://").is_some_and(|(scheme, rest)| {
+        (scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("http"))
+            && rest
+                .split(['/', '?', '#'])
+                .next()
+                .is_some_and(|host| !host.is_empty())
+            && !rest.contains(' ')
+    });
+    if ok {
+        Ok(())
+    } else {
+        Err(QaqhError::invalid(format!(
+            "provider base_url {raw:?} is invalid: must be http(s)://<host>"
+        )))
+    }
+}
+
 fn check_revision(store: &ProfilesStore, expected: Option<u64>) -> QaqhResult<()> {
     if let Some(expected) = expected {
         store
@@ -99,6 +119,7 @@ impl QaqhService {
         if dto.base_url.trim().is_empty() {
             return Err(QaqhError::invalid("provider base_url must be non-empty"));
         }
+        validate_base_url(&dto.base_url)?;
         let mut store = load_catalog()?;
         check_revision(&store, expected_revision)?;
 
@@ -170,6 +191,11 @@ impl QaqhService {
         if model.max_output_tokens == 0 {
             return Err(QaqhError::invalid(format!(
                 "model {provider_id}/{model_id}: max_tokens must be greater than 0"
+            )));
+        }
+        if model.context_window == 0 {
+            return Err(QaqhError::invalid(format!(
+                "model {provider_id}/{model_id}: context_window must be greater than 0"
             )));
         }
         let mut store = load_catalog()?;
