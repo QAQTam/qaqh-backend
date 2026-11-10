@@ -379,7 +379,17 @@ pub enum ExecInterruptReason {
 /// JSON. Keep this shape aligned with RingingV2's `pending_permission` view.
 /// Full normalized tool arguments are deliberately excluded because they may
 /// contain secrets.
+///
+/// 它是 **JSON-in-JSON 边界**（ADR-0004 §决策 3）：正文穿过 HTTP 面进审批 UI，所以
+/// 它是导出物（`types/` + `cs/` + `coverage.json` 的 approvals.admin），不接受"它是
+/// `serde_json::Value` 所以不用管"。compat 类 = `strict-input`：
+/// `deny_unknown_fields` 是有意的，生产端（`qaqh-agent-runtime` 的
+/// `ToolAdmission::ApprovalRequired`）必须与它同形状，多一个字段即形状漂移 —— 而漂移
+/// 在 daemon 侧必须显式失败
+/// （`qaqh-daemon::axum_server::axum_impl::v2::ApprovalBodyError`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PermissionRequestDetails {
     pub tool_name: String,

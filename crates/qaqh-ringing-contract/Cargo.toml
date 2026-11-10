@@ -8,6 +8,8 @@ description = "Ringing 公共契约:SessionState、类型化事件、命令目�
 [features]
 default = []
 ts = ["dep:ts-rs", "qaqh-types/ts"]
+# JSON Schema 投影（ADR-0008）：形状权威是 Rust DTO，不是 TypeScript 那一侧的产物。
+schema = ["dep:schemars"]
 
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
@@ -17,6 +19,7 @@ serde_json = "1"
 uuid = { version = "1", features = ["v7"] }
 sha2 = "0.11"
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
+schemars = { version = "1.2", features = ["derive"], optional = true }
 
 [dev-dependencies]
 serde_json = "1"
