@@ -15,6 +15,11 @@ snapshot in docs/api-surface/<name>/:
 - the axum_server source tree contains no literal-path `.route("…")` (nor any
   `.nest(` / `.merge(`): the tables are the only place a route may be declared;
 - the qaqh-client facade `pub use` list unchanged.
+- the golden tree of every pinned frozen line is byte-for-byte the tree that was
+   pinned in `docs/api-surface/snapshots/frozen-locks.json` (ADR-0011). This one is
+   the *lock identity* check: it fires on `main` too, where the artifact-vs-code
+   comparison is deliberately report-only — so rewriting a frozen tree in place
+   cannot be dressed up as "making CI green".
 
 Exit 0 = surface unchanged. Non-zero = API drift; on the LTS branch such a
 change must be rejected: revert the implementation, never the snapshot.
@@ -35,6 +40,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 VOLATILE_MANIFEST_FIELDS = ("source_revision", "source_dirty")
+
+# 冻结线金标准树身份的登记处。它必须在被钉住的树**之外**（否则改写锁会改变被钉的
+# OID，自指）；放在 `docs/api-surface/snapshots/` 是因为分类闸把 `snapshots/`
+# 一律算 `guard-tightening` —— 登记一把锁是收紧守卫，不是换锁。
+LOCK_REL = "docs/api-surface/snapshots/frozen-locks.json"
 
 HTTP_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH")
 
@@ -128,6 +138,116 @@ def facade_lines() -> list[str]:
     statements = re.findall(r"pub use[^;]+;", src, flags=re.S)
     return sorted(" ".join(statement.split()) for statement in statements)
 
+def tree_oid_at_head(rel_path: str) -> str | None:
+    """HEAD 里那棵金标准树的 git tree OID（对象库内容，与平台/工作区行尾无关）。"""
+    proc = subprocess.run(
+        ["git", "rev-parse", f"HEAD:{rel_path}"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def tree_oid_from_worktree(rel_path: str) -> str | None:
+    """工作区里这棵树将来会被提交成的 OID（临时 index，绝不碰真索引/工作区）。
+
+    有了它，切线时 export + `--rebaseline` + `--pin-frozen` 能落在**同一个**提交里：
+    否则锁只能在新线提交之后再补一次，而那中间的一次 CI 必然红 —— 一个自己造出来的
+    假信号。
+    """
+    index = tempfile.mktemp(prefix="qaqh-pin-index-")
+    env = os.environ.copy()
+    env["GIT_INDEX_FILE"] = index
+    try:
+        subprocess.run(
+            ["git", "read-tree", "HEAD"], cwd=ROOT, env=env, check=True, capture_output=True
+        )
+        subprocess.run(
+            ["git", "add", "--", rel_path], cwd=ROOT, env=env, check=True, capture_output=True
+        )
+        proc = subprocess.run(
+            ["git", "write-tree", f"--prefix={rel_path.rstrip('/')}/"],
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        return proc.stdout.strip() if proc.returncode == 0 else None
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(
+            f"cannot build a tree for {rel_path} from the worktree: "
+            f"{error.stderr.decode(errors='replace') if isinstance(error.stderr, bytes) else error.stderr}"
+        )
+    finally:
+        if os.path.exists(index):
+            os.unlink(index)
+
+
+def lock_entries() -> dict[str, object]:
+    path = ROOT / LOCK_REL
+    if not path.is_file():
+        return {}
+    document = json.loads(path.read_text(encoding="utf-8"))
+    return {key: value for key, value in document.items() if not key.startswith("_")}
+
+
+def compare_frozen_locks(golden_rel: str) -> list[str]:
+    """钉住的锁 == 头上这棵树？不匹配只有两种合法解释，见 ADR-0011。"""
+    entries = lock_entries()
+    if not entries:
+        return [
+            f"{LOCK_REL} missing or empty: every frozen line must pin the identity of "
+            "its golden tree (`--pin-frozen`, machine-written)"
+        ]
+    problems: list[str] = []
+    if golden_rel not in entries:
+        problems.append(
+            f"{golden_rel} is not pinned in {LOCK_REL}: run --pin-frozen. 补登记属 "
+            "guard-tightening（只动 snapshots/），不是换锁"
+        )
+    for rel, entry in sorted(entries.items()):
+        actual = tree_oid_at_head(rel)
+        pinned = str(entry["git_tree"])
+        if actual is None:
+            problems.append(f"pinned golden tree {rel} does not exist at HEAD")
+            continue
+        if actual != pinned:
+            problems.append(
+                f"golden tree {rel} is not the pinned lock: HEAD={actual} pinned={pinned}. "
+                "要么这是就地重切（禁止：手册 §1「金标准只允许在新线切出时由机器重切」），"
+                "要么你改了锁没改树/改了树没改锁 —— 后者由 --pin-frozen 在同一提交里补齐。"
+                "在 main 上把这条改绿不是修 bug，是偷换锁（ADR-0011）。"
+            )
+    return problems
+
+
+def pin_frozen(golden_rel: str) -> None:
+    """Machine-write the lock entry for one golden tree. Never hand-edit it."""
+    oid = tree_oid_from_worktree(golden_rel)
+    if oid is None:
+        raise SystemExit(f"no golden tree for {golden_rel} in the worktree — nothing to pin")
+    manifest = json.loads((ROOT / golden_rel / "manifest.json").read_text(encoding="utf-8"))
+    path = ROOT / LOCK_REL
+    document = (
+        json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {"_comment": ""}
+    )
+    document["_comment"] = (
+        "Identity of each frozen line's golden tree (ADR-0011). Machine-written by "
+        "scripts/check-lts-api-surface.py --pin-frozen; never hand-edit. Registering a "
+        "lock is guard-tightening, rewriting the tree it names is a refreeze."
+    )
+    document[golden_rel] = {
+        "git_tree": oid,
+        "contract_hash": manifest["contract_hash"],
+        "manifest_files": len(manifest["files"]),
+        "generator_version": manifest["generator_version"],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    path.write_text(rendered, encoding="utf-8", newline="\n")
+    print(f"pinned {golden_rel} at tree {oid} in {LOCK_REL}")
+
 
 def export_fresh(stage: Path) -> None:
     env = os.environ.copy()
@@ -217,16 +337,28 @@ def main() -> int:
         help="check only the route registry, the literal-route lint and the facade list "
              "(no cargo build; for a fast local look at the source-of-truth drift)",
     )
+    parser.add_argument(
+        "--pin-frozen",
+        action="store_true",
+        help="machine-write the frozen-lock entry (docs/api-surface/snapshots/frozen-locks.json) "
+             "for the --against golden tree and exit. Run it when a new LTS line is cut, or "
+             "after an approved doc-only re-cut on that line.",
+    )
     options = parser.parse_args()
 
     golden = ROOT / options.against
     if not golden.is_dir():
         raise SystemExit(f"golden snapshot directory not found: {golden}")
+    golden_rel = options.against.strip("/").replace("\\", "/")
 
     routes, facade = route_lines(), facade_lines()
 
     if options.rebaseline:
         rebaseline(golden, routes, facade)
+        return 0
+
+    if options.pin_frozen:
+        pin_frozen(golden_rel)
         return 0
 
     problems: list[str] = []
@@ -241,6 +373,10 @@ def main() -> int:
         problems.extend(f"  {offender}" for offender in offenders)
     problems.extend(compare_snapshot(golden, routes, "routes"))
     problems.extend(compare_snapshot(golden, facade, "facade"))
+    # 锁身份检查与快照同级：它不看代码产物，只看"你头上这棵金标准树是不是登记过的那把锁"。
+    # 所以它必须在 `--skip-export` 下也跑 —— main 上产物比对是 report-only，
+    # 这条是硬闸（ADR-0011）。
+    problems.extend(compare_frozen_locks(golden_rel))
 
     if not options.skip_export:
         if tracked_dirty():

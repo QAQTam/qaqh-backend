@@ -21,6 +21,12 @@
    这条红是 ADR-0007 §决策 4 设计出来的：`surface-policy.yml:78-80` 的
    `continue-on-error: ${{ target != 'LTS-v3.0' }}` 让它在 main 上只报告、在 LTS 上硬拦。
    **不得**为了让它变绿而重切或手改 `docs/api-surface/v3.0`（规则 16）。
+5. 但"不许重切"这句话原本**没有机器闸**：分类闸的判据是"改动落点是否落在
+   `docs/api-surface/**`"，而本轮这条 refreeze 恰恰不动金标准 —— 实测它对 `5880a867`
+   输出`未触碰冻结金标准，规则不适用`（exit 0）。于是 main 上唯一看得见契约漂移的一步
+   是 report-only 的，"重切一下它就绿"没有东西拦。这一条由 **ADR-0011** 补上
+   （锁身份登记 + 守卫硬比 tree OID，`--skip-export` 下也跑）。切 `LTS-v3.1` 时
+   `--pin-frozen` 必须与重切金标准落在**同一个提交**（手册 §8 第 3 步已写）。
 3. revision 的机制事实（决定"要不要 bump"之前必须看清它到底管什么）：
    - `crates/qaqh-ringing/src/v2/types.rs:39/44`：
      `COMMAND_CONTRACT_REVISION = "ringing-commands-7"`、`SESSION_CONTRACT_REVISION = "ringing-session-2"`。
@@ -93,6 +99,8 @@
 - 切线时必须由机器写金标准（exporter + `--rebaseline`），并且三处指向一起改
   （`lts-api-guard.yml` 的 `branches:`、`check-lts-api-surface.py` 的 `--against` 默认值、
   `qaqh-ringing/src/v2/types.rs` 的 revision）—— 漏一处等于新线没有闸（手册 §8 第 4 步）。
+- 金标准重切之后必须 `--pin-frozen`（ADR-0011）：`docs/api-surface/snapshots/frozen-locks.json`
+  里没登记新线的锁身份 ⇒ 守卫直接红，不会静默放行。
 - 若 §待决 1 选了 bump，`fixtures/*.json` 与 `constants.ts` 里的 revision 字面量会随机器
   重切而变化，`qaqh-client/tests/v2_public_api.rs:36` 的断言必须同步 —— 那是行为断言，
   改它要在同一提交里说明理由（手册 §1"夹具只能修编译性破损"的例外只在新线）。

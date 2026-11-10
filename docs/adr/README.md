@@ -45,6 +45,7 @@
 | [0008](0008-neutral-ir-per-language-projection.md) | 中立 ContractIR + 每语言投影，退役 ts→cs 解析链 | **第 1 步已落地**（schema 预览投影）· 主重构未实施 |
 | [0009](0009-wire-view-vs-artifact-bytes.md) | 冻结粒度区分 wire 语义与产物字节：分类从两类改三类 | **已落地于 main**（`wire_view` + `doc-only-refresh`）· 由真实误判触发 |
 | [0010](0010-cut-lts-v3.1-line.md) | 换锁：v3.1 线的待拍板取值与攒着的 refreeze 清单 | **提议中**（revision 取值、切线时机、前端先行三项等人定） |
+| [0011](0011-frozen-lock-identity.md) | 冻结线的锁必须有登记身份：main 上「改金标准让它变绿」这条路从此被封死 | **已采纳（agent 落地于 main，待 owner 复核）** · 反证已做 |
 
 ## 阅读顺序
 
@@ -54,3 +55,5 @@
 0008 是 0003/0004/0005 的承载体 —— registry 与 compat 声明最终都长在 IR 上；
 0010 是 0007 那条"换锁只能走新线"的**账本**：main 上攒了几笔 refreeze、切线时要不要 bump
 代际、由谁拍板，都记在那里。
+0011 补 0007 剩下的最后一个缺口：分类闸只看"改没改金标准",看不见"改了契约却没动金标准",
+于是 main 上那条 report-only 的红可以被"重切一下"抹掉 —— 锁的身份从此必须登记。
