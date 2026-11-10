@@ -22,6 +22,10 @@
 **冻结的定义**——LTS 分支上,以下内容禁止变更行为、字段、语义:
 
 1. **HTTP 端点集合**:`/ringing/v2/*` 全部路由 + `/health` `/activity` `/control/v1/*`
+   —— 两者都由**数据表**登记并驱动 `build_router`:`qaqh_ringing::RINGING_V2_HTTP_ROUTES`
+   与 `axum_impl::CONTROL_PLANE_ROUTES`。加路由的唯一途径是往表里写一行(表驱动 + 缺 arm 启动
+   panic);守卫 lint 禁止 `axum_server/**` 出现字面量 `.route("…")`/`.nest(`/`.merge(`。
+   冻结粒度含 HTTP 方法(见 `snapshots/routes.txt`,由 `--rebaseline` 机器重切,勿手改)。
 2. **信封与版本闸门**:`RingingV2CommandEnvelope` 字段、`contract_revision` 的取值
    (`ringing-commands-7` / `ringing-session-2` 在整个 LTS 生命周期内**保持原值不动**)
 3. **类型化方法表**:`TYPED_METHODS`(`qaqh-runtime/src/ringing/service_methods*.rs`)中每个方法的
