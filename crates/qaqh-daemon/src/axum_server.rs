@@ -3,6 +3,8 @@
 
 #[cfg(test)]
 mod authz_matrix_tests;
+#[cfg(test)]
+mod v2_storm_tests;
 mod axum_impl;
 
 pub(crate) use axum_impl::challenge::ChallengeStore;
