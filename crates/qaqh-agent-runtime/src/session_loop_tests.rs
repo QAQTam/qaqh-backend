@@ -453,3 +453,382 @@ mod tests {
         ));
     }
 }
+
+#[cfg(test)]
+mod handoff_tests {
+    //! 行为级测试：交接真的终止回合、参数不全会响亮报错并继续推进、
+    //! 超限错误真的改写分母、硬压力真的折叠且留下可见痕迹。
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use qaqh_ringing::ConversationSendMessage;
+    use qaqh_ringing_contract::fact::InputPurpose;
+    use qaqh_session::db::store;
+    use qaqh_session::owner::OwnerDirectory;
+
+    use crate::handoff::{FOLD_NOTE, self};
+    use crate::provider_job::ProviderRequestSpec;
+    use crate::session_loop::SessionLoop;
+    use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
+
+    struct Harness {
+        loop_: Arc<SessionLoop>,
+        owners: Arc<OwnerDirectory>,
+        base_url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+    }
+
+    fn tool_call_body(
+        name: &str,
+        args: &serde_json::Value,
+        id: &str,
+        usage: &serde_json::Value,
+    ) -> String {
+        let call = serde_json::json!({"choices":[{"index":0,"delta":{"role":"assistant",
+            "tool_calls":[{"index":0,"id":id,"type":"function",
+            "function":{"name":name,"arguments":args.to_string()}}]},"finish_reason":null}]});
+        let done = serde_json::json!({"choices":[{"index":0,"delta":{},
+            "finish_reason":"tool_calls"}],"usage": usage});
+        format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", call, done)
+    }
+
+    fn text_body(text: &str) -> String {
+        let head =
+            serde_json::json!({"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
+        let done = serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
+        format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", head, done)
+    }
+
+    /// 口径样本：裸 `prompt_tokens`=60，真实总输入 = 命中 900 + 未命中 60 = 960。
+    fn cache_usage() -> serde_json::Value {
+        serde_json::json!({"prompt_tokens":60,"completion_tokens":5,"total_tokens":65,
+            "prompt_cache_hit_tokens":900,"prompt_cache_miss_tokens":60})
+    }
+
+    async fn harness(
+        dir: &std::path::Path,
+        script: Vec<(u16, String)>,
+        window: u32,
+        threshold: f64,
+    ) -> Harness {
+        let owners = Arc::new(OwnerDirectory::open(dir.join("qaqh.db")).expect("open owners db"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: "SES-HANDOFF".into(),
+                parent_session_id: None,
+                title: "handoff".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                skills: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let manager = Arc::new(Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(&[]),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            "SES-HANDOFF",
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let base_url = format!("http://{}", server.server_addr());
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let script = Arc::new(Mutex::new(script));
+            let cursor = Arc::new(Mutex::new(0usize));
+            let requests = Arc::clone(&requests);
+            std::thread::spawn(move || {
+                let header =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                        .expect("header");
+                for request in server.incoming_requests() {
+                    let mut request = request;
+                    let mut body = String::new();
+                    let _ = request.as_reader().read_to_string(&mut body);
+                    requests.lock().unwrap().push(body);
+                    // 末尾一条重复供应：SDK 重试不该让测试假失败。
+                    let (status, payload) = {
+                        let script = script.lock().unwrap();
+                        let mut cursor = cursor.lock().unwrap();
+                        let index = (*cursor).min(script.len() - 1);
+                        *cursor += 1;
+                        script[index].clone()
+                    };
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(payload)
+                            .with_status_code(status)
+                            .with_header(header.clone()),
+                    );
+                }
+            });
+        }
+        let provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        let spec = ProviderRequestSpec::new(provider, 1024)
+            .with_context(window, threshold)
+            .with_tools(vec![handoff::tool_def()]);
+        let loop_ = SessionLoop::new("SES-HANDOFF", owner, port, spec, dir.to_path_buf());
+        Harness {
+            loop_,
+            owners,
+            base_url,
+            requests,
+        }
+    }
+
+    fn input(text: &str) -> ConversationSendMessage {
+        ConversationSendMessage {
+            text: text.into(),
+            images: vec![],
+            attachments: None,
+            message_id: Some(format!("in-{text}")),
+            input_purpose: InputPurpose::TriggerTurn,
+            as_system: false,
+            inter_agent: None,
+            subagent_terminal: None,
+        }
+    }
+
+    async fn wait_until(
+        owners: &OwnerDirectory,
+        pred: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let owner = owners.get_or_create("SES-HANDOFF");
+        for _ in 0..800 {
+            let value = serde_json::to_value(owner.snapshot().await.expect("snapshot"))
+                .expect("serialize snapshot");
+            if pred(&value) {
+                return value;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("条件未在时限内成立");
+    }
+
+    fn idle_with_turns(value: &serde_json::Value) -> bool {
+        value["activity"] == "idle"
+            && value["turns"]
+                .as_array()
+                .is_some_and(|turns| !turns.is_empty())
+    }
+
+    fn timeline_tool_result(value: &serde_json::Value) -> String {
+        value["timeline"]
+            .as_array()
+            .expect("timeline")
+            .iter()
+            .filter(|entry| entry["kind"] == "tool_result")
+            .map(|entry| {
+                entry["data"]["content"]["data"]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 交接 = 终局：一次请求、completed 终态、结果入库、镜像落盘。
+    #[tokio::test]
+    async fn handoff_ends_the_turn_and_persists_the_durable_fact() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("QAQH_DATA_DIR");
+        // 镜像落点由 data_dir() 决定，把根指到临时目录才能断言文件真的写出来。
+        // SAFETY: 本用例独占 QAQH_DATA_DIR 的改写并在断言后还原；同 crate 内只有
+        // 这一个用例碰它，tempdir 路径互不重叠。
+        unsafe { std::env::set_var("QAQH_DATA_DIR", dir.path().join("root")) };
+
+        let doc = serde_json::json!({
+            "handoff_doc": "## 待决\n- 下一步查 SIWC 窗口来源",
+            "work_summary": "交接测试"
+        });
+        let h = harness(
+            dir.path(),
+            vec![(200, tool_call_body("handoff", &doc, "call-h1", &cache_usage()))],
+            10_000,
+            0.5,
+        )
+        .await;
+        h.loop_
+            .send_input(input("开始干活"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, idle_with_turns).await;
+        assert_eq!(state["turns"][0]["outcome"]["kind"], "finished");
+        assert_eq!(
+            state["turns"][0]["outcome"]["data"]["terminal"],
+            "completed",
+            "TurnTerminal 冻结三值，交接只能报 completed"
+        );
+        assert_eq!(state["tools"][0]["state"]["kind"], "finished");
+        let stored = timeline_tool_result(&state);
+        assert!(
+            stored.contains("\"handed_off\":true"),
+            "机器面必须入库: {stored}"
+        );
+        assert_eq!(
+            h.requests.lock().unwrap().len(),
+            1,
+            "交接后不得再向模型回传"
+        );
+
+        let mirror = dir
+            .path()
+            .join("root")
+            .join("sessions")
+            .join("SES-HANDOFF")
+            .join("handoff");
+        let written: Vec<_> = std::fs::read_dir(&mirror)
+            .expect("镜像目录必须存在")
+            .flatten()
+            .collect();
+        assert_eq!(written.len(), 1, "一次交接只写一份镜像");
+        let content = std::fs::read_to_string(written[0].path()).expect("read mirror");
+        assert!(content.contains("交接测试"));
+        assert!(content.contains("查 SIWC 窗口来源"));
+        assert!(content.contains("上下文占用"));
+
+        match previous {
+            // SAFETY: 与用例开头的 set_var 配对，本用例独占该变量。
+            Some(value) => unsafe { std::env::set_var("QAQH_DATA_DIR", value) },
+            // SAFETY: 该变量原本未设置，移除即还原环境。
+            None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
+        }
+    }
+
+    /// 缺交接文档 = 工具失败并回给模型，回合继续推进（不静默、不终止）。
+    #[tokio::test]
+    async fn handoff_with_missing_doc_fails_loudly_and_keeps_the_loop() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let usage = serde_json::json!({"prompt_tokens":10,"completion_tokens":1,"total_tokens":11});
+        let bad = tool_call_body(
+            "handoff",
+            &serde_json::json!({ "work_summary": "只写了一句话" }),
+            "call-h2",
+            &usage,
+        );
+        let h = harness(
+            dir.path(),
+            vec![(200, bad), (200, text_body("明白，我不交空文档"))],
+            10_000,
+            0.95,
+        )
+        .await;
+        h.loop_
+            .send_input(input("交接但忘了正文"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, idle_with_turns).await;
+        let stored = timeline_tool_result(&state);
+        assert!(
+            stored.contains("缺少 `handoff_doc`"),
+            "缺字段必须响亮报错并入库: {stored}"
+        );
+        assert_eq!(h.requests.lock().unwrap().len(), 2, "报错后必须继续推进");
+        assert!(
+            serde_json::to_string(&state)
+                .unwrap()
+                .contains("明白，我不交空文档"),
+            "第二轮的回答要留在会话里"
+        );
+    }
+
+    /// 超限错误：分母立刻按声明值一半保守收敛，且失败码不再伪装成一般 provider 失败。
+    #[tokio::test]
+    async fn context_overflow_error_lowers_the_denominator() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let overflow = serde_json::json!({"error":{"message":
+            "This model's maximum context length is 1200 tokens. However, your request is too long.",
+            "type":"invalid_request_error","code":"context_length_exceeded"}})
+        .to_string();
+        let h = harness(dir.path(), vec![(400, overflow)], 2000, 0.5).await;
+        h.loop_.send_input(input("推超限")).expect("send input");
+
+        let state = wait_until(&h.owners, idle_with_turns).await;
+        assert_eq!(
+            state["turns"][0]["outcome"]["data"]["error"]["code"],
+            "context_overflow",
+            "超限不得伪装成一般 provider 失败"
+        );
+        assert_eq!(
+            handoff::effective_window(&h.base_url, "test-model", 2000),
+            1000,
+            "无实测记录时按声明值一半保守收敛"
+        );
+    }
+
+    /// 硬压力：折叠只动模型投影、提醒以可见事实入库、占用按 hit+miss 口径。
+    #[tokio::test]
+    async fn hard_pressure_folds_tool_results_and_leaves_visible_inputs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 960/1000 = 96%：软提醒（>=50%）与硬折叠（>=95%）同轮触发。
+        let bad = tool_call_body(
+            "handoff",
+            &serde_json::json!({ "handoff_doc": "  ", "work_summary": "空正文" }),
+            "call-h3",
+            &cache_usage(),
+        );
+        let h = harness(
+            dir.path(),
+            vec![(200, bad), (200, text_body("收到，这就写文档"))],
+            1000,
+            0.5,
+        )
+        .await;
+        h.loop_.send_input(input("压力大")).expect("send input");
+
+        let state = wait_until(&h.owners, idle_with_turns).await;
+        let requests = h.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            !requests[0].contains(FOLD_NOTE),
+            "第一轮没有任何东西可折叠"
+        );
+        assert!(
+            requests[1].contains(FOLD_NOTE),
+            "第二轮必须折叠工具结果"
+        );
+        assert!(
+            !requests[1].contains("不能为空"),
+            "折叠后原文不该再进模型上下文"
+        );
+        assert!(
+            requests[1].contains("[系统] 上下文占用 96%"),
+            "占用必须按 hit+miss 口径，而不是裸 prompt_tokens 的 6%"
+        );
+        assert!(requests[1].contains("本轮唯一任务：调用 handoff"));
+        assert!(
+            timeline_tool_result(&state).contains("不能为空"),
+            "折叠只动模型投影，落库事实必须原样"
+        );
+        let watchdog = state["timeline"]
+            .as_array()
+            .expect("timeline")
+            .iter()
+            .filter(|entry| {
+                entry["kind"] == "input"
+                    && entry["data"]["purpose"] == "interject"
+                    && entry["data"]["actor"]["kind"] == "api"
+            })
+            .count();
+        assert_eq!(watchdog, 2, "提醒与折叠各留一条可见事实");
+    }
+}
