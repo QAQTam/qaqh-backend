@@ -96,15 +96,21 @@ git push origin v3.0.1
 |---|---|---|
 | `sdk-contract.yml` | PR / push(main、LTS-v3.0)/ 手动 | Rust 测试三件套 + 契约确定性 + 严格 TS 消费者 + 契约哈希锁定 |
 | `lts-api-guard.yml` | push / PR → `LTS-v3.0` | 金标准逐字节比对 + 路由表/门面快照(硬闸,仅冻结线) |
-| `surface-policy.yml` | PR / push(main、LTS-v3.0) | **改动分类闸**:`contract-refreeze` vs `guard-tightening` 判定 + 路由登记处 lint + 门面;金标准比对在 main 上 report-only、在 LTS 上硬拦 |
+| `surface-policy.yml` | PR / push(main、LTS-v3.0) | **改动分类闸**:refreeze / tightening / doc-only 三判 + 路由登记处 lint + 门面;金标准比对在 main 上 report-only、在 LTS 上硬拦 |
 | `release.yml` | 推 `v*` tag(发布)/ 手动 dispatch(干跑) | 双平台 `--locked` release 构建、打包、发 Release |
 
-`surface-policy.yml` 的判据是**改动落点**,不是人写的标签文案:只动 `snapshots/*` ⇒ 要求
-`guard-tightening`;动了导出物(`manifest.json`/`types/`/`cs/`/`fixtures/`…)⇒ 要求
-`contract-refreeze`,且**禁止目标为 `LTS-v3.0`**(换锁属新线,如 `LTS-v3.1`)。标记可写在
-commit subject/body 的 `[guard-tightening]` 或 PR label(仓库已建好这两个 label)。
-实测:引入整份金标准的 `b96f2b72` 被该闸判红;ADR-0003 那次只改 `routes.txt` 的提交
-自动判为 `guard-tightening` 并放行。
+`surface-policy.yml` 的判据是**改动落点 + wire 视图**,不是人写的标签文案。三类(仓库已建好对应 label):
+
+| 标记 | 何时 | 能否进 `LTS-v3.0` |
+|---|---|---|
+| `contract-refreeze` | wire 实变:增删产物、类型字段变化 | ❌ 只能开新线 + bump revision |
+| `guard-tightening` | 只动 `snapshots/*`,导出物逐字节不变 | ✅ |
+| `doc-only-refresh` | 导出物字节变了但去掉注释后 **wire 视图相同**(如给 DTO 加 doc 注释,`contract_hash` 会跟着变) | ✅ 且不 bump revision |
+
+标记写在 commit subject/body(`[doc-only-refresh]`)或 PR label。**是否真属 doc-only 由脚本自己算**
+(它对每个改动产物做去注释比较),谎报会被 `artifact added` / `wire-differs` 列表当场戳穿 —— 见 ADR-0009。
+实测:引入整份金标准的 `b96f2b72` 判红;只改 `routes.txt` 的 ADR-0003 提交自动判 `guard-tightening` 放行;
+LTS 上那次注释重切(`ac54e508`+`4c3a26be`)判 `doc-only-refresh`。
 
 外部依赖钉子:`qaqtam/mutil-ai` @ `4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4`。
 LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级属 main 的权利。
