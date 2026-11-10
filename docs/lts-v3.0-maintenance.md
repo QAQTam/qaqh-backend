@@ -25,12 +25,22 @@
    名称、params/result 类型形状、MethodKind、错误语义
 4. **命令与事件面**:`RingingCommand`、`RingingV2Event` 各变体的字段与判别方式
 5. **SDK 契约哈希**:`qaqh-contract-export` 的 `contract_hash` 相对 `v3.0.0` release 内契约 zip **不得变化**
+   (相对 v3.0.0 的偏离必须先在 §7 登记后才允许提交;additive 且不动 `contract_revision` 的偏离可记在
+   当前锁内,其余一律开新 LTS 线)
 
 **允许的改动**:bug 修复、内部重构(不触及上述面的)、新增仅在内部使用的代码路径、测试。
 
-**改动是否踩线的判定法**:跑 `just sdk-check` / `scripts/check-sdk-contract.py --typescript --release`,
-若契约哈希或严格 TS 消费者失败,即踩线;LTS 上不允许用"顺手改夹具"的方式让它变绿
-(夹具只能修编译性破损,不得改描述被测行为的断言)。
+**改动是否踩线的判定法**——先分清各闸门实际比什么(别把纪律当成 CI):
+
+| 闸门 | 实际比对对象 | 能抓到什么 |
+|---|---|---|
+| `lts-api-guard.yml` → `scripts/check-lts-api-surface.py` | HEAD 导出物 vs **仓内** `docs/api-surface/v3.0/` golden(逐字节,`manifest.json` 的 `source_revision`/`source_dirty` 除外)+ 路由表 + facade 清单 | 实现改了 wire 但没同步 golden(或反之) |
+| `sdk-contract.yml:48-49` | `export --out $T` 后 `check --against $T`,即**同一份** temp | 导出不确定/不可复现 |
+| `scripts/check-sdk-contract.py --typescript --release` | 由导出物自算 `contract_hash` 校验 manifest 自洽 + 严格 TS 消费者编译 | 契约自相矛盾、前端可见字段被删(表现为 `error TS2353`) |
+
+**没有任何 CI 步骤把 `contract_hash` 与 `v3.0.0` release 资产比对**——§1.5 那条是**人工纪律**,唯一执法者
+是 §6 checklist 与 §7 登记。LTS 上不允许用"顺手改夹具"的方式让它变绿(夹具只能修编译性破损,不得改描述
+被测行为的断言)。
 
 **漂移事故参照**:model-config 重构删除 `SessionSettingsPatch.profile` 时,TS 严格消费者在 CI 抓到漂移
 —— LTS 上这类漂移 = 发布阻断,必须回退实现而非改夹具。
@@ -101,10 +111,32 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 
 ## 6. 发版 checklist
 
-- [ ] `git log v3.0.<n-1>..LTS-v3.0` 里没有触碰 §1 冻结面的提交
-- [ ] `contract_hash` 与上一版 release 的契约 zip 一致(或差异有成文说明且仅限 main 线)
+- [ ] `git log v3.0.<n-1>..LTS-v3.0` 里触碰 §1 冻结面的提交都已在 §7 登记(未登记 = 本次发版阻断)
+- [ ] `contract_hash` 与上一版 release 的契约 zip 一致;不一致时 §7 必须有对应条目,且偏离是 **additive + 未 bump `contract_revision`**
+- [ ] §7 登记条目里写清了「机器闸门为什么不会拦」(golden 同提交即绿),别让下个维护者以为 CI 兜住了锁
 - [ ] `version.txt` 已改为本次补丁戳,Cargo.toml / package.json / Cargo.lock / qaqh-backend.lock.json 全部同步
 - [ ] sdk-contract 在 LTS-v3.0 绿
 - [ ] (标准流程)dispatch 干跑双平台绿
 - [ ] tag 已推,Release 页面出现且标记 Latest,资产齐全
 - [ ] 前端仓库把依赖 pin 到新 tag(契约 zip 里的 `QAQH_SOURCE_REVISION` 与 tag 提交一致)
+
+## 7. 锁内已批准的契约修订登记
+
+> 「换锁」的判据不是补丁号进位(3.0.0→3.0.1 只是版本号),而是这条锁的参照物有没有被改动后仍留在锁内。
+> 换锁 = bump `contract_revision` + 重切 tag,那属于开新 LTS 线(§1.2/§42);登记在案的 additive 偏离则
+> 留在当前锁内,以 golden 目录为锁内新基线。**换锁 ≠ 破坏性改动**:删字段/改语义是破坏性,加可选字段不是。
+
+### 7.1 2026-11-10 · 随 `v3.0.1` 携带 · 事件面加可选行差估算字段
+
+- **变更**:`SessionEvent::ToolArgumentsDelta` 增 `lines_added` / `lines_removed`(累计行差估算)。
+- **兼容性判定**:纯 additive。未删字段、未改任何既有字段语义、未改事件判别方式;两字段
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`,旧客户端报文里根本不出现这两个键。
+- **`contract_revision` 未 bump**(仍 `ringing-commands-7` / `ringing-session-2`,`qaqh-ringing/src/v2/types.rs:39,44`):
+  客户端对它的校验是严格相等,bump 会让所有存量前端当场拒连——一个"先顶一下"的补丁 tag 承担不起。
+- **基线**:`docs/api-surface/v3.0/` 已随实现同提交再生成(变化面:
+  `cs/SessionEvent.cs`、`cs/SessionEventFrame.cs`、`types/qaqh/SessionEvent.ts`、`types/qaqh/SessionEventFrame.ts`、
+  `manifest.json`;路由表与 facade 未动)。`lts-api-guard` 以 golden 为准,故本条不会变红——**这是登记而非 CI 放行**。
+- **消费口径**:估算数的是已到达的**参数文本**行数,不是实际改动行数;终态 `ToolFinished.code_delta`
+  才是盘上真 diff(本次一并把 code_delta 从参数文本口径改为展示投影真 diff 单一事实源)。
+  前端把估算当进度条,不得把 `null` 渲染成 `+0 −0`。
+- **出口**:任何后续要删/改这些字段、改语义、或 bump revision 的变更 → 开 `v3.1` 线,不得再记在本节。

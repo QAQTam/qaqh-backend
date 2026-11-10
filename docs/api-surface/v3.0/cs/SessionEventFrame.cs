@@ -78,6 +78,12 @@ public sealed record SessionEventFrameToolArgumentsDelta : SessionEventFrame
     public string ToolName { get; init; }
     [JsonPropertyName("text")]
     public string Text { get; init; }
+    [JsonPropertyName("lines_added")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? LinesAdded { get; init; }
+    [JsonPropertyName("lines_removed")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? LinesRemoved { get; init; }
 }
 
 public sealed record SessionEventFrameToolDeclared : SessionEventFrame

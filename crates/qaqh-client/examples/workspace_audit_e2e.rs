@@ -61,8 +61,6 @@ fn main() {
                 RingingCommand::SessionCreate {
                     cwd: Some(workspace.clone()),
                     title: None,
-                    profile: None,
-                    effort: None,
                     model_selection: None,
                     tool_mode: None,
                     custom_tools: None,
