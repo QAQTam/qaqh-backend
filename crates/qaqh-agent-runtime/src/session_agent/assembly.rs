@@ -72,10 +72,14 @@ pub fn provider_spec(
         apply_deepseek_responses_facts(&mut provider, &config.model);
     }
     let mut spec = ProviderRequestSpec::new(provider, config.max_tokens)
-        .with_credential(config.credential);
+        .with_credential(config.credential)
+        .with_context(config.context_length, config.auto_compact_threshold);
     if !tools.is_empty() {
         spec = spec.with_tools(tools);
     }
+    // `handoff` 是控制面工具，不受会话/全局 allowlist 约束：minimal 档连 `ask`
+    // 都不带，若它也被过滤掉，模型就没有逃生阀，只会在撞墙时 400。
+    crate::handoff::ensure_declared(&mut spec.tools);
     let effort = config.reasoning_effort.trim();
     if !effort.is_empty() {
         spec = spec.with_effort(effort.to_string());
