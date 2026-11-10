@@ -354,12 +354,15 @@ impl SessionOwner {
     }
 
     /// 工具参数流式片段(仅展示;不代表参数已合法或工具已执行)。
+    /// 行差估算由 provider 侧随片段一起算好带上来,这里只做投影,不再数一遍。
     pub fn tool_arguments_delta(
         &self,
         turn_id: &TurnId,
         call_id: &ToolCallId,
         tool_name: &str,
         text: &str,
+        lines_added: Option<u32>,
+        lines_removed: Option<u32>,
     ) {
         let turn_id = turn_id.clone();
         let call_id = call_id.clone();
@@ -371,6 +374,8 @@ impl SessionOwner {
                 call_id,
                 tool_name,
                 text,
+                lines_added,
+                lines_removed,
             });
             Ok(())
         });

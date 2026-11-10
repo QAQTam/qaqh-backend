@@ -4,17 +4,18 @@
 //! 但渲染层希望模型吐出第一行时就能看到「目前 +N −M」。因此这里只做只读
 //! 扫描，且任何异常都退化成"沿用上一次的值"——估算通道永远不许影响回合。
 //!
-//! 口径是**参数行数**，与 `code_delta::compute` 的终态数字同源（有测试锁住
-//! "整段参数喂完后的估算 == 终态 CodeChanged"）：
-//!
+//! 三个写工具各自的计数键：
 //! - `write` → `content` 的行数；
 //! - `edit` → `new_string` 行数 / `old_string` 行数（旧拼写 `new_str`/`old_str` 同权）；
 //! - `apply_patch` → 补丁里的 `+` / `-` 行（上下文行不算），复用
 //!   [`StreamingPatchParser`]，所以计数规则与引擎解析器天然一致。当前未完成
 //!   行只要已经有 `+` / `-` 前缀就计入预览，不必等 `\n` 提交。
 //!
-//! 它因此**不等于**"实际改动行数"：`replace_all` 会成倍、命中失败会归零、
-//! 展示层 diff 又是另一个口径。终态一到，权威值立刻接管。
+//! 口径是**参数文本行数**。参数吐完时这里到达它的上限，但那**不是**终态数字：
+//! 终态 `code_delta` 由工具落盘后按盘上真 diff 出数（见 `code_delta` 模块头），
+//! 两个口径不同且应当不同——覆盖既有文件时 `write` 的估算把整份正文都算成新增
+//! 行，真 diff 只算实际改掉的行；`replace_all` 的倍数、命中失败的归零也只有落盘
+//! 时才可知。所以流式读数一到终态就被接管，这是设计而不是偏差。
 
 use crate::apply_patch_engine::StreamingPatchParser;
 
@@ -319,7 +320,6 @@ impl ArgLineEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_delta::compute;
 
     /// 整段喂 vs 逐字符喂，结果必须一致——这是"边输出边数"的正确性前提。
     fn estimate_of(tool: &str, args_json: &str, chunk: usize) -> ArgLineEstimate {
@@ -522,28 +522,34 @@ mod tests {
         assert_eq!(estimate("write", args).lines_added, 3);
     }
 
-    /// 估算的终点必须等于终态 CodeChanged：数字不能"出现后又变一套"。
+    /// 逐片段吐完之后的读数必须等于「整段参数一次算」的权威计数：`write`/`edit`
+    /// 数参数文本行，`apply_patch` 与引擎的非流式统计同源。终态真 diff 是另一个
+    /// 口径（见模块头），不在这里锁。
     #[test]
-    fn matches_the_terminal_code_delta() {
-        for (tool, args_json) in [
-            ("write", WRITE_ARGS),
-            ("edit", EDIT_ARGS),
-            ("apply_patch", PATCH_ARGS),
-        ] {
-            let args: serde_json::Value = serde_json::from_str(args_json).unwrap();
-            // 探针值不影响本测试：锁的是行数口径；files_created 口径见
-            // code_delta 自己的测试。
-            let terminal =
-                compute(tool, &args, false).unwrap_or_else(|| panic!("{tool} 终态没出数"));
-            assert_eq!(
-                estimate(tool, args_json),
-                ArgLineEstimate {
-                    lines_added: terminal.lines_added as u32,
-                    lines_removed: terminal.lines_removed as u32,
-                },
-                "{tool} 的流式估算与终态口径不一致"
-            );
-        }
+    fn settled_estimate_matches_the_non_streaming_counts() {
+        assert_eq!(
+            estimate("write", WRITE_ARGS),
+            ArgLineEstimate {
+                lines_added: 3,
+                lines_removed: 0
+            }
+        );
+        assert_eq!(
+            estimate("edit", EDIT_ARGS),
+            ArgLineEstimate {
+                lines_added: 3,
+                lines_removed: 2
+            }
+        );
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-keep\n+KEEP\n context\n+plus\n*** End Patch\n";
+        let stats = crate::apply_patch_engine::patch_stats(patch).expect("patch_stats parses it");
+        assert_eq!(
+            estimate("apply_patch", PATCH_ARGS),
+            ArgLineEstimate {
+                lines_added: stats.lines_added as u32,
+                lines_removed: stats.lines_removed as u32,
+            }
+        );
     }
 
     #[test]

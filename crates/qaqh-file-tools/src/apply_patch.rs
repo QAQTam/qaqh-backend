@@ -79,6 +79,10 @@ pub struct ApplyPatchOutput {
     #[serde(skip)]
     #[schemars(skip)]
     diff: Option<String>,
+    /// 逐文件行差，与 `insertions`/`deletions` 同一次计算、同一口径。
+    #[serde(skip)]
+    #[schemars(skip)]
+    display_files: Vec<crate::tool_api::ToolDisplayFile>,
 }
 
 impl ToolProjection for ApplyPatchOutput {
@@ -89,6 +93,7 @@ impl ToolProjection for ApplyPatchOutput {
     }
 
     fn display(&self, args: &Value) -> ToolDisplay {
+        let _ = args;
         let summary = match self.first_path.as_deref() {
             Some(path) if !path.is_empty() => crate::file_mutate::mutation_change_summary(
                 path,
@@ -100,7 +105,7 @@ impl ToolProjection for ApplyPatchOutput {
                 self.files, self.insertions, self.deletions
             ),
         };
-        mutation_display(
+        let display = mutation_display(
             self.first_path.as_deref(),
             "",
             crate::tool_api::PathOp::Patch,
@@ -109,34 +114,14 @@ impl ToolProjection for ApplyPatchOutput {
             &self.model_text,
             self.diff.clone(),
         )
-        .with_lines(self.insertions as u32, self.deletions as u32)
-        .with_files(
-            args.get("patch")
-                .and_then(Value::as_str)
-                .map(patch_display_files)
-                .unwrap_or_default(),
-        )
+        .with_files(self.display_files.clone());
+        // 预览没有落盘：不出行差，于是终态也不出 code_delta——统计只说真发生过的改动。
+        if self.dry_run {
+            display
+        } else {
+            display.with_lines(self.insertions as u32, self.deletions as u32)
+        }
     }
-}
-
-/// 逐文件行差：直接取解析器的权威计数。
-///
-/// 补丁文本解析失败（或没有 `patch` 参数）时返回空表 = 「不知道」，
-/// 绝不按文件名或工具名去猜 added/modified。
-fn patch_display_files(patch: &str) -> Vec<crate::tool_api::ToolDisplayFile> {
-    let Ok(stats) = crate::apply_patch_engine::patch_stats(patch) else {
-        return Vec::new();
-    };
-    stats
-        .files
-        .into_iter()
-        .map(|file| crate::tool_api::ToolDisplayFile {
-            path: file.path.to_string_lossy().into_owned(),
-            op: file.op.as_str().to_string(),
-            lines_added: u32::try_from(file.lines_added).ok(),
-            lines_removed: u32::try_from(file.lines_removed).ok(),
-        })
-        .collect()
 }
 
 pub struct ApplyPatchTool;
@@ -209,22 +194,39 @@ impl TypedTool for ApplyPatchTool {
 
         let mut insertions = 0usize;
         let mut deletions = 0usize;
+        // 逐文件行差与终态合计同一次计算、同一口径（盘上真 diff）。旧写法拿
+        // `patch_stats` 从补丁文本反推第二套数字，那个数与引擎真正写出的内容可以不等。
+        let mut display_files: Vec<crate::tool_api::ToolDisplayFile> = Vec::new();
         // 展示面：把每个 delta 的 unified diff 拼成一段**裸** unified 文本
         // （`--- `/`+++ `/`@@`，不带 `diff --git` 头——与 `file_shared::unified_diff`
         // 同源，前端 `parseUnifiedDiff` 正是按这个形状切文件边界）。
         // 一次补丁可命中多个文件，抽屉按文件过滤要靠这段里的全部文件段。
         let mut diff_text = String::new();
         for delta in &outcome.deltas {
-            match (&delta.old, &delta.new) {
-                (None, Some(new)) => insertions += new.lines().count(),
-                (Some(old), None) => deletions += old.lines().count(),
+            let operation = if delta.old.is_none() {
+                "add"
+            } else if delta.new.is_none() {
+                "delete"
+            } else {
+                "update"
+            };
+            let (added, removed) = match (&delta.old, &delta.new) {
+                (None, Some(new)) => (new.lines().count(), 0usize),
+                (Some(old), None) => (0usize, old.lines().count()),
                 (Some(old), Some(new)) => {
                     let (added, removed, _) = crate::file_shared::diff_stats_between(old, new);
-                    insertions += added as usize;
-                    deletions += removed as usize;
+                    (added as usize, removed as usize)
                 }
-                (None, None) => {}
-            }
+                (None, None) => (0usize, 0usize),
+            };
+            insertions += added;
+            deletions += removed;
+            display_files.push(crate::tool_api::ToolDisplayFile {
+                path: delta.path.clone(),
+                op: operation.to_string(),
+                lines_added: u32::try_from(added).ok(),
+                lines_removed: u32::try_from(removed).ok(),
+            });
             // 统一 LF 视图再算 diff：盘上 CRLF 文件不该让整段变成「全删全加」。
             let (before, _) =
                 crate::file_shared::normalize_newlines(delta.old.as_deref().unwrap_or(""));
@@ -242,13 +244,6 @@ impl TypedTool for ApplyPatchTool {
                     // 账本键用解析后的绝对路径（与 read/edit/write 同键）。
                     crate::file_state::record_write(&delta.resolved_path, new);
                 }
-                let operation = if delta.old.is_none() {
-                    "add"
-                } else if delta.new.is_none() {
-                    "delete"
-                } else {
-                    "update"
-                };
                 crate::journal::record_change(
                     &ctx.session_id,
                     "",
@@ -333,6 +328,7 @@ impl TypedTool for ApplyPatchTool {
             files,
             insertions,
             deletions,
+            display_files,
             added: outcome.affected.added,
             modified: outcome.affected.modified,
             deleted: outcome.affected.deleted,
