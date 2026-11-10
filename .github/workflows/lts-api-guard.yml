@@ -29,3 +29,20 @@ jobs:
           workspaces: qaqh-backend
       - name: Verify LTS API surface is frozen
         run: python3 scripts/check-lts-api-surface.py
+
+  # 锁内偏离必须留痕（§1.5 的机器化）。不碰 Rust：纯 git + python，几十秒。
+  change-policy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: qaqh-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qaqh-backend
+          # 比对区间要能看到 base 侧历史。
+          fetch-depth: 0
+      - name: Assert the guard's own criteria hold
+        run: python3 scripts/check-surface-change-policy.py --self-test
+      - name: Assert frozen-surface changes carry a §7 ledger entry
+        run: python3 scripts/check-surface-change-policy.py
