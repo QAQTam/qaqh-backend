@@ -1206,12 +1206,12 @@ pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Resp
         Err(error) => {
             // 编码失败绝不等于"发一个 200 空体"：客户端只会拿到一段无法解析的 JSON，
             // 而所有守卫看不见任何东西（ADR-0004 §决策 4 的同族，只是它在出站这一侧）。
-            // 可达性要说实话：service 面先把 DTO 转成 `Value`，而 `serde_json::to_value`
-            // 对非有限浮点是 **Ok(Value::from(f))→NaN 塌成 null**（value/ser.rs，实测有
-            // 断言钉住），所以 `json_response` 在这里拿到的是合法 Value ⇒ 这条 500 分支
-            // 在当前代码里**没有现网可达路径**，它是最后一道防线。真正待修的洞在
-            // config.load 那条无值域校验的读数路径（NaN 会以 `null` 的身份出现在
-            // `autoCompactThreshold` 上），已记进 ADR-0004 待办而不是顺手改配置语义。
+            // 可达性（本轮实测，纠正我自己写错过一次的判断）：非有限浮点**不走这条 Err 路** ——
+            // `to_value(NaN)` = `Ok(Null)`，`to_string({ratio: NaN})` = `Ok("{\"ratio\":null}")`，
+            // ∞ 同理（`ser.rs` 的 `FpCategory::Nan | Infinite => write_null`）。所以这条分支
+            // 只服务真正的编码器故障（非法 map 键、自定义 `Serialize` 报错），有测试用合成
+            // 编码器钉住它。NaN 的洞因此**不是**"发空体"，而是"静默换成 null"：见
+            // ADR-0004 的 `config.load` 值域校验待办。
             let code = "response_serialization_failed";
             log::error!("[v2] {code}: {error}");
             api_error_response(
@@ -1228,19 +1228,24 @@ mod response_encoding_tests {
     use super::{api_error_response, json_response};
     use axum::http::StatusCode;
 
-    #[derive(serde::Serialize)]
-    struct Gauge {
-        ratio: f64,
+    /// 合成一个"编码器自己报错"的类型：这才是 `json_response` 的 Err 分支的真触发条件。
+    /// （不要用 NaN 当触发器 —— 它压根不报错，见下面的 null 测试。）
+    struct Broken;
+
+    impl serde::Serialize for Broken {
+        fn serialize<S: serde::Serializer>(&self, _serializer: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("synthetic encoder failure"))
+        }
     }
 
     /// 编码失败必须显式失败，不许塌成"200 + 空体"。
     #[tokio::test]
     async fn v2_json_response_never_returns_an_empty_success_body() {
-        let response = json_response(StatusCode::OK, &Gauge { ratio: f64::NAN });
+        let response = json_response(StatusCode::OK, &Broken);
         assert_eq!(
             response.status(),
             StatusCode::INTERNAL_SERVER_ERROR,
-            "编不出去的响应必须是失败，不是看起来成功的空体"
+            "编码器报错时必须是失败，不是看起来成功的空体"
         );
         let bytes = axum::body::to_bytes(response.into_body(), 4096)
             .await
@@ -1250,18 +1255,30 @@ mod response_encoding_tests {
         assert_eq!(parsed["code"], "response_serialization_failed");
     }
 
-    /// `json_response` 注释里那条可达性判断的证据：`to_value` 对 NaN 是 **成功**，
-    /// 结果是 `null` —— 所以 service 面不会走到上面那条 500 分支，而是把 NaN 静默
-    /// 换成 null（config.load 的洞就在这儿，见 ADR-0004 待办）。
+    /// 我上一版把这条写反了（断成 `to_vec(NaN)` 会报错 ⇒ CI 打红）。实测正确的形状是
+    /// **两条路都成功、都把非有限浮点写成 `null`** —— 这条测试留着，就是为了让下一个
+    /// 人不再凭记忆写它，同时它给出 ADR-0004 `config.load` 待办的真正症状：静默换值。
     #[test]
     fn v2_to_value_collapses_non_finite_floats_to_null() {
+        #[derive(serde::Serialize)]
+        struct Gauge {
+            ratio: f64,
+        }
         assert_eq!(
             serde_json::to_value(f64::NAN).expect("to_value accepts any f64"),
             serde_json::Value::Null
         );
-        assert!(
-            serde_json::to_vec(&f64::NAN).is_err(),
-            "直接编码（json_response 这条路）才会报错——这正是两条路的分岔"
+        assert_eq!(
+            serde_json::to_string(&Gauge { ratio: f64::NAN }).expect("NaN encodes"),
+            r#"{"ratio":null}"#,
+            "NaN 不报错，被静默换成 null"
+        );
+        assert_eq!(
+            serde_json::to_string(&Gauge {
+                ratio: f64::NEG_INFINITY
+            })
+            .expect("∞ encodes"),
+            r#"{"ratio":null}"#
         );
     }
 
