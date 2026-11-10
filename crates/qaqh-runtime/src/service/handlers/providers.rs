@@ -99,24 +99,10 @@ impl QaqhService {
     }
 
     /// 内置预设静态表（Spec §3.2）：只读快照，预设 id → 默认 endpoint/协议/
-    /// 凭据类型，外加 [`qaqh_profile::preset_compat`] 的端点能力声明（仅登记
-    /// 了确凿事实的预设携带 compat 键）。选择预设 = 前端把默认值复制进
-    /// provider.upsert 落自己的目录。
+    /// 凭据类型。选择预设 = 前端把默认值复制进 provider.upsert 落自己的目录。
     pub fn provider_presets(&self) -> QaqhResult<Value> {
-        let entries = qaqh_profile::PROVIDER_PRESETS
-            .iter()
-            .map(|preset| {
-                let mut entry = serde_json::to_value(preset)
-                    .map_err(|error| QaqhError::invalid(format!("serialize presets: {error}")))?;
-                if let Some(compat) = qaqh_profile::preset_compat(preset.id) {
-                    entry["compat"] = serde_json::to_value(compat).map_err(|error| {
-                        QaqhError::invalid(format!("serialize preset compat: {error}"))
-                    })?;
-                }
-                Ok(entry)
-            })
-            .collect::<QaqhResult<Vec<Value>>>()?;
-        Ok(Value::Array(entries))
+        serde_json::to_value(qaqh_profile::PROVIDER_PRESETS)
+            .map_err(|error| QaqhError::invalid(format!("serialize presets: {error}")))
     }
 
     /// 新增或整体替换一个 Provider，目录 revision 由公共命令信封携带。
@@ -159,14 +145,6 @@ impl QaqhService {
         };
 
         let models = existing.map(|p| p.models).unwrap_or_default();
-        // compat 的 DTO None = 「未声明」。预设 id 回退到预设表的端点能力
-        // 声明（如 qianwen 的嵌套 cached_tokens 口径），老前端「选预设即
-        // 复制」路径因此无需任何改动就拿到声明；自拟 provider 无预设，
-        // 行为逐字节不变（全默认）。
-        let compat = dto
-            .compat
-            .clone()
-            .or_else(|| qaqh_profile::preset_compat(id));
         let def = ProviderDef {
             name: dto.name.trim().to_string(),
             base_url: dto.base_url.trim().to_string(),
@@ -174,7 +152,7 @@ impl QaqhService {
             credential: dto.credential,
             api_key,
             headers: dto.headers.clone(),
-            compat,
+            compat: dto.compat.clone(),
             models,
         };
         store
