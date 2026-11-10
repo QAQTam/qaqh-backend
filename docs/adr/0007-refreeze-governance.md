@@ -37,11 +37,17 @@
    被行尾符打到；`compare_snapshot` 用 `read_text()`，Python 的 universal newlines 已把 `\r\n`
    归一 —— 把 `routes.txt`/`facade.txt` 临时改成 CRLF 再跑守卫自己的函数，**两种行尾都 PASS**。
    即这是一道**单点**缺陷，不是三道全废（写 ADR 时容易顺手夸大成"整个守卫在 Windows 不可用"）。
-   同源陷阱：`cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0`
-   必然报 `artifact file set differs` —— 金标准目录里的 `snapshots/routes.txt`、`snapshots/facade.txt`
-   不是导出物，Python 守卫在 `:78-83` 显式豁免了它们，Rust `check` 没有这个豁免。
-   两个坑都属于"闸门本身在本地跑不通"，后果是**本地绿≠任何事，本地红也≠任何事**，
-   而 §1 的判定法恰恰写的是本地跑。
+   **本条已于 2026-11-10 修好**（`52a0d0bb`，落在 `LTS-v3.0`，main 已 merge）：
+   `.gitattributes` 加了 `docs/api-surface/** text eol=lf`，且 `compare_trees` 现在豁免
+   `snapshots/` 并把 `manifest.json` 交给带 volatile 字段切除的语义比对。修好后
+   `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0` 在 Windows
+   checkout 上 **exit 0**（本机实测），所以它从此就是**正确的本地金标准预检命令**。
+   撞车记录（ governance 价值的一条实证）：本 worker 在 `13e6dc1e` 里独立加了同一条
+   `docs/api-surface/** text eol=lf`，与 `52a0d0bb` 在 merge 时正面冲突（且 git 会把
+   `.gitattributes` 里的 `>>>>>>> origin/LTS-v3.0` 冲突标记**当成属性行解析**，报
+   `not a valid attribute name`）。两人 20 分钟内各自修同一个洞、互不知情 ——
+   这正是决策 1（CODEOWNERS）与决策 2/3（refreeze 标签 + 成文 ADR）要解决的形状，
+   而不是抽象的官僚流程。合并时保留 `52a0d0bb` 的版本、删掉重复规则。
 
 ## 决策
 
@@ -106,5 +112,7 @@
 - [ ] `contract-refreeze` 标签 + `refreeze-policy` job（校验标签、ADR 链接、目标分支）
 - [ ] `lts-api-guard.yml` 增加一个 `main` 上的 report-only job
 - [ ] 手册 §1 增一行：换锁流程 = 打标签 + ADR + 新线，散文判据全部交给 job
-- [ ] `.gitattributes` 追加 `docs/api-surface/** text eol=lf`（解 §问题 4：让金标准比对平台无关）
-- [ ] 手册 §1 判定法改写：本地预检 = `check-sdk-contract.py --typescript`，金标准比对 = CI-only
+- [x] `.gitattributes` 追加 `docs/api-surface/** text eol=lf`（由 `52a0d0bb` 落在 LTS，main 已 merge；
+      本 worker 的重复规则在 merge 时删掉，保留一份）
+- [x] 手册 §1 判定法改为可执行的两条：`check --against docs/api-surface/v3.0`（金标准，本地可用）
+      + `check-sdk-contract.py --typescript --release`（确定性与严格 TS 消费者）

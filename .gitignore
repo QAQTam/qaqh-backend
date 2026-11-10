@@ -25,6 +25,10 @@ crates/*/bindings/
 # HarmonyOS hvigor 构建缓存（build-logs 等，非源码）
 .hvigor/
 
+# scripts/*.py 被 import 时（例如复用 check-lts-api-surface.py 的函数做验证）
+# 会生成字节码缓存，非源码
+__pycache__/
+
 # WorkBuddy 会话目录不入库，但项目记忆例外——
 # 记忆随仓库走：重置/换机后 clone 即自动恢复（handover 见 docs/handover-2026-09-09.md）
 .workbuddy/*
