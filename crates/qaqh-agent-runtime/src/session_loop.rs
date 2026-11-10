@@ -1455,6 +1455,8 @@ impl ProgressSink for OwnerSink {
             &ToolCallId::new(update.call_id.to_string()),
             update.tool_name,
             update.args,
+            update.lines_added,
+            update.lines_removed,
         );
     }
 

@@ -2,10 +2,10 @@
   "format_version": 1,
   "wire_version": 2,
   "backend_version": "3.0.20261110-g1842986",
-  "source_revision": "ac54e508ec73ebf5c1205a4eb95a77c42d25fcdc",
+  "source_revision": "cdaf6dbdd02fad85192395b70ee9cb69d380dfe2",
   "source_dirty": false,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "c25b08f1265ca2992a91417afe9b11fc3a381e2b1b6950d9cca8f9e4b834fc71",
+  "contract_hash": "1a0db0e0a22bdca154c4eeaa18b1fa7461732dbd7727fad45aa038f8488a7fb0",
   "files": [
     {
       "path": "constants.ts",
@@ -593,11 +593,11 @@
     },
     {
       "path": "cs/SessionEvent.cs",
-      "sha256": "aa8e9d6144321b9d752548c520d8e607d5175c32a783a08f501604321c5e043a"
+      "sha256": "74ab345d506163eede215fa911a66c37be16d054104799c66e6185b37961cbda"
     },
     {
       "path": "cs/SessionEventFrame.cs",
-      "sha256": "8db46c2b2728181cf367d1d6784d6550d5e3224c45f3d45250f3baab29d4c26b"
+      "sha256": "f7405df7d21145b49b637a69696b78c1abc40b220ec5d1b5266b887afacd0aa1"
     },
     {
       "path": "cs/SessionGetActivityParams.cs",
@@ -2005,11 +2005,11 @@
     },
     {
       "path": "types/qaqh/SessionEvent.ts",
-      "sha256": "4036695491fa2817659ede275fd43259633049f9911f3671e9ea55d367eca75a"
+      "sha256": "20ba439325f4f5c8e22df5fdaa348e3796eaf7788c7406e31386b51952668572"
     },
     {
       "path": "types/qaqh/SessionEventFrame.ts",
-      "sha256": "6b260be5e35d2925f2035290a8698dde86c07cf0c523663360cd2fc59e60332c"
+      "sha256": "9ed3f6e3b1302f8f25e80653fac83647eb5013358bc3c4a1026e3375ed576641"
     },
     {
       "path": "types/qaqh/SessionGetActivityParams.ts",

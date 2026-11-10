@@ -116,8 +116,6 @@ async fn create_fixture_session(client: &Client) -> String {
             RingingCommand::SessionCreate {
                 cwd: None,
                 title: None,
-                profile: None,
-                effort: None,
                 model_selection: None,
                 tool_mode: None,
                 custom_tools: None,
