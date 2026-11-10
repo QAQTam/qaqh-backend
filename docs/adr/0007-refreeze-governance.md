@@ -1,6 +1,6 @@
 # ADR-0007 换锁治理：CODEOWNERS + refreeze 标签 + 守卫自保护
 
-状态: `已采纳（未实施）` · 决策日期 2026-11-10
+状态: `已采纳（决策 1/2/4/5 已落地；决策 3 落了一半；branch protection 待 admin）` · 决策日期 2026-11-10
 
 ## 背景（已核对）
 
@@ -107,17 +107,31 @@
   **"错合"而不是"漏改"**，符合 ADR-0001 §决策 3 的失败方向约定。
 - CODEOWNERS 在小团队会退化为"自己批自己"。这是治理成本而非机制缺陷；即便如此，
   §2/§3 的标签+ADR 仍留下了**可追溯记录**，价值主要在事后而非事前。
-- `main` 上的非阻断导出比对会增加 CI 时长（要跑一次 `--release` 导出）。若嫌慢，可只做
-  `snapshots/routes.txt` + facade 文本比对（秒级），字节比对留给 LTS —— 与 ADR-0003 的
-  `just surface-quick` 分层一致。
+- `main` 上的非阻断比对**不需要** release 导出：`surface-policy.yml` 里跑的
+  `check --against docs/api-surface/v3.0`（debug 即可，`52a0d0bb` 之后它已豁免 `snapshots/`）
+  加上秒级的 `--skip-export`（路由表 + lint + 门面）。原设想中的 `just surface-quick`
+  配方由这两个标志替代，未另建 recipe。
 
 ## 落地清单
 
-- [ ] `.github/CODEOWNERS` 新建（上表七条路径）
-- [ ] `LTS-v3.0` 开启 branch protection：code owner review + required status check
-- [ ] `contract-refreeze` 标签 + `refreeze-policy` job（校验标签、ADR 链接、目标分支）
-- [ ] `lts-api-guard.yml` 增加一个 `main` 上的 report-only job
-- [ ] 手册 §1 增一行：换锁流程 = 打标签 + ADR + 新线，散文判据全部交给 job
+- [x] `.github/CODEOWNERS` 新建 —— **12 条路径**（比本文原列的 7 条多：补了路由登记处
+      `axum_server/**` 与 `v2/mod.rs`、`.gitattributes`、`docs/adr/**`、手册本身）
+- [ ] `LTS-v3.0` 开启 branch protection（code owner review + required status check）
+      —— **需要 admin，代码侧开不了**；勾选项已写进手册 §7。缺了它，上面那份 CODEOWNERS
+      和下面的分类 job 都只是"会跑但不拦"，这正是本轮撞车能发生的原因。
+- [x] `contract-refreeze` / `guard-tightening` 两个 label 已建（描述改成了 ASCII：
+      Windows 控制台下 CJK 有被写坏的风险，本轮实测后改写了一次）
+- [x] `scripts/check-surface-change-policy.py` + `.github/workflows/surface-policy.yml`：
+      按**改动落点**自动分类。实测 5 例全对 —— 只改 `snapshots/routes.txt` 的 0003 提交判
+      `guard-tightening` 放行；引入整份金标准的 `b96f2b72` 无标记判红；同一改动声明
+      `contract-refreeze` 且目标 `LTS-v3.0` 判红；目标换 `LTS-v3.1` 放行；无基线时
+      明确提示"未经分类"而不是静默绿。
+- [~] 决策 3（refreeze 必须附 ADR 链接）**只落了标签这一半**：脚本校验标记，暂不校验
+      commit/PR 里是否真有 ADR 链接。有意留的半步：先让分类不可绕，门槛一次抬满只会逼人绕过。
+- [x] 决策 4（main 上 report-only）已落地，但**不在 `lts-api-guard.yml` 里**：改在
+      `surface-policy.yml` 用 `continue-on-error: target != 'LTS-v3.0'` 实现"main 只报告、
+      LTS 硬拦"，免得两条 workflow 各跑一份 release 构建。
+- [x] 手册 §4 增 `surface-policy.yml` 行与分类判据；新增 §7 写清需要 admin 的两项设置
 - [x] `.gitattributes` 追加 `docs/api-surface/** text eol=lf`（由 `52a0d0bb` 落在 LTS，main 已 merge；
       本 worker 的重复规则在 merge 时删掉，保留一份）
 - [x] 手册 §1 判定法改为可执行的两条：`check --against docs/api-surface/v3.0`（金标准，本地可用）
