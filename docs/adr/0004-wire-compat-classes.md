@@ -153,6 +153,15 @@
       即"样例必须是 daemon 真发得出的形状"这条也是机器闸而不是评审意见。
 - [ ] 列出**出站 enum 全集**并逐个归入 §已决 的三表之一（internally tagged / adjacently tagged /
       裸字符串 unit-only）；第三类的处置必须逐个定，不能默认它能自动化
+- [ ] **`config.load` 的读数路径不做值域校验**（2026-11-10 第二轮实测新增，出站半边）：
+      `crates/qaqh-config/src/config.rs:860` 直接接受 `PersistentConfig.auto_compact_threshold`
+      （TOML 规范允许 `nan`），而 `ConfigDto.auto_compact_threshold` 是 `f64`；
+      `serde_json::to_value` 对非有限浮点是 **成功**并把值塌成 `null`
+      （`value/from.rs` 文档 + 断言 `v2_to_value_collapses_non_finite_floats_to_null`）。
+      后果：非法配置不报错，而是以 `"autoCompactThreshold": null` 的身份出现在契约面上
+      ——**静默换值**，比报错更坏。`PersistentConfig` 自己声明的是 `strict-input`
+      （本 ADR 表第 3 行），所以在载入处显式失败才与它声明的类别一致；改法待定，
+      因为它同时决定"旧配置文件里的非法值要不要给迁移提示"这一用户可见行为。
 - [ ] 契约声明 `variant_policy` + 线上保留值 `"unknown"`，并让 TS / C# / schema 三个投影都可见
       （改导出物 ⇒ 提交必须带 `[contract-refreeze]`，禁入 `LTS-v3.0`）
 - [ ] 生产端 revision 闸门：变体带"自哪个 revision 起"的版本戳，向较老 client session 序列化时
