@@ -110,15 +110,39 @@ async fn log_http_errors(req: Request, next: Next) -> Response {
     response
 }
 
+/// Daemon 控制面 HTTP 路由表 —— LTS 冻结面的一部分,但不属于 Ringing 契约面。
+///
+/// 与 `qaqh_ringing::RINGING_V2_HTTP_ROUTES` 同构,两张表合起来是路由的**唯一登记处**:
+/// - `build_router` 遍历本表注册 handler:表里有而 match 缺 arm = 启动即 panic;
+/// - `scripts/check-lts-api-surface.py` 从两张**数据表**生成 `snapshots/routes.txt`,
+///   不再从 `.route()` 调用点用正则反推;同脚本 lint 禁止本模块树出现字面量路径的
+///   `.route("…")`/`.nest(…)`/`.merge(…)` —— 加路由的唯一途径是往表里写一行。
+///
+/// 为什么必须入表(实测缺陷,ADR-0003 §缺口 1):此前这 4 条由 `ROUTE_CHAINED` 正则从
+/// `.route()` 抓取,而该正则只捕获 path 不捕获 method,于是快照里长期是
+/// `* /health` 这类通配形态 —— **这 4 个端点的 HTTP 方法从未真正被冻结**。
+pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/health"),
+    ("GET", "/activity"),
+    ("POST", "/control/v1/stop"),
+    ("POST", "/control/v1/stop-if-idle"),
+];
+
 pub fn build_router(state: AppState) -> Router {
+    // 控制面表驱动注册:理由见 CONTROL_PLANE_ROUTES。
+    let mut router = Router::new();
+    for (method, path) in CONTROL_PLANE_ROUTES {
+        router = match (*method, *path) {
+            ("GET", "/health") => router.route(path, get(health)),
+            ("GET", "/activity") => router.route(path, get(activity)),
+            ("POST", "/control/v1/stop") => router.route(path, post(handle_stop)),
+            ("POST", "/control/v1/stop-if-idle") => router.route(path, post(handle_stop_if_idle)),
+            other => panic!("control-plane route without a registered handler: {other:?}"),
+        };
+    }
     // Ringing v2 面从契约路由表注册(B02 漂移闸):表驱动保证「表里的每条路由
     // 都有 handler」——新路径只加表不加 arm 会启动即 panic;反过来 handler arm
     // 里的路径字符串以表为准,不得自造。
-    let mut router = Router::new()
-        .route("/health", get(health))
-        .route("/activity", get(activity))
-        .route("/control/v1/stop", post(handle_stop))
-        .route("/control/v1/stop-if-idle", post(handle_stop_if_idle));
     for (method, path) in qaqh_ringing::RINGING_V2_HTTP_ROUTES {
         router = match (*method, *path) {
             ("POST", "/ringing/v2/clients/open") => router.route(path, post(handle_open_v2)),

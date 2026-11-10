@@ -1,7 +1,5 @@
-* /activity
-* /control/v1/stop
-* /control/v1/stop-if-idle
-* /health
+GET /activity
+GET /health
 GET /ringing/v2/commands/{command_id}
 GET /ringing/v2/content/{content_id}
 GET /ringing/v2/devices
@@ -9,6 +7,8 @@ GET /ringing/v2/sessions/{session_id}/approvals
 GET /ringing/v2/sessions/{session_id}/bootstrap
 GET /ringing/v2/sessions/{session_id}/events
 GET /ringing/v2/sessions/{session_id}/team
+POST /control/v1/stop
+POST /control/v1/stop-if-idle
 POST /ringing/v2/clients/open
 POST /ringing/v2/commands
 POST /ringing/v2/content

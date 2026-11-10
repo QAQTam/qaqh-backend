@@ -130,16 +130,42 @@ POST /control/v1/stop-if-idle}`，`regex − union = 同 4 条的 * 形式`，`E
 - `docs/lts-v3.0-maintenance.md` §1 冻结面第 1 条的措辞应补一句"控制面同样由表驱动"，
   避免后来者再得出"控制面无主"的结论。
 
-## 落地清单
+## 落地清单（2026-11-10 实施，见 main 上的对应提交）
 
-- [ ] `CONTROL_PLANE_ROUTES` 常量 + `build_router` 改为表驱动（缺 arm panic 语义与 v2 面一致）
-- [ ] 导出器加 `routes-dump` 子命令（打印 `RINGING_V2_HTTP_ROUTES`，不新增导出物、不触发 refreeze）
-- [ ] `routes.txt` 由两份表生成；删 `check-lts-api-surface.py` 的 `ROUTE_CHAINED`/`ROUTE_ARM`
-      （**注意这不是空改动**：控制面 4 行会从 `* /health` 变成 `GET /health`，
-      即金标准快照会有 4 行 diff。方向是**收紧**——多钉住了 4 个方法，不是改契约。）
-- [ ] **禁止型 lint**：`axum_server/**` 里除表驱动循环外出现 `.route(` / `.nest(` / `.merge(` 即红
-- [ ] **行为测试**：`tower::ServiceExt::oneshot` 逐条打表里的 `(method, path)`，断言非 404；未登记路径断言 404
-- [ ] `validation.rs` 反向覆盖闸（含 `uncovered` 显式声明语法）
-- [ ] `.nest()` 隐藏控制面路由的回归用例（守卫必须红）
-- [ ] `coverage.rs` 的 `path` 列改为对表全等校验，禁复合字符串
-- [ ] 手册 §1 冻结面条目补注控制面归属
+- [x] `CONTROL_PLANE_ROUTES` 常量（`axum_server/axum_impl/mod.rs`）+ `build_router` 改为表驱动，
+      缺 arm ⇒ `panic!("control-plane route without a registered handler: …")`，与 v2 面同构
+- [x] `routes.txt` 由两张表生成；**删除 `ROUTE_CHAINED` / `ROUTE_ARM` 两个正则**，
+      换成严格表解析：const 缺失 / 未闭合 / 行形状不对 ⇒ 直接 `SystemExit`（fail-closed）
+- [x] **禁止型 lint**：`axum_server/**`（去注释后）出现 `.route("…")` 字面量、`.nest(`、`.merge(` 即红。
+      实测反证：临时插一行 `router.clone().route("/ghost", get(health))` ⇒ 守卫报出
+      `axum_impl/mod.rs:155` 并 exit 1
+- [x] **行为测试** `v2_route_table_equals_the_real_router`（`axum_server/route_table_tests.rs`）：
+      20 条表项逐个 `oneshot`，断言不落 fallback（fallback 签名 = 404 + body `"not found"`）；
+      6 条幽灵路径断言**必须**落 fallback；路径参数未登记合成值 ⇒ 断言失败。
+      探针用 **view scope 设备凭证**，因为两个 stop 端点先过 `require_scope(Admin)`
+      （`control.rs:40-42` / `:55-57`）—— 否则 `TEST_SERVICE` 这个跨测试 `OnceLock`
+      会被真关掉，同二进制里后续 daemon 测试全废。实测 1 passed / 0.12s
+- [x] `validation.rs` **反向覆盖闸** + 取消对复合路径的跳过：`expand_routes()` 展开
+      `"GET + POST"` / `"/a/b + /events"` 这类声明，正向（声明 ⊆ 表，含复合）与
+      反向（表 ⊆ 声明）都查；方法数与路径数不匹配 ⇒ 判为含糊声明报错。
+      实测反证：往表里加一条 `("GET","/ringing/v2/__ghost__")` ⇒
+      `RINGING_V2_HTTP_ROUTES declares GET /ringing/v2/__ghost__ that no coverage capability documents`
+- [x] `UNCOVERED_ROUTES` 目前是 `[0]` —— 16 条 v2 路由**全部**已有能力记录，无需豁免项
+- [x] 重切快照：`--rebaseline`（机器写，人不手改）。实测 diff **恰好 4 行**
+      （`* /health` → `GET /health` 等），`facade.txt` 无变化，
+      导出物与 `contract_hash` 逐字节不变（`check --against docs/api-surface/v3.0` exit 0）
+- [x] `.nest()` / `.merge()` 分支：**手工反证已做**（临时插 `router.clone().nest("/ghost", Router::new())`
+      ⇒ 守卫报 `axum_impl/mod.rs:185` 并 exit 1，撤回后转绿）。
+      顺带修掉 lint 自身的一个误导：去注释时原先是**删行**，导致报出的行号比真实位置小 30 行；
+      现在改成置空行保号 —— 一个报错误行号的 lint 本身就是新的误导源。
+      仍**没有**常驻自动化用例（不为此建一套 python 测试脚手架，规则 1）；
+      下一次有人动这个脚本时应重复这次反证。
+
+## 与决策的偏离（记录以免被误读为设计漂移）
+
+决策 2 里写的 `routes-dump` 子命令**没有实现**，因为实施时发现更省事且更强的做法：
+守卫直接严格解析两张 `pub const` **数据表**（文本解析，但只解析固定形状的表，
+且"解析不出即报错"）。好处是①守卫不再需要 cargo 构建就能查路由（`--skip-export`），
+②零新增导出物、零跨 crate 依赖（导出器要读 daemon 的 const 就得反向依赖 daemon）。
+表若被人用非字面量形式改写（变量、宏展开），严格解析会直接失败，不会静默漏抓 ——
+这正是当初否决"保留正则"的理由，所以偏离是朝同一个方向收紧的。
