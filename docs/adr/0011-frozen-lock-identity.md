@@ -79,6 +79,11 @@
   `金标准改动 1 个文件（导出物 0 / 快照 1 / wire 实变 0）⇒ 需要标记 [guard-tightening]`
   带标记 exit 0；把同一改动集的标记去掉（临时分支 amend）⇒ **exit 1**
   `缺少必需标记 [guard-tightening]`。第三类判据不是文案承诺。
+- CI 侧一并确认了这条红确实存在：run `42798374172`（push → main）的 job conclusion 与
+  `Golden contract byte compare` 的 **step conclusion 都是 `success`**，只有
+  `gh run view --log` 里能看到 `##[error]Process completed with exit code 1`。
+  ⇒ 规则 18 那句"看步骤明细而不是 job 绿灯"仍不够，`continue-on-error` 连 step 结论一起
+  改写；验收必须以日志为准（已在手册 §1 与交接 §6.5 修正）。
 
 ## 落地清单
 
