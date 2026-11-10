@@ -636,6 +636,7 @@ pub fn chat_stream_messages(
     // 历史一律全量发送：gate 侧不做增量过滤，wire 级修补由 SDK normalize 负责。
     let mut request = ChatRequest::new(project_messages(messages, 0));
     request.tools = convert_tools(tools);
+    request.prompt_cache = prompt_cache_enabled();
     let effort_norm = crate::types::normalize_reasoning_effort(effort.as_deref());
     // Thinking budget: only when provider explicitly supports it. If effort
     // is None we do not force thinking — let the provider default.
@@ -685,6 +686,16 @@ pub fn chat_stream_messages(
     )
 }
 
+/// Anthropic 面显式缓存断点（`cache_control: {"type":"ephemeral"}`）总开关。
+///
+/// Messages wire 的协议语义就包含 ephemeral 断点，默认开；逃生口对齐
+/// Claude Code 的 `DISABLE_PROMPT_CACHING` 惯例——个别不认 `cache_control`
+/// 的 Anthropic 兼容网关用环境变量一键关掉，不改请求面配置。
+fn prompt_cache_enabled() -> bool {
+    !std::env::var("QAQH_DISABLE_PROMPT_CACHING")
+        .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
 /// usage 口径判定的作用域键：会话 id 优先（同一端点不同会话互不污染），
 /// 没有会话身份（`chat_sync` 的 compact/title）时退回端点身份。
 fn usage_scope(provider: &ProviderConfig, model: &str, user_id: Option<&str>) -> Scope {
@@ -705,6 +716,7 @@ pub fn chat_sync_messages(
     let messages = normalize_skill_envelope(provider, messages)?;
     // 同流式路径：全量历史，无增量过滤。
     let mut request = ChatRequest::new(project_messages(messages, 0));
+    request.prompt_cache = prompt_cache_enabled();
     if provider.supports_thinking && max_tokens < 4096 {
         return Err(format!(
             "model {model}: configured max_tokens {max_tokens} is below the 4096 minimum \

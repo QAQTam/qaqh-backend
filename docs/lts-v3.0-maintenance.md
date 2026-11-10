@@ -106,7 +106,7 @@ git push origin v3.0.1
 | `sdk-contract.yml` | PR / push(main、LTS-v3.0)/ 手动 | Rust 测试三件套 + 契约确定性 + 严格 TS 消费者 + 契约哈希锁定 |
 | `release.yml` | 推 `v*` tag(发布)/ 手动 dispatch(干跑) | 双平台 `--locked` release 构建、打包、发 Release |
 
-外部依赖钉子:`qaqtam/mutil-ai` @ `4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4`。
+外部依赖钉子:`qaqtam/mutil-ai` @ `b37ca25f23350a8c6cb78bc69fda023f2cb809aa`。
 LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级属 main 的权利。
 
 ## 5. 故障手册(本 SDK 实战踩过的坑)
