@@ -40,14 +40,17 @@ pub(super) fn write_preview(out: &Path) -> Result<usize, Box<dyn std::error::Err
     // Contract = Serialize: what the daemon *emits* is the shape a pinned frontend must
     // tolerate, and it is exactly the shape `fixtures/` are serialized into (ADR-0005).
     // The deserialize view is one settings switch away and is the one that carries
-    // `additionalProperties: false` for `deny_unknown_fields` (ADR-0004).
-    let settings = SchemaSettings::draft2020_12().for_serialize();
+    // `additionalProperties: false` for `deny_unknown_fields` (ADR-0004) — which is why
+    // an *inbound* body is projected with that switch instead of a hand-written table.
+    let serialize = SchemaSettings::draft2020_12().for_serialize();
+    let deserialize = SchemaSettings::draft2020_12().for_deserialize();
 
     let mut entries: Vec<(String, String)> = Vec::new();
     macro_rules! preview_all {
-        ($($ty:ty),+ $(,)?) => { $( entries.push(emit::<$ty>(&settings, out)?); )+ };
+        ($settings:expr, $($ty:ty),+ $(,)?) => { $( entries.push(emit::<$ty>(&$settings, out)?); )+ };
     }
     preview_all!(
+        serialize,
         qaqh_memwatch::ComponentGroup,
         qaqh_memwatch::ComponentMemory,
         qaqh_memwatch::MemorySnapshot,
@@ -57,8 +60,19 @@ pub(super) fn write_preview(out: &Path) -> Result<usize, Box<dyn std::error::Err
         qaqh_memwatch::SessionMemory,
     );
 
+    // ADR-0004 §决策 3 的 JSON-in-JSON 边界：审批正文由 daemon 与每个读方**反序列化**，
+    // 所以它的投影取 deserialize 视图 —— `deny_unknown_fields` 在这里派生出
+    // `additionalProperties: false`，compat 类不必手抄。
+    let inbound: Vec<(String, String)> = vec![emit::<
+        qaqh_ringing_contract::PermissionRequestDetails,
+    >(&deserialize, out)?];
+
     entries.sort();
     let files: Vec<_> = entries
+        .iter()
+        .map(|(path, sha256)| json!({ "path": path, "sha256": sha256 }))
+        .collect();
+    let inbound_files: Vec<_> = inbound
         .iter()
         .map(|(path, sha256)| json!({ "path": path, "sha256": sha256 }))
         .collect();
@@ -66,15 +80,16 @@ pub(super) fn write_preview(out: &Path) -> Result<usize, Box<dyn std::error::Err
         "status": "preview: outside manifest.json, not part of the frozen contract artifacts",
         "projection": "Rust DTO -> JSON Schema via schemars; TypeScript is not an input to this backend",
         "schema_draft": "https://json-schema.org/draft/2020-12/schema",
-        "contract": "serialize",
+        "contract": "serialize for emitted surfaces, deserialize for inbound JSON-in-JSON bodies",
         "generator_version": crate::GENERATOR_VERSION,
-        "pilot_slice": "qaqh-memwatch exported surface",
+        "pilot_slice": "qaqh-memwatch exported surface + PermissionRequestDetails (approval body)",
         "files": files,
+        "inbound_deserialize_files": inbound_files,
     });
     crate::write(
         out,
         "schema/index.json",
         &(serde_json::to_string_pretty(&index)? + "\n"),
     )?;
-    Ok(entries.len())
+    Ok(entries.len() + inbound.len())
 }

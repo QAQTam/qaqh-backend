@@ -145,8 +145,13 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 "RingingV2PendingApprovals",
                 "RingingV2PendingPermissionView",
                 "RingingV2PendingInteractionView",
+                "PermissionRequestDetails",
             ],
-            vec!["approvals-pending.json", "approvals-empty.json"],
+            vec![
+                "approvals-pending.json",
+                "approvals-empty.json",
+                "pending-permission-details.json",
+            ],
         ),
         (
             "content.upload",
@@ -161,9 +166,14 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let mut capabilities: Vec<Value> = routes
         .into_iter()
         .map(|(id, method, path, scope, lease, types, fixtures)| {
-            json!({"id":id,"status":"implemented","method":method,"path":path,"minimum_scope":scope,
+            let mut record = json!({"id":id,"status":"implemented","method":method,"path":path,"minimum_scope":scope,
             "requires_lease":lease,"types":types,"fixtures":fixtures,
-            "validation":"rust-dto","remote_transport_acceptance":"not_verified"})
+            "validation":"rust-dto","remote_transport_acceptance":"not_verified"});
+            // fail-closed 的边界要写进契约本身，而不是散落在 handler 注释里。
+            if let Some(notes) = capability_wire_notes(id) {
+                record["wire_notes"] = json!(notes);
+            }
+            record
         })
         .collect();
     let typed_descriptors: Vec<_> = qaqh_runtime::ringing::service_methods::TYPED_METHODS
@@ -263,4 +273,24 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         [serde_json::to_vec_pretty(&coverage)?.as_slice(), b"\n"].concat(),
     )?;
     Ok(())
+}
+
+/// 只有需要把 fail-closed 边界写进契约的 capability 才带 `wire_notes`。
+///
+/// approvals.admin 这张表与 `axum_impl::v2::ApprovalBodyError::code()` 同源：
+/// 「正文合法缺失才允许降级，形状读不通必须报错」。金标准里出现这些字符串是导出器
+/// 写的结果，不是人抄的结果（规则 16）。
+fn capability_wire_notes(id: &str) -> Option<Vec<&'static str>> {
+    match id {
+        "approvals.admin" => Some(vec![
+            "pending_permission's tool_name/reason/paths/category/level/risk/consequence are a projection of the typed body PermissionRequestDetails (fixture: pending-permission-details.json), not free-form JSON-in-JSON",
+            "PermissionRequestDetails carries deny_unknown_fields: one extra key is shape drift, and the value domains are fixed by PermissionRequestDetails::is_valid() (category read|write|exec|net, level 1..=4, risk low|medium|high)",
+            "degradation is legal only when the body is legitimately absent (ContentValue::Unavailable, or the content row was evicted): details_unavailable=true (admin) / details_unavailable in challenge details (device), and the answerable id stays visible",
+            "a body that exists but is not valid JSON fails the request: 500 interaction_body_not_json",
+            "a JSON body that is not PermissionRequestDetails shape fails the request: 500 permission_details_shape_invalid",
+            "a well-shaped body whose values violate is_valid() projects as details_unavailable=true and is logged as permission_details_incomplete; approval stays fail-closed (device approve/trust rejected with permission_details_unavailable, reject still allowed)",
+            "content store read failure: 500 content_unavailable",
+        ]),
+        _ => None,
+    }
 }

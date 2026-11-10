@@ -9,7 +9,7 @@ publish = false
 qaqh-config-api = { path = "../../crates/qaqh-config-api", features = ["ts"] }
 qaqh-profile = { path = "../../crates/qaqh-profile", features = ["ts"] }
 qaqh-ringing = { path = "../../crates/qaqh-ringing", features = ["ts"] }
-qaqh-ringing-contract = { path = "../../crates/qaqh-ringing-contract", features = ["ts"] }
+qaqh-ringing-contract = { path = "../../crates/qaqh-ringing-contract", features = ["ts", "schema"] }
 qaqh-ringing-runtime = { path = "../../crates/qaqh-ringing-runtime", features = ["ts"] }
 qaqh-types = { path = "../../crates/qaqh-types", features = ["ts"] }
 qaqh-runtime = { path = "../../crates/qaqh-runtime", features = ["ts"] }

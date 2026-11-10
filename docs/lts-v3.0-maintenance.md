@@ -197,3 +197,11 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 5. 给 `LTS-v3.1` **新建**一份分支保护（§7 的命令换分支名）；旧线 `LTS-v3.0` 保留到 EOL。
 6. 切 `v3.1.0` tag → `release.yml` 自动发 daemon zip + 契约 zip；前端 pin 新契约并对齐 hash
    （ADR-0006 落地前这步仍是人肉，也正是它要消灭的东西）。
+
+**`main` 上这条比对红是设计状态,不是待修缺陷**(ADR-0007 §决策 4)：
+`surface-policy.yml` 的 `Golden contract byte compare` 只在 target = `LTS-v3.0` 时硬拦,
+在 main 上是 `continue-on-error`(job 绿、步骤红 —— 验收新闸门必须看步骤明细,规则 18)。
+任何落在 main 的 `contract-refreeze`(新增产物、字段变化)都会让它红,直到按 §8 切新线
+并由机器重切金标准。此时**唯一禁止的动作**是改 `docs/api-surface/v3.0` 让它变绿：那棵树
+是冻结线持有的锁。main 上目前攒着的 refreeze 差额记在
+`docs/adr/0010-cut-lts-v3.1-line.md`(该 ADR 同时列着切线前必须由人拍板的 revision 取值)。

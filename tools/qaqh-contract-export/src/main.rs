@@ -18,6 +18,10 @@ use sha2::{Digest, Sha256};
 use ts_rs::{Config, TS};
 
 const FORMAT_VERSION: u32 = 1;
+/// 投影**规则**一变才 bump（`export()` 用它做目录所有权判定）。产物集合的变化由
+/// `contract_hash` 记账，不归这个版本管 —— 0.2.0 → 0.3.0 是 ADR-0008 把 `schema/`
+/// 折进 `generate()` 那一步的预留 bump（它同时会重写每个 C# 文件头部的生成器注释，
+/// 240 个文件，属规则 15 的 `doc-only` 面而不是 wire 面）。
 const GENERATOR_VERSION: &str = "qaqh-contract-export/0.2.0";
 
 mod account_fixtures;
@@ -802,6 +806,9 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // 会话面即契约类型（qaqh-ringing-contract）：bootstrap/state/事件帧
         // 一手导出,无投影/泛型容器中间层。
         RingingV2SyncResult,
+        // JSON-in-JSON 边界（ADR-0004 §决策 3）：审批卡的正文穿过 HTTP 面,它的形状
+        // 必须是导出物,不接受"它是 `serde_json::Value` 所以不用管"。
+        qaqh_ringing_contract::PermissionRequestDetails,
         qaqh_ringing_contract::SessionBootstrap,
         qaqh_ringing_contract::SessionState,
         qaqh_ringing_contract::SessionTurnSnapshot,
@@ -1066,22 +1073,60 @@ fn compare_trees(expected: &Path, actual: &Path) -> Result<(), Box<dyn std::erro
     let expected_files = export_artifact_paths(expected)?;
     let actual_files = export_artifact_paths(actual)?;
     if expected_files != actual_files {
+        // 整棵树 dump 两遍等于没报错：600 条路径会吃掉 ~24KB 日志，真正要看的那 3 条
+        // 反而被埋掉。增删+数量足够定位；逐产物的 wire 语义判定是
+        // `scripts/check-surface-change-policy.py` 的活（它给 `artifact added/deleted`
+        // 与 `wire-differs` 列表），这里不重复一遍。
+        let only_expected: Vec<&str> = expected_files
+            .iter()
+            .filter(|path| !actual_files.contains(path))
+            .map(String::as_str)
+            .collect();
+        let only_actual: Vec<&str> = actual_files
+            .iter()
+            .filter(|path| !expected_files.contains(path))
+            .map(String::as_str)
+            .collect();
         return Err(format!(
-            "artifact file set differs; expected={expected_files:?}, actual={actual_files:?}"
+            "artifact file set differs: {} vs {} files; only-in-first=[{}], only-in-second=[{}]",
+            expected_files.len(),
+            actual_files.len(),
+            summarize(&only_expected),
+            summarize(&only_actual)
         )
         .into());
     }
-    for path in expected_files {
-        // manifest.json 走 compare_manifest 的语义比对（per-commit 戳剔除），
-        // 不在这张字节等值表里。
+    // manifest.json 走 compare_manifest 的语义比对（per-commit 戳剔除），
+    // 不在这张字节等值表里。差异一次报全，而不是第一个就停 —— 换锁时最需要知道的
+    // 是"到底动了哪几个产物"，逐个试错要跑 601 文件那么多次导出。
+    let mut differing: Vec<&str> = Vec::new();
+    for path in &expected_files {
         if path == "manifest.json" {
             continue;
         }
-        if fs::read(expected.join(&path))? != fs::read(actual.join(&path))? {
-            return Err(format!("artifact differs: {path}").into());
+        if fs::read(expected.join(path))? != fs::read(actual.join(path))? {
+            differing.push(path);
         }
     }
+    if !differing.is_empty() {
+        return Err(format!(
+            "{} artifacts differ byte-wise: [{}]",
+            differing.len(),
+            summarize(&differing)
+        )
+        .into());
+    }
     Ok(())
+}
+
+/// 报错用的路径摘要：最多 20 条，其余只报数量。
+fn summarize(paths: &[&str]) -> String {
+    let shown = paths.len().min(20);
+    let mut rendered = paths[..shown].join(", ");
+    if paths.len() > shown {
+        rendered.push_str(&format!(", +{} more", paths.len() - shown));
+    }
+    rendered
 }
 
 /// `snapshots/` 是 `scripts/check-lts-api-surface.py` 消费的 route/facade

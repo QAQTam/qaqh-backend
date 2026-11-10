@@ -38,16 +38,19 @@
 | [0001](0001-kernel-userspace-branch-model.md) | kernel/user-space 分支模型与 LTS API 冻结 | 已采纳 |
 | [0002](0002-contract-source-of-truth-no-openapi.md) | 契约真相源 = Rust DTO；拒绝 OpenAPI 承载 RingingV2 | 已采纳（含 `已拒绝` 方案） |
 | [0003](0003-route-registry-fail-closed.md) | 冻结守卫必须 fail-closed：路由 registry 单一真相源 | **已落地于 main**（表驱动 + 删正则 + 禁止型 lint + 双向覆盖闸 + 行为测试）· r2 修订：registry 本就存在 |
-| [0004](0004-wire-compat-classes.md) | wire 兼容方向是声明数据，不是隐含 serde 行为 | 已采纳（未实施）· §待决**已决**：出站引入 `unknown` fallback（入站维持 reject） |
+| [0004](0004-wire-compat-classes.md) | wire 兼容方向是声明数据，不是隐含 serde 行为 | **已采纳（部分实施）** · §待决**已决**：出站引入 `unknown` fallback（入站维持 reject）· 落地清单**前两条 fail-open 已落 `main`**（契约盲区入导出物 + `.ok()` 改显式失败） |
 | [0005](0005-n-minus-one-pairing-tests.md) | 兼容性由 N-1 配对测试证明，不由字节相等证明 | 已采纳（未实施） |
 | [0006](0006-contract-as-versioned-package.md) | 契约分发为版本化包 + provenance | 已采纳（未实施） |
 | [0007](0007-refreeze-governance.md) | 换锁治理：CODEOWNERS + refreeze/tightening 标签 + 守卫自保护 | **已落地于 main** + **LTS 分支保护已开**（缺口表见手册 §7） |
 | [0008](0008-neutral-ir-per-language-projection.md) | 中立 ContractIR + 每语言投影，退役 ts→cs 解析链 | **第 1 步已落地**（schema 预览投影）· 主重构未实施 |
 | [0009](0009-wire-view-vs-artifact-bytes.md) | 冻结粒度区分 wire 语义与产物字节：分类从两类改三类 | **已落地于 main**（`wire_view` + `doc-only-refresh`）· 由真实误判触发 |
+| [0010](0010-cut-lts-v3.1-line.md) | 换锁：v3.1 线的待拍板取值与攒着的 refreeze 清单 | **提议中**（revision 取值、切线时机、前端先行三项等人定） |
 
 ## 阅读顺序
 
 0001 定义"什么不许变"；0002 定义"以什么为真相源、拒绝什么外框"；
 0003/0004 修现有闸门的**失效模式**（fail-open、语义未声明）；
 0005 把证明方式从"字节相等"升级为"行为配对"；0006/0007 管分发与治理；
-0008 是 0003/0004/0005 的承载体 —— registry 与 compat 声明最终都长在 IR 上。
+0008 是 0003/0004/0005 的承载体 —— registry 与 compat 声明最终都长在 IR 上；
+0010 是 0007 那条"换锁只能走新线"的**账本**：main 上攒了几笔 refreeze、切线时要不要 bump
+代际、由谁拍板，都记在那里。

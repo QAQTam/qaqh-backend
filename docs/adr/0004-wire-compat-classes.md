@@ -1,6 +1,9 @@
 # ADR-0004 wire 兼容方向是声明数据，不是隐含 serde 行为
 
-状态: `已采纳（未实施）` · 决策日期 2026-11-10 · **§待决 已决**：出站引入 `unknown` fallback，入站维持 reject
+状态: `已采纳（部分实施）` · 决策日期 2026-11-10 · **§待决 已决**：出站引入 `unknown` fallback，入站维持 reject
+
+> **2026-11-10 第二轮**：落地清单前两条（本 ADR 里唯二的现存 fail-open）已在 `main` 落地，
+> 实测数据见 §落地清单。其余条目仍未实施 —— 不要把本 ADR 整体读成"已完成"。
 
 ## 背景（已核对的代码事实）
 
@@ -123,12 +126,31 @@
 
 ## 落地清单
 
-顺序有讲究：先收**已经存在的 fail-open 盲区**（第 2、3 条，不依赖任何新机制），
+顺序有讲究：先收**已经存在的 fail-open 盲区**（前两条，不依赖任何新机制），
 再做 `unknown` 那套（第 1、4、5 条，属 `contract-refreeze` 类改动，只能走 main / 新线）。
 
-- [ ] 收口契约盲区：`PermissionRequestDetails` 纳入导出物（TS + C# + JSON Schema + fixture）
-- [ ] `v2.rs:569-571` 及 `ContentValue::Ref` 分支（同文件 `:563`）的 `.ok()` 静默降级改为显式失败
-      —— 这两条是当前唯一"坏了不报错且守卫看不见"的实例，优先级高于任何新抽象
+- [x] 收口契约盲区：`PermissionRequestDetails` 纳入导出物（TS + C# + JSON Schema + fixture）
+      —— 实测导出物 599 → 602：新增 `types/qaqh/PermissionRequestDetails.ts`、
+      `cs/PermissionRequestDetails.cs`、`fixtures/pending-permission-details.json`；
+      `coverage.json` 的 `approvals.admin` 现在同时列类型、正文夹具与
+      `wire_notes`（错误码表）。`contract_hash`
+      `c25b08f1…` → `39256ad9…` ⇒ 分类闸判 `contract-refreeze`（`artifact added ×3`），
+      只落 `main`，`docs/api-surface/v3.0` 一个字节没动（切线时由机器重切，见 ADR-0010）。
+      JSON Schema 侧顺带产出一条**派生**证据：deserialize 视图对 `deny_unknown_fields`
+      自动给出 `additionalProperties: false`，同一份 DTO 的 `level: u8` 在 schema 里是
+      `format:"uint8"` + `0..=255`，而经 TS 窄腰的 `cs_backend` 投出的是 `long` —— §决策 1
+      要的 compat 声明确实可以派生，不必手抄表（ADR-0008 的靶子又多一例）。
+- [x] `v2.rs` 的 `.ok()` 静默降级改为显式失败 —— 落点是新增的
+      `ApprovalBodyError`（`crates/qaqh-daemon/src/axum_server/axum_impl/v2.rs`）：
+      存储侧取不到才允许降级（`details_unavailable` / `details: null` 保持既有
+      fail-closed 语义与 `is_valid()` 权威），形状侧读不通一律带错误码失败：
+      `interaction_body_not_json`（inline 正文与 content store 字节都不是 JSON，含原
+      `:555`/`:563` 两处）、`permission_details_shape_invalid`（含 `deny_unknown_fields`
+      撞上的多余字段）；`is_valid()` 为假走类型化回退 + `permission_details_incomplete`
+      的 warn，不吞掉也不至于让可答复的卡片消失。错误码表由 `coverage.json` 的
+      `wire_notes` 记账。反证：夹具值域被改成 `category="filesystem"` 后导出器
+      直接失败（`approvals fixture is not a body the daemon could emit`），
+      即"样例必须是 daemon 真发得出的形状"这条也是机器闸而不是评审意见。
 - [ ] 列出**出站 enum 全集**并逐个归入 §已决 的三表之一（internally tagged / adjacently tagged /
       裸字符串 unit-only）；第三类的处置必须逐个定，不能默认它能自动化
 - [ ] 契约声明 `variant_policy` + 线上保留值 `"unknown"`，并让 TS / C# / schema 三个投影都可见

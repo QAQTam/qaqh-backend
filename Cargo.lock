@@ -3272,6 +3272,7 @@ name = "qaqh-ringing-contract"
 version = "3.0.20261110-g1842986"
 dependencies = [
  "qaqh-types",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2",

@@ -15,7 +15,7 @@ use qaqh_ringing_contract::fact::{
     ActivityState, AgentPath, ContentValue, InterAgentDelivery, InteractionKind, MessageId,
     SessionId,
 };
-use qaqh_ringing_contract::state::{DriverState, InteractionView};
+use qaqh_ringing_contract::state::{DriverState, InteractionView, PermissionRequestDetails};
 use qaqh_ringing_contract::team::{
     TaskBoardSnapshot, TaskView, TeamAgentResidency, TeamAgentSnapshot, TeamAgentStatus,
     TeamBoardSnapshot, TeamInboxSummary, TeamSnapshot,
@@ -133,17 +133,42 @@ fn write_team(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn write_approvals(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // 审批卡正文的 canonical 形状（JSON-in-JSON 边界，ADR-0004 §决策 3）。视图的取值
+    // 由这份正文投影而来，与 daemon 的 `pending_permission_view` 同一套映射，因此
+    // 不可能再出现"样例写着 daemon 永远发不出的值"那种自相矛盾的夹具（旧夹具写过
+    // category="filesystem"、level="tier-2"，而 `is_valid()` 只接受
+    // category ∈ read|write|exec|net、level ∈ 1..=4）。
+    let details = PermissionRequestDetails {
+        tool_name: "fs.write".into(),
+        action_summary: Some("write synthetic file".into()),
+        reason: "synthetic reason".into(),
+        paths: vec!["/synthetic/workspace/README.md".into()],
+        category: "write".into(),
+        level: 2,
+        risk: "medium".into(),
+        consequence: "overwrites the file".into(),
+    };
+    // 导出器拒绝发布 daemon 自己会判为不合法的样例 —— 夹具由此变成机器闸而不是抄写。
+    if !details.is_valid() {
+        return Err(
+            "approvals fixture is not a body the daemon could emit (is_valid() = false)".into(),
+        );
+    }
+    super::write_fixture(stage, "pending-permission-details.json", &details)?;
     let pending = RingingV2PendingApprovals {
         pending_permission: Some(RingingV2PendingPermissionView {
             tool_call_id: "call_fixture".into(),
-            tool_name: Some(serde_json::json!("fs.write")),
-            action_summary: Some(serde_json::json!("write synthetic file")),
-            reason: Some(serde_json::json!("synthetic reason")),
-            paths: serde_json::json!(["/synthetic/workspace/README.md"]),
-            category: Some(serde_json::json!("filesystem")),
-            level: Some(serde_json::json!("tier-2")),
-            risk: Some(serde_json::json!("medium")),
-            consequence: Some(serde_json::json!("overwrites the file")),
+            tool_name: Some(serde_json::json!(&details.tool_name)),
+            action_summary: details
+                .action_summary
+                .as_ref()
+                .map(|value| serde_json::json!(value)),
+            reason: Some(serde_json::json!(&details.reason)),
+            paths: serde_json::json!(&details.paths),
+            category: Some(serde_json::json!(&details.category)),
+            level: Some(serde_json::json!(details.level)),
+            risk: Some(serde_json::json!(&details.risk)),
+            consequence: Some(serde_json::json!(&details.consequence)),
             details_unavailable: false,
         }),
         pending_interaction: Some(RingingV2PendingInteractionView {
