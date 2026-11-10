@@ -192,7 +192,8 @@ fn check(target: &Path, release: bool) -> Result<(), Box<dyn std::error::Error>>
         .and_then(|()| generate(&stage))
         .and_then(|()| {
             validate_layout(&stage)?;
-            compare_trees(&stage, target)
+            compare_trees(&stage, target)?;
+            compare_manifest(&stage, target)
         });
     let _ = fs::remove_dir_all(&stage);
     result
@@ -1062,8 +1063,8 @@ fn validate_layout(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn compare_trees(expected: &Path, actual: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let expected_files = list_files(expected)?;
-    let actual_files = list_files(actual)?;
+    let expected_files = export_artifact_paths(expected)?;
+    let actual_files = export_artifact_paths(actual)?;
     if expected_files != actual_files {
         return Err(format!(
             "artifact file set differs; expected={expected_files:?}, actual={actual_files:?}"
@@ -1071,9 +1072,42 @@ fn compare_trees(expected: &Path, actual: &Path) -> Result<(), Box<dyn std::erro
         .into());
     }
     for path in expected_files {
+        // manifest.json 走 compare_manifest 的语义比对（per-commit 戳剔除），
+        // 不在这张字节等值表里。
+        if path == "manifest.json" {
+            continue;
+        }
         if fs::read(expected.join(&path))? != fs::read(actual.join(&path))? {
             return Err(format!("artifact differs: {path}").into());
         }
+    }
+    Ok(())
+}
+
+/// `snapshots/` 是 `scripts/check-lts-api-surface.py` 消费的 route/facade
+/// 基线，不是导出器产物。与 guard 的 `compare_file_set` 同口径排除，否则
+/// `check --against docs/api-surface/*` 永远报集合漂移（误导性的"API 变更"）。
+fn export_artifact_paths(root: &Path) -> Result<Vec<String>, std::io::Error> {
+    Ok(list_files(root)?
+        .into_iter()
+        .filter(|path| !path.starts_with("snapshots/"))
+        .collect())
+}
+
+/// manifest 语义比对：`source_revision` / `source_dirty` 是 per-commit 戳，
+/// 按口径剔除后必须全等——`contract_hash` 覆盖全部产物哈希，仍逐字节钉死。
+fn compare_manifest(expected: &Path, actual: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn load(
+        dir: &Path,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, Box<dyn std::error::Error>> {
+        let text = fs::read_to_string(dir.join("manifest.json"))?;
+        let mut manifest: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)?;
+        manifest.remove("source_revision");
+        manifest.remove("source_dirty");
+        Ok(manifest)
+    }
+    if load(expected)? != load(actual)? {
+        return Err("manifest.json differs beyond source_revision/source_dirty".into());
     }
     Ok(())
 }
@@ -1155,6 +1189,52 @@ mod tests {
         assert!(compare_trees(&expected, &actual).is_err());
         fs::write(actual.join("extra.ts"), "export type B = string;\n").expect("write extra");
         assert!(compare_trees(&expected, &actual).is_err());
+        fs::remove_dir_all(root).expect("cleanup test tree");
+    }
+
+    /// guard 口径：snapshots/ 里的 route/facade 基线不是导出产物，不得进
+    /// 文件集比对（否则 `check --against docs/api-surface/*` 永远假阳）。
+    #[test]
+    fn compare_trees_ignores_snapshot_baseline() {
+        let root = env::temp_dir().join(format!("qaqh-contract-test-{}", unique_suffix()));
+        let expected = root.join("expected");
+        let actual = root.join("actual");
+        fs::create_dir_all(&expected).expect("expected dir");
+        fs::create_dir_all(&actual).expect("actual dir");
+        fs::write(expected.join("index.ts"), "export * from \"./a\";\n").expect("write expected");
+        fs::write(actual.join("index.ts"), "export * from \"./a\";\n").expect("write actual");
+        fs::create_dir_all(actual.join("snapshots")).expect("snapshots dir");
+        fs::write(actual.join("snapshots/routes.txt"), "GET /x\n").expect("write snapshot");
+        compare_trees(&expected, &actual).expect("snapshots/ must not count as artifact drift");
+        fs::remove_dir_all(root).expect("cleanup test tree");
+    }
+
+    /// manifest 语义比对：per-commit 戳允许不同；contract_hash 动一个字符
+    /// 必须失败。
+    #[test]
+    fn compare_manifest_carves_out_per_commit_stamps() {
+        let root = env::temp_dir().join(format!("qaqh-contract-test-{}", unique_suffix()));
+        let expected = root.join("expected");
+        let actual = root.join("actual");
+        fs::create_dir_all(&expected).expect("expected dir");
+        fs::create_dir_all(&actual).expect("actual dir");
+        fs::write(
+            expected.join("manifest.json"),
+            r#"{"source_revision":"aaaa","source_dirty":false,"contract_hash":"h1"}"#,
+        )
+        .expect("write expected manifest");
+        fs::write(
+            actual.join("manifest.json"),
+            r#"{"source_revision":"bbbb","source_dirty":true,"contract_hash":"h1"}"#,
+        )
+        .expect("write actual manifest");
+        compare_manifest(&expected, &actual).expect("volatile stamps must be excluded");
+        fs::write(
+            actual.join("manifest.json"),
+            r#"{"source_revision":"bbbb","source_dirty":true,"contract_hash":"h2"}"#,
+        )
+        .expect("mutate contract hash");
+        assert!(compare_manifest(&expected, &actual).is_err());
         fs::remove_dir_all(root).expect("cleanup test tree");
     }
 }
