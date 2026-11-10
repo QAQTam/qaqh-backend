@@ -323,6 +323,14 @@ pub(crate) async fn handle_team_snapshot_v2(
 /// { "pending_permission": {...}|null, "pending_interaction": {...}|null }
 /// ```
 ///
+/// 正文降级只有一种合法来源：**内容确实取不到**（`ContentValue::Unavailable`，或 ref
+/// 指向的正文行已被淘汰）⇒ `details_unavailable: true` / `details: null`，条目仍在
+/// （id 是答复所必需的）。正文存在却读不成 JSON、或 JSON 不合
+/// `PermissionRequestDetails` 形状 ⇒ **带错误码的显式失败**，不再 `.ok()` 成 None：
+/// 那种降级把形状漂移伪装成"没有详情"，HTTP 仍 200，没人知道契约断了（ADR-0004 §决策
+/// 4；错误码表见 `ApprovalBodyError::code`，由 `coverage.json` 的 approvals.admin
+/// `wire_notes` 钉住）。
+///
 /// 返回的 id 是 **canonical** 形态（`call_<ULID>` / `int_<ULID>`）；运行时侧已接受
 /// canonical 与 wire 两种形态，故宿主直接透传即可。
 pub(crate) async fn handle_pending_approvals_v2(
@@ -368,8 +376,8 @@ pub(crate) async fn handle_pending_approvals_v2(
             Err(error) => {
                 return api_error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "content_unavailable",
-                    &format!("pending interaction content for {session_id}: {error}"),
+                    error.code(),
+                    &format!("pending permission details for {session_id}: {error}"),
                 );
             }
         },
@@ -386,8 +394,8 @@ pub(crate) async fn handle_pending_approvals_v2(
                 Err(error) => {
                     return api_error_response(
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        "content_unavailable",
-                        &format!("pending interaction content for {session_id}: {error}"),
+                        error.code(),
+                        &format!("pending interaction body for {session_id}: {error}"),
                     );
                 }
             };
@@ -495,16 +503,11 @@ pub(crate) async fn handle_approval_respond_v2(
     execute_command(&state, &headers, &identity, envelope).await
 }
 
-/// 从 canonical interaction 的 `request` 取回 permission 详情正文，映射回旧 v1
-/// 端点暴露的 `pending_permission_details` 形状。
-///
-/// 正文取不到（被淘汰）时仍返回条目本身——id 是答复所必需的，详情缺失只能降级
-/// 展示，不能让待审批项从 UI 上消失。
 fn pending_permission_view(
     state: &AppState,
     session_id: &str,
     interaction: &InteractionView,
-) -> Result<Option<RingingV2PendingPermissionView>, qaqh_session::db::DbError> {
+) -> Result<Option<RingingV2PendingPermissionView>, ApprovalBodyError> {
     let Some(tool_call_id) = interaction
         .call_id
         .as_ref()
@@ -512,11 +515,8 @@ fn pending_permission_view(
     else {
         return Ok(None);
     };
-    let details = permission_request_details(interaction_body_value(
-        state,
-        session_id,
-        &interaction.request,
-    )?);
+    let body = interaction_body_value(state, session_id, &interaction.request)?;
+    let details = permission_request_details(session_id, body)?;
     Ok(Some(RingingV2PendingPermissionView {
         tool_call_id,
         tool_name: details
@@ -545,40 +545,134 @@ fn pending_permission_view(
     }))
 }
 
-/// Parse an interaction body from inline JSON or its session-scoped SQLite content row.
 fn interaction_body_value(
     state: &AppState,
     session_id: &str,
     request: &ContentValue,
-) -> Result<Option<serde_json::Value>, qaqh_session::db::DbError> {
+) -> Result<Option<serde_json::Value>, ApprovalBodyError> {
     match request {
-        ContentValue::Inline { text } => Ok(serde_json::from_str(text).ok()),
+        // 生产端只写两种正文：permission 的 `PermissionRequestDetails`、ask 的
+        // `NormalizedAsk`（都是 JSON）。读不成 JSON 就说明读写两侧形状不一致 =
+        // 代码错误，报出来，不许 `.ok()` 成"没有详情"。
+        ContentValue::Inline { text } => parse_inline_body(text).map(Some),
         ContentValue::Ref { content_ref } => {
             // canonical ref 是 `sha256:<hex>`，SQLite content id 是裸 hex。
             let store_id = content_ref.hash().as_str();
             let store_id = store_id.strip_prefix("sha256:").unwrap_or(store_id);
-            let Some(entry) = state.hub.get_content(session_id, store_id)? else {
+            let Some(entry) = state
+                .hub
+                .get_content(session_id, store_id)
+                .map_err(ApprovalBodyError::Store)?
+            else {
+                // 正文行已被淘汰：这是唯一允许降级的一种"取不到"。
                 return Ok(None);
             };
-            Ok(serde_json::from_slice(&entry.bytes).ok())
+            parse_stored_body(&entry.bytes, store_id).map(Some)
         }
         ContentValue::Unavailable(_) => Ok(None),
     }
 }
 
-fn permission_request_details(body: Option<serde_json::Value>) -> Option<PermissionRequestDetails> {
-    body.and_then(|body| serde_json::from_value::<PermissionRequestDetails>(body).ok())
-        .filter(PermissionRequestDetails::is_valid)
+fn parse_inline_body(text: &str) -> Result<serde_json::Value, ApprovalBodyError> {
+    serde_json::from_str(text).map_err(|source| ApprovalBodyError::InlineNotJson { source })
+}
+
+fn parse_stored_body(bytes: &[u8], store_id: &str) -> Result<serde_json::Value, ApprovalBodyError> {
+    serde_json::from_slice(bytes).map_err(|source| ApprovalBodyError::StoredNotJson {
+        store_id: store_id.to_owned(),
+        source,
+    })
+}
+
+/// 取回 permission 详情正文并投影成审批视图的字段来源。
+///
+/// `Ok(None)` 只有一种来源：正文**合法地取不到**（被淘汰 / `Unavailable`），此时视图
+/// 以 `details_unavailable: true` 如实标记。例外是值域不合法（`is_valid()` 为假）——
+/// 它形状对、正文也在，但 `details_unavailable` 已经是 fail-closed 闸（device 侧
+/// approve/trust 会被 `permission_details_unavailable` 拒，只留 reject），所以走"类型化
+/// 回退 + 带错误码的 warn"，而不是让整张待审批卡连带可答复的 id 一起消失。
+fn permission_request_details(
+    session_id: &str,
+    body: Option<serde_json::Value>,
+) -> Result<Option<PermissionRequestDetails>, ApprovalBodyError> {
+    let Some(body) = body else {
+        return Ok(None);
+    };
+    let details = serde_json::from_value::<PermissionRequestDetails>(body)
+        .map_err(|source| ApprovalBodyError::PermissionShape { source })?;
+    if details.is_valid() {
+        return Ok(Some(details));
+    }
+    let error = ApprovalBodyError::PermissionIncomplete;
+    log::warn!("[v2] session {session_id}: {} — {error}", error.code());
+    Ok(None)
+}
+
+/// 审批投影读正文时的一切失败。分级即 ADR-0004 §决策 4 的边界：**存储侧取不到可以
+/// 降级，形状侧读不通必须报错**。
+#[derive(Debug)]
+pub(crate) enum ApprovalBodyError {
+    /// SQLite 正文行读不回来（存储故障，与 wire 形状无关）。
+    Store(qaqh_session::db::DbError),
+    /// `ContentValue::Inline` 的正文不是合法 JSON。
+    InlineNotJson { source: serde_json::Error },
+    /// content store 里的字节不是合法 JSON。
+    StoredNotJson {
+        store_id: String,
+        source: serde_json::Error,
+    },
+    /// permission 正文不是 `PermissionRequestDetails` 的形状。该结构带
+    /// `deny_unknown_fields` ⇒ 多一个字段也算漂移，正是原先被 `.ok()` 吞掉的那一类。
+    PermissionShape { source: serde_json::Error },
+    /// 形状对但值域不合法（`PermissionRequestDetails::is_valid()` 的语义原样保留）。
+    PermissionIncomplete,
+}
+
+impl ApprovalBodyError {
+    /// HTTP 面上的错误码。这张表由 `coverage.json` 的 approvals.admin `wire_notes`
+    /// 钉住（导出器写，不手抄进金标准）。
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::Store(_) => "content_unavailable",
+            Self::InlineNotJson { .. } | Self::StoredNotJson { .. } => "interaction_body_not_json",
+            Self::PermissionShape { .. } => "permission_details_shape_invalid",
+            Self::PermissionIncomplete => "permission_details_incomplete",
+        }
+    }
+}
+
+impl std::fmt::Display for ApprovalBodyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(error) => write!(formatter, "content store read failed: {error}"),
+            Self::InlineNotJson { source } => {
+                write!(formatter, "inline interaction body is not JSON: {source}")
+            }
+            Self::StoredNotJson { store_id, source } => write!(
+                formatter,
+                "stored interaction body {store_id} is not JSON: {source}"
+            ),
+            Self::PermissionShape { source } => write!(
+                formatter,
+                "permission body does not match PermissionRequestDetails: {source}"
+            ),
+            Self::PermissionIncomplete => write!(
+                formatter,
+                "permission body violates PermissionRequestDetails::is_valid()"
+            ),
+        }
+    }
 }
 
 #[cfg(test)]
 mod permission_request_details_tests {
-    use super::permission_request_details;
+    use super::{
+        ApprovalBodyError, parse_inline_body, parse_stored_body, permission_request_details,
+    };
     use serde_json::json;
 
-    #[test]
-    fn permission_details_require_the_ringing_v2_body_shape() {
-        let details = permission_request_details(Some(json!({
+    fn valid_body() -> serde_json::Value {
+        json!({
             "tool_name": "exec_command",
             "action_summary": "command: \"cargo check\"",
             "reason": "Execution requires confirmation",
@@ -587,30 +681,98 @@ mod permission_request_details_tests {
             "level": 1,
             "risk": "high",
             "consequence": "May execute arbitrary actions."
-        })))
-        .expect("structured permission details should project");
+        })
+    }
+
+    #[test]
+    fn permission_details_require_the_ringing_v2_body_shape() {
+        let details = permission_request_details("session-fixture", Some(valid_body()))
+            .expect("structured permission details should project")
+            .expect("a valid body projects to details");
         assert_eq!(details.tool_name, "exec_command");
         assert_eq!(
             details.action_summary.as_deref(),
             Some("command: \"cargo check\"")
         );
         assert_eq!(details.level, 1);
+    }
 
+    /// 形状漂移（旧 v1 的裸字符串正文、`deny_unknown_fields` 撞上的多余字段）必须
+    /// 报错，不许降级成"没有详情"——这正是 ADR-0004 §发现 里那个"多一个字段就整块
+    /// 消失但 HTTP 200"的 fail-open。
+    #[test]
+    fn v2_permission_shape_drift_is_a_loud_error() {
+        let error = permission_request_details(
+            "session-fixture",
+            Some(json!("Execution requires confirmation")),
+        )
+        .expect_err("a bare string is not PermissionRequestDetails");
+        assert_eq!(error.code(), "permission_details_shape_invalid");
+
+        // 生产端不会写 `normalized_args`（完整工具入参可能含密钥,刻意排除在外）；
+        // `deny_unknown_fields` 因此把它判成形状漂移。
+        let drifted = json!({
+            "tool_name": "exec_command",
+            "action_summary": "command: \"cargo check\"",
+            "reason": "Execution requires confirmation",
+            "paths": [],
+            "category": "exec",
+            "level": 1,
+            "risk": "high",
+            "consequence": "May execute arbitrary actions.",
+            "normalized_args": {},
+        });
+        let error = permission_request_details("session-fixture", Some(drifted))
+            .expect_err("deny_unknown_fields makes an extra field shape drift");
+        assert_eq!(error.code(), "permission_details_shape_invalid");
+    }
+
+    /// `is_valid()` 的语义原样保留：形状对、值域不合法仍是 fail-closed 的
+    /// "详情不可用"（卡与可答复的 id 都还在），只是不再无声。
+    #[test]
+    fn v2_incomplete_body_still_degrades_fail_closed() {
+        // `level` 的合法值域是 1..=4（唯一权威是 is_valid()，此处不重抄表）。
+        let incomplete = json!({
+            "tool_name": "exec_command",
+            "reason": "Execution requires confirmation",
+            "paths": [],
+            "category": "exec",
+            "level": 0,
+            "risk": "high",
+            "consequence": "May execute arbitrary actions."
+        });
+        let details = permission_request_details("session-fixture", Some(incomplete))
+            .expect("a well-shaped body is not an HTTP failure");
         assert!(
-            permission_request_details(Some(json!("Execution requires confirmation"))).is_none()
+            details.is_none(),
+            "incomplete body must not project as details"
         );
+    }
+
+    #[test]
+    fn v2_absent_body_is_the_only_legitimate_degradation() {
         assert!(
-            permission_request_details(Some(json!({
-                "tool_name": "exec_command",
-                "reason": "Execution requires confirmation",
-                "paths": [],
-                "category": "exec",
-                "level": 0,
-                "risk": "high",
-                "consequence": "May execute arbitrary actions."
-            })))
-            .is_none()
+            permission_request_details("session-fixture", None)
+                .expect("absent body is not an error")
+                .is_none()
         );
+    }
+
+    #[test]
+    fn v2_non_json_bodies_report_their_origin() {
+        let error = parse_inline_body("Execution requires confirmation")
+            .expect_err("inline text must be JSON interaction body");
+        assert_eq!(error.code(), "interaction_body_not_json");
+        assert!(matches!(error, ApprovalBodyError::InlineNotJson { .. }));
+
+        let error = parse_stored_body(b"{not json", "deadbeef")
+            .expect_err("stored bytes must be JSON interaction body");
+        assert_eq!(error.code(), "interaction_body_not_json");
+        assert!(
+            error.to_string().contains("deadbeef"),
+            "错误消息要能指回具体的正文行：{error}"
+        );
+        assert!(matches!(error, ApprovalBodyError::StoredNotJson { .. }));
     }
 }
 
