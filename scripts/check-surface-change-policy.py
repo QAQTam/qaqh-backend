@@ -31,8 +31,12 @@ GOLDEN_PREFIX = "docs/api-surface/"
 SNAPSHOT_MARKER = "snapshots/"
 REFREEZE = "contract-refreeze"
 TIGHTEN = "guard-tightening"
+DOCONLY = "doc-only-refresh"
 # 这些分支已经是"冻结线"，refreeze 必须落到新线（v3.1…）。
 FROZEN_BRANCHES = ("LTS-v3.0",)
+# 只有字节记账作用的文件：它必然随任何产物变化而变化，不参与语义判断。
+BOOKKEEPING = ("manifest.json",)
+CODE_SUFFIXES = (".ts", ".cs")
 
 
 def git(*args: str) -> str:
@@ -44,6 +48,73 @@ def git(*args: str) -> str:
 def is_placeholder(sha: str) -> bool:
     # 新建分支的 before sha 全为 0；此时没有可比基线。
     return not sha or set(sha) == {"0"}
+
+
+def show(rev: str, path: str) -> str | None:
+    proc = subprocess.run(["git", "show", f"{rev}:{path}"], cwd=ROOT,
+                          capture_output=True, text=True)
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def wire_view(path: str, text: str) -> str:
+    """产物里"客户端能观察到的部分"：去掉注释后的内容。
+
+    注释不进 wire 语义 —— 但它进 `contract_hash`（哈希的是字节）。不区分这两件事的后果
+    是真实发生过的：`ac54e508` 只给 `ModelCapabilities` 的 Rust doc 加了一段分层说明，
+    `4c3a26be` 重切金标准后 `contract_hash` 由 `ead943ac…` 变成 `c25b08f1…`，
+    于是一次**零 wire 影响**的文档改动被当成"换锁"。这里把它拆出来单独分类。
+    只在代码后缀上去行尾注释，避免误伤 JSON 字符串里的 `//`。
+    """
+    if not path.endswith(CODE_SUFFIXES):
+        return text
+    lines: list[str] = []
+    in_block = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if in_block:
+            if "*/" in line:
+                in_block = False
+            continue
+        if line.startswith("/*"):
+            if "*/" not in line:
+                in_block = True
+            continue
+        if line.startswith("//"):
+            continue
+        lines.append(line.split(" // ")[0])
+    return "\n".join(lines)
+
+
+def artifacts_wire_changed(base: str, head: str, artifacts: list[str]) -> list[str]:
+    """返回真正发生 wire 变化的产物；空列表 ⇒ 只有注释/记账在动。
+
+    先用一次 `--name-status` 拿增删改状态（增/删必属 wire 变化），只对**修改过**的
+    产物取两侧内容 —— 否则一份金标准 diff 会 spawn 上千次 git show。
+    """
+    listing = git("diff", "--name-status", f"{base}..{head}", "--", GOLDEN_PREFIX)
+    status: dict[str, str] = {}
+    for line in listing.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            status[parts[-1].strip()] = parts[0].strip()
+
+    semantic: list[str] = []
+    for path in artifacts:
+        if path.rsplit("/", 1)[-1] in BOOKKEEPING:
+            continue
+        kind = status.get(path, "M")
+        if kind.startswith("A"):
+            semantic.append(f"artifact added: {path}")
+            continue
+        if kind.startswith("D"):
+            semantic.append(f"artifact deleted: {path}")
+            continue
+        before, after = show(base, path), show(head, path)
+        if before is None or after is None:
+            semantic.append(f"artifact unavailable on one side ({kind}): {path}")
+        elif wire_view(path, before) != wire_view(path, after):
+            semantic.append(f"wire-differs: {path}")
+    return semantic
 
 
 def main() -> int:
@@ -70,19 +141,30 @@ def main() -> int:
 
     artifacts = [path for path in golden if SNAPSHOT_MARKER not in path]
     snapshots = [path for path in golden if SNAPSHOT_MARKER in path]
-    required = REFREEZE if artifacts else TIGHTEN
+    # 三分类，而不是两分类 —— 见 wire_view() 的记录：注释不进可观察契约，
+    # 但它进 contract_hash（哈希字节）。把两者混为一谈会让"加一句文档说明"变成"换锁"。
+    semantic = artifacts_wire_changed(args.base, args.head, artifacts) if artifacts else []
+    if not artifacts:
+        required = TIGHTEN
+    elif semantic:
+        required = REFREEZE
+    else:
+        required = DOCONLY
 
     evidence = git("log", f"{args.base}..{args.head}", "--format=%s%n%b") + "\n" + os.environ.get(
         "SURFACE_LABELS", ""
     )
-    declared = [marker for marker in (REFREEZE, TIGHTEN) if marker in evidence]
+    declared = [marker for marker in (REFREEZE, DOCONLY, TIGHTEN) if marker in evidence]
 
     print(f"surface-policy: 金标准改动 {len(golden)} 个文件"
-          f"（导出物 {len(artifacts)} / 快照 {len(snapshots)}）⇒ 需要标记 `[{required}]`")
-    for path in golden[:12]:
-        print(f"    {path}")
-    if len(golden) > 12:
-        print(f"    …（另 {len(golden) - 12} 个）")
+          f"（导出物 {len(artifacts)} / 快照 {len(snapshots)} / wire 实变 {len(semantic)}）"
+          f"⇒ 需要标记 `[{required}]`")
+    for line in semantic[:10]:
+        print(f"    {line}")
+    if len(semantic) > 10:
+        print(f"    …（另 {len(semantic) - 10} 项 wire 变化）")
+    if not semantic and artifacts:
+        print(f"    （{len(artifacts)} 个导出物只有注释或 manifest 记账在动，例：{artifacts[0]}）")
 
     problems: list[str] = []
     if required not in evidence:
@@ -93,13 +175,16 @@ def main() -> int:
             problems.append(
                 f"声明了 `[{declared[0]}]` 但改动落点要求 `[{required}]`："
                 + ("只动了 snapshots/*，属收紧而非换锁" if required == TIGHTEN
-                   else "动了导出物，contract_hash 会变，属换锁")
+                   else ("有 wire 实变，属换锁" if required == REFREEZE
+                         else "wire 无变化，只是注释/记账，不该按换锁算"))
             )
-    if artifacts and required == REFREEZE and args.target in FROZEN_BRANCHES:
+    if required == REFREEZE and args.target in FROZEN_BRANCHES:
         problems.append(
             f"`{args.target}` 是已冻结线：contract-refreeze 只能进新 LTS 线"
             "（如 LTS-v3.1），并按手册 §1 重切 tag + bump contract_revision。"
         )
+    # DOCONLY 允许进冻结线，但仍必须显式声明：谎报会被上面那份 wire 实变列表当场戳穿，
+    # 所以这条不靠自觉，靠证据。
 
     if problems:
         print("surface-policy: FAILED", file=sys.stderr)
@@ -112,8 +197,12 @@ def main() -> int:
         )
         return 1
 
-    print(f"surface-policy: OK — 按 `[{required}]` 处理"
-          + ("" if not artifacts else "（换锁：禁入已冻结线）"))
+    meaning = {
+        REFREEZE: "（换锁：wire 实变，禁入已冻结线，须 bump revision 并重切 tag）",
+        DOCONLY: "（仅注释/记账变化：不动 wire，允许进已冻结线，无需 bump revision）",
+        TIGHTEN: "（只收紧快照基线：允许进已冻结线）",
+    }[required]
+    print(f"surface-policy: OK — 按 `[{required}]` 处理{meaning}")
     return 0
 
 

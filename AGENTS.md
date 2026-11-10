@@ -23,7 +23,7 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 12. 使用sed修改文件必须参带rg确保修改正确.
 13. 必须在工作前使用todo工具让用户知道你的修改流程
 14. 涉及到新的库时可以用find-docs skills去找最新API避免旧版用法性能低下或不可用
-15. 契约面改动必须分类后再提交:改到导出物(manifest/types/cs/fixtures/coverage)就是 `[contract-refreeze]`,禁入已冻结分支,只能开新 LTS 线;只改 `snapshots/*` 且导出物逐字节不变就是 `[guard-tightening]`,允许进 LTS。判据由 `scripts/check-surface-change-policy.py` 决定,不由人的自觉决定 —— 不分类的提交视同违规。
+15. 契约面改动必须先分类再提交,三选一:`[contract-refreeze]`(wire 实变:增删产物或类型字段变化,禁入已冻结线,只能开新 LTS 线并 bump revision)、`[guard-tightening]`(只改 `snapshots/*` 基线,导出物逐字节不变,可进 LTS)、`[doc-only-refresh]`(导出物字节变但去掉注释后 wire 视图相同 —— 典型如给 DTO 加 doc 注释导致 `contract_hash` 变化,可进 LTS 且不需 bump revision)。判据由 `scripts/check-surface-change-policy.py` 自己算,不由提交者声明的标签决定:谎报 doc-only 会被 wire 实变列表当场戳穿。
 16. 路由只能在两张表里声明(`RINGING_V2_HTTP_ROUTES` / `CONTROL_PLANE_ROUTES`);出现字面量 `.route("…")`/`.nest(`/`.merge(` 即为错误。金标准与快照只能由机器写(exporter / `--rebaseline`),手改金标准等同作弊。
 17. 契约与闸门的决策一律落在 `docs/adr/`;动冻结面先读对应 ADR,被否的方案也要写进去防重提。引用 ADR 时必须看状态字段,**不得把"已采纳(未实施)"当成"已完成"**。
 18. 新闸门落地必须**反证**它真会红(用真实历史提交或临时插违规),并且要看 CI 的步骤明细而不是 job 绿灯 —— `continue-on-error` 会掩盖步骤失败;报错误行号的 lint 本身就是新的误导源。
