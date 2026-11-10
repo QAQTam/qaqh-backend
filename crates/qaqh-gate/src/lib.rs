@@ -127,6 +127,10 @@ pub fn chat_stream(
 }
 
 /// Synchronous (non-streaming) chat for internal use (compact, etc.).
+///
+/// 现状（v3.0）：**无生产调用方**。旧的压缩/标题旁路（`qaqh-message::compaction`、
+/// `engine_title`）已随架构拆除；上下文交接改由模型面 `handoff` 工具承担
+/// （见 `qaqh-agent-runtime::handoff`），后端不再代笔摘要。
 pub fn chat_sync(
     provider: &ProviderConfig,
     messages: Vec<Message>,

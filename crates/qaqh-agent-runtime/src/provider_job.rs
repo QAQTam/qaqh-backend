@@ -41,6 +41,12 @@ pub struct ProviderRequestSpec {
     pub tools: Option<Vec<ToolDef>>,
     pub max_tokens: u32,
     pub effort: Option<String>,
+    /// 端点声明的上下文窗口（`Config::context_length`）——占用页脚与 handoff
+    /// 阈值判断的分母。`0` = 未声明：不编百分比，也不发提醒。
+    pub context_window: u32,
+    /// 软阈值（`Config::auto_compact_threshold`，0 = 关闭提醒）。契约里已有的
+    /// 开关，此前无任何消费者；现在它驱动 handoff 提醒。
+    pub auto_compact_threshold: f64,
 }
 
 /// 一次模型请求实际走到哪(证明链外的最小等价物)。
@@ -88,7 +94,16 @@ impl ProviderRequestSpec {
             tools: None,
             max_tokens,
             effort: None,
+            context_window: 0,
+            auto_compact_threshold: 0.0,
         }
+    }
+
+    /// 上下文口径：分母 + 软阈值。
+    pub fn with_context(mut self, context_window: u32, auto_compact_threshold: f64) -> Self {
+        self.context_window = context_window;
+        self.auto_compact_threshold = auto_compact_threshold;
+        self
     }
 
     pub fn with_credential(mut self, credential: qaqh_types::CredentialSource) -> Self {
