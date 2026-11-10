@@ -88,7 +88,21 @@ git push origin v3.0.1
 
 ## 3. 紧急热修
 
-流程同上,但允许跳过步骤 2/4,第 3 步 CI 绿了直接打 tag。热修 tag 仍必须走 `v3.0.x` 序号,禁止 `latest`/浮动 tag。
+**2026-11-10 起分支保护对 admin 也生效**（`enforce_admins=true`），所以热修**不能直推** `LTS-v3.0`：
+
+```bash
+git switch -c hotfix/v3.0.x-plus1 origin/LTS-v3.0
+#   改实现 → 推分支 → 开 PR 到 LTS-v3.0
+#   过闸要求：contract + freeze 绿 + 1 个批准 + 会话已 resolve
+#   若这次热修动了导出物 → commit 里必须带 [contract-refreeze]，而那**不允许进 LTS**：
+#   说明它不是热修，是换锁，得走 §8 的新线流程
+```
+流程同上,但允许跳过步骤 2/4（本地 sdk-check 与 dispatch 干跑）；步骤 3 的 CI 绿改成由 PR 的
+required checks 保证。热修 tag 仍必须走 `v3.0.x` 序号,禁止 `latest`/浮动 tag。
+
+真要紧急绕过（不推荐，会在保护审计里留痕）：
+`gh api --method DELETE repos/QAQTam/qaqh-backend/branches/LTS-v3.0/protection/enforce_admins`
+用完立刻 PUT 回来（见 §7 底部命令）。
 
 ## 4. CI 矩阵速查
 
@@ -147,7 +161,7 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 | Strict（分支必须先与 LTS 同步） | ✅ | 两个 worker 并发时防"基于陈旧分支合入" |
 | Require conversation resolution | ✅ | — |
 | Allow force pushes / deletions | ❌（禁用） | 冻结线不可改写历史 |
-| **Do not enforce for admins** | ⚠️ **留口**（`enforce_admins=false`） | 热修手册 §3 依赖 admin 直推。要真锁死就把这项改 true，代价是热修必须走 PR |
+| **Enforce for admins** | ✅ **true**（2026-11-10 第二次收紧） | admin 也**不能直推冻结线**，热修改走 §3 的 PR 路径 |
 
 ### 两个**故意留着**的缺口（不要误以为全通了）
 
@@ -160,3 +174,26 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
    当前对 LTS 的 PR 是"无匹配 owner → 不触发 code-owner 要求"。第 1 条落地时这条自动一起生效。
 
 `main` **未加保护**（快车，规则见 `docs/adr/0001` §决策）。
+
+## 8. 换锁：开新 LTS 线（`contract-refreeze` 的唯一去处）
+
+§1 说"换锁不是冻结"，但一直没写怎么走 —— 这一节就是那条路。凡动导出物（`contract_hash` 会变）
+的改动只能落到这里：
+
+1. **先写 ADR**（模板 `docs/adr/README.md`），至少含：新 `contract_revision` 值、被破坏的
+   capability 清单、迁移窗口、ADR-0005 配对测试结论。无 ADR 的 refreeze 不批。
+2. **先在 `main` 上落**：commit 带 `[contract-refreeze]`，CI 绿。
+3. **切线**：`git switch -c LTS-v3.1 main`，重切金标准（机器写，不手改）：
+   ```bash
+   QAQH_SOURCE_REVISION=$(git rev-parse HEAD) QAQH_SOURCE_DIRTY=0 \
+     cargo run -p qaqh-contract-export -- export --out docs/api-surface/v3.1 --release
+   python scripts/check-lts-api-surface.py --against docs/api-surface/v3.1 --rebaseline
+   ```
+4. **改三处指向**（漏一处 = 新线没有闸）：
+   - `.github/workflows/lts-api-guard.yml` 的 `branches:` → `LTS-v3.1`
+   - `scripts/check-lts-api-surface.py` 的 `--against` 默认值 → `docs/api-surface/v3.1`
+   - `qaqh-ringing/src/v2/types.rs` 的 `COMMAND_CONTRACT_REVISION` / `SESSION_CONTRACT_REVISION`
+     bump（当前 `ringing-commands-7` / `ringing-session-2`）
+5. 给 `LTS-v3.1` **新建**一份分支保护（§7 的命令换分支名）；旧线 `LTS-v3.0` 保留到 EOL。
+6. 切 `v3.1.0` tag → `release.yml` 自动发 daemon zip + 契约 zip；前端 pin 新契约并对齐 hash
+   （ADR-0006 落地前这步仍是人肉，也正是它要消灭的东西）。
