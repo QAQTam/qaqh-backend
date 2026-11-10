@@ -1,6 +1,6 @@
 # ADR-0007 换锁治理：CODEOWNERS + refreeze 标签 + 守卫自保护
 
-状态: `已采纳（决策 1/2/4/5 已落地；决策 3 落了一半；branch protection 待 admin）` · 决策日期 2026-11-10
+状态: `已采纳（决策 1/2/4/5 已落地；决策 3 落了一半；LTS 分支保护已开启，两处故意缺口见手册 §7）` · 决策日期 2026-11-10
 
 ## 背景（已核对）
 
@@ -116,9 +116,11 @@
 
 - [x] `.github/CODEOWNERS` 新建 —— **12 条路径**（比本文原列的 7 条多：补了路由登记处
       `axum_server/**` 与 `v2/mod.rs`、`.gitattributes`、`docs/adr/**`、手册本身）
-- [ ] `LTS-v3.0` 开启 branch protection（code owner review + required status check）
-      —— **需要 admin，代码侧开不了**；勾选项已写进手册 §7。缺了它，上面那份 CODEOWNERS
-      和下面的分类 job 都只是"会跑但不拦"，这正是本轮撞车能发生的原因。
+- [~] `LTS-v3.0` 分支保护：**2026-11-10 已开启**（PR + 1 批准 + code-owner 要求 +
+      required checks `contract`/`freeze` + strict + 禁 force-push/删除，回读确认）。
+      两处**故意**没做满：① `change-policy` 未加进 required contexts，因为
+      `surface-policy.yml` 目前只在 `main`，现在就加会让 LTS 每个 PR 永远停在 Expected；
+      ② `enforce_admins=false` 保手册 §3 的热修直推口。详见手册 §7 的缺口表。
 - [x] `contract-refreeze` / `guard-tightening` 两个 label 已建（描述改成了 ASCII：
       Windows 控制台下 CJK 有被写坏的风险，本轮实测后改写了一次）
 - [x] `scripts/check-surface-change-policy.py` + `.github/workflows/surface-policy.yml`：

@@ -23,3 +23,9 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 12. 使用sed修改文件必须参带rg确保修改正确.
 13. 必须在工作前使用todo工具让用户知道你的修改流程
 14. 涉及到新的库时可以用find-docs skills去找最新API避免旧版用法性能低下或不可用
+15. 契约面改动必须分类后再提交:改到导出物(manifest/types/cs/fixtures/coverage)就是 `[contract-refreeze]`,禁入已冻结分支,只能开新 LTS 线;只改 `snapshots/*` 且导出物逐字节不变就是 `[guard-tightening]`,允许进 LTS。判据由 `scripts/check-surface-change-policy.py` 决定,不由人的自觉决定 —— 不分类的提交视同违规。
+16. 路由只能在两张表里声明(`RINGING_V2_HTTP_ROUTES` / `CONTROL_PLANE_ROUTES`);出现字面量 `.route("…")`/`.nest(`/`.merge(` 即为错误。金标准与快照只能由机器写(exporter / `--rebaseline`),手改金标准等同作弊。
+17. 契约与闸门的决策一律落在 `docs/adr/`;动冻结面先读对应 ADR,被否的方案也要写进去防重提。引用 ADR 时必须看状态字段,**不得把"已采纳(未实施)"当成"已完成"**。
+18. 新闸门落地必须**反证**它真会红(用真实历史提交或临时插违规),并且要看 CI 的步骤明细而不是 job 绿灯 —— `continue-on-error` 会掩盖步骤失败;报错误行号的 lint 本身就是新的误导源。
+19. 本仓存在并发写入者:动同类文件前先 `git fetch` 并与 `origin/LTS-v3.0` 比对,合并后维持 **`main` ⊇ `LTS-v3.0`** 的超集不变量;撞车(同一缺陷被各自修两次)要在 ADR 留痕而不是悄悄 rebase 掉。
+20. 验证优先用官方命令(`check --against docs/api-surface/v3.0`、`check-lts-api-surface.py`、`cargo test -p <改动涉及的 crate>`),不要每次手搓等价比对;本机资源受限时 `--release` 全量构建交 CI(见规则 7/10)。
