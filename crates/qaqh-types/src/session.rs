@@ -210,9 +210,11 @@ impl SessionMeta {
     /// 会话列表/tab 的**展示标题**（前端契约 **G2** 定死的口径）：
     /// `title` → `cwd` 尾段 → `session_id`。
     ///
-    /// 标题只有两个来源（2026-10-06 归一裁决）：worker 首 turn 后 LLM 生成，
-    /// 或生成失败时回退的首条用户消息截断（`FALLBACK_MAX_CHARS`）。不存在
-    /// 「最后一条回复」类的漂移来源——列表标题不随对话内容变化。
+    /// v3.0 冻结面上 `title` 只有两条写口：`session.create` 携带（`title_source`
+    /// 记 `user`）与 `session.rename`。字段文档那句「异步 LLM 总结覆盖」描述的是已
+    /// 拆除的旧实现（`qaqh-title` / `engine_title`，`FALLBACK_MAX_CHARS` 也不存在了；
+    /// 该字段文档本身是 ts-rs 导出物，LTS 上改一个字就是 `contract_hash` 漂移，只能
+    /// 在 v3.1 换锁时对齐）。不存在「最后一条回复」类漂移来源。
     pub fn display_title(&self) -> String {
         if let Some(title) = self.title.as_deref().filter(|s| !s.is_empty()) {
             return title.to_owned();

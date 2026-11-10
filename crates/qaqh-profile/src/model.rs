@@ -48,8 +48,14 @@ pub struct ModelDef {
     pub defaults: ModelDefaults,
 }
 
+/// 未声明 `context_window` 时的缺省分母（BYOK 手写 providers.toml 这类无 UI 来源）。
+///
+/// 上面 `context_window` 的文档注释仍写着 128,000：那是 ts-rs 导出物（`ModelDef.ts`
+/// 的 JSDoc），LTS 冻结面上改一个字就是 `contract_hash` 漂移，只能在 v3.1 换锁时
+/// 一起对齐。这里才是真实数值；运行时另有按 provider 实测的收敛（见 agent-runtime
+/// `handoff`）。
 fn default_context_window() -> u32 {
-    128_000
+    383_000
 }
 
 fn default_enabled() -> bool { true }

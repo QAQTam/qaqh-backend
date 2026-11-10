@@ -26,6 +26,14 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
             .collect();
         prompt.push_str(&format!("tools: {}\n", names.join(", ")));
     }
+    // 交接是控制面能力，与 allowlist 无关，所以这段说明无条件在场。
+    prompt.push_str(
+        "\n[Context handoff]\n\
+         工具结果尾部可能带 `[#ctx 61% · 98k/160k]`，那是 provider 实测回传的实时占用。\n\
+         占用接近上限、或你判断历史已不易自持时，**必须**调用 `handoff` 写交接文档：它会终止\n\
+         本会话，并由客户端拿这份文档开新会话继续推进。\n\
+         口头总结不算交接（新会话读不到它）；不要拖到请求被拒才动。\n",
+    );
     if let Some(agents) = read_agents_instructions(cwd) {
         prompt.push_str("\n[Project instructions]\n");
         prompt.push_str(&agents);
