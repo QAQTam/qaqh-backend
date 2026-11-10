@@ -54,6 +54,23 @@ CI 红 = 拒绝该改动;金标准只允许在两种情况下再生成:① 新 L
 再生成命令:`QAQH_SOURCE_REVISION=$(git rev-parse HEAD) QAQH_SOURCE_DIRTY=0 cargo run -p qaqh-contract-export -- export --out <tmp> --release`,
 随后把产物复制进金标准目录、连同 `snapshots/routes.txt`、`snapshots/facade.txt` 一并提交。
 
+**`main` 上这条比对红是设计状态，不是待修缺陷**（ADR-0007 §决策 4）：
+`surface-policy.yml` 的 `Golden contract byte compare` 只在 target = `LTS-v3.0` 时硬拦，
+在 main 上是 `continue-on-error`（job 绿、步骤红 —— 验收新闸门必须看步骤明细，规则 18）。
+任何落在 main 的 `contract-refreeze`（新增产物、字段变化）都会让它红，直到按 §8 切新线
+并由机器重切金标准。此时**唯一禁止的动作**是改 `docs/api-surface/v3.0` 让它变绿：那棵树
+是冻结线持有的锁。main 上目前攒着的 refreeze 差额记在
+`docs/adr/0010-cut-lts-v3.1-line.md`（该 ADR 同时列着切线前必须由人拍板的 revision 取值）。
+
+"重切一下它就绿"这条路已被 ADR-0011 封死：每条冻结线的金标准树**身份**必须登记在
+`docs/api-surface/snapshots/frozen-locks.json`（唯一写法
+`python scripts/check-lts-api-surface.py --pin-frozen`），守卫每次运行都拿
+`HEAD:<金标准目录>` 的 git tree OID 比对登记值，且这段**在 `--skip-export` 下也跑** ——
+而 `surface-policy.yml` 在 main 上硬跑守卫，只有产物逐字节比对才是 report-only。
+于是：改了代码 ⇒ 那条红留着（允许的演进）；改了锁不补登记 ⇒ 守卫 exit 1（拒绝）。
+补登记本身只动 `snapshots/`，属 `guard-tightening`，且 `docs/api-surface/**` 在
+CODEOWNERS 里 ⇒ 必须 owner 评审。
+
 ## 2. 标准补丁发版流程(LTS-v3.0)
 
 ```bash
@@ -188,6 +205,9 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
    QAQH_SOURCE_REVISION=$(git rev-parse HEAD) QAQH_SOURCE_DIRTY=0 \
      cargo run -p qaqh-contract-export -- export --out docs/api-surface/v3.1 --release
    python scripts/check-lts-api-surface.py --against docs/api-surface/v3.1 --rebaseline
+   # 同一个提交里把新线的锁身份也机器写掉（ADR-0011）：--pin-frozen 从工作区算 tree OID，
+   # 不需要"先提交再补一次锁"（那中间的一次 CI 必然红在 not pinned 上）。
+   python scripts/check-lts-api-surface.py --against docs/api-surface/v3.1 --pin-frozen
    ```
 4. **改三处指向**（漏一处 = 新线没有闸）：
    - `.github/workflows/lts-api-guard.yml` 的 `branches:` → `LTS-v3.1`
@@ -197,11 +217,3 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 5. 给 `LTS-v3.1` **新建**一份分支保护（§7 的命令换分支名）；旧线 `LTS-v3.0` 保留到 EOL。
 6. 切 `v3.1.0` tag → `release.yml` 自动发 daemon zip + 契约 zip；前端 pin 新契约并对齐 hash
    （ADR-0006 落地前这步仍是人肉，也正是它要消灭的东西）。
-
-**`main` 上这条比对红是设计状态,不是待修缺陷**(ADR-0007 §决策 4)：
-`surface-policy.yml` 的 `Golden contract byte compare` 只在 target = `LTS-v3.0` 时硬拦,
-在 main 上是 `continue-on-error`(job 绿、步骤红 —— 验收新闸门必须看步骤明细,规则 18)。
-任何落在 main 的 `contract-refreeze`(新增产物、字段变化)都会让它红,直到按 §8 切新线
-并由机器重切金标准。此时**唯一禁止的动作**是改 `docs/api-surface/v3.0` 让它变绿：那棵树
-是冻结线持有的锁。main 上目前攒着的 refreeze 差额记在
-`docs/adr/0010-cut-lts-v3.1-line.md`(该 ADR 同时列着切线前必须由人拍板的 revision 取值)。
