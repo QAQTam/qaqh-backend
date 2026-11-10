@@ -48,6 +48,16 @@
    `not a valid attribute name`）。两人 20 分钟内各自修同一个洞、互不知情 ——
    这正是决策 1（CODEOWNERS）与决策 2/3（refreeze 标签 + 成文 ADR）要解决的形状，
    而不是抽象的官僚流程。合并时保留 `52a0d0bb` 的版本、删掉重复规则。
+   撞车记录 2（2026-11-10 第二轮）：`origin/LTS-v3.0` 前进到 `cdaf6dbd` 之后，两个 worker
+   在数十分钟内**各自**把 LTS merge 回 main 恢复超集不变量 —— 本地 `c8e06526`，
+   对端 `b3f139a8`（它把这次 merge 标成 `[doc-only-refresh]`，而两侧改动都没碰金标准，
+   分类闸对两者都输出`未触碰冻结金标准，规则不适用`）。合并无内容冲突
+   （`presets.rs` 里那条新增只出现一次，实测计数 = 1）。
+   留这条的真正原因不是追责，而是：**`main ⊇ LTS-v3.0` 目前没有机器闸** —— 它只写在
+   规则 19 / 交接 §3，靠人记得 `git fetch`。把它做成闸门（在 `surface-policy` 里断言
+   `git merge-base --is-ancestor origin/LTS-v3.0 HEAD`，仅对 target=main 生效）需要先回答
+   "PR 分支落后于 LTS 时算谁的红"，属新增闸门 ⇒ 按 README §必须写 ADR 的条目另开一份，
+   不在本轮顺手实现。
 
 ## 决策
 
