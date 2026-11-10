@@ -31,12 +31,12 @@
 
 **允许的改动**:bug 修复、内部重构(不触及上述面的)、新增仅在内部使用的代码路径、测试。
 
-**改动是否踩线的判定法**:本地跑 `scripts/check-sdk-contract.py --typescript --release`
-(确定性 + 严格 TS 消费者,与金标准无关,任何平台成立)。**金标准比对是 CI-only**:`just sdk-check`
-的 `against` 参数必须指向一份**新鲜导出**目录,不能指向 `docs/api-surface/v3.0`(那里多出的 `snapshots/`
-会被判为文件集差异);而 `check-lts-api-surface.py` 按字节比对金标准,在非 Linux checkout 上会因
-行尾符整树判红 —— 两条陷阱详见 ADR-0007 §问题 4。
-判定:契约哈希或严格 TS 消费者失败,即踩线;LTS 上不允许用"顺手改夹具"的方式让它变绿
+**改动是否踩线的判定法**:本地两条都跑 ——
+① `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0`(金标准比对。自 `52a0d0bb`
+起 `compare_trees` 豁免 `snapshots/`、`manifest.json` 走切除 `source_revision`/`source_dirty` 的语义比对,
+且 `.gitattributes` 已把金标准目录钉成 `eol=lf`,故 Windows 与 Linux 同样可用,本机实测 exit 0);
+② `scripts/check-sdk-contract.py --typescript --release`(产物确定性 + 独立严格 TS 消费者)。
+判定:金标准、契约哈希或严格 TS 消费者任一失败,即踩线;LTS 上不允许用"顺手改夹具"的方式让它变绿
 (夹具只能修编译性破损,不得改描述被测行为的断言)。
 
 **漂移事故参照**:model-config 重构删除 `SessionSettingsPatch.profile` 时,TS 严格消费者在 CI 抓到漂移
