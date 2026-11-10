@@ -79,6 +79,16 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
         wire: Wire::Messages,
         credential: CredentialSource::ApiKey,
     },
+    // 千问 Token Plan 包月专线（用户主付费通道）：host 是 token-plan 子域，
+    // 面与上侧 Anthropic 兼容端点同形（base 止于 /apps/anthropic，wire
+    // 追加 /v1/messages；此面无 /v1/models）。
+    ProviderPreset {
+        id: "qwen-token-plan-cn",
+        name: "Qwen (Token-Plan CN)",
+        base_url: "https://token-plan.maas.qianwenaiapi.com/apps/anthropic",
+        wire: Wire::Messages,
+        credential: CredentialSource::ApiKey,
+    },
 ];
 
 /// 按 id 查预设；未注册的 id 返回 `None`（自拟 provider 不经过预设）。
