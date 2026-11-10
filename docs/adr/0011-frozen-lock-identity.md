@@ -65,7 +65,7 @@
   因此必须把 pin 写成流程的一部分（本轮已同步手册）。
 - `LTS-v3.0` 上的 `check-lts-api-surface.py` 目前是**旧版本**（守卫脚本只在 main 演进）。
   这条闸要在冻结线上生效，得和 `surface-policy.yml` 一起走"cherry-pick 进 LTS"那笔账
-  （交接文档 §7 第三条，仍需人工按手册 §1/§7 走一次）。
+  （交接 §7 的"闸门三件套进 `LTS-v3.0`"那条，仍需人工按手册 §1/§7 走一次）。
 - 反证（规则 18）：临时分支上给 `docs/api-surface/v3.0/index.ts` 追加一行
   `export * from "./types/qaqh/HandEditedIntoTheLock";` 并提交 ⇒
   `python scripts/check-lts-api-surface.py --skip-export` **exit 1**，报
@@ -83,7 +83,7 @@
   `Golden contract byte compare` 的 **step conclusion 都是 `success`**，只有
   `gh run view --log` 里能看到 `##[error]Process completed with exit code 1`。
   ⇒ 规则 18 那句"看步骤明细而不是 job 绿灯"仍不够，`continue-on-error` 连 step 结论一起
-  改写；验收必须以日志为准（已在手册 §1 与交接 §6.5 修正）。
+  改写；验收必须以日志为准（已在手册 §1 与交接 §6.1 修正）。
 
 ## 落地清单
 
