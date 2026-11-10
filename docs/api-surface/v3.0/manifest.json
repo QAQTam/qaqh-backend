@@ -2,10 +2,10 @@
   "format_version": 1,
   "wire_version": 2,
   "backend_version": "3.0.20261110-g1842986",
-  "source_revision": "a595d1450e11edb8c0a5495159bcc6d2a1fb9705",
+  "source_revision": "ac54e508ec73ebf5c1205a4eb95a77c42d25fcdc",
   "source_dirty": false,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "ead943ac72efeb4d20a114fe60fefc68523c1aee5dea8df0b8310d4dbe2fc651",
+  "contract_hash": "c25b08f1265ca2992a91417afe9b11fc3a381e2b1b6950d9cca8f9e4b834fc71",
   "files": [
     {
       "path": "constants.ts",
@@ -1749,7 +1749,7 @@
     },
     {
       "path": "types/qaqh/ModelCapabilities.ts",
-      "sha256": "cfd98424a41b5274fc4ea6cacd7901c0d776a4590d5183b29fc43098f564d117"
+      "sha256": "22558ef6f6300941095070769e141f3afe2050529f06e6eba69fb9f5ad516b75"
     },
     {
       "path": "types/qaqh/ModelDef.ts",
