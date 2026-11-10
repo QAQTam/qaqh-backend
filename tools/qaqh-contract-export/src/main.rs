@@ -32,6 +32,9 @@ mod coverage;
 // cs_backend must run after the ts-rs type export: it parses the generated
 // TypeScript subset and re-encodes the same wire contract as C# sources.
 mod cs_backend;
+/// ADR-0008 step 2 (measurement, not migration): reconcile the IR (JSON Schema, read off
+/// the Rust DTO) against the C# that `cs_backend` already emitted. Writes nothing.
+mod ir_diff;
 /// ADR-0008 step 1: JSON Schema projection straight off the Rust DTO. Its output is a
 /// preview tree, not a contract artifact — and it never parses the TypeScript backend's
 /// output, which is the whole point (see `FLOAT_FIELDS` in `cs_backend.rs`).
@@ -86,9 +89,29 @@ fn main() {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
-    let command = args
-        .next()
-        .ok_or("expected export --out <dir> or check --against <dir>")?;
+    let command = args.next().ok_or(
+        "expected export --out <dir>, check --against <dir>, schema-preview --out <dir>, \
+         or ir-diff [dir]",
+    )?;
+    if command == "ir-diff" {
+        // 一次性量尺，默认自己生成一份临时 stage（不落产物、不进 manifest、不动金标准）；
+        // 也可以 `ir-diff --against <dir>` 复用一棵已导出的树，省一次 generate()。
+        return match args.next().as_deref() {
+            None => ir_diff_from_fresh_stage(),
+            Some("--against") => {
+                let target =
+                    PathBuf::from(args.next().ok_or("ir-diff --against needs a directory")?);
+                if args.next().is_some() {
+                    return Err("unexpected trailing argument".into());
+                }
+                ir_diff::run(&target)
+            }
+            Some(other) => {
+                return Err(format!("ir-diff takes no argument or --against <dir>, got {other:?}")
+                    .into());
+            }
+        };
+    }
     let flag = args.next().ok_or("missing output flag")?;
     let target = PathBuf::from(args.next().ok_or("missing directory")?);
     let release = match args.next().as_deref() {
@@ -227,6 +250,24 @@ fn schema_preview(target: &Path, release: bool) -> Result<(), Box<dyn std::error
         target.display()
     );
     Ok(())
+}
+
+/// `ir-diff` with no directory: generate once into a temp stage purely to have the
+/// `cs/*.cs` side to read. `generate()` + `validate_layout()` are the same calls `check()`
+/// makes, so the diagnostic measures the real artifact tree and then throws it away.
+fn ir_diff_from_fresh_stage() -> Result<(), Box<dyn std::error::Error>> {
+    let stage = env::temp_dir().join(format!(
+        "qaqh-contract-ir-diff-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    fs::create_dir(&stage)?;
+    let result = generate(&stage).and_then(|()| {
+        validate_layout(&stage)?;
+        ir_diff::run(&stage)
+    });
+    let _ = fs::remove_dir_all(&stage);
+    result
 }
 
 fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {

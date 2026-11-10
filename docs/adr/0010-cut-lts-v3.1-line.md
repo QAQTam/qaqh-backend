@@ -27,6 +27,13 @@
    是 report-only 的，"重切一下它就绿"没有东西拦。这一条由 **ADR-0011** 补上
    （锁身份登记 + 守卫硬比 tree OID，`--skip-export` 下也跑）。切 `LTS-v3.1` 时
    `--pin-frozen` 必须与重切金标准落在**同一个提交**（手册 §8 第 3 步已写）。
+6. **切线前新得到的量化输入**（`ir-diff`，见 ADR-0008 §第 2 步（量）实施记录）：IR 覆盖
+   8/236 型（3.4%）；被覆盖的部分**属性与判别式集合 0 丢失**，但整数属性 38/77 是
+   宽度/符号位降级（`ulong→long` 36×、`byte→long` 1×、`uint→long` 1×），全表面 192 个
+   整数属性里**无符号 CLR 0 个**、`[JsonUnmappedMemberHandling]` 0 处。
+   ⇒ 我上一轮那句"现在就切会把 possibly-wrong 的 C# 冻住"要收窄成：**冻住的不是正在算错的
+   字节，而是"精度与 compat 声明继续无人看守"** —— 其余 228 个类型现在连量都量不到。
+   所以 §待决 2 攒着的清单要加一项 **IR 扩面**（至少到 `qaqh-ringing*` + `qaqh-config-api`）。
 3. revision 的机制事实（决定"要不要 bump"之前必须看清它到底管什么）：
    - `crates/qaqh-ringing/src/v2/types.rs:39/44`：
      `COMMAND_CONTRACT_REVISION = "ringing-commands-7"`、`SESSION_CONTRACT_REVISION = "ringing-session-2"`。
@@ -65,6 +72,7 @@
 2. **切线时机**：现在就切 `LTS-v3.1`（只为 3 个产物），还是等 ADR-0004 的 `unknown` 那套
    与 ADR-0008 的 `schema/` 折入一起切（一次换锁吸收三批 refreeze，前端只 pin 一次）。
    倾向：后者；攒着的差额由本 ADR 记账，不会丢。
+  （第二轮实测后追加：攒的那批里必须包含 IR 扩面，否则新线的 C# 面仍是裸奔 —— §背景 6。）
 3. **错误语义变更要不要前端先行**：`qaqh-electron` 的 `pending_approvals` 消费方目前对
    500 的处理是什么、需不需要它先落一条确定文案，再让 v3.1 daemon 上线。
    这一条不在本仓可验证范围内（姊妹仓），必须由人确认。
@@ -77,6 +85,9 @@
 - [ ] ADR-0008：`schema/` 折入 `generate()`（同时 `GENERATOR_VERSION` 0.2.0 → 0.3.0，
       那一步会重写每个 C# 文件头的生成器注释 ⇒ 240 个文件的 `doc-only` 面）
 - [ ] ADR-0005：N-1 配对测试（切线前置条件，ADR-0007 §决策 3 要求 refreeze 的 ADR 附其结论）
+- [ ] **IR 扩面**（ADR-0008 第 1 步剩余部分）：`qaqh-config-api` → `qaqh-types` →
+      `qaqh-ringing*` → `qaqh-runtime::service_methods`；覆盖率从 8/236 抬起来之前，
+      "新线 C# 面无精度损失"这句话无法被任何工具验证（本轮实测）
 
 ## 被否选项
 

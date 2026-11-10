@@ -1,6 +1,6 @@
 # ADR-0008 中立 ContractIR + 每语言投影，退役 ts→cs 解析链
 
-状态: `已采纳（第 1 步已落地：schema 预览投影；主重构未实施）` · 决策日期 2026-11-10 ·
+状态: `已采纳（第 1 步 + 第 2 步的量尺已落地；替换投影与删解析机未实施）` · 决策日期 2026-11-10 ·
 **决策人：仓库所有者**（在"同意退役，按中立 IR + 每语言投影重构（工作量大但架构更好）"选项中拍板）
 
 ## 背景（已核对的代码事实）
@@ -45,7 +45,10 @@ C# 投影会静默生成 `long`，小数被截断**；而
   错误字节重新冻结**；
 - 路由快照与 facade 与此无关。
 
-六道闸门没有一个能看见它。这与 ADR-0004 §发现 的 `PermissionRequestDetails` 是同一形状：
+六道闸门没有一个能看见它（**这句已被部分修正**：2026-11-10 第二轮落地的 `ir-diff` 能看见它，
+前提是该类型已进入 IR 清单 —— 见 §第 2 步（量）的覆盖率 3.4%，也就是说今天它仍然只对
+8 个类型有效，对新增 f64 字段所在的大多数类型仍然看不见）。这与 ADR-0004 §发现 的
+`PermissionRequestDetails` 是同一形状：
 **信息在穿过 TS 这道窄腰时被丢弃，然后由人肉表格补回**。表格不是闸门。
 
 同族问题：`main.rs:199` 的 `.with_large_int("number")` 让 u64 也塌成 JS number，
@@ -158,8 +161,60 @@ C# 投影会静默生成 `long`，小数被截断**；而
 - [x] `schema` 投影（`schemars`）先行落地，纯新增 —— 已落地为 `schema-preview`，pilot = `qaqh-memwatch` 全导出面
 - [ ] pilot 扩面：`qaqh-config-api`（把 `autoCompactThreshold` 的 f64 案例纳入）→ `qaqh-types` → `qaqh-ringing*` → `qaqh-runtime::service_methods`
 - [ ] 扩面完成后，把 `schema/` 折进 `generate()`（⇒ 走 ADR-0007 refreeze，`GENERATOR_VERSION` 0.2.0 → 0.3.0）
-- [ ] C# 改为 IR 直投影，与 `cs_backend` 双跑逐字节 diff
+- [x] **量尺先行**：`cargo run -p qaqh-contract-export -- ir-diff`（见 §第 2 步（量））——
+      原计划写的"双跑逐字节 diff"经实测**做不到**（ts-rs 不暴露结构化 IR），
+      已按实测改成属性级对账，并把这一步提前到"替换投影"之前
 - [ ] 差异清单评审：每条要么被修好，要么成文为"旧输出即错误"
 - [ ] 删 `lex` / `parse_decl` / `FLOAT_FIELDS` / `ALIAS_TARGET` / `CS_KEYWORDS`
 - [ ] `coverage.rs` 的 `path` 列改为由表全等校验（收口 ADR-0003 r2：registry 已存在，缺的是控制面与反向覆盖）
 - [ ] `GENERATOR_VERSION` → 0.3.0，重切金标准（走 refreeze 流程）
+
+## 第 2 步（量）实施记录（2026-11-10 第二轮）
+
+新增 `ir-diff` 子命令（`tools/qaqh-contract-export/src/ir_diff.rs`）：把 IR 说过的话与
+`cs_backend` 已经发出去的 `cs/*.cs` 逐属性对账。**不写任何文件**、不参与 `generate()`、
+不动金标准 —— 它是量尺不是产物。
+
+### 一条把原计划改写的实测事实
+
+`ts-rs 12.0.1` **没有结构化 IR 可拿**：`TS` trait 公开面只有渲染后的 TS 字符串
+（`name`/`inline`/`decl`/`docs`）加一个只给依赖遍历用的 `TypeVisitor`
+（实测 `ts-rs-12.0.1/src/lib.rs:366-470`，全 crate 无 `pub enum Type`/`Typ`）。
+所以"C# 直出 IR 并与 `cs_backend` 比字节"这条路在不动 135 个 DTO 的前提下不存在；
+真 IR 只能是 schemars 那一侧，双跑只能是 **IR 事实 vs 已品 C# 的属性级对账**。
+C# 侧的读取也不是再造一个解析器：`cs_backend` 自己把 JSON 原名写在 attribute 里
+（`emit_properties`/`Decl::Enum`/`Decl::Union` 的 `format!` 字面量），按行取事实即可。
+
+### 测量结果（`ir-diff` 原样输出，本机）
+
+| 项 | 实测 |
+|---|---|
+| IR 覆盖率 | 8 型 / C# 共发 **236** 个类型文件 = **3.4%**；逐属性对账 77 项 |
+| 整数宽度/符号位降级 | **38 条**：`36× 期望 ulong → 实际 long`、`1× byte → long`、`1× uint → long` |
+| 全表面无符号性 | C# 整数属性 **192** 个，其中无符号 CLR（`ulong`/`uint`/`byte`/`ushort`）**0 个** |
+| 结构正确性 | 属性丢失/错类 **0**、判别式集合差异 **0** ⇒ 结构层面今天没有算错 |
+| `float` 被判成整数 | **0** —— 但原因是全仓只有 2 个 `f64` 属性，且**都**在 `FLOAT_FIELDS` 白名单里（`ConfigDto`/`ConfigPatch` 的 `autoCompactThreshold`，实测 `double` 与 `double?`） |
+| `strict-input` 类丢失 | **1 条**：`PermissionRequestDetails` 的 `deny_unknown_fields` 派生出 `additionalProperties:false`，而全表面 **0 处** `[JsonUnmappedMemberHandling]` ⇒ 消费端默认宽松（ADR-0004 §决策 5 的实据） |
+| 可空性/可选性约定差异 | 0（schemars 与 ts-rs 对 serde 属性的表达不必同形，故单列一类，不算错） |
+| 夹具整数超出 2^53-1 | 0 条（`with_large_int("number")` 的精度风险今天没有实例踩上） |
+
+### 由此收紧一句我上一轮说过头的话
+
+"现在就切 `LTS-v3.1` 会把 possibly-wrong 的 C# 冻住"——按实测应当拆成两半：
+
+- **结构不会错**：属性集合、判别式集合、`[JsonPropertyName]` 全部对得上（0 丢失）。
+- **精度无人看守**：无符号性在 236 个文件里 0 处保留；今天不出错只是因为
+  "恰好只有 2 个 f64 字段且都在表里"、"恰好没有 u64 超过 `i64::MAX`"。
+  下一个 f64 字段一进 DTO，`cs/` 就会静默出 `long`，而**除 `ir-diff` 外没有闸门会红**
+  ——前提是那个类型进了 IR 清单，即 §落地清单里的"pilot 扩面"。
+
+所以顺序结论变了：**扩面 > 替换**。差异清单今天读起来是"38 条精度降级 + 0 条错误"，
+这既否证了"解析机正在产出错误"的强命题，也证实了"它在独自撑着正确性"的弱命题。
+
+### 过程中踩到的一个自己造的坑（值得记）
+
+`ir-diff` 初版让预览树也走 `serde_json::to_value` 往返，结果 **9 个 schema 文件键序全变**
+（serde_json 未开 `preserve_order` ⇒ `Value::Object` 是 `BTreeMap`，键被字母排序）。
+修法是把两条通道拆开：`published` 直接 `to_string_pretty(&RootSchema)` 保持插入顺序，
+`facts` 才转 `Value` 给 diff 读结构。反证：重跑 `schema-preview` 与重构前那棵树逐文件
+SHA256 比对 ⇒ **0 差异**；同轮 `export` 的 `contract_hash` 仍是 `39256ad9…`（未被这次改动扰动）。
