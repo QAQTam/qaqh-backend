@@ -56,7 +56,10 @@ CI 红 = 拒绝该改动;金标准只允许在两种情况下再生成:① 新 L
 
 **`main` 上这条比对红是设计状态，不是待修缺陷**（ADR-0007 §决策 4）：
 `surface-policy.yml` 的 `Golden contract byte compare` 只在 target = `LTS-v3.0` 时硬拦，
-在 main 上是 `continue-on-error`（job 绿、步骤红 —— 验收新闸门必须看步骤明细，规则 18）。
+在 main 上是 `continue-on-error`（**job 绿、step 明细也绿，只有日志写着**
+`##[error]Process completed with exit code 1` —— 实测于 run `42798374172`。
+所以验收新闸门要看 `gh run view <id> --log`；只看 job 或 step 的绿灯都会骗人，
+规则 18 的原表述在此修正）。
 任何落在 main 的 `contract-refreeze`（新增产物、字段变化）都会让它红，直到按 §8 切新线
 并由机器重切金标准。此时**唯一禁止的动作**是改 `docs/api-surface/v3.0` 让它变绿：那棵树
 是冻结线持有的锁。main 上目前攒着的 refreeze 差额记在
