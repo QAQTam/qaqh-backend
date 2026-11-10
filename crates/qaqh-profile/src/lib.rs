@@ -15,7 +15,7 @@ pub mod resolver;
 pub mod store;
 
 pub use model::{ModelDef, ModelDefaults, ModelSelection, ProfilesDocument, ProviderDef};
-pub use presets::{provider_preset, ProviderPreset, PROVIDER_PRESETS};
+pub use presets::{PROVIDER_PRESETS, ProviderPreset, preset_compat, provider_preset};
 pub use resolver::{resolve_model_selection, EffectiveModelConfig, ModelResolveError};
 pub use store::{ProfilesStore, ProfileStoreError};
 

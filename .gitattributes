@@ -1,10 +1,7 @@
 # Auto detect text files and perform LF normalization
 * text=auto
 
-# 冻结守卫按字节比对金标准:check-lts-api-surface.py 的 compare_file_set 用 read_bytes(),
-# 而 core.autocrlf=true 会把金标准 checkout 成 CRLF(本机实测 601 个文件全带 CR),
-# 于是 Windows 上本地跑守卫 = 599 个产物整树假红。金标准是机器生成的导出物,永久钉死 LF,
-# 让守卫在任何平台等价(ADR-0007 §问题 4 / 决策 6)。
-# 注:snapshots/routes.txt 与 facade.txt 不受影响 —— 守卫用 read_text() 读,
-# Python 的 universal newlines 已把 \r\n 归一;实测两种行尾都 PASS。
+# 契约 golden 目录钉死 LF：exporter 产物即 LF，`check` / guard 的
+# compare_file_set 做字节等值；Windows 按 autocrlf 检出 CRLF 会把全部
+# 产物报成 differs 假阳性漂移。
 docs/api-surface/** text eol=lf
