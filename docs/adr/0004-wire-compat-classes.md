@@ -1,6 +1,6 @@
 # ADR-0004 wire 兼容方向是声明数据，不是隐含 serde 行为
 
-状态: `已采纳（未实施）` · 决策日期 2026-11-10 · 含一个待决子问题（见 §待决）
+状态: `已采纳（未实施）` · 决策日期 2026-11-10 · **§待决 已决**：出站引入 `unknown` fallback，入站维持 reject
 
 ## 背景（已核对的代码事实）
 
@@ -70,7 +70,10 @@
 - **把 compat 类写进注释/文档**：已被现实否证 —— `PersistentConfig` 的兼容策略就写在
   `config.rs:8` 的注释里，机器读不到，因此无法成为闸门。
 
-## 待决（需你拍板，不可代答）
+## 已决（2026-11-10）：出站面引入 `unknown` fallback；入站面维持 reject
+
+原文这一节是"待决"，现由仓库所有者拍板：**出站取 B（`unknown` 变体）**，入站维持既有的 reject。
+下面是核实过可行性之后的落地形状，不是愿望清单。
 
 **先记录一条实测到的既成事实**（`tools/qaqh-contract-export/src/artifact_tests.rs:77-107`，
 `wire_decoders_reject_invalid_discriminants`，本次跑过 = 5 passed）：
@@ -86,23 +89,55 @@
 新增变体时，pin 在 v3.0 的前端应当怎么办 —— 那是 TS 运行时（非 serde）的解析行为，
 本仓现有闸门完全管不到（见 ADR-0005）。
 
-`closed-set` wire enum 遇到**对端不认识的新变体**时：
+### 一条容易踩错的事实（查证 serde 官方 variant-attrs 文档，不靠记忆）
 
-- **A. reject**：报错。与现有反向测试同源（`scripts/check-sdk-contract.py:112-117` 的
-  `@ts-expect-error` 正依赖"账户状态/activity state 是闭合 enum"才成立），类型可判定性强；
-  但老前端连上新 daemon 的新变体 = 该次交互直接失败。
-- **B. fallback 变体**（`unknown`）：老前端不崩，但会把未知语义降级为"不知道"，
-  UI 必须为它设计占位表现，且 TS 类型退化为开放并集。
+> `#[serde(other)]` … Only allowed on a **unit variant** inside of an **internally tagged or
+> adjacently tagged** enum.
 
-本 ADR 不替你选。既然入站面已由闭合 serde enum 事实上取了 **A**，剩下真正要拍的只剩一件事：
-**出站面是否取 B** —— 老客户端不该因为收到不认识的事件变体而整条流失效，但代价是 TS 类型退化为
-开放并集、且必须为 `unknown` 设计 UI 占位。确认后才能在 `coverage.json` 里落 `variant_policy` 字段。
+⇒ 本仓的枚举分三类，只有前两类能机械套 `other`：
+
+| 类别 | 实测位置 | `unknown` 怎么加 |
+|---|---|---|
+| internally tagged（`#[serde(tag = "kind"/"type")]`） | `events.rs:52`、`state.rs:220/256/308/342`、`v2/types.rs:20/31/270/660/703`、`command.rs:45` | 加 **unit variant** `Unknown` + `#[serde(other)]`，零手写 impl ✅ |
+| adjacently tagged（`tag="kind", content="data"`） | `fact/content.rs:11`、`fact/types.rs:134/625`、`state.rs:113/129` | 同上，但 `Unknown` 必须是 unit variant ⇒ **降级即丢内容**。UI 必须按"详情不可用"设计，不能假装还在 |
+| 裸字符串 unit-only enum（只有 `rename_all`，无 `tag`） | `qaqh-memwatch/src/lib.rs:24/51` 的 `ComponentGroup`/`PhaseKind`，以及同类状态枚举 | **serde 不支持 `other`** ⇒ 要么手写 `Deserialize`，要么保持 closed 由前端容错。这一类需逐个定，是本决定唯一不能自动化的部分 |
+
+### 关键澄清：光在 Rust 加 `Unknown` 保护不了老前端
+
+出站失效发生在**生产端**：新 daemon 发 `kind:"super_thing"`，pin 在 v3.0 的前端不认识。
+`#[serde(other)]` 只让**反序列化方**（daemon 读自己的旧 DB、以及未来的 daemon）容忍；
+老前端的 TS 类型不会因为后端加了变体就自动长出容错。所以 B 的真机制是大厂那种
+**按版本降级发射（version-gated emission）**，共四件事：
+
+1. **契约声明**：出站 enum 在 `coverage.json` 带 `variant_policy: "fallback"`，并声明线上保留值
+   `"unknown"`；TS / C# / JSON Schema 三个投影都让 `"unknown"` 出现在可取值里。
+2. **生产端闸门**：每个新变体带"自哪个 revision 起存在"的元数据；daemon 向**较老的 client session**
+   序列化视图时，把对方不可能认识的变体改写成 `unknown`。依据是既有协商面
+   （`RingingV2OpenResponse.command_contract_revision` / `session_contract_revision` 已在
+   `main.rs:306-307` 握手携带），缺的只是"按 revision 降级"这一步。
+3. **前端表现**：`unknown` 必须有确定文案（不是空白/不是崩），否则"容错"与"坏掉"无法区分。
+4. **入站不变**：未知判别串继续 reject —— `artifact_tests.rs:77-107` 已把这层锁住。
+
+代价写清：第 2 项是这套里唯一真正复杂的。没做第 2 项之前，第 1+3 项只保证"前端不崩"，
+**不保证"老前端看到的是它认识的值"**。所以落地清单把 2 单独列一条，不假装一步到位。
 
 ## 落地清单
 
-- [ ] IR 上加 `compat` 属性，导出进 `coverage.json`（依赖 ADR-0008 的数据结构，可先手写最小版）
-- [ ] `PermissionRequestDetails` 纳入导出物；补 TS/C# 类型与 fixture
+顺序有讲究：先收**已经存在的 fail-open 盲区**（第 2、3 条，不依赖任何新机制），
+再做 `unknown` 那套（第 1、4、5 条，属 `contract-refreeze` 类改动，只能走 main / 新线）。
+
+- [ ] 收口契约盲区：`PermissionRequestDetails` 纳入导出物（TS + C# + JSON Schema + fixture）
 - [ ] `v2.rs:569-571` 及 `ContentValue::Ref` 分支（同文件 `:563`）的 `.ok()` 静默降级改为显式失败
+      —— 这两条是当前唯一"坏了不报错且守卫看不见"的实例，优先级高于任何新抽象
+- [ ] 列出**出站 enum 全集**并逐个归入 §已决 的三表之一（internally tagged / adjacently tagged /
+      裸字符串 unit-only）；第三类的处置必须逐个定，不能默认它能自动化
+- [ ] 契约声明 `variant_policy` + 线上保留值 `"unknown"`，并让 TS / C# / schema 三个投影都可见
+      （改导出物 ⇒ 提交必须带 `[contract-refreeze]`，禁入 `LTS-v3.0`）
+- [ ] 生产端 revision 闸门：变体带"自哪个 revision 起"的版本戳，向较老 client session 序列化时
+      把对方不认识的变体降级为 `unknown`（§已决 第 2 项，本清单里唯一复杂的一条）
 - [ ] 全仓扫一遍 wire 面上的 `deny_unknown_fields` 与 `from_*().ok()`，逐条分类
+- [ ] IR 上加 `compat` 属性，导出进 `coverage.json`（与 ADR-0008 合并落地；
+      `deny_unknown_fields` 一出现即可由 JSON Schema 的 `additionalProperties: false` 反推，
+      所以 compat 可以**派生**而非手抄 —— 手抄表正是本 ADR §被否选项里否掉的东西）
 - [ ] 守卫加"compat 类不得降级"检查
-- [ ] 待决项确认后，为每个 wire enum 落 `variant_policy`
+- [ ] 前端（`../qaqh-electron`）为 `unknown` 定确定文案；没有它，第 4/5 条只是后端自嗨

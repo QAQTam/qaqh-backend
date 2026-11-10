@@ -129,20 +129,28 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 - [ ] tag 已推,Release 页面出现且标记 Latest,资产齐全
 - [ ] 前端仓库把依赖 pin 到新 tag(契约 zip 里的 `QAQH_SOURCE_REVISION` 与 tag 提交一致)
 
-## 7. 仓库设置（需 admin，代码侧无法替你开）
+## 7. 仓库设置：LTS-v3.0 分支保护（2026-11-10 已开启）
 
-`CODEOWNERS` 与 required check 只有开了分支保护才生效。对 `LTS-v3.0` 需要：
+经所有者授权，已用 `gh api PUT /repos/QAQTam/qaqh-backend/branches/LTS-v3.0/protection` 开启并回读确认：
 
-1. Settings → Branches → Branch protection rules → **`LTS-v3.0`**
-   - ☑ **Require a pull request before merging**（禁直推冻结线；`main` 不必）
-   - ☑ **Require review from Code Owners**（`.github/CODEOWNERS` 那 12 条路径才生效）
-   - ☑ **Require status checks to pass** → 加入
-     `surface-policy / change-policy`、`lts-api-guard / freeze`、`sdk-contract / contract`
-   - ☐ Do not allow bypassing（要不要锁死由你定：手册 §3 的热修依赖这条）
-2. Settings → Branches → **`main`**（可选）：只加 required status check、不开 code-owner 要求，
-   保持快车低摩擦。
+| 项 | 值 | 说明 |
+|---|---|---|
+| Require a pull request before merging | ✅（1 个批准） | **直推冻结线这条路从此关闭** —— 本轮"两个 worker 各修同一个缺陷并 merge 撞车"的那个入口 |
+| Require review from Code Owners | ✅ | 见下方"尚未生效的一半" |
+| Require status checks | ✅ `contract`、`freeze` | context 名是**从 API 实测取的**（不是猜的）：`sdk-contract.yml` 的 job 名 `contract`、`lts-api-guard.yml` 的 job 名 `freeze` |
+| Strict（分支必须先与 LTS 同步） | ✅ | 两个 worker 并发时防"基于陈旧分支合入" |
+| Require conversation resolution | ✅ | — |
+| Allow force pushes / deletions | ❌（禁用） | 冻结线不可改写历史 |
+| **Do not enforce for admins** | ⚠️ **留口**（`enforce_admins=false`） | 热修手册 §3 依赖 admin 直推。要真锁死就把这项改 true，代价是热修必须走 PR |
 
-没开这两项的现实后果，就是本轮亲身遇到的：两个 worker 在 20 分钟内各自独立修了同一个金标准
-EOL 缺陷、互不知情并在 merge 时正面冲突（`docs/adr/0007-refreeze-governance.md` §问题 4 末段）。
-label `contract-refreeze` / `guard-tightening` 已建好，分类逻辑已上线（`surface-policy.yml`），
-差的正是上面这两下勾选。
+### 两个**故意留着**的缺口（不要误以为全通了）
+
+1. `change-policy`（即 `surface-policy.yml` 的 job）**没有**加进 required contexts ——
+   因为 workflow 文件是从**被推的那个 ref** 读取的，而 `surface-policy.yml` 目前只在 `main` 上。
+   现在就加，LTS 的每个 PR 会永远停在 "Expected"，等于把冻结线焊死。
+   **等 `surface-policy.yml` + `.github/CODEOWNERS` 进了 LTS，再把这个 context 补上**：
+   `gh api POST .../protection/required_status_checks/contexts --input '{"contexts":["change-policy"]}'`
+2. 同理，`Require review from Code Owners` 已勾但 `.github/CODEOWNERS` 还不在 LTS ref 上 ⇒
+   当前对 LTS 的 PR 是"无匹配 owner → 不触发 code-owner 要求"。第 1 条落地时这条自动一起生效。
+
+`main` **未加保护**（快车，规则见 `docs/adr/0001` §决策）。
