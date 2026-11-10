@@ -27,8 +27,8 @@ use super::authz::Identity;
 use super::command::fail;
 use super::test_hooks::InteractionFault;
 use super::v2::{
-    api_error_response, caller_lease_bound_to_identity, existing_v2_receipt, json_response,
-    resolved_interaction_existing,
+    ResolvedInteraction, api_error_response, caller_lease_bound_to_identity, existing_v2_receipt,
+    json_response, resolved_interaction_existing,
 };
 use super::{AppState, Scope};
 
@@ -197,24 +197,38 @@ pub(crate) async fn execute_command(
         ack.existing = Some(existing.into_existing());
         return json_response(StatusCode::OK, &ack);
     }
-    if let CommandTarget::Session { session_id } = &envelope.target
-        && let Some(existing) =
-            resolved_interaction_existing(&state, session_id, &envelope.command).await
-    {
-        return json_response(
-            StatusCode::OK,
-            &RingingV2CommandAck {
-                command_id: envelope.command_id.clone(),
-                status: RingingCommandAckStatus::Rejected,
-                code: Some("interaction_already_resolved".into()),
-                message: Some("interaction was already resolved".into()),
-                retry_after_ms: None,
-                existing: Some(existing),
-                result: None,
-                operation: None,
-                revision: None,
-            },
-        );
+    if let CommandTarget::Session { session_id } = &envelope.target {
+        match resolved_interaction_existing(&state, session_id, &envelope.command).await {
+            ResolvedInteraction::Verdict(existing) => {
+                return json_response(
+                    StatusCode::OK,
+                    &RingingV2CommandAck {
+                        command_id: envelope.command_id.clone(),
+                        status: RingingCommandAckStatus::Rejected,
+                        code: Some("interaction_already_resolved".into()),
+                        message: Some("interaction was already resolved".into()),
+                        retry_after_ms: None,
+                        existing: Some(existing),
+                        result: None,
+                        operation: None,
+                        revision: None,
+                    },
+                );
+            }
+            ResolvedInteraction::None => {}
+            // 投影读不出来时**不能走 fail()**：那会写一条终态回执，等于宣称我们知道结果。
+            // 错误码复用 `state_unavailable`（与 handle_pending_approvals_v2 里同一条件的
+            // 用法同义：canonical projection 不可读），不新造词表；且不落回执，客户端按
+            // outcome_unknown 用原 command_id 复查/重试
+            // （coverage.json 的 receipt_policy.semantics.outcome_unknown）。
+            ResolvedInteraction::Unavailable(error) => {
+                return api_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "state_unavailable",
+                    &format!("canonical control projection for {session_id}: {error}"),
+                );
+            }
+        }
     }
 
     {

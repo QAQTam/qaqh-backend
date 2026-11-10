@@ -961,19 +961,34 @@ fn interaction_target(command: &qaqh_ringing::RingingCommand) -> Option<Interact
     }
 }
 
-/// Structured verdict of an already-resolved interaction, if the canonical
-/// control projection has one. Legacy facts carry no verdict → `None`, and the
-/// command falls through to the worker's existing rejection path.
+/// 已裁决交互的三种结局。**读不出投影 ≠ 没有裁决**：把读取故障压成"没有裁决"再往下放，
+/// 等于在存储故障时可能重复执行一次副作用命令——而幂等语义要求"未知就说未知"
+/// （`coverage.json` 的 `receipt_policy.outcome_unknown`）。原来的
+/// `owner.snapshot().await.ok()?` 干的正是这件事。
+pub(super) enum ResolvedInteraction {
+    /// 有结构化裁决结论，直接作为 existing 回放（重放路径）。
+    Verdict(RingingV2ExistingResult),
+    /// 投影读到了，但这条交互没有裁决（legacy facts 或未裁决）⇒ 交给 worker。
+    None,
+    /// 投影读不出来 ⇒ 调用方必须按"结果未知"回答，**且不得写终态回执**。
+    Unavailable(String),
+}
+
 pub(super) async fn resolved_interaction_existing(
     state: &AppState,
     session_id: &str,
     command: &qaqh_ringing::RingingCommand,
-) -> Option<RingingV2ExistingResult> {
-    let target = interaction_target(command)?;
+) -> ResolvedInteraction {
+    let Some(target) = interaction_target(command) else {
+        return ResolvedInteraction::None;
+    };
     let owner = state.service.owners().get_or_create(session_id);
-    let snapshot = owner.snapshot().await.ok()?;
+    let snapshot = match owner.snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => return ResolvedInteraction::Unavailable(error.to_string()),
+    };
     let interactions = snapshot.interactions;
-    let interaction = match target {
+    let found = match target {
         InteractionTarget::InteractionId(id) => interactions
             .iter()
             .find(|interaction| interaction.interaction_id.as_str() == id),
@@ -983,14 +998,21 @@ pub(super) async fn resolved_interaction_existing(
                 .as_ref()
                 .is_some_and(|call_id| call_id.as_str() == id)
         }),
-    }?;
-    let decision = interaction.resolution.as_ref()?.decision;
-    let result = command_result_for(
+    };
+    let Some(interaction) = found else {
+        return ResolvedInteraction::None;
+    };
+    let Some(resolution) = interaction.resolution.as_ref() else {
+        return ResolvedInteraction::None;
+    };
+    let Some(result) = command_result_for(
         interaction.kind,
         interaction.interaction_id.as_str(),
-        decision,
-    )?;
-    Some(RingingV2ExistingResult::InteractionResolved { result })
+        resolution.decision,
+    ) else {
+        return ResolvedInteraction::None;
+    };
+    ResolvedInteraction::Verdict(RingingV2ExistingResult::InteractionResolved { result })
 }
 
 fn command_result_for(
@@ -1170,16 +1192,88 @@ pub(crate) fn api_error_response(status: StatusCode, code: &str, message: &str) 
             "code": code,
             "message": message,
         }))
-        .unwrap_or_default(),
+        // 错误体只有两个字符串，编码不可能失败；真失败了就是 serde_json 自身出事。
+        // 这里绝不允许 `unwrap_or_default()` —— 那会发一个"状态码说错了、内容说不出"
+        // 的响应，客户端连 code 都读不到（宪法 5：报错别静默）。
+        .expect("error body is two JSON strings; encoding cannot fail"),
     )
         .into_response()
 }
 
 pub(crate) fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
-    (
-        status,
-        [(header::CONTENT_TYPE, "application/json")],
-        serde_json::to_vec(value).unwrap_or_default(),
-    )
-        .into_response()
+    match serde_json::to_vec(value) {
+        Ok(body) => (status, [(header::CONTENT_TYPE, "application/json")], body).into_response(),
+        Err(error) => {
+            // 编码失败绝不等于"发一个 200 空体"：客户端只会拿到一段无法解析的 JSON，
+            // 而所有守卫看不见任何东西（ADR-0004 §决策 4 的同族，只是它在出站这一侧）。
+            // 可达性要说实话：service 面先把 DTO 转成 `Value`，而 `serde_json::to_value`
+            // 对非有限浮点是 **Ok(Value::from(f))→NaN 塌成 null**（value/ser.rs，实测有
+            // 断言钉住），所以 `json_response` 在这里拿到的是合法 Value ⇒ 这条 500 分支
+            // 在当前代码里**没有现网可达路径**，它是最后一道防线。真正待修的洞在
+            // config.load 那条无值域校验的读数路径（NaN 会以 `null` 的身份出现在
+            // `autoCompactThreshold` 上），已记进 ADR-0004 待办而不是顺手改配置语义。
+            let code = "response_serialization_failed";
+            log::error!("[v2] {code}: {error}");
+            api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                code,
+                &format!("failed to encode response body: {error}"),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod response_encoding_tests {
+    use super::{api_error_response, json_response};
+    use axum::http::StatusCode;
+
+    #[derive(serde::Serialize)]
+    struct Gauge {
+        ratio: f64,
+    }
+
+    /// 编码失败必须显式失败，不许塌成"200 + 空体"。
+    #[tokio::test]
+    async fn v2_json_response_never_returns_an_empty_success_body() {
+        let response = json_response(StatusCode::OK, &Gauge { ratio: f64::NAN });
+        assert_eq!(
+            response.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "编不出去的响应必须是失败，不是看起来成功的空体"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body");
+        assert!(!bytes.is_empty(), "错误体必须真的带内容");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("error body is JSON");
+        assert_eq!(parsed["code"], "response_serialization_failed");
+    }
+
+    /// `json_response` 注释里那条可达性判断的证据：`to_value` 对 NaN 是 **成功**，
+    /// 结果是 `null` —— 所以 service 面不会走到上面那条 500 分支，而是把 NaN 静默
+    /// 换成 null（config.load 的洞就在这儿，见 ADR-0004 待办）。
+    #[test]
+    fn v2_to_value_collapses_non_finite_floats_to_null() {
+        assert_eq!(
+            serde_json::to_value(f64::NAN).expect("to_value accepts any f64"),
+            serde_json::Value::Null
+        );
+        assert!(
+            serde_json::to_vec(&f64::NAN).is_err(),
+            "直接编码（json_response 这条路）才会报错——这正是两条路的分岔"
+        );
+    }
+
+    /// 错误体本身不可为空的另一例：`api_error_response` 只拼两个字符串，编码不可失败，
+    /// 所以它用 `expect` 而不是发一段空 body（客户端连 code 都读不到）。
+    #[tokio::test]
+    async fn v2_api_error_response_always_carries_a_code() {
+        let response = api_error_response(StatusCode::BAD_GATEWAY, "state_unavailable", "boom");
+        let bytes = axum::body::to_bytes(response.into_body(), 4096)
+            .await
+            .expect("body");
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("error body is JSON");
+        assert_eq!(parsed["code"], "state_unavailable");
+    }
 }

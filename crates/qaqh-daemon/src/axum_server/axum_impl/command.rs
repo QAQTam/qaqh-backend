@@ -33,6 +33,11 @@ pub(crate) fn accept_ack(command_id: String, message: Option<String>) -> Ringing
 }
 
 /// 命令幂等指纹。进程内入口与 HTTP 面必须共用，否则重放判定会漂移。
+///
+/// 这里绝不允许 `unwrap_or_default()`：payload 塌成 `""` 时 `sha256("")` 是个**常量**，
+/// 两个各自编码失败的信封会撞成同一指纹，于是 `duplicate_command_mismatch` 那道闸
+/// 当场失去区分力（`coverage.json` 的 `receipt_policy.semantics.fingerprint_guard`
+/// 说的正是"不同 payload 必须被拒，而不是被当成重放"）。
 pub(crate) fn command_fingerprint(envelope: &RingingV2CommandEnvelope) -> String {
     let payload = serde_json::to_string(&serde_json::json!({
         "contract_revision": envelope.contract_revision,
@@ -40,7 +45,12 @@ pub(crate) fn command_fingerprint(envelope: &RingingV2CommandEnvelope) -> String
         "preconditions": envelope.preconditions,
         "command": envelope.command,
     }))
-    .unwrap_or_default();
+    // `json!` 先转成 `Value`。本仓实测：`qaqh-ringing` 里没有任何 `f32`/`f64` 字段，
+    // 命令面也不携带 ConfigDto/ConfigPatch（那两个才有 auto_compact_threshold: f64），
+    // 所以指纹这一步不可失败 —— 用 `expect` 而不是 `unwrap_or_default()`：后者在失败时
+    // 把 payload 塌成 `""`，指纹变成常量 `sha256("")`，两个不同的坏信封会撞成同一指纹，
+    // `duplicate_command_mismatch` 那道闸当场失去区分力。
+    .expect("fingerprint payload is a Value built from float-free command types");
     qaqh_types::sha256_hex(payload.as_bytes())
 }
 
