@@ -1,0 +1,80 @@
+name: Surface policy
+
+# ADR-0007：换锁(refreeze)与收紧(tightening)必须在机器上分岔；
+# ADR-0003 决策 4：金标准比对在 main 上也跑（report-only），于是"本该进 LTS 的
+# 改动提错了 main"在 PR/push 页面就可见，而不是等 cherry-pick 时才发现守卫从没跑过。
+
+on:
+  pull_request:
+  push:
+    branches: [main, LTS-v3.0]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  change-policy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: qaqh-backend
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: qaqh-backend
+          # 分类要算 base..head 的文件集，浅克隆拿不到基线。
+          fetch-depth: 0
+      # 姊妹 path 依赖：导出器经 qaqh-runtime 传递依赖 mutil-ai，必须按同一 pin 取。
+      - uses: actions/checkout@v4
+        with:
+          repository: qaqtam/mutil-ai
+          ref: 4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4
+          path: mutil-ai
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: qaqh-backend
+
+      - name: Resolve base / head / target / labels
+        id: ctx
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            echo "base=$PR_BASE" >> "$GITHUB_OUTPUT"
+            echo "head=$PR_HEAD" >> "$GITHUB_OUTPUT"
+            echo "target=$PR_BASE_REF" >> "$GITHUB_OUTPUT"
+            echo "labels=$(gh pr view "$PR_NUMBER" --json labels -q '[.labels[].name] | join(",")' 2>/dev/null || true)" >> "$GITHUB_OUTPUT"
+          else
+            echo "base=$EVENT_BEFORE" >> "$GITHUB_OUTPUT"
+            echo "head=$SHA" >> "$GITHUB_OUTPUT"
+            echo "target=$REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "labels=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Classify the change (refreeze vs tightening)
+        env:
+          SURFACE_BASE_SHA: ${{ steps.ctx.outputs.base }}
+          SURFACE_HEAD_SHA: ${{ steps.ctx.outputs.head }}
+          SURFACE_TARGET_BRANCH: ${{ steps.ctx.outputs.target }}
+          SURFACE_LABELS: ${{ steps.ctx.outputs.labels }}
+        run: python3 scripts/check-surface-change-policy.py
+
+      - name: Route registry, literal-route lint, facade baseline
+        run: python3 scripts/check-lts-api-surface.py --skip-export
+
+      # LTS 上是硬闸；main 上只报告（快车允许演进，但必须看得见它动了什么）。
+      - name: Golden contract byte compare
+        continue-on-error: ${{ steps.ctx.outputs.target != 'LTS-v3.0' }}
+        run: cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0

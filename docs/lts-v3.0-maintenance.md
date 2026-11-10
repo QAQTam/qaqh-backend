@@ -95,7 +95,16 @@ git push origin v3.0.1
 | 工作流 | 触发 | 作用 |
 |---|---|---|
 | `sdk-contract.yml` | PR / push(main、LTS-v3.0)/ 手动 | Rust 测试三件套 + 契约确定性 + 严格 TS 消费者 + 契约哈希锁定 |
+| `lts-api-guard.yml` | push / PR → `LTS-v3.0` | 金标准逐字节比对 + 路由表/门面快照(硬闸,仅冻结线) |
+| `surface-policy.yml` | PR / push(main、LTS-v3.0) | **改动分类闸**:`contract-refreeze` vs `guard-tightening` 判定 + 路由登记处 lint + 门面;金标准比对在 main 上 report-only、在 LTS 上硬拦 |
 | `release.yml` | 推 `v*` tag(发布)/ 手动 dispatch(干跑) | 双平台 `--locked` release 构建、打包、发 Release |
+
+`surface-policy.yml` 的判据是**改动落点**,不是人写的标签文案:只动 `snapshots/*` ⇒ 要求
+`guard-tightening`;动了导出物(`manifest.json`/`types/`/`cs/`/`fixtures/`…)⇒ 要求
+`contract-refreeze`,且**禁止目标为 `LTS-v3.0`**(换锁属新线,如 `LTS-v3.1`)。标记可写在
+commit subject/body 的 `[guard-tightening]` 或 PR label(仓库已建好这两个 label)。
+实测:引入整份金标准的 `b96f2b72` 被该闸判红;ADR-0003 那次只改 `routes.txt` 的提交
+自动判为 `guard-tightening` 并放行。
 
 外部依赖钉子:`qaqtam/mutil-ai` @ `4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4`。
 LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级属 main 的权利。
@@ -119,3 +128,21 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 - [ ] (标准流程)dispatch 干跑双平台绿
 - [ ] tag 已推,Release 页面出现且标记 Latest,资产齐全
 - [ ] 前端仓库把依赖 pin 到新 tag(契约 zip 里的 `QAQH_SOURCE_REVISION` 与 tag 提交一致)
+
+## 7. 仓库设置（需 admin，代码侧无法替你开）
+
+`CODEOWNERS` 与 required check 只有开了分支保护才生效。对 `LTS-v3.0` 需要：
+
+1. Settings → Branches → Branch protection rules → **`LTS-v3.0`**
+   - ☑ **Require a pull request before merging**（禁直推冻结线；`main` 不必）
+   - ☑ **Require review from Code Owners**（`.github/CODEOWNERS` 那 12 条路径才生效）
+   - ☑ **Require status checks to pass** → 加入
+     `surface-policy / change-policy`、`lts-api-guard / freeze`、`sdk-contract / contract`
+   - ☐ Do not allow bypassing（要不要锁死由你定：手册 §3 的热修依赖这条）
+2. Settings → Branches → **`main`**（可选）：只加 required status check、不开 code-owner 要求，
+   保持快车低摩擦。
+
+没开这两项的现实后果，就是本轮亲身遇到的：两个 worker 在 20 分钟内各自独立修了同一个金标准
+EOL 缺陷、互不知情并在 merge 时正面冲突（`docs/adr/0007-refreeze-governance.md` §问题 4 末段）。
+label `contract-refreeze` / `guard-tightening` 已建好，分类逻辑已上线（`surface-policy.yml`），
+差的正是上面这两下勾选。

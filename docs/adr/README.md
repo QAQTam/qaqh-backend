@@ -37,11 +37,11 @@
 |---|---|---|
 | [0001](0001-kernel-userspace-branch-model.md) | kernel/user-space 分支模型与 LTS API 冻结 | 已采纳 |
 | [0002](0002-contract-source-of-truth-no-openapi.md) | 契约真相源 = Rust DTO；拒绝 OpenAPI 承载 RingingV2 | 已采纳（含 `已拒绝` 方案） |
-| [0003](0003-route-registry-fail-closed.md) | 冻结守卫必须 fail-closed：路由 registry 单一真相源 | 已采纳（未实施）· **r2 修订**：registry 其实已存在，缺口收敛到控制面 |
+| [0003](0003-route-registry-fail-closed.md) | 冻结守卫必须 fail-closed：路由 registry 单一真相源 | **已落地于 main**（表驱动 + 删正则 + 禁止型 lint + 双向覆盖闸 + 行为测试）· r2 修订：registry 本就存在 |
 | [0004](0004-wire-compat-classes.md) | wire 兼容方向是声明数据，不是隐含 serde 行为 | 已采纳（未实施，含一个待决子问题） |
 | [0005](0005-n-minus-one-pairing-tests.md) | 兼容性由 N-1 配对测试证明，不由字节相等证明 | 已采纳（未实施） |
 | [0006](0006-contract-as-versioned-package.md) | 契约分发为版本化包 + provenance | 已采纳（未实施） |
-| [0007](0007-refreeze-governance.md) | 换锁治理：CODEOWNERS + refreeze 标签 + 守卫自保护 | 已采纳（未实施）· 含 §问题 4：金标准比对在非 Linux checkout 上结构性不可用 |
+| [0007](0007-refreeze-governance.md) | 换锁治理：CODEOWNERS + refreeze/tightening 标签 + 守卫自保护 | **已落地于 main**（CODEOWNERS + `surface-policy.yml` 分类闸 + 两个 label）· 剩 branch protection 需 admin |
 | [0008](0008-neutral-ir-per-language-projection.md) | 中立 ContractIR + 每语言投影，退役 ts→cs 解析链 | **第 1 步已落地**（schema 预览投影）· 主重构未实施 |
 
 ## 阅读顺序
