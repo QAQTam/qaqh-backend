@@ -54,6 +54,21 @@ B02 事故（`coverage.rs:54-55` 注释记录的那次"coverage 虚报了从未�
 ⇒ 控制面若改用 `.nest()`、变量拼 path、或 `.merge()`，**漏报是静默的，守卫照样绿**。
 这才是 fail-open 的确切位置：不在 v2 面（那里 panic-on-missing-arm 已兜住），在控制面。
 
+**而且这条洞已经被实测到了**（2026-11-10 现场核对，非推演）：`ROUTE_CHAINED` 只捕获 path、
+不捕获 method，于是它对这 4 条产出的是通配形式。当前快照里控制面 4 行的真实内容是
+
+```
+* /activity    * /control/v1/stop    * /control/v1/stop-if-idle    * /health
+```
+
+即 **LTS 冻结面今天并没有钉住这 4 个端点的 HTTP 方法** —— 把 `/health` 从 `GET` 改成 `POST`，
+`routes.txt` 仍是 `* /health`，守卫**全绿**（v2 那 16 条不受影响：它们走 `ROUTE_ARM`，方法是从
+match arm 的 `("GET", "…")` 字面量里取到的，所以是有方法的）。
+对比结果实测为：`union(表) − regex = {GET /activity, GET /health, POST /control/v1/stop,
+POST /control/v1/stop-if-idle}`，`regex − union = 同 4 条的 * 形式`，`EXACTLY EQUAL = False`。
+
+这条比 `.nest()` 假设更硬：它是一个**已经存在于金标准里的松匹配**，而且修法就是把控制面入表。
+
 ### 缺口 2：`snapshots/routes.txt` 是同一真相的第三份描述
 
 守卫把正则结果写进 `routes.txt` 与快照比对（`check-lts-api-surface.py:58-67,112-116`），
@@ -77,6 +92,20 @@ B02 事故（`coverage.rs:54-55` 注释记录的那次"coverage 虚报了从未�
    命名与归属写清楚：**它属于 LTS 冻结面，不属于 Ringing 契约面**，因此只进快照闸，不进 v2 虚报闸。
 2. **`routes.txt` 改由两份表生成**（`RINGING_V2_HTTP_ROUTES` + `CONTROL_PLANE_ROUTES`），
    **删除 `ROUTE_CHAINED` / `ROUTE_ARM` 两个正则**。快照覆盖面从此等于编译期常量，不再等于正则完备性。
+   落地方式：v2 那 16 条**不再从源码猜** —— 导出器已经链接 `qaqh-ringing`，加一个
+   `routes-dump` 子命令把 `RINGING_V2_HTTP_ROUTES` 原样打到 stdout，守卫读它即可；
+   这条路不新增导出物，因此**不触发 refreeze**（`snapshots/` 本就被比对逻辑豁免，见 ADR-0007 §问题 4）。
+2b. **把"收集型"正则换成"禁止型"lint —— 这才是 fail-closed 的确切形状。**
+   正则的问题不是"抓不全"，而是**它失败时表现为成功**（少抓一条 = 快照少一行 = 依旧绿）。
+   反转之后：在 `crates/qaqh-daemon/src/axum_server/**` 里，除表驱动循环内部那一处
+   `router.route(path, …)` 之外，**出现任何 `.route(` 字面量即红**。
+   这样 `.nest()`/`.merge()`/变量拼接/新写法统统不会被"漏抓"，而是**不认识就报错**。
+   同一条 lint 还顺手管住 `nest`/`merge`：`Router::nest(` 与 `Router::merge(` 一并禁止，
+   除非显式登记在豁免表里（带理由）。
+2c. **行为侧再兜一层**：daemon 加一个测试，对两份表的每条 `(method, path)` 用
+   `tower::ServiceExt::oneshot` 打一次请求，断言**不返回 404**（路径参数用合成值填），
+   并断言一个未登记路径返回 404。这把"表与真实 router 等价"从结构断言升级为行为断言，
+   与 ADR-0005 的配对测试同源，但成本是一次进程内调用、无网络无构建。
 3. **反向覆盖闸**：`validation.rs` 增加一条 —— 表里每条 route 必须被 ≥1 个 capability 引用，
    或在 `coverage.rs` 里显式标 `uncovered`（带理由）。虚报与漏报从此对称。
 4. **回归用例锁死这个性质**：故意在 daemon 里用 `.nest()` 挂一条控制面路由 ⇒ 守卫必须红。
@@ -104,7 +133,12 @@ B02 事故（`coverage.rs:54-55` 注释记录的那次"coverage 虚报了从未�
 ## 落地清单
 
 - [ ] `CONTROL_PLANE_ROUTES` 常量 + `build_router` 改为表驱动（缺 arm panic 语义与 v2 面一致）
+- [ ] 导出器加 `routes-dump` 子命令（打印 `RINGING_V2_HTTP_ROUTES`，不新增导出物、不触发 refreeze）
 - [ ] `routes.txt` 由两份表生成；删 `check-lts-api-surface.py` 的 `ROUTE_CHAINED`/`ROUTE_ARM`
+      （**注意这不是空改动**：控制面 4 行会从 `* /health` 变成 `GET /health`，
+      即金标准快照会有 4 行 diff。方向是**收紧**——多钉住了 4 个方法，不是改契约。）
+- [ ] **禁止型 lint**：`axum_server/**` 里除表驱动循环外出现 `.route(` / `.nest(` / `.merge(` 即红
+- [ ] **行为测试**：`tower::ServiceExt::oneshot` 逐条打表里的 `(method, path)`，断言非 404；未登记路径断言 404
 - [ ] `validation.rs` 反向覆盖闸（含 `uncovered` 显式声明语法）
 - [ ] `.nest()` 隐藏控制面路由的回归用例（守卫必须红）
 - [ ] `coverage.rs` 的 `path` 列改为对表全等校验，禁复合字符串
