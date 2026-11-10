@@ -72,11 +72,23 @@ pub enum SessionEvent {
     },
     /// 参数生成进度,仅用于展示;不代表工具已执行或参数已合法。
     /// `tool_name` 是模型侧声明的工具名;`text` 是累计参数前缀(替换语义)。
+    /// `lines_added`/`lines_removed` 是从**已到达的参数文本**数出来的累计行差
+    /// 估算:与 `text` 同帧、同替换语义,所以丢帧自愈、重帧幂等。口径是参数文本
+    /// (`edit` 数 `old_string`/`new_string`,`write` 数 `content`,
+    /// `apply_patch` 数补丁的 `+`/`-` 行),**不等于**实际改动行数——`replace_all`
+    /// 会成倍、命中失败会归零,而这些在参数吐完之前不可知。
+    /// 只对写工具出数:`None` = 该工具没有行数概念(read/grep/exec…)或估算已
+    /// 冻结,客户端不得用 `?? 0` 把「不知道」渲染成「零变化」。
+    /// 终态一到权威值立刻接管(`ToolFinished.code_delta` 是真 diff 口径)。
     ToolArgumentsDelta {
         call_id: ToolCallId,
         turn_id: TurnId,
         tool_name: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines_added: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lines_removed: Option<u32>,
     },
     /// 模型声明工具调用:declared 行已落库;`args` 是最终参数(裸 JSON 对象
     /// 或 null)。实时订阅者据此建立与 bootstrap `tools` 视图一致的工具身份。

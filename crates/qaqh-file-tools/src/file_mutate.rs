@@ -264,7 +264,7 @@ impl ToolProjection for WriteOutput {
         } else {
             mutation_change_summary(&self.path, self.lines_added, self.lines_removed)
         };
-        mutation_display(
+        let display = mutation_display(
             crate::support::arg_path(args),
             &self.path,
             crate::tool_api::PathOp::Write,
@@ -273,13 +273,18 @@ impl ToolProjection for WriteOutput {
             &self.model_text,
             self.diff.clone(),
         )
-        .with_lines(self.lines_added, self.lines_removed)
         .with_files(vec![crate::tool_api::ToolDisplayFile {
             path: self.path.clone(),
             op: if self.created { "add" } else { "update" }.to_string(),
             lines_added: Some(self.lines_added),
             lines_removed: Some(self.lines_removed),
-        }])
+        }]);
+        // 预览没有落盘：不出行差，于是终态也不出 code_delta——统计只说真发生过的改动。
+        if self.dry_run {
+            display
+        } else {
+            display.with_lines(self.lines_added, self.lines_removed)
+        }
     }
 }
 
