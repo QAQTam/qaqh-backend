@@ -153,6 +153,14 @@
       即"样例必须是 daemon 真发得出的形状"这条也是机器闸而不是评审意见。
 - [ ] 列出**出站 enum 全集**并逐个归入 §已决 的三表之一（internally tagged / adjacently tagged /
       裸字符串 unit-only）；第三类的处置必须逐个定，不能默认它能自动化
+      —— `ir-diff` 现在能把"IR 里有判别式集合、C# enum 里缺哪个成员"直接列出来
+      （对已覆盖的 8 型：判别式差异 0 条 ⇒ 集合本身对齐，缺的是 §已决 那条 `unknown` 值）。
+- [ ] **compat 类在 C# 投影里不可见**（2026-11-10 第二轮实测，§决策 1/5 的实据）：
+      `ir-diff` 扫全表面得到 `cs/*.cs` 里 `[JsonUnmappedMemberHandling]` **0 处**，
+      而 `deny_unknown_fields` 在 JSON Schema 侧确实派生出 `additionalProperties:false`
+      （`PermissionRequestDetails` 是唯一已覆盖的 strict-input 型，被点名为 1 条丢失）。
+      ⇒ §决策 5"冻结线上 compat 类不得降级"目前没有可比对的声明：先把 compat 类**投影进
+      C#/TS**（由 schema 派生，不手抄），守卫才有东西可比。
 - [ ] **`config.load` 的读数路径不做值域校验**（2026-11-10 第二轮实测新增，出站半边）：
       `crates/qaqh-config/src/config.rs:860` 直接接受 `PersistentConfig.auto_compact_threshold`
       （TOML 规范允许 `nan`），而 `ConfigDto.auto_compact_threshold` 是 `f64`；
