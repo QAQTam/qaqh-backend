@@ -65,6 +65,12 @@
 2. **`contract-refreeze` 标签 + 一个 required job**：凡改 `docs/api-surface/**` 的 PR 必须带该标签；
    带该标签的 PR **禁止合入 `LTS-v3.0`**（只允许合新 LTS 线，如 `LTS-v3.1`）。
    这把 §1 的散文变成一条机器不可绕过的路径，并首次让"换锁"与"回退"在流程上分岔。
+   **但标签必须分两类，否则会把自己的闸门改进也堵死**（ADR-0003 已撞见实例：控制面入表会让
+   `snapshots/routes.txt` 从 `* /health` 变成 `GET /health`，即"多钉住 4 个方法"）：
+   - `contract-refreeze`：`manifest.json` / `contract_hash` / 导出物变化 ⇒ 用户可见面变了 ⇒ 禁入 LTS；
+   - `guard-tightening`：**仅** `snapshots/*` 变化且导出物与 `contract_hash` 逐字节不变 ⇒
+     冻结得更多而非改约 ⇒ 允许进 LTS（bug 级发版即可）。
+   required job 判的是"变化的文件集合落在哪一类"，不是"有没有动 docs/api-surface"。
 3. **refreeze 必须成文**：带标签的 PR 附一份 ADR（模板见 `docs/adr/README.md`），
    内容至少含：新 `contract_revision` 值、被破坏的 capability 清单、迁移窗口、
    以及 ADR-0005 配对测试的结论。无 ADR 链接 ⇒ job 红。
