@@ -260,6 +260,10 @@ pub fn execute_authorized_with_context(
         .iter()
         .map(|path| (path.clone(), crate::file_state::last_hash(path)))
         .collect();
+    // code_delta 存在性探针：必须在变更落地前抓取（一次 fs::metadata，零
+    // spawn），供终态 write 档位判 files_created。替代旧 git HEAD 两步探测。
+    let code_delta_file_existed =
+        crate::code_delta::probe_pre_existed(&args, &context.workspace_root);
 
     // P4 A1: write/exec/net 必须先写 durable audit intent；失败不得进入 handler。
     let high_risk = matches!(
@@ -378,9 +382,7 @@ pub fn execute_authorized_with_context(
         manager.finalize_req(prepared, tool_result, elapsed_ms)
     });
     let code_delta = success
-        .then(|| {
-            crate::code_delta::compute(&name, &args, &context.workspace_root, &context.session_id)
-        })
+        .then(|| crate::code_delta::compute(&name, &args, code_delta_file_existed))
         .flatten();
 
     match report {
