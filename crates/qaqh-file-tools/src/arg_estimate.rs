@@ -531,8 +531,10 @@ mod tests {
             ("apply_patch", PATCH_ARGS),
         ] {
             let args: serde_json::Value = serde_json::from_str(args_json).unwrap();
-            let terminal = compute(tool, &args, std::path::Path::new("."), "test")
-                .unwrap_or_else(|| panic!("{tool} 终态没出数"));
+            // 探针值不影响本测试：锁的是行数口径；files_created 口径见
+            // code_delta 自己的测试。
+            let terminal =
+                compute(tool, &args, false).unwrap_or_else(|| panic!("{tool} 终态没出数"));
             assert_eq!(
                 estimate(tool, args_json),
                 ArgLineEstimate {
