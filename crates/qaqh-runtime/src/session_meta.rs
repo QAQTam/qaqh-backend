@@ -92,6 +92,11 @@ fn patch_columns(
 }
 
 /// Commit a title change to the business row.
+///
+/// `source` 目前只用于 `session.rename` 的落库语义（`TitleSource::User`）：
+/// `title_source` 是业务列，不进契约。`TitleSource::Auto`（LLM 自动生成）在 v3.0
+/// 冻结面上没有实现方——旧 `engine_title` / `qaqh-title` 已拆除，`chat_sync` 也
+/// 没有生产调用方，所以这里保留参数但不落笔，别把它当成「有自动标题」的证据。
 pub(crate) fn set_title(
     owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,

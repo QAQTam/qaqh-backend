@@ -7,6 +7,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 
 pub mod agent;
+pub mod handoff;
 pub mod progress;
 pub mod provider_job;
 pub mod quota_ledger;
