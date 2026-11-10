@@ -61,7 +61,7 @@ presence(`clients.list` 查询可见);daemon 未运行时桥会**自拉起**
 
 - 文本 + 图片 prompt
 - 流式回答与思考块
-- 工具调用卡片(声明/运行/输出尾窗/终态,含 `code_delta` 统计摘要与文件定位)
+- 工具调用卡片(参数生成中的实时行差估算/声明/运行/输出尾窗/终态,含 `code_delta` 统计摘要与文件定位)
 - 权限审批:`InteractionKind::Permission` → `session/request_permission` →
   `tool.permission.respond`
 

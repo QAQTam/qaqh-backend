@@ -1,250 +1,139 @@
-//! Code-delta calculation for successful file mutations.
+//! Code-delta 统计：终态展示投影的被动再投影。
 //!
 //! R-4 豁免点：本文件与 `execution.rs` 使用的 `qaqh_types::CodeDeltaRecord`
-//! 是编辑效果的被动纯数据记录，属 R-4 允许的「被动投影记录」（口径与完整例外
-//! 清单见 `dashboard.rs:7`）——除此以外禁止引入 domain 事件/行为类型。
+//! 只是「这次改动长什么样」的被动纯数据记录，不携带任何行为；此处不得引入
+//! domain 事件/行为类型。
 //!
-//! 本模块**零子进程**。`files_created` 由 `execution.rs` 派发前调用的
-//! [`probe_pre_existed`]（一次 `fs::metadata`）判定。此前这里是 git2 → git CLI
-//! 两步探测（`rev-parse HEAD` + `cat-file -e HEAD:<path>`，以「是否在 HEAD」
-//! 近似「是否新建」），已整体移除：
-//! - 统计口径不值得每次成功的 write/edit/delete 付两次进程 spawn（Windows 上
-//!   尤其贵）；
-//! - HEAD 口径本身不准——未 commit 的既有文件会被报成新建；
-//! - 旧探测还把 delete 档位算好的 `files_deleted=1` 覆写成 0（当时的注释自认
-//!   「既有口径」），随之一起修正。
+//! **只有一个事实源：`ToolResultDisplay`。** 工具在落盘那一刻已经把行差算成
+//! 真 diff（`file_shared::diff_stats_between` 逐块比对盘上正文，apply_patch 用
+//! 补丁引擎的逐文件计数），这里不再从参数文本反推第二套数字。
+//!
+//! 被废弃的旧口径及其病灶：
+//! - `edit` 从 `old_string`/`new_string` 数行 → 改 10 行块里的 1 行报 `+10 −10`
+//!   （展示面同一调用报 `+1 −1`），`replace_all` 命中 N 次只算 1 次；
+//! - `write` 从 `content` 数行且 `lines_removed` 恒 0 → 覆盖既有文件时声称「没删
+//!   任何行」；
+//! - `delete` 恒 `+0 −0` → 明明整份正文没了；
+//! - `files_created` 靠派发前一次 `fs::metadata` 探针猜——而工具自己已经知道
+//!   这次是新建还是覆盖（`files[].op`）。
+//!
+//! 现在拿不出权威行差就不出记录，绝不拿参数文本凑一个数。
 
-/// 派发前存在性探针：args 里的 `path`/`file_path` 在本次调用动手之前是否
-/// 已是磁盘上的文件。一次 `fs::metadata`，零 spawn。绝对路径原样、相对路径
-/// 锚定 workspace_root（与 `file_mutate::resolve_mutation_path` 同口径）。
-/// 只有 `write` 的结果被消费（判 `files_created`）；其余档位忽略该值。
-pub fn probe_pre_existed(args: &serde_json::Value, workspace_root: &std::path::Path) -> bool {
-    let Some(raw) = crate::support::arg_path(args) else {
-        return false;
+/// 把一次成功调用的展示投影折算成 code-delta 记录。
+///
+/// `None` = 这个工具没有行数概念（read/grep/exec…），或它自己声明没算
+/// （`dry_run` 预览不声称改动）。`Some(0)/Some(0)` = 真的零行差，与「不知道」
+/// 在类型上就是两件事，这里如实透传。
+pub fn from_display(
+    display: &qaqh_types::ToolResultDisplay,
+) -> Option<qaqh_types::CodeDeltaRecord> {
+    let lines_added = display.lines_added?;
+    let lines_removed = display.lines_removed?;
+    // 单文件调用归属到那一个路径；多文件补丁不归属到任何单一路径（旧口径保持）。
+    let file = match display.files.as_slice() {
+        [only] => Some(only.path.clone()),
+        _ => None,
     };
-    let path = std::path::Path::new(raw);
-    let resolved = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        workspace_root.join(path)
-    };
-    resolved.is_file()
+    Some(qaqh_types::CodeDeltaRecord {
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+        lines_added: lines_added as usize,
+        lines_removed: lines_removed as usize,
+        files_created: count_op(display, "add"),
+        files_deleted: count_op(display, "delete"),
+        file,
+    })
 }
 
-pub fn compute(
-    tool_name: &str,
-    args: &serde_json::Value,
-    file_existed_before: bool,
-) -> Option<qaqh_types::CodeDeltaRecord> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let file_path = crate::support::arg_path(args);
-
-    // 行数一律从 args 文本数出来（廉价，无子进程）。
-    // 档位键是 execution.rs 的 resolved tool name：`write` 不是 `file`
-    // （旧拼法 `("file", "write")` 在这里永远匹配不上，实测返回 None）。
-    match tool_name {
-        "write" => {
-            let content = args
-                .get("content")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            Some(qaqh_types::CodeDeltaRecord {
-                timestamp: now,
-                lines_added: content.lines().count(),
-                lines_removed: 0,
-                // 覆盖既有文件不算创建；派发前探针是唯一的判定源。
-                files_created: usize::from(!file_existed_before),
-                files_deleted: 0,
-                file: file_path.map(String::from),
-            })
-        }
-        "apply_patch" => {
-            // 行数与增删文件数都从补丁文本数出来。此前这一档落进
-            // `_ => None`，CodeChanged 与 code_stats.jsonl 对 apply_patch 整体缺席。
-            let patch = args.get("patch").and_then(|value| value.as_str())?;
-            let stats = crate::apply_patch_engine::patch_stats(patch).ok()?;
-            Some(qaqh_types::CodeDeltaRecord {
-                timestamp: now,
-                lines_added: stats.lines_added,
-                lines_removed: stats.lines_removed,
-                files_created: stats.files_created,
-                files_deleted: stats.files_deleted,
-                file: stats
-                    .single_path
-                    .map(|path| path.to_string_lossy().into_owned()),
-            })
-        }
-        "delete" => Some(qaqh_types::CodeDeltaRecord {
-            timestamp: now,
-            lines_added: 0,
-            lines_removed: 0,
-            files_created: 0,
-            // 成功即删除了一个文件（旧 git 探测会把这里覆写成 0，已随探测移除）。
-            files_deleted: 1,
-            file: file_path.map(String::from),
-        }),
-        "edit" => {
-            // str_replace：old_string 删除行数、new_string 新增行数（旧拼写同权）。
-            let added = args
-                .get("new_string")
-                .or_else(|| args.get("new_str"))
-                .and_then(|x| x.as_str())
-                .map(|s| s.lines().count())
-                .unwrap_or(0);
-            let removed = args
-                .get("old_string")
-                .or_else(|| args.get("old_str"))
-                .and_then(|x| x.as_str())
-                .map(|s| s.lines().count())
-                .unwrap_or(0);
-            Some(qaqh_types::CodeDeltaRecord {
-                timestamp: now,
-                lines_added: added,
-                lines_removed: removed,
-                // edit 读取既有文件是成功前提，本次调用不可能是创建者。
-                files_created: 0,
-                files_deleted: 0,
-                file: file_path.map(String::from),
-            })
-        }
-        _ => None,
-    }
+fn count_op(display: &qaqh_types::ToolResultDisplay, op: &str) -> usize {
+    display
+        .files
+        .iter()
+        .filter(|file| file.op == op)
+        .count()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{compute, probe_pre_existed};
-    use serde_json::json;
+    use super::from_display;
+    use qaqh_types::{ToolResultDisplay, ToolResultDisplayFile};
 
-    /// 探针只读磁盘，不碰任何子进程；绝对/相对/缺 path 三种拼写都要给对。
-    #[test]
-    fn probe_pre_existed_reads_the_disk() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let existing = dir.path().join("has.txt");
-        std::fs::write(&existing, "x").expect("write seed");
-        assert!(
-            probe_pre_existed(&json!({ "path": existing.to_string_lossy() }), dir.path()),
-            "绝对路径已存在 → true"
-        );
-        assert!(
-            probe_pre_existed(&json!({ "file_path": "has.txt" }), dir.path()),
-            "相对路径锚定 workspace_root"
-        );
-        assert!(
-            !probe_pre_existed(&json!({ "path": "nope.txt" }), dir.path()),
-            "不存在 → false"
-        );
-        assert!(
-            !probe_pre_existed(&json!({}), dir.path()),
-            "无 path 参数 → false"
-        );
+    fn display(
+        added: Option<u32>,
+        removed: Option<u32>,
+        files: Vec<(&str, &str)>,
+    ) -> ToolResultDisplay {
+        ToolResultDisplay {
+            summary: None,
+            diff: None,
+            files: files
+                .into_iter()
+                .map(|(path, op)| ToolResultDisplayFile {
+                    path: path.to_string(),
+                    op: op.to_string(),
+                    lines_added: added,
+                    lines_removed: removed,
+                })
+                .collect(),
+            lines_added: added,
+            lines_removed: removed,
+            header: None,
+            body: None,
+            outcome: None,
+        }
     }
 
-    /// write 的 files_created 完全由派发前探针决定：新建=1，覆盖=0。
-    /// （旧 git 探测把「未 commit 的既有文件」报成新建，此处口径改为磁盘。）
+    /// 编辑既有文件：真 diff 说了算，新建/删除计数都由 `files[].op` 决定，
+    /// 不再需要任何派发前探针。
     #[test]
-    fn write_files_created_follows_the_pre_dispatch_probe() {
-        let args = json!({ "path": "a.txt", "content": "x\ny\n" });
-        let created = compute("write", &args, false).expect("write delta");
+    fn update_reports_the_authored_line_delta() {
+        let record = from_display(&display(Some(1), Some(1), vec![("src/a.rs", "update")]))
+            .expect("display 出数即出记录");
+        assert_eq!(
+            (
+                record.lines_added,
+                record.lines_removed,
+                record.files_created,
+                record.files_deleted
+            ),
+            (1, 1, 0, 0)
+        );
+        assert_eq!(record.file.as_deref(), Some("src/a.rs"));
+    }
+
+    /// `write` 新建 vs 覆盖由工具自己的 `op` 区分——旧实现靠 `fs::metadata` 猜。
+    #[test]
+    fn created_and_deleted_files_come_from_file_ops() {
+        let created = from_display(&display(Some(5), Some(0), vec![("new.txt", "add")])).unwrap();
         assert_eq!((created.files_created, created.files_deleted), (1, 0));
-        let overwrite = compute("write", &args, true).expect("write delta");
-        assert_eq!((overwrite.files_created, overwrite.files_deleted), (0, 0));
+        let deleted = from_display(&display(Some(0), Some(5), vec![("gone.txt", "delete")])).unwrap();
+        assert_eq!((deleted.files_created, deleted.files_deleted), (0, 1));
+        assert_eq!(deleted.lines_removed, 5, "delete 不再是恒 0");
     }
 
-    /// edit 成功前提就是文件存在，永远不报创建（旧档位恒 1 全靠 git 覆写回 0，
-    /// 无 git 的仓库外路径因此虚报——现在结构性不可能）。
+    /// 多文件补丁不归属到单一路径，行差取终态合计。
     #[test]
-    fn edit_never_claims_creation() {
-        let delta = compute(
-            "edit",
-            &json!({"file_path": "a.rs", "old_string": "x", "new_string": "y"}),
-            true,
-        )
-        .expect("edit delta");
-        assert_eq!((delta.lines_added, delta.lines_removed), (1, 1));
-        assert_eq!((delta.files_created, delta.files_deleted), (0, 0));
-    }
-
-    /// 回归锁：delete 的 files_deleted=1 不许再被任何覆写归零。
-    #[test]
-    fn delete_keeps_its_deletion_count() {
-        let delta = compute("delete", &json!({ "path": "a.txt" }), true).expect("delete delta");
-        assert_eq!((delta.files_created, delta.files_deleted), (0, 1));
-    }
-
-    /// apply_patch 此前落进 `_ => None`：CodeChanged 与 code_stats.jsonl 对它
-    /// 整体缺席。行数从补丁文本数，上下文行不计入。
-    #[test]
-    fn apply_patch_reports_line_counts_from_the_patch() {
-        let patch = "\
-*** Begin Patch
-*** Update File: src/a.rs
-@@
--old one
--old two
-+new one
-+new two
-+new three
- context line
-*** End Patch
-";
-        let delta =
-            compute("apply_patch", &json!({ "patch": patch }), false).expect("apply_patch delta");
-        assert_eq!((delta.lines_added, delta.lines_removed), (3, 2));
-        assert_eq!((delta.files_created, delta.files_deleted), (0, 0));
-        assert_eq!(delta.file.as_deref(), Some("src/a.rs"));
-    }
-
-    #[test]
-    fn multi_file_apply_patch_delta_sums_across_files() {
-        let patch = "\
-*** Begin Patch
-*** Add File: a.txt
-+one
-+two
-*** Delete File: b.txt
-*** Update File: c.txt
-@@
--x
-+X
-*** End Patch
-";
-        let delta =
-            compute("apply_patch", &json!({ "patch": patch }), false).expect("apply_patch delta");
-        assert_eq!((delta.lines_added, delta.lines_removed), (3, 1));
-        assert_eq!((delta.files_created, delta.files_deleted), (1, 1));
-        assert_eq!(delta.file, None, "多文件补丁不归属到单一路径");
-    }
-
-    /// 数不出来就不报数字，而不是报一个假的零。
-    #[test]
-    fn apply_patch_without_a_parseable_patch_yields_no_delta() {
-        assert!(
-            compute(
-                "apply_patch",
-                &json!({ "patch": "*** Begin Patch\n+x\n" }),
-                false,
-            )
-            .is_none(),
-            "缺 End Patch 的补丁不该出数"
+    fn multi_file_promise_has_no_single_path() {
+        let record = from_display(&display(
+            Some(3),
+            Some(1),
+            vec![("a.txt", "add"), ("b.txt", "delete"), ("c.txt", "update")],
+        ))
+        .unwrap();
+        assert_eq!(record.file, None);
+        assert_eq!(
+            (record.files_created, record.files_deleted, record.lines_added),
+            (1, 1, 3)
         );
-        assert!(compute("apply_patch", &json!({}), false).is_none());
     }
 
-    /// 档位键必须是 resolved tool name。旧写法 `("file", "write")` 实测永远
-    /// 匹配不上（注册表里这个工具就叫 `write`），write 因此从不出 CodeChanged。
+    /// 只读工具（以及只出预览的 dry_run）不出行差：没有记录，而不是记录一堆 0。
     #[test]
-    fn write_tool_reports_content_line_count() {
-        let delta = compute(
-            "write",
-            &json!({ "path": "a.txt", "content": "x\ny\n" }),
-            false,
-        )
-        .expect("write 必须出 CodeChanged");
-        assert_eq!((delta.lines_added, delta.lines_removed), (2, 0));
-        assert_eq!(delta.file.as_deref(), Some("a.txt"));
+    fn no_line_authority_means_no_record() {
+        assert!(from_display(&display(None, None, vec![("src/a.rs", "update")])).is_none());
+        assert!(from_display(&display(Some(2), None, vec![])).is_none());
+        assert!(from_display(&display(Some(0), Some(0), vec![])).is_some());
     }
 }
