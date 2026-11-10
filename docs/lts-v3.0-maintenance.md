@@ -26,7 +26,8 @@
 4. **命令与事件面**:`RingingCommand`、`RingingV2Event` 各变体的字段与判别方式
 5. **SDK 契约哈希**:`qaqh-contract-export` 的 `contract_hash` 相对 `v3.0.0` release 内契约 zip **不得变化**
    (相对 v3.0.0 的偏离必须先在 §7 登记后才允许提交;additive 且不动 `contract_revision` 的偏离可记在
-   当前锁内,其余一律开新 LTS 线)
+   当前锁内,其余一律开新 LTS 线)。**"偏离必须留痕"这半句已由 `change-policy` 作业机器执法**
+   (见下表);至于"偏离是否允许",仍由本节判据 + §7 登记内容决定。
 
 **允许的改动**:bug 修复、内部重构(不触及上述面的)、新增仅在内部使用的代码路径、测试。
 
@@ -37,10 +38,13 @@
 | `lts-api-guard.yml` → `scripts/check-lts-api-surface.py` | HEAD 导出物 vs **仓内** `docs/api-surface/v3.0/` golden(逐字节,`manifest.json` 的 `source_revision`/`source_dirty` 除外)+ 路由表 + facade 清单 | 实现改了 wire 但没同步 golden(或反之) |
 | `sdk-contract.yml:48-49` | `export --out $T` 后 `check --against $T`,即**同一份** temp | 导出不确定/不可复现 |
 | `scripts/check-sdk-contract.py --typescript --release` | 由导出物自算 `contract_hash` 校验 manifest 自洽 + 严格 TS 消费者编译 | 契约自相矛盾、前端可见字段被删(表现为 `error TS2353`) |
+| `lts-api-guard.yml` → `scripts/check-surface-change-policy.py` | 本次改动的**文件集合** vs `docs/lts-v3.0-maintenance.md` 的 §7 新增条目 | 触碰前端可见冻结面(docs/api-surface、ringing-contract、ringing/src/v2、command.rs、qaqh-client、contract-export)却没有登记 |
 
-**没有任何 CI 步骤把 `contract_hash` 与 `v3.0.0` release 资产比对**——§1.5 那条是**人工纪律**,唯一执法者
-是 §6 checklist 与 §7 登记。LTS 上不允许用"顺手改夹具"的方式让它变绿(夹具只能修编译性破损,不得改描述
-被测行为的断言)。
+**仍然没有任何 CI 步骤把 `contract_hash` 与 `v3.0.0` release 资产比对**(那条比的是影子不是成因:一句 doc
+注释也能让 hash 漂移,见 §7.2)。所以 §1.5 的可执行形式是:**碰冻结面 ⇒ 必须留下 §7 登记**(`change-policy`
+红),而不是"hash 不许变"这种没人比的口号。LTS 上不允许用"顺手改夹具"的方式让它变绿(夹具只能修编译性破损,
+不得改描述被测行为的断言);`change-policy` 自身的判据由它的 `--self-test` 钉住——把 `FROZEN` 前缀删短或把
+§7 标题正则放宽,那一步会先红。
 
 **漂移事故参照**:model-config 重构删除 `SessionSettingsPatch.profile` 时,TS 严格消费者在 CI 抓到漂移
 —— LTS 上这类漂移 = 发布阻断,必须回退实现而非改夹具。
@@ -49,7 +53,8 @@
 `scripts/check-lts-api-surface.py`,把 HEAD 的契约导出物与 `docs/api-surface/v3.0/` 金标准逐字节比对
 (manifest 中随提交变化的 `source_revision/source_dirty` 除外),并冻结 HTTP 路由表与 qaqh-client facade 清单。
 CI 红 = 拒绝该改动;金标准只允许在两种情况下再生成:① 新 LTS 线(如 v3.1)切出时;
-② LTS 上明确批准的契约修订(此时它已不是"冻结"而是"换锁",需 bump revision 并重切 tag)。
+② LTS 上明确批准的契约修订(此时它已不是"冻结"而是"换锁"):additive 且不动 `contract_revision` 的偏离
+留在当前锁内、随 §7 登记提交即可;要删/改字段、改语义或 bump `contract_revision`,那是开新 LTS 线(v3.1)。
 再生成命令:`QAQH_SOURCE_REVISION=$(git rev-parse HEAD) QAQH_SOURCE_DIRTY=0 cargo run -p qaqh-contract-export -- export --out <tmp> --release`,
 随后把产物复制进金标准目录、连同 `snapshots/routes.txt`、`snapshots/facade.txt` 一并提交。
 
@@ -67,8 +72,13 @@ pwsh scripts/sync-version.ps1   # 先把 version.txt 改成 3.0.2026MMDD-N 之�
 # 2. 验证契约未冻结区被误伤(可选但强烈建议)
 just sdk-check
 
-# 3. 推分支 → sdk-contract CI 必须绿
-git push
+# 3. 走 PR(不再直推:LTS-v3.0 开了 Require PR + enforce_admins,直推按平台语义会被拒)
+git switch -c feat/<slice> && git push -u origin feat/<slice>
+gh pr create --base LTS-v3.0 --head feat/<slice> --title ... --body-file ...
+#    三项必需检查必须绿:contract(sdk-contract.yml)、freeze(lts-api-guard 内容一致)、
+#    change-policy(lts-api-guard 留痕)。required_approving_review_count=0 —— 单人维护者
+#    凑不出"非作者的 code owner",评审人头这道门已在 §7.3 撤掉,执法点改到上述三项。
+gh pr merge <n> --merge
 
 # 4. 干跑构建验证(不发版,两平台编一遍)
 #    GitHub → Actions → Release → Run workflow → 选 LTS-v3.0
@@ -112,8 +122,9 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 ## 6. 发版 checklist
 
 - [ ] `git log v3.0.<n-1>..LTS-v3.0` 里触碰 §1 冻结面的提交都已在 §7 登记(未登记 = 本次发版阻断)
+- [ ] `change-policy` 作业在 PR 上为绿(它就是上一条的机器形式;它红 = 有冻结面改动没留痕)
 - [ ] `contract_hash` 与上一版 release 的契约 zip 一致;不一致时 §7 必须有对应条目,且偏离是 **additive + 未 bump `contract_revision`**
-- [ ] §7 登记条目里写清了「机器闸门为什么不会拦」(golden 同提交即绿),别让下个维护者以为 CI 兜住了锁
+- [ ] §7 登记条目里写清了「哪道闸门放行、为什么放行」(golden 同提交即 `freeze` 绿),别让下个维护者以为 CI 兜住了语义
 - [ ] `version.txt` 已改为本次补丁戳,Cargo.toml / package.json / Cargo.lock / qaqh-backend.lock.json 全部同步
 - [ ] sdk-contract 在 LTS-v3.0 绿
 - [ ] (标准流程)dispatch 干跑双平台绿
@@ -125,6 +136,8 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 > 「换锁」的判据不是补丁号进位(3.0.0→3.0.1 只是版本号),而是这条锁的参照物有没有被改动后仍留在锁内。
 > 换锁 = bump `contract_revision` + 重切 tag,那属于开新 LTS 线(§1.2/§42);登记在案的 additive 偏离则
 > 留在当前锁内,以 golden 目录为锁内新基线。**换锁 ≠ 破坏性改动**:删字段/改语义是破坏性,加可选字段不是。
+>
+> 从 §7.3 起,本节不再只是纸面纪律:`change-policy` 作业会比对"触碰冻结面"与"本节新增条目",缺一即红。
 
 ### 7.1 2026-11-10 · 随 `v3.0.1` 携带 · 事件面加可选行差估算字段
 
@@ -140,3 +153,36 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
   才是盘上真 diff(本次一并把 code_delta 从参数文本口径改为展示投影真 diff 单一事实源)。
   前端把估算当进度条,不得把 `null` 渲染成 `+0 −0`。
 - **出口**:任何后续要删/改这些字段、改语义、或 bump revision 的变更 → 开 `v3.1` 线,不得再记在本节。
+
+### 7.2 2026-11-10 · 已合入 `4c3a26be` · 事后追认:doc 注释驱动的 hash 漂移
+
+- **事实**:`4c3a26be`(chore(contract): regenerate golden for ModelCapabilities layering docs)只改了两个
+  文件——`types/qaqh/ModelCapabilities.ts` 增加 13 行**注释**(源自 `ac54e508` 给
+  `crates/qaqh-types/src/provider.rs` 加的结构体文档),`manifest.json` 的 `contract_hash` 随导出物变化。
+  提交信息自己写明 "Shape unchanged - docs only"。C# 侧产物未变。
+- **性质**:**不是**字段/语义变更,`ModelCapabilities` 的形状(`tool_calls`/`image_input`/
+  `native_web_search`/`reasoning`)一字未动 → 对客户端零影响,不需要任何前端改动。
+- **为什么要追认**:它直推进了当时已开保护的 `LTS-v3.0`,触碰了 `docs/api-surface/**` 却无登记。
+  `contract_hash` 变了,而 §1.5 旧文面把它写成"不得变化"——按旧文面这次属违规,按实际影响这次属噪声。
+  这正是把纪律建在影子上而非成因上的后果,已在 §1.5 改写为"碰冻结面必留痕"并由 `change-policy` 执法:
+  同样内容今天会**强制**要求一条登记才允许合并。
+- **登记编号说明**:`§7.1` 在前、`§7.2` 在后按"入账顺序"排列而非按提交时间;`4c3a26be`(16:45)早于
+  `§7.1` 对应的 PR #16(20:29),但追认条目一律按登记时刻排在后。
+
+### 7.3 2026-11-10 · 锁的执法方式变更(B 方案,无代码影响)
+
+- **变更**(仓库设置,不进 git 树,故本条是唯一留痕处):`LTS-v3.0` 分支保护由
+  `required_approving_review_count=1` + `require_code_owner_reviews=true` + `enforce_admins=true`
+  改为 `count=0` + `code_owner=false`,**`enforce_admins` 与 strict `contract`/`freeze` 保留**。
+- **为什么必须改**:唯一有 write 权限的账号是 `QAQTam`,而 PR 作者也是 `QAQTam`;GitHub 硬规则禁止作者批准
+  自己的 PR(owner/admin 无例外),`enforce_admins=true` 又关掉了 admin 绕过,仓库级 auto-merge 也未开启 ⇒
+  合格批准人集合为空,**任何 PR 都进不来**(PR #16 当时 `reviewRequests: []`,平台自己也算不出人)。
+- **为什么不加第二个 code owner 了事**:单人维护下,"多一个人头"要么由 bot 自动批准(那实质就是机器执法,
+  不如把判据写成可测的断言),要么永远凑不齐(那就是现在这个死锁)。所以执法点迁到
+  `contract` + `freeze` + 新增的 `change-policy`。
+- **为什么保留 `enforce_admins=true`**:比原提案更严。它让 admin 也不能直推绕开三项检查——§7.2 那类
+  "绕过锁的推送"从此结构性不可能。代价:§2 的发版流程必须走 PR(已改写)。
+- **注意**:`.github/CODEOWNERS` 只存在于默认分支 `main`,`LTS-v3.0` 树上没有这个文件;`main` 那份把
+  冻结面与守卫脚本全部指向 `@QAQTam`,因此"Require review from Code Owners"在 main 上会复现同一个死锁。
+  主线若采纳同一判据,应把 code-owner 评审换成可自动判定的断言。
+- **兼容性**:零 wire 影响,不涉及 revision,不影响任何已发布契约。
