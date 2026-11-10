@@ -43,6 +43,7 @@
 | [0006](0006-contract-as-versioned-package.md) | 契约分发为版本化包 + provenance | 已采纳（未实施） |
 | [0007](0007-refreeze-governance.md) | 换锁治理：CODEOWNERS + refreeze/tightening 标签 + 守卫自保护 | **已落地于 main** + **LTS 分支保护已开**（缺口表见手册 §7） |
 | [0008](0008-neutral-ir-per-language-projection.md) | 中立 ContractIR + 每语言投影，退役 ts→cs 解析链 | **第 1 步已落地**（schema 预览投影）· 主重构未实施 |
+| [0009](0009-wire-view-vs-artifact-bytes.md) | 冻结粒度区分 wire 语义与产物字节：分类从两类改三类 | **已落地于 main**（`wire_view` + `doc-only-refresh`）· 由真实误判触发 |
 
 ## 阅读顺序
 

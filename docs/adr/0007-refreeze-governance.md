@@ -67,10 +67,15 @@
    这把 §1 的散文变成一条机器不可绕过的路径，并首次让"换锁"与"回退"在流程上分岔。
    **但标签必须分两类，否则会把自己的闸门改进也堵死**（ADR-0003 已撞见实例：控制面入表会让
    `snapshots/routes.txt` 从 `* /health` 变成 `GET /health`，即"多钉住 4 个方法"）：
-   - `contract-refreeze`：`manifest.json` / `contract_hash` / 导出物变化 ⇒ 用户可见面变了 ⇒ 禁入 LTS；
+   - `contract-refreeze`：**wire 实变**（增删产物、类型字段变化）⇒ 用户可见面变了 ⇒ 禁入 LTS；
    - `guard-tightening`：**仅** `snapshots/*` 变化且导出物与 `contract_hash` 逐字节不变 ⇒
-     冻结得更多而非改约 ⇒ 允许进 LTS（bug 级发版即可）。
+     冻结得更多而非改约 ⇒ 允许进 LTS（bug 级发版即可）；
+   - `doc-only-refresh`（**由 ADR-0009 补的第三类**）：导出物字节变了但 `wire_view` 不变
+     （典型是给 DTO 加了一段 doc 注释导致生成的 TS 多了 JSDoc，`contract_hash` 随之变化）
+     ⇒ 允许进 LTS，**不**需要 bump revision。
    required job 判的是"变化的文件集合落在哪一类"，不是"有没有动 docs/api-surface"。
+   分类判据本身从"字节"改为"wire 视图"的过程与被否方案，见 **ADR-0009**（触发它的是
+   `ac54e508`+`4c3a26be` 那次零 wire 变化的注释改动被误判成换锁）。
 3. **refreeze 必须成文**：带标签的 PR 附一份 ADR（模板见 `docs/adr/README.md`），
    内容至少含：新 `contract_revision` 值、被破坏的 capability 清单、迁移窗口、
    以及 ADR-0005 配对测试的结论。无 ADR 链接 ⇒ job 红。
