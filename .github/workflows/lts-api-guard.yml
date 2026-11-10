@@ -45,4 +45,12 @@ jobs:
       - name: Assert the guard's own criteria hold
         run: python3 scripts/check-surface-change-policy.py --self-test
       - name: Assert frozen-surface changes carry a §7 ledger entry
-        run: python3 scripts/check-surface-change-policy.py
+        # PR 事件显式取回 base 侧（不赌 checkout 有没有建 origin/<base> 这个 ref ——
+        # 上一版就是在这里静默走到了一条本地没跑过的 env 分支）。
+        run: |
+          if [ -n "${GITHUB_BASE_REF:-}" ]; then
+            git fetch --no-tags origin "refs/heads/${GITHUB_BASE_REF}"
+            python3 scripts/check-surface-change-policy.py --base FETCH_HEAD --head HEAD
+          else
+            python3 scripts/check-surface-change-policy.py
+          fi
