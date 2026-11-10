@@ -50,7 +50,7 @@ struct AcpAgent {
 struct Session {
     prompt: Arc<Mutex<()>>,
     cancellation: watch::Sender<bool>,
-    /// 本回合内已声明工具调用的输出缓冲;终态后移除。
+    /// 本回合内已建立卡片的工具调用（含参数仍在生成中的）:终态后移除。
     tools: Mutex<HashMap<String, ToolStream>>,
 }
 
@@ -58,6 +58,9 @@ struct Session {
 struct ToolStream {
     output: String,
     streamed: usize,
+    /// 最近一次已发布的参数进度标题。40ms 心跳里大多数帧行差数字没变，同值就
+    /// 不再补发一帧（ACP 的 tool_call_update 是替换语义，重复发只会让客户端重画）。
+    progress_title: String,
 }
 
 impl AcpAgent {
@@ -272,23 +275,85 @@ impl AcpAgent {
                     tool_name,
                     args,
                 } if turn.as_ref() == Some(&turn_id) => {
-                    session.tools.lock().await.insert(
-                        call_id.to_string(),
-                        ToolStream::default(),
-                    );
-                    let mut call = AcpToolCall::new(
-                        AcpToolCallId::new(call_id.to_string()),
-                        tool_title(&tool_name, args.as_ref()),
-                    )
-                    .name(tool_name.clone())
-                    .kind(tool_kind(&tool_name))
-                    .status(ToolCallStatus::Pending);
-                    if let Some(args) = args {
-                        call = call.raw_input(args);
+                    let key = call_id.to_string();
+                    let established_by_args_stream = session
+                        .tools
+                        .lock()
+                        .await
+                        .insert(key.clone(), ToolStream::default())
+                        .is_some();
+                    let title = tool_title(&tool_name, args.as_ref());
+                    if established_by_args_stream {
+                        // 卡片已由参数生成进度建立:补一次 update 把标题/输入/类型
+                        // 定稿,绝不再发一个 ToolCall——同一个 call_id 在客户端只该有一行。
+                        let mut fields = ToolCallUpdateFields::new()
+                            .title(title)
+                            .kind(tool_kind(&tool_name))
+                            .status(ToolCallStatus::Pending);
+                        if let Some(args) = args {
+                            fields = fields.raw_input(args);
+                        }
+                        connection.send_notification(SessionNotification::new(
+                            session_id.clone(),
+                            SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                                AcpToolCallId::new(key),
+                                fields,
+                            )),
+                        ))?;
+                    } else {
+                        let mut call = AcpToolCall::new(AcpToolCallId::new(key), title)
+                            .name(tool_name.clone())
+                            .kind(tool_kind(&tool_name))
+                            .status(ToolCallStatus::Pending);
+                        if let Some(args) = args {
+                            call = call.raw_input(args);
+                        }
+                        connection.send_notification(SessionNotification::new(
+                            session_id.clone(),
+                            SessionUpdate::ToolCall(call),
+                        ))?;
                     }
+                }
+                SessionEvent::ToolArgumentsDelta {
+                    call_id,
+                    turn_id,
+                    tool_name,
+                    lines_added,
+                    lines_removed,
+                    ..
+                } if turn.as_ref() == Some(&turn_id) => {
+                    // 只有拿得出行差估算的调用（三个写工具）才值得提前出卡片;
+                    // read/grep 一类没有进度可画,照旧等 ToolDeclared。
+                    let (Some(lines_added), Some(lines_removed)) = (lines_added, lines_removed)
+                    else {
+                        continue;
+                    };
+                    let key = call_id.to_string();
+                    let title = format!("{tool_name} +{lines_added} −{lines_removed} lines");
+                    let mut tools = session.tools.lock().await;
+                    let fresh = !tools.contains_key(&key);
+                    let record = tools.entry(key.clone()).or_default();
+                    if record.progress_title == title {
+                        continue;
+                    }
+                    record.progress_title = title.clone();
+                    drop(tools);
+                    let update = if fresh {
+                        SessionUpdate::ToolCall(
+                            AcpToolCall::new(AcpToolCallId::new(key.clone()), title)
+                                .name(tool_name.clone())
+                                .kind(tool_kind(&tool_name))
+                                .status(ToolCallStatus::Pending),
+                        )
+                    } else {
+                        SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
+                            AcpToolCallId::new(key),
+                            ToolCallUpdateFields::new().title(title),
+                        ))
+                    };
                     connection.send_notification(SessionNotification::new(
                         session_id.clone(),
-                        SessionUpdate::ToolCall(call),
+                        update,
                     ))?;
                 }
                 SessionEvent::ToolStateChanged {
