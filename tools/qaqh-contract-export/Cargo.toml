@@ -15,8 +15,9 @@ qaqh-types = { path = "../../crates/qaqh-types", features = ["ts"] }
 qaqh-runtime = { path = "../../crates/qaqh-runtime", features = ["ts"] }
 qaqh-siwc = { path = "../../crates/qaqh-siwc" }
 qaqh-dsaccount = { path = "../../crates/qaqh-dsaccount" }
-qaqh-memwatch = { path = "../../crates/qaqh-memwatch", features = ["ts"] }
+qaqh-memwatch = { path = "../../crates/qaqh-memwatch", features = ["ts", "schema"] }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"] }
+schemars = { version = "1.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11"

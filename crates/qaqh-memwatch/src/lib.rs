@@ -21,6 +21,7 @@ const MAX_COMPONENT_GAUGES: usize = 64;
 /// re-implementing the naming convention. New groups are additive.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ComponentGroup {
     #[default]
@@ -48,6 +49,7 @@ impl ComponentGroup {
 /// Stable lifecycle class for a phase sample, independent of its exact label.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PhaseKind {
     #[default]
@@ -79,6 +81,7 @@ impl PhaseKind {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ProcessMemory {
     /// Resident pages currently mapped into the process working set.
     pub resident_bytes: Option<u64>,
@@ -94,6 +97,7 @@ pub struct ProcessMemory {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SessionMemory {
     pub session_id: String,
     pub resident: bool,
@@ -118,6 +122,7 @@ pub struct SessionMemory {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct ComponentMemory {
     pub name: String,
     /// Coarse source group, derived from the name prefix on update.
@@ -133,6 +138,7 @@ pub struct ComponentMemory {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct PhaseSample {
     pub sequence: u64,
     pub at_ms: u64,
@@ -148,6 +154,7 @@ pub struct PhaseSample {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct MemorySnapshot {
     pub schema_version: u32,
     pub enabled: bool,

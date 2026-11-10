@@ -7,10 +7,13 @@ description = "Bounded release-mode process and runtime memory observability"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
+schemars = { version = "1.2", features = ["derive"], optional = true }
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 
 [features]
 ts = ["dep:ts-rs"]
+# JSON Schema projection (ADR-0008): the wire DTO is the source, never TypeScript.
+schema = ["dep:schemars"]
 
 [lints]
 workspace = true
