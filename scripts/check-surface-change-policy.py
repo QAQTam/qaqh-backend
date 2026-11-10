@@ -16,6 +16,7 @@ doc 注释都能让它漂移（见 §7.2 追认的那次）；把断言建在影
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -63,32 +64,55 @@ def verdict(touched_frozen: list[str], ledger_entries_added: list[str]) -> list[
     ]
 
 
-def resolve_range(args: argparse.Namespace) -> tuple[str, str] | None:
+class NewBranchPush(Exception):
+    """新建分支的首次 push：没有 before 端，本次跳过比对（如实报出，不算通过也不算失败）。"""
+
+
+def rev_exists(rev: str) -> bool:
+    result = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", rev],
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def resolve_range(args: argparse.Namespace) -> tuple[str, str]:
     """确定比较区间。PR：merge-base(base, head)..head；push：before..after。
 
-    新区间无法解析（例如新建分支的 push，`before` 全零）时返回 None 并如实报出，
-    绝不静默当成通过。
+    解析不出来就抛异常（调用方转成退出码 2），绝不返回一个"看起来能跑"的假区间——
+    这条断言的意义是拦人，静默降级等于把闸门拆了还报告成功。
     """
-    if args.base and args.head:
+    if args.base or args.head:
+        if not (args.base and args.head):
+            raise ValueError("--base 与 --head 必须成对给出")
         return merge_base(args.base, args.head), args.head
+
     event = os.environ.get("GITHUB_EVENT_NAME", "")
-    before = os.environ.get("GITHUB_EVENT_BEFORE", "").strip()
     sha = os.environ.get("GITHUB_SHA", "").strip()
     if event == "pull_request":
-        base = os.environ.get("GITHUB_BASE_REF", "").strip()
-        if base and sha:
-            return merge_base(f"origin/{base}", sha), sha
-        return None
-    if event == "push" and before and sha and set(before) != {"0"}:
+        base_ref = os.environ.get("GITHUB_BASE_REF", "").strip()
+        candidates = [f"origin/{base_ref}", base_ref] if base_ref else []
+        base = next((rev for rev in candidates if rev and rev_exists(rev)), "")
+        if not base or not sha or not rev_exists(sha):
+            raise ValueError(
+                f"pull_request 事件下解析不出比较区间（base={base_ref!r} → {base!r}, "
+                f"head={sha!r}）；请显式传 --base/--head"
+            )
+        return merge_base(base, sha), sha
+    if event == "push":
+        before = os.environ.get("GITHUB_EVENT_BEFORE", "").strip()
+        if not before or set(before) == {"0"}:
+            raise NewBranchPush("新建分支的首次 push：没有 before 端")
+        if not sha:
+            raise ValueError("push 事件缺少 GITHUB_SHA")
         return before, sha
-    return None
+    raise ValueError(f"不是可识别的事件（GITHUB_EVENT_NAME={event!r}），请显式传 --base/--head")
 
 
 def merge_base(base: str, head: str) -> str:
-    try:
-        return git("merge-base", base, head).strip()
-    except subprocess.CalledProcessError:
-        return base
+    # 不回退成 base 本身：那会把"两个端点不同源"伪装成"差异很大"，判据就失真了。
+    return git("merge-base", base, head).strip()
 
 
 def collect(base: str, head: str) -> tuple[list[str], list[str]]:
@@ -158,16 +182,18 @@ def main() -> int:
     if args.self_test:
         return self_test()
 
-    pair = resolve_range(args)
-    if pair is None:
-        print(
-            "change-policy: 无法确定比较区间（既无 --base/--head，也不在可识别的 "
-            "pull_request / push 事件里，例如新建分支的首次 push）。本次跳过比对。",
-            file=sys.stderr,
-        )
+    try:
+        base, head = resolve_range(args)
+    except NewBranchPush as skip:
+        print(f"change-policy: 跳过比对 —— {skip}", file=sys.stderr)
         return 0
+    except (ValueError, subprocess.CalledProcessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
 
-    base, head = pair
+    if not rev_exists(base) or not rev_exists(head):
+        print(f"error: 比较端点不存在：base={base!r} head={head!r}", file=sys.stderr)
+        return 2
     frozen, entries = collect(base, head)
     problems = verdict(frozen, entries)
     if problems:
