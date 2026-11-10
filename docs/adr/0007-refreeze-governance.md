@@ -1,0 +1,110 @@
+# ADR-0007 换锁治理：CODEOWNERS + refreeze 标签 + 守卫自保护
+
+状态: `已采纳（未实施）` · 决策日期 2026-11-10
+
+## 背景（已核对）
+
+- `docs/lts-v3.0-maintenance.md` §1 写明金标准**只允许在两种情况下再生成**：
+  ① 新 LTS 线切出；② LTS 上明确批准的契约修订 —— 并明确指出此时"它已不是冻结而是换锁，
+  需 bump revision 并重切 tag"。
+- `.github/` 下**无 `CODEOWNERS`**（实测 `Test-Path .github/CODEOWNERS` = False），
+  仅三个 workflow：`lts-api-guard.yml`、`sdk-contract.yml`、`release.yml`。
+- 触发面不对称：`lts-api-guard.yml:3-7` **只在 `LTS-v3.0`** 的 push / PR→LTS 跑；
+  `sdk-contract.yml:3-7` 跑 PR / main / LTS-v3.0。
+
+## 问题：闸门本身不受闸门保护
+
+先澄清一件**已经成立**的好性质：手改 `docs/api-surface/**` 里的产物**会**被判红 ——
+守卫在 `check-lts-api-surface.py:137-143` 现场重新导出并与金标准逐字节比对（`:76-98`），
+人改的字节与代码生成的字节不一致即失败。所以"偷偷改快照让它变绿"这条路已经堵住了。
+
+真正没堵的是另外三条：
+
+1. **改松守卫本身**：PR 里动 `scripts/check-lts-api-surface.py`（缩小正则、跳过某个目录、
+   把 `manifest.json` 加入豁免字段）同样能让 LTS 变绿。闸门代码不在任何评审强制路径上。
+2. **"换锁"与"回退实现"在机器上不可区分**：一个合法的 refreeze PR（重生成快照）与一个违规的
+   "顺手改快照" PR，**在 diff 形态上一模一样** —— 都是 `docs/api-surface/**` 变化。目前只有
+   §1 那句散文能区分二者，而散文不是 required check。
+3. **PR 目标分支选错 = 守卫根本不跑**：把本应进 `LTS-v3.0` 的改动提到 `main`，
+   `lts-api-guard.yml` 因 trigger 不匹配而静默不执行（这与 ADR-0003 的 fail-open 是同一类形状）。
+4. **金标准比对在非 Linux checkout 上结构性不可用**（实测，2026-11-10）：
+   `.gitattributes` 是 `* text=auto`，于是 `docs/api-surface/**` 在 Windows checkout 里是 **CRLF**，
+   而导出器写的是 **LF**。`check-lts-api-surface.py:96` 用 `read_bytes()` 比对 ⇒ 现场实测
+   **599 个文件里 598 个"差异"**，全部只是行尾符（CRLF→LF 归一后 598/599 全等，唯一真差异是
+   `manifest.json` 的两个 volatile 字段）。守卫因此**实际上只能在 CI（ubuntu-latest）跑**，
+   手册里"本地预检金标准"的说法是不成立的。
+   **受影响范围要划准**（实测）：只有 `compare_file_set` 的 `read_bytes()` 那一道（599 个产物）
+   被行尾符打到；`compare_snapshot` 用 `read_text()`，Python 的 universal newlines 已把 `\r\n`
+   归一 —— 把 `routes.txt`/`facade.txt` 临时改成 CRLF 再跑守卫自己的函数，**两种行尾都 PASS**。
+   即这是一道**单点**缺陷，不是三道全废（写 ADR 时容易顺手夸大成"整个守卫在 Windows 不可用"）。
+   同源陷阱：`cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0`
+   必然报 `artifact file set differs` —— 金标准目录里的 `snapshots/routes.txt`、`snapshots/facade.txt`
+   不是导出物，Python 守卫在 `:78-83` 显式豁免了它们，Rust `check` 没有这个豁免。
+   两个坑都属于"闸门本身在本地跑不通"，后果是**本地绿≠任何事，本地红也≠任何事**，
+   而 §1 的判定法恰恰写的是本地跑。
+
+## 决策
+
+1. **`CODEOWNERS` 覆盖闸门与其输入**，而不只覆盖业务代码：
+   ```
+   docs/api-surface/**            @<owner>
+   scripts/check-lts-api-surface.py @<owner>
+   scripts/check-sdk-contract.py  @<owner>
+   tools/qaqh-contract-export/**  @<owner>
+   crates/qaqh-ringing*/**        @<owner>
+   crates/qaqh-client/**          @<owner>
+   .github/workflows/**           @<owner>
+   ```
+   配 branch protection：上述路径的改动需 owner 批准（`Require review from Code Owners`）。
+2. **`contract-refreeze` 标签 + 一个 required job**：凡改 `docs/api-surface/**` 的 PR 必须带该标签；
+   带该标签的 PR **禁止合入 `LTS-v3.0`**（只允许合新 LTS 线，如 `LTS-v3.1`）。
+   这把 §1 的散文变成一条机器不可绕过的路径，并首次让"换锁"与"回退"在流程上分岔。
+3. **refreeze 必须成文**：带标签的 PR 附一份 ADR（模板见 `docs/adr/README.md`），
+   内容至少含：新 `contract_revision` 值、被破坏的 capability 清单、迁移窗口、
+   以及 ADR-0005 配对测试的结论。无 ADR 链接 ⇒ job 红。
+4. **触发面补漏**：在 `main` 上也跑一次"导出 + 快照差异"，但**只报告不阻断**（main 允许演进，
+   ADR-0001 §决策）；目的是让"本应进 LTS 的改动提错了 main"在 PR 页面就可见，而不是等 cherry-pick
+   时才发现守卫从没跑过。
+5. **金标准目录写权限收敛到导出器**：`main.rs:116-129` 已用 `generator_version` 做目录所有权检查
+   （拒绝覆盖非本 exporter 拥有的目录/版本），保留并补一条：CI 中检测
+   `docs/api-surface/**` 里出现**非导出物**的新文件即红（防止有人往金标准目录塞手写补丁文件）。
+
+6. **让守卫在任意平台等价**（针对 §问题 4，二选一，倾向前者）：
+   - `.gitattributes` 追加 `docs/api-surface/** text eol=lf`，把金标准钉成 LF，
+     于是 `read_bytes()` 比对与 checkout 平台无关；导出器本身已是 LF，无需改动。
+   - 或守卫读入时做行尾归一后再比对。**不选**"给 Rust `check` 加 `snapshots/` 豁免"作为主方案——
+     那会让 `check --against` 有两种语义（自洽校验 / 对金标准校验），是新的含糊；
+     金标准比对归 Python 守卫，`check` 保持"只比导出物对导出物"。
+7. **手册的判定法改为可执行的两条**：本地跑 `scripts/check-sdk-contract.py --typescript`
+   （确定性 + 严格 TS 消费者，与金标准无关，任何平台都成立）；金标准比对声明为
+   **CI-only**，本地仅在 Linux/WSL 下建议跑 `scripts/check-lts-api-surface.py`。
+
+## 被否选项
+
+- **禁止任何人改金标准目录**：否。新 LTS 线切出时必须合法重切，硬禁会把正常发版卡死；
+  需要的是**分岔路径**（标签 + ADR + 目标分支），不是禁令。
+- **只加 CODEOWNERS 不加标签**：不够。见 §问题 2 —— 两种 PR 的 diff 形态相同，靠人读 diff
+  区分"换锁"和"作弊"，正是本 ADR 要消除的判断成本。
+- **在 main 上也阻断**：否，违反 ADR-0001 的快车前提（rule 3：不许拖慢 main）。
+- **上 CI 模板/组织级 policy 引擎**（如 OPA 全量把关）：当前三条 workflow 的规模不值得，
+  一个 required job 就够。
+
+## 后果与代价
+
+- 多一个 required check ⇒ 忘记打标签的合法 PR 会被拦，第一次会有点烦；但拦截方向是
+  **"错合"而不是"漏改"**，符合 ADR-0001 §决策 3 的失败方向约定。
+- CODEOWNERS 在小团队会退化为"自己批自己"。这是治理成本而非机制缺陷；即便如此，
+  §2/§3 的标签+ADR 仍留下了**可追溯记录**，价值主要在事后而非事前。
+- `main` 上的非阻断导出比对会增加 CI 时长（要跑一次 `--release` 导出）。若嫌慢，可只做
+  `snapshots/routes.txt` + facade 文本比对（秒级），字节比对留给 LTS —— 与 ADR-0003 的
+  `just surface-quick` 分层一致。
+
+## 落地清单
+
+- [ ] `.github/CODEOWNERS` 新建（上表七条路径）
+- [ ] `LTS-v3.0` 开启 branch protection：code owner review + required status check
+- [ ] `contract-refreeze` 标签 + `refreeze-policy` job（校验标签、ADR 链接、目标分支）
+- [ ] `lts-api-guard.yml` 增加一个 `main` 上的 report-only job
+- [ ] 手册 §1 增一行：换锁流程 = 打标签 + ADR + 新线，散文判据全部交给 job
+- [ ] `.gitattributes` 追加 `docs/api-surface/** text eol=lf`（解 §问题 4：让金标准比对平台无关）
+- [ ] 手册 §1 判定法改写：本地预检 = `check-sdk-contract.py --typescript`，金标准比对 = CI-only

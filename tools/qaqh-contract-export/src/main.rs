@@ -28,6 +28,10 @@ mod coverage;
 // cs_backend must run after the ts-rs type export: it parses the generated
 // TypeScript subset and re-encodes the same wire contract as C# sources.
 mod cs_backend;
+/// ADR-0008 step 1: JSON Schema projection straight off the Rust DTO. Its output is a
+/// preview tree, not a contract artifact — and it never parses the TypeScript backend's
+/// output, which is the whole point (see `FLOAT_FIELDS` in `cs_backend.rs`).
+mod schema_backend;
 mod validation;
 mod wire_fixtures;
 
@@ -94,8 +98,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match (command.as_str(), flag.as_str()) {
         ("export", "--out") => export(&target, release),
         ("check", "--against") => check(&target, release),
+        ("schema-preview", "--out") => schema_preview(&target, release),
         _ => Err(
-            "expected export --out <dir> [--release] or check --against <dir> [--release]".into(),
+            "expected export --out <dir> [--release], check --against <dir> [--release], \
+             or schema-preview --out <dir>"
+                .into(),
         ),
     }
 }
@@ -189,6 +196,32 @@ fn check(target: &Path, release: bool) -> Result<(), Box<dyn std::error::Error>>
         });
     let _ = fs::remove_dir_all(&stage);
     result
+}
+
+/// ADR-0008 step 1: emit the JSON Schema preview tree. Deliberately *not* wired into
+/// `generate()`: folding it in changes the artifact file set, which is the ADR-0007
+/// refreeze path, not a silent side effect of an unrelated commit.
+fn schema_preview(target: &Path, release: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if release {
+        return Err(
+            "schema-preview writes no manifest and stamps no source revision; drop --release"
+                .into(),
+        );
+    }
+    if target.join("manifest.json").exists() {
+        return Err(format!(
+            "refusing to write a schema preview into a contract artifact tree: {}",
+            target.display()
+        )
+        .into());
+    }
+    fs::create_dir_all(target)?;
+    let count = schema_backend::write_preview(target)?;
+    println!(
+        "schema preview: {count} type schemas + schema/index.json at {} (outside manifest.json)",
+        target.display()
+    );
+    Ok(())
 }
 
 fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {

@@ -1,7 +1,10 @@
 # LTS v3.0 维护发版说明书
 
 > 适用分支:`LTS-v3.0` · 起点版本:`v3.0.0`(tag 于 main @ `7fe35d96` 切出,与 LTS 分支同源)
-> 配套 CI:`.github/workflows/release.yml`(发版)、`.github/workflows/sdk-contract.yml`(契约校验)
+> 配套 CI:`.github/workflows/release.yml`(发版)、`.github/workflows/sdk-contract.yml`(契约校验)、
+> `.github/workflows/lts-api-guard.yml`(冻结守卫)
+> 决策台账:`docs/adr/`——本文写**怎么做**,`docs/adr/` 写**为什么这样定、以及哪些方案被否**。
+> 已采纳但未实施的闸门见 ADR-0003～0008;引用时注意其状态,勿把"已采纳(未实施)"读成"已完成"。
 
 ## 0. 分支模型:kernel / user-space
 
@@ -28,8 +31,12 @@
 
 **允许的改动**:bug 修复、内部重构(不触及上述面的)、新增仅在内部使用的代码路径、测试。
 
-**改动是否踩线的判定法**:跑 `just sdk-check` / `scripts/check-sdk-contract.py --typescript --release`,
-若契约哈希或严格 TS 消费者失败,即踩线;LTS 上不允许用"顺手改夹具"的方式让它变绿
+**改动是否踩线的判定法**:本地跑 `scripts/check-sdk-contract.py --typescript --release`
+(确定性 + 严格 TS 消费者,与金标准无关,任何平台成立)。**金标准比对是 CI-only**:`just sdk-check`
+的 `against` 参数必须指向一份**新鲜导出**目录,不能指向 `docs/api-surface/v3.0`(那里多出的 `snapshots/`
+会被判为文件集差异);而 `check-lts-api-surface.py` 按字节比对金标准,在非 Linux checkout 上会因
+行尾符整树判红 —— 两条陷阱详见 ADR-0007 §问题 4。
+判定:契约哈希或严格 TS 消费者失败,即踩线;LTS 上不允许用"顺手改夹具"的方式让它变绿
 (夹具只能修编译性破损,不得改描述被测行为的断言)。
 
 **漂移事故参照**:model-config 重构删除 `SessionSettingsPatch.profile` 时,TS 严格消费者在 CI 抓到漂移

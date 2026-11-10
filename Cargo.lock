@@ -2961,6 +2961,7 @@ dependencies = [
  "qaqh-runtime",
  "qaqh-siwc",
  "qaqh-types",
+ "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2",
@@ -3141,6 +3142,7 @@ dependencies = [
 name = "qaqh-memwatch"
 version = "3.0.20261110-g1842986"
 dependencies = [
+ "schemars 1.2.3",
  "serde",
  "ts-rs",
 ]
