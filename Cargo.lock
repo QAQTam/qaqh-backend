@@ -2974,6 +2974,7 @@ version = "3.0.20261110-g1842986"
 dependencies = [
  "axum",
  "futures-util",
+ "http-body-util",
  "log",
  "qaqh-acp",
  "qaqh-config",
