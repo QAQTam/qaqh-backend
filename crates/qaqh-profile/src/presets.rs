@@ -60,7 +60,9 @@ pub const PROVIDER_PRESETS: &[ProviderPreset] = &[
     ProviderPreset {
         id: "gemini",
         name: "Google Gemini",
-        base_url: "https://generativelanguage.googleapis.com",
+        // gemini 面 canonical path 是 `/models/{model}:generateContent`
+        // （不含版本段），base 必须自带 /v1beta，否则 URL 缺版本直接 404。
+        base_url: "https://generativelanguage.googleapis.com/v1beta",
         wire: Wire::Gemini,
         credential: CredentialSource::ApiKey,
     },
