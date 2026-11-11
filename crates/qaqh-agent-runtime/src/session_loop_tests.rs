@@ -751,6 +751,55 @@ mod handoff_tests {
         );
     }
 
+    /// 占用页脚挂在本轮最后一条工具结果的信封正文尾部：实时遥测，不进历史事实。
+    ///
+    /// 回归：页脚挂载按 `ContentBlock::Text` 匹配，而工具消息的正文块是
+    /// `ToolResult`——永远落空，读数从未真正到达模型。
+    #[tokio::test]
+    async fn context_footer_rides_the_last_tool_result_of_the_round() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // 第一轮：handoff 缺正文 → 工具失败，回合继续；读数 960/1000 → 96%。
+        // 第二轮：直接收尾。第二条请求里那条工具结果应带页脚。
+        let h = harness(
+            dir.path(),
+            vec![
+                (
+                    200,
+                    tool_call_body(
+                        "handoff",
+                        &serde_json::json!({ "work_summary": "只写了一句话" }),
+                        "call-h3",
+                        &cache_usage(),
+                    ),
+                ),
+                (200, text_body("收到，继续")),
+            ],
+            1000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("交接但忘了正文"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, idle_with_turns).await;
+        let requests = h.requests.lock().unwrap();
+        assert!(requests.len() >= 2, "工具失败后回合必须继续推进");
+        assert!(
+            !requests[0].contains("[#ctx 96%"),
+            "首轮请求还没有任何读数，不得出现真实占用页脚"
+        );
+        assert!(
+            requests[1].contains("[#ctx 96% · 0k/1k"),
+            "第二条请求的最后一条工具结果应带占用页脚（读数 960/1000）"
+        );
+        // 实时遥测不进 durable timeline：重放读到的仍是不带页脚的原文。
+        assert!(
+            !timeline_tool_result(&state).contains("[#ctx"),
+            "历史事实不得携带页脚"
+        );
+    }
+
     /// 超限错误：分母立刻按声明值一半保守收敛，且失败码不再伪装成一般 provider 失败。
     #[tokio::test]
     async fn context_overflow_error_lowers_the_denominator() {

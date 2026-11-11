@@ -196,8 +196,10 @@ fn shell_derive_args_are_shell_specific() {
         ]
     );
     assert_eq!(pwsh.len(), 12);
-    // 验证 Base64(UTF-16LE) 可逆且与 ps_encode 一致
-    assert_eq!(pwsh[11], ps_encode("Get-ChildItem"));
+    // 验证 Base64(UTF-16LE) 可逆且与 ps_encode 一致（脚本正文 = 统一 UTF-8
+    // preamble + 原命令，preamble 只改脚本内容、不改 argv 形态）。
+    let expected_script = format!("{PS_UTF8_PREAMBLE}\nGet-ChildItem");
+    assert_eq!(pwsh[11], ps_encode(&expected_script));
     let decoded = {
         let bytes = base64_decode(&pwsh[11]).expect("valid base64");
         let utf16: Vec<u16> = bytes
@@ -208,7 +210,7 @@ fn shell_derive_args_are_shell_specific() {
             .collect();
         String::from_utf16(&utf16).expect("valid utf16le")
     };
-    assert_eq!(decoded, "Get-ChildItem");
+    assert_eq!(decoded, expected_script);
 
     let cmd = Shell::Cmd.derive_exec_args("dir");
     // 审计 M2：argv[0] 为 System32 下的 cmd.exe 绝对路径（或 PATH 解析结果）。
@@ -253,9 +255,10 @@ fn command_with_args_contract_is_dollar_args_only() {
     let args = vec!["中文测试".to_string()];
     let argv = Shell::PowerShell.derive_exec_args_with("Write-Output $args[0]", Some(&args));
     // 派生：脚本 + 参数原样尾随，中间无 `-Command` 之类的再包装。
+    // 脚本 token = UTF-8 preamble + `\n` + 原命令，按尾段定位。
     let script_at = argv
         .iter()
-        .position(|token| token == "Write-Output $args[0]")
+        .position(|token| token.ends_with("Write-Output $args[0]"))
         .expect("script token");
     assert_eq!(argv[script_at + 1..], args[..]);
     assert_eq!(argv.len(), script_at + 2);
@@ -277,6 +280,10 @@ fn pwsh_command_with_args_uses_command_with_args() {
         "argv[0]={}",
         pwsh[0]
     );
+    // 脚本 token 带统一 UTF-8 preamble 前缀（argv 形态不变）。
+    let expected_script =
+        format!("{PS_UTF8_PREAMBLE}\nWrite-Output $args[0]; Write-Output $args[1]");
+    let expected_script = expected_script.as_str();
     assert_eq!(
         &pwsh[1..12],
         [
@@ -290,7 +297,7 @@ fn pwsh_command_with_args_uses_command_with_args() {
             "-OutputFormat",
             "Text",
             "-CommandWithArgs",
-            "Write-Output $args[0]; Write-Output $args[1]"
+            expected_script
         ]
     );
     assert_eq!(&pwsh[12..], &args);
@@ -492,6 +499,36 @@ fn pwsh_tool_with_chinese_args_via_command_with_args() {
         r.model_text().contains("中文测试"),
         "output: {}",
         r.model_text()
+    );
+}
+
+/// 统一 UTF-8 preamble 回归（2026-11-10，zh-CN CP936 实测）：外层 pwsh **捕获**
+/// 一个写 UTF-8 字节的子进程输出（git 的输出形态），必须原样存活。缺 preamble
+/// 时外层按 OEM 码页解码子进程字节再转码写出，得到「合法 UTF-8 的乱码」
+/// （`涓枃…`），reader 侧 UTF-8 优先 + OEM 兜底救不回。
+#[test]
+fn pwsh_captured_utf8_child_output_survives_oem_host() {
+    if !pwsh_regression_runner_ready() {
+        skip_without_shell!(Shell::PowerShell, "pwsh");
+    }
+    assert!(shell_available(Shell::PowerShell));
+    // 子进程自带 UTF-8 OutputEncoding 写管道；外层用捕获形态 `$out = pwsh ...`
+    // 走双重转码路径。子进程名用名义名 `pwsh` 即可（同 PATH 探测口径）。
+    let ctx = make_ctx(
+        "exec",
+        serde_json::json!({
+            "command": "$cmd = '[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); Write-Output 中文内层输出'; $out = pwsh -NoProfile -NonInteractive -Command $cmd; \"R:[$out]\"",
+            "shell": "pwsh",
+            "cwd": std::env::current_dir().unwrap(),
+        }),
+    );
+    let r = handle_run_exec(ctx);
+    assert!(r.is_success(), "model text: {}", r.model_text());
+    let v: serde_json::Value = serde_json::from_str(r.model_text()).expect("valid json");
+    let output = v.get("output").and_then(|x| x.as_str()).unwrap_or("");
+    assert!(
+        output.contains("R:[中文内层输出]"),
+        "捕获型 UTF-8 子进程输出被转码损坏，output: {output}"
     );
 }
 #[test]

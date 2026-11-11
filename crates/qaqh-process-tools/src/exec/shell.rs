@@ -287,7 +287,11 @@ impl Shell {
 
     /// Build the argv that runs `command` through this shell.
     /// PowerShell 默认走 `-EncodedCommand`（Base64 UTF-16LE），彻底避免引号/中文/特殊字符在
-    /// Win32 命令行解析中的转义地狱；stdout/stderr 仍通过管道捕获，编码不影响输出。
+    /// Win32 命令行解析中的转义地狱。**输出侧编码**不做假设则必坏：pwsh 以
+    /// `[Console]::OutputEncoding`（缺省 = OEM 码页，中文 Windows 为 CP936）解码
+    /// 子进程字节再以同码页写出，`$s = git log` 这类捕获形态得到的是「合法
+    /// UTF-8 的乱码」，reader 侧 UTF-8 优先 + OEM 兜底（[`super::pipe`]）救不回
+    /// ——故所有 PowerShell 系脚本一律前置 [`PS_UTF8_PREAMBLE`] 统一到 UTF-8。
     /// 当 `args` 非空且为 PowerShell 时，自动走 `-CommandWithArgs`（7.6 LTS 主流），
     /// 把 `args` 原样作为 CommandParameters 填入 `$args`，避免在脚本内拼接引号。
     /// **绑定契约：只填 `$args`（`$args[0]` 起 / `$args.Count`），不产生
@@ -317,6 +321,9 @@ impl Shell {
                 v
             }
             Shell::PowerShell | Shell::WindowsPowerShell => {
+                // 统一 UTF-8 preamble 进脚本正文（两条 argv 形态共用），
+                // 见 [`PS_UTF8_PREAMBLE`] 的实测依据。
+                let script = format!("{PS_UTF8_PREAMBLE}\n{command}");
                 if let Some(a) = args.filter(|a| !a.is_empty()) {
                     // -CommandWithArgs：首参是脚本，后续空格分隔的 CommandParameters 原样进 $args
                     let mut v = vec![
@@ -331,12 +338,12 @@ impl Shell {
                         "-OutputFormat".to_string(),
                         "Text".to_string(),
                         "-CommandWithArgs".to_string(),
-                        command.to_string(),
+                        script,
                     ];
                     v.extend(a.iter().cloned());
                     v
                 } else {
-                    let encoded = ps_encode(command);
+                    let encoded = ps_encode(&script);
                     vec![
                         self.path().to_string(),
                         "-NoLogo".to_string(),
@@ -398,6 +405,25 @@ fn windows_system_shell(
         }
     })
 }
+
+/// PowerShell 系的统一 UTF-8 前置语句（作为脚本正文首行注入，
+/// `-EncodedCommand` 与 `-CommandWithArgs` 两条形态共用）。
+///
+/// 一条赋值链同时钉三处编码（右结合，实测 pwsh 7.6 / 5.1 均可用）：
+/// - `[Console]::OutputEncoding`：pwsh 解码子进程输出字节 + 写自身重定向
+///   stdout 的编码。不设置时缺省 = OEM 码页（中文 Windows CP936），git 等
+///   UTF-8 程序的输出会经历「UTF-8 字节 →按 936 解码成乱码字符串 →按
+///   UTF-8/936 写出」的双重转码，reader 侧任何字节级兜底都救不回
+///   （实测 `$s = git log --format=%s` → `涓枃…`；裸 `git log` 因字节透传
+///   侥幸正确，掩盖了这一缺口）。
+/// - `[Console]::InputEncoding`：控制台语境下把子进程输入 CP 切到 65001
+///   （write_stdin 会话喂中文、ConPTY 输入方向依赖它）。
+/// - `$OutputEncoding`：PS 向管道下游原生程序喂 stdin 的编码。
+///
+/// UTF-8 无 BOM（`new($false)`）：BOM 会作为 U+FEFF 混进首行输出。
+/// setter 在 stdin=null / 输出重定向 / ConPTY 三种宿主形态实测无异常
+/// （pwsh 7.6.9 + 5.1，`$ErrorActionPreference=Stop` 下 exit 0）。
+pub(crate) const PS_UTF8_PREAMBLE: &str = "$OutputEncoding = [Console]::OutputEncoding = [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)";
 
 /// PowerShell `-EncodedCommand` 要求的编码：UTF-16LE → Base64（RFC 4648）。
 /// 与 `pwsh -EncodedCommand` 文档一致：`[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))`
