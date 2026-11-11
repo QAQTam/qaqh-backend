@@ -706,6 +706,19 @@ impl ToolResult {
         self.model.total_tokens = estimate_tokens(&self.model.text);
     }
 
+    /// 把实时遥测尾巴（占用页脚）追加到模型投影正文末尾。
+    ///
+    /// 只追加、不重排：已有前缀字节不变，前缀缓存不吃亏；summary 与 durable
+    /// timeline 事实都不带它——重放读到的仍是不带页脚的原文。空尾巴（端点
+    /// 未声明窗口）是 no-op，信封字节不动。
+    pub fn append_model_tail(&mut self, tail: &str) {
+        if tail.is_empty() {
+            return;
+        }
+        self.model.text.push_str(tail);
+        self.model.total_tokens = estimate_tokens(&self.model.text);
+    }
+
     /// 大输出外置：一次性改写模型文本、截断标记、summary 与外置引用。
     ///
     /// 四项必须同时改写——历史上逐字段赋值导致 summary 与 `model.text` 语义
@@ -843,6 +856,22 @@ mod tests {
         assert!(result.model.truncated);
         assert!(result.project_for_model().get("success").is_none());
         result.validate().unwrap();
+    }
+
+    /// 页脚追加只改正文尾部：前缀字节不变、tokens 重估、空尾巴 no-op。
+    #[test]
+    fn model_tail_append_is_prefix_stable_and_empty_is_noop() {
+        let mut result = ToolResult::ok("body");
+        result.append_model_tail("\n[#ctx 96% · 0k/1k · 接近阈值请调用 handoff]");
+        assert!(result.model_text().starts_with("body"), "前缀字节不变");
+        assert!(result.model_text().contains("[#ctx 96%"));
+        let tokens_after = result.project_for_model()["context_usage"].clone();
+        assert!(tokens_after.is_null(), "页脚不等于占用读数,两者互不冒充");
+        result.append_model_tail("");
+        assert!(
+            result.model_text().ends_with("[#ctx 96% · 0k/1k · 接近阈值请调用 handoff]"),
+            "空尾巴 no-op"
+        );
     }
 
     /// 词元钱包读数必须出现在信封属性区，且能被解析回来。
