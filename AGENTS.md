@@ -23,3 +23,6 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 12. 使用sed修改文件必须参带rg确保修改正确.
 13. 必须在工作前使用todo工具让用户知道你的修改流程
 14. 涉及到新的库时可以用find-docs skills去找最新API避免旧版用法性能低下或不可用
+15. 本仓库为LTS仓，遵循用户空间（前后端API）不可变，内核空间（后端）保持对外一致或同等效力下可以发生部分小破坏性变化或以exp设计接线。
+16. 本仓禁止直接使用git checkout，可以使用更加安全的新用法。
+17. shell新增uutils组件替换pwsh7的部分实现，调用时LLM可以较为自然的调用uutils
