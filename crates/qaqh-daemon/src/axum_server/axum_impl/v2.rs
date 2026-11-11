@@ -776,11 +776,57 @@ mod permission_request_details_tests {
     }
 }
 
+/// lease 存活复查(吊销必须杀掉在途 SSE,spec §6)。
+fn lease_active(
+    leases: &Arc<Mutex<qaqh_ringing_runtime::RingingLeaseStore>>,
+    caller: &str,
+) -> bool {
+    leases
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .is_active_session(caller)
+}
+
+/// 设备吊销的终止帧(与 resync 同为「单帧后即断流」形态)。
+async fn send_stream_terminated(
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+    caller: &str,
+    session: &str,
+) {
+    log::info!("[ringing-v2] lease {caller} revoked; terminating in-flight SSE for {session}");
+    let data = serde_json::json!({
+        "code": "revoked",
+        "session_id": session,
+        "message": "client lease revoked or expired; reconnect after re-auth",
+    })
+    .to_string();
+    let _ = tx
+        .send(Ok(Event::default()
+            .event("ringing.stream_terminated")
+            .data(data)))
+        .await;
+}
+
+/// 单帧 `ringing.resync_required` 后即结束的 SSE 响应(wire 形状与 lagged 路径一致)。
+fn resync_required_sse(session_id: &str, reason: &str) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(1);
+    let data = serde_json::json!({
+        "session_id": session_id,
+        "reason": reason,
+    })
+    .to_string();
+    let _ = tx.try_send(Ok(Event::default().event("ringing.resync_required").data(data)));
+    Sse::new(ReceiverStream::new(rx))
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
 /// 每 seed 一条 SSE(报告二 §5)。
 ///
 /// 帧载荷是类型化 `SessionEventFrame`,`id: {epoch}:{seq}` 即同步游标。
-/// owner 广播无回放尾:`since_cursor` 落后于当前水位即下发
-/// `ringing.resync_required` 要求客户端重新 bootstrap;lagged 同理。
+/// owner 广播自带**回放尾**(H1',P0-2026-11-10 报告 §6):`since_cursor` 在尾
+/// 覆盖内 → 原子补发后无缝 live,不掐流;lagged 同理从尾追帧。仅尾也覆盖不住
+/// 的远古游标/旧 epoch 才下发 `ringing.resync_required` 要求客户端重新 bootstrap。
 pub(crate) async fn handle_events_v2(
     State(state): State<AppState>,
     Extension(identity): Extension<Identity>,
@@ -812,17 +858,17 @@ pub(crate) async fn handle_events_v2(
         },
     };
     let owner = state.service.owners().get_or_create(&session_id);
-    let mut subscription = owner.subscribe();
-    // resync 判定(B01):订阅后读实时位置 P(`current_seq` = 下一个将分配的
-    // seq,纯内存原子,不查库)。游标 epoch 不匹配 → 客户端持旧代状态,必须
-    // resync;`since < P` → 订阅窗口外有缺口(无回放尾)→ resync;`since >= P`
-    // 或无游标 → live 直推,重叠由客户端幂等消费吸收。
-    let live_position = owner.current_seq();
-    let needs_resync = if !cursor_epoch_matches {
-        true
-    } else {
-        since_seq.is_some_and(|since| since < live_position)
-    };
+    // H1'(P0-2026-11-10 报告 §6):读面**原子 attach + 回放尾**。旧「快照水位
+    // 比对、无回放尾缺口即掐流」判定由环覆盖检查替代:epoch 失配 → resync;
+    // 游标在回放尾覆盖内 → 补发 `(since, T]` 后无缝续 live;仅尾也淘汰了的
+    // 远古游标才回落 `ringing.resync_required`——wire 形状与事件名一字未改。
+    if !cursor_epoch_matches {
+        return resync_required_sse(&session_id, "epoch_mismatch");
+    }
+    let attach = owner.attach_after(since_seq);
+    if attach.replay.gap {
+        return resync_required_sse(&session_id, "cursor_gap");
+    }
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(64);
     // 设备吊销(`revoke_device` 摘 lease)必须**杀掉在途 SSE**(spec §6):订阅本身
@@ -836,17 +882,27 @@ pub(crate) async fn handle_events_v2(
     // 开关仍由 `diagnostics.memory.start/stop` 控制。
     let diagnostics_service = state.service.clone();
     let diagnostics_admin = identity.is_admin();
+    let replay_frames = attach.replay.frames;
+    // 转发水位:初始 = 本次补发的最大 seq;receiver 与补发在「先入环、后广播 ×
+    // 先 grab、后读环」交错下可能重合同帧,由水位跳过。
+    let mut last_seq = attach.replay.watermark;
+    let catch_owner = Arc::clone(&owner);
     tokio::spawn(async move {
-        if needs_resync {
-            let data = serde_json::json!({
-                "session_id": stream_session,
-                "reason": "cursor_gap",
-            });
-            let frame = Event::default()
-                .event("ringing.resync_required")
-                .data(data.to_string());
-            let _ = tx.send(Ok(frame)).await;
-            return;
+        let mut subscription = attach.receiver;
+        // 回放尾补发:与 live 同流、同 `id: {epoch}:{seq}`、同吊销纪律。
+        for frame_event in replay_frames {
+            if !lease_active(&leases, &caller) {
+                send_stream_terminated(&tx, &caller, &stream_session).await;
+                return;
+            }
+            let data = serde_json::to_string(&frame_event).unwrap_or_else(|_| "{}".into());
+            let sse = Event::default()
+                .id(format!("{}:{}", stream_epoch, frame_event.seq))
+                .event("ringing.event")
+                .data(data);
+            if tx.send(Ok(sse)).await.is_err() {
+                return;
+            }
         }
         let mut diagnostics_tick = diagnostics_admin.then(|| {
             let mut interval = tokio::time::interval(MEMORY_PUSH_INTERVAL);
@@ -890,23 +946,12 @@ pub(crate) async fn handle_events_v2(
                     }
                 }
                 Some(Ok(frame_event)) => {
-                    if !leases
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .is_active_session(&caller)
-                    {
-                        log::info!(
-                            "[ringing-v2] lease {caller} revoked; terminating in-flight SSE for {stream_session}"
-                        );
-                        let frame = Event::default().event("ringing.stream_terminated").data(
-                            serde_json::json!({
-                                "code": "revoked",
-                                "session_id": stream_session.as_str(),
-                                "message": "client lease revoked or expired; reconnect after re-auth",
-                            })
-                            .to_string(),
-                        );
-                        let _ = tx.send(Ok(frame)).await;
+                    // 补发/缓冲重叠窗口的重帧跳过(见 attach 头注 H1')。
+                    if last_seq.is_some_and(|last| frame_event.seq <= last) {
+                        continue;
+                    }
+                    if !lease_active(&leases, &caller) {
+                        send_stream_terminated(&tx, &caller, &stream_session).await;
                         break;
                     }
                     let data = serde_json::to_string(&frame_event).unwrap_or_else(|_| "{}".into());
@@ -917,18 +962,48 @@ pub(crate) async fn handle_events_v2(
                     if tx.send(Ok(frame)).await.is_err() {
                         break;
                     }
+                    last_seq = Some(frame_event.seq);
                 }
-                // lagged:缺口出现,要求客户端重新同步。
+                // lagged:不再掐流——先从回放尾追帧;尾也兜不住的缺口才 resync。
                 Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                    let data = serde_json::json!({
-                        "session_id": stream_session,
-                        "reason": "stream_lagged",
-                    });
-                    let frame = Event::default()
-                        .event("ringing.resync_required")
-                        .data(data.to_string());
-                    let _ = tx.send(Ok(frame)).await;
-                    break;
+                    let catch_after = last_seq.map_or(since_seq.unwrap_or(0), |last| last + 1);
+                    let catch = catch_owner.replay_after(Some(catch_after));
+                    if catch.gap {
+                        let data = serde_json::json!({
+                            "session_id": stream_session,
+                            "reason": "stream_lagged",
+                        });
+                        let frame = Event::default()
+                            .event("ringing.resync_required")
+                            .data(data.to_string());
+                        let _ = tx.send(Ok(frame)).await;
+                        break;
+                    }
+                    let mut terminate = false;
+                    for frame_event in catch.frames {
+                        if last_seq.is_some_and(|last| frame_event.seq <= last) {
+                            continue;
+                        }
+                        if !lease_active(&leases, &caller) {
+                            send_stream_terminated(&tx, &caller, &stream_session).await;
+                            terminate = true;
+                            break;
+                        }
+                        let data =
+                            serde_json::to_string(&frame_event).unwrap_or_else(|_| "{}".into());
+                        let frame = Event::default()
+                            .id(format!("{}:{}", stream_epoch, frame_event.seq))
+                            .event("ringing.event")
+                            .data(data);
+                        if tx.send(Ok(frame)).await.is_err() {
+                            terminate = true;
+                            break;
+                        }
+                        last_seq = Some(frame_event.seq);
+                    }
+                    if terminate {
+                        break;
+                    }
                 }
                 Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break,
             }
