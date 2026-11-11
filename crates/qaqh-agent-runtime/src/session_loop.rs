@@ -675,17 +675,17 @@ impl SessionLoop {
                             }
                             // 占用页脚只挂在本轮最后一条工具结果上：它是实时遥测，
                             // 不进历史事实（重放时不该带上上一轮的百分比）。
+                            // 工具消息的正文块是 ToolResult 而非 Text——按 Text 匹配
+                            // 永远落空，页脚从未真正挂上去过；改为追加到信封正文
+                            // 尾部，随 render_xml_envelope 原样发出。
                             if let Some(usage) = self.last_context()
                                 && let Some(last) = tool_messages.last_mut()
-                                && let Some(ContentBlock::Text { text }) = last.content.last_mut()
+                                && let Some(ContentBlock::ToolResult { result, .. }) = last.content.last_mut()
                             {
-                                *text = format!(
-                                    "{text}{}",
-                                    crate::handoff::ctx_footer(
-                                        usage.used_tokens,
-                                        usage.window_tokens
-                                    )
-                                );
+                                result.append_model_tail(&crate::handoff::ctx_footer(
+                                    usage.used_tokens,
+                                    usage.window_tokens
+                                ));
                             }
                             messages.push(message);
                             messages.extend(tool_messages);
