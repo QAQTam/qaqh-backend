@@ -19,6 +19,7 @@ use std::{
 };
 
 use crate::progress::{AssistantProgress, ProgressBlockKind, ProgressStream, ToolInputProgress};
+use qaqh_workspace::arg_estimate::{ArgLineEstimator, RawPatchLineEstimator};
 
 /// Upper bound on the streamed text retained for a failed attempt.
 const MAX_PARTIAL_TEXT_BYTES: usize = 64 * 1024;
@@ -40,6 +41,12 @@ pub struct ProviderRequestSpec {
     pub tools: Option<Vec<ToolDef>>,
     pub max_tokens: u32,
     pub effort: Option<String>,
+    /// 端点声明的上下文窗口（`Config::context_length`）——占用页脚与 handoff
+    /// 阈值判断的分母。`0` = 未声明：不编百分比，也不发提醒。
+    pub context_window: u32,
+    /// 软阈值（`Config::auto_compact_threshold`，0 = 关闭提醒）。契约里已有的
+    /// 开关，此前无任何消费者；现在它驱动 handoff 提醒。
+    pub auto_compact_threshold: f64,
 }
 
 /// 一次模型请求实际走到哪(证明链外的最小等价物)。
@@ -87,7 +94,16 @@ impl ProviderRequestSpec {
             tools: None,
             max_tokens,
             effort: None,
+            context_window: 0,
+            auto_compact_threshold: 0.0,
         }
+    }
+
+    /// 上下文口径：分母 + 软阈值。
+    pub fn with_context(mut self, context_window: u32, auto_compact_threshold: f64) -> Self {
+        self.context_window = context_window;
+        self.auto_compact_threshold = auto_compact_threshold;
+        self
     }
 
     pub fn with_credential(mut self, credential: qaqh_types::CredentialSource) -> Self {
@@ -194,7 +210,7 @@ fn stream_once(
     let mut partial_text = String::new();
     let mut partial_reasoning = String::new();
     let mut last_emit: Option<Instant> = None;
-    let mut tool_args: HashMap<usize, (String, String, String)> = HashMap::new();
+    let mut tool_args: HashMap<usize, ToolInputStream> = HashMap::new();
     let result = qaqh_gate::chat_stream(
         &spec.provider,
         messages,
@@ -254,13 +270,16 @@ fn stream_once(
                 }
                 let entry = tool_args
                     .entry(index)
-                    .or_insert_with(|| (id, name.clone(), String::new()));
-                entry.1 = name;
-                entry.2.push_str(&args_chunk);
+                    .or_insert_with(|| ToolInputStream::new(id, false));
+                if entry.name != name {
+                    entry.rebind(name);
+                }
+                // 每一片都喂：节流只管发布频率，管不着计数。
+                entry.push_fragment(&args_chunk);
                 if let Some(display) = &display
                     && due(&mut last_emit)
                 {
-                    publish_tool_input(display, &entry.0, &entry.1, &entry.2);
+                    publish_tool_input(display, entry);
                 }
             }
             qaqh_gate::StreamEvent::NativeToolProgress {
@@ -274,11 +293,20 @@ fn stream_once(
                     return;
                 };
                 let name = name.unwrap_or_default();
-                tool_args.insert(index, (call_id.clone(), name.clone(), input_so_far.clone()));
+                // 原生面是**累计快照**语义（替换），不是增量：同一身份换正文时
+                // 保留估算器状态，只做快照吸收。
+                let entry = tool_args
+                    .entry(index)
+                    .or_insert_with(|| ToolInputStream::new(call_id.clone(), true));
+                entry.call_id = call_id;
+                if entry.name != name {
+                    entry.rebind(name);
+                }
+                entry.absorb_snapshot(&input_so_far);
                 if let Some(display) = &display
                     && due(&mut last_emit)
                 {
-                    publish_tool_input(display, &call_id, &name, &input_so_far);
+                    publish_tool_input(display, entry);
                 }
             }
             qaqh_gate::StreamEvent::WebSearchStatus(_)
@@ -397,13 +425,121 @@ fn publish_block(display: &ProgressStream, kind: ProgressBlockKind, text: &str) 
     });
 }
 
-fn publish_tool_input(display: &ProgressStream, call_id: &str, tool_name: &str, args: &str) {
+fn publish_tool_input(display: &ProgressStream, entry: &ToolInputStream) {
+    // 没建估算器 = 这个工具没有行数概念：出 null，让客户端画「正在生成参数」
+    // 而不是替它编一个 +0 −0。
+    let estimate = entry.estimate_lines();
     display.sink.tool_input(ToolInputProgress {
         turn_id: &display.blocks.turn_id,
-        call_id,
-        tool_name,
-        args,
+        call_id: &entry.call_id,
+        tool_name: &entry.name,
+        args: &entry.text,
+        lines_added: estimate.map(|estimate| estimate.lines_added),
+        lines_removed: estimate.map(|estimate| estimate.lines_removed),
     });
+}
+
+/// 一路在飞的工具参数流：累计原文 + 行差估算器。
+///
+/// 估算只服务展示（[`crate::progress`] 的旁路面）：永不参与执行、永不授权调用、
+/// 也永不进模型上下文，所以任何一步读不出数都只是「这一帧没数」，不影响回合。
+struct ToolInputStream {
+    call_id: String,
+    name: String,
+    text: String,
+    /// 参数来自哪条 provider 面：JSON 参数面，还是 codex 原生 freeform 文本面。
+    native: bool,
+    estimator: Option<Estimator>,
+}
+
+impl ToolInputStream {
+    fn new(call_id: String, native: bool) -> Self {
+        Self {
+            call_id,
+            name: String::new(),
+            text: String::new(),
+            native,
+            estimator: None,
+        }
+    }
+
+    /// 声明名换值（首帧起才有名字，或 provider 改写了名字）：估算键跟着换，并
+    /// 立刻拿已累计文本重数一遍——读数不许因为改名倒退成 0。
+    fn rebind(&mut self, name: String) {
+        self.name = name;
+        self.reseed();
+    }
+
+    fn reseed(&mut self) {
+        self.estimator = Estimator::new(&self.name, self.native);
+        if let Some(estimator) = &mut self.estimator {
+            estimator.push_fragment(&self.text);
+        }
+    }
+
+    /// 投喂**新到达的片段**：累计串与计数同步前进。
+    fn push_fragment(&mut self, fragment: &str) {
+        if fragment.is_empty() {
+            return;
+        }
+        if let Some(estimator) = &mut self.estimator {
+            estimator.push_fragment(fragment);
+        }
+        self.text.push_str(fragment);
+    }
+
+    /// 吸收一个累计快照：切出新到的尾巴照常喂片段；快照不再是已累计串的前缀
+    /// 延伸（provider 换代重发）时整段重来，绝不把两种正文混数成一个读数。
+    fn absorb_snapshot(&mut self, snapshot: &str) {
+        match snapshot.strip_prefix(self.text.as_str()) {
+            Some(suffix) => self.push_fragment(suffix),
+            None => {
+                self.text = snapshot.to_string();
+                self.reseed();
+            }
+        }
+    }
+
+    /// 当前累计估算。`None` = 该工具没有行数概念（或估算器还没建起来）。
+    fn estimate_lines(&self) -> Option<qaqh_workspace::arg_estimate::ArgLineEstimate> {
+        self.estimator
+            .as_ref()
+            .map(|estimator| estimator.estimate())
+    }
+}
+
+/// 参数文本有两条完全不同的到达形状，计数规则也完全不同，禁止混为一谈：
+/// JSON 参数面按参数键数文本行，codex 原生 freeform 面直接数补丁的 `+`/`-` 行
+/// （那段文本不是 JSON，当 JSON 扫必然数错）。
+enum Estimator {
+    Json(ArgLineEstimator),
+    RawPatch(RawPatchLineEstimator),
+}
+
+impl Estimator {
+    /// 值得估算才建估算器：JSON 面只认三个写工具，原生面上只有 `apply_patch`
+    /// 的参数是补丁文本。其余工具（read/grep/exec/…）不建，因此不出行数字段。
+    fn new(tool_name: &str, native: bool) -> Option<Self> {
+        if native {
+            return (tool_name == "apply_patch")
+                .then(|| Self::RawPatch(RawPatchLineEstimator::default()));
+        }
+        ArgLineEstimator::for_tool(tool_name).map(Self::Json)
+    }
+
+    fn push_fragment(&mut self, fragment: &str) {
+        match self {
+            Self::Json(estimator) => estimator.push_fragment(fragment),
+            Self::RawPatch(estimator) => estimator.push_fragment(fragment),
+        }
+    }
+
+    fn estimate(&self) -> qaqh_workspace::arg_estimate::ArgLineEstimate {
+        match self {
+            Self::Json(estimator) => estimator.estimate(),
+            Self::RawPatch(estimator) => estimator.estimate(),
+        }
+    }
 }
 
 /// Terminal classification for the committed response fact.
@@ -502,4 +638,49 @@ fn worker_crashed(message: &str) -> ProviderOutcome {
     let mut outcome = failed_after_start(message);
     outcome.failure_kind = Some(ProviderFailureKind::WorkerCrash);
     outcome
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ToolInputStream;
+
+    /// 两条参数面的到达形状不同（JSON 面给增量、codex 原生面给累计快照），
+    /// 但都必须收敛到同一个估算终值；快照不再是前缀延伸（provider 换体重发）
+    /// 时整段重来，绝不把两种正文混数成一个读数。
+    #[test]
+    fn both_argument_shapes_settle_on_one_estimate() {
+        let mut json = ToolInputStream::new("call_1".to_string(), false);
+        json.rebind("edit".to_string());
+        for fragment in [r#"{"old_string":"a\nb","new_string":"A"#, r#"\nB\nC"}"#] {
+            json.push_fragment(fragment);
+        }
+        let edit = json.estimate_lines().expect("edit 值得估算");
+        assert_eq!((edit.lines_added, edit.lines_removed), (3, 2));
+
+        let mut native = ToolInputStream::new("call_2".to_string(), true);
+        native.rebind("apply_patch".to_string());
+        native.absorb_snapshot("*** Begin Patch\n*** Add File: a.txt\n+one");
+        native.absorb_snapshot("*** Begin Patch\n*** Add File: a.txt\n+one\n+two\n");
+        let added = native.estimate_lines().expect("apply_patch 值得估算");
+        assert_eq!((added.lines_added, added.lines_removed), (2, 0));
+
+        native.absorb_snapshot(
+            "*** Begin Patch\n*** Update File: b.txt\n@@\n-x\n+Y\n*** End Patch\n",
+        );
+        let replaced = native.estimate_lines().expect("估算器随快照换代重建");
+        assert_eq!(
+            (replaced.lines_added, replaced.lines_removed),
+            (1, 1),
+            "换体重发后读数只属于新正文"
+        );
+    }
+
+    /// 只读工具没有行数概念：不建估算器，于是事件里出行数字段缺席而不是 `+0 −0`。
+    #[test]
+    fn read_only_arguments_stay_unestimated() {
+        let mut json = ToolInputStream::new("call_3".to_string(), false);
+        json.rebind("read".to_string());
+        json.push_fragment(r#"{"path":"src/a.rs"}"#);
+        assert!(json.estimate_lines().is_none());
+    }
 }

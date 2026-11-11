@@ -29,6 +29,12 @@ pub struct ToolInputProgress<'a> {
     pub call_id: &'a str,
     pub tool_name: &'a str,
     pub args: &'a str,
+    /// Cumulative line-delta estimate read from the arguments that have
+    /// arrived so far. `None` means this tool has no line concept (read-only
+    /// calls never get a `+/-`) — it is not a verified zero. The authoritative
+    /// number is the terminal `code_delta`, which is a real-diff measure.
+    pub lines_added: Option<u32>,
+    pub lines_removed: Option<u32>,
 }
 
 /// Host-owned destination for in-flight display updates.
