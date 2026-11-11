@@ -186,3 +186,16 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
   冻结面与守卫脚本全部指向 `@QAQTam`,因此"Require review from Code Owners"在 main 上会复现同一个死锁。
   主线若采纳同一判据,应把 code-owner 评审换成可自动判定的断言。
 - **兼容性**:零 wire 影响,不涉及 revision,不影响任何已发布契约。
+
+### 7.4 2026-11-11 · 随 v3.0 收口 PR #21 · client 读面错误信封还原(无 wire 影响)
+
+- **变更**:`qaqh-client::Client::query` 非 2xx 不再丢弃响应体,改复用 `service::response_error`
+  还原 daemon 的 `{code,message}` 信封(与 `service_call` 同源);解析不出才退回 `Http`。
+- **兼容性判定**:纯客户端错误投影改进,additive。HTTP wire、方法签名、facade 清单均未变
+  (`freeze` 实测绿);结构化错误下消费方从裸 `Http` 变为 `Api`(多拿 code/message),只读 status
+  的消费方不受影响。
+- **`contract_revision` 未 bump**(仍 `ringing-commands-7` / `ringing-session-2`)。
+- **闸门放行**:`freeze` 绿(导出物/路由/facade 不变);`change-policy` 以本条留痕;`contract` 见 PR CI。
+- **背景**:前端 browser-control 文本拼接器把 config.toml 的 headers 双写致 `config.load` 400,
+  根因文案(TOML duplicate key)被 `query()` 吞成 `code:null`。本修复让诊断到达前端;前端拼接器
+  根治(daemon 结构化写口)留 v3.1。同 PR 的 ctx 页脚/pwsh UTF-8 修复不触冻结面前缀,无需登记。
