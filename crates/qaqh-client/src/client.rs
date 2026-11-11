@@ -446,6 +446,11 @@ impl Client {
     }
 
     /// `POST /ringing/v2/service/{name}` — typed read-only query.
+    ///
+    /// 失败口径与 [`Self::service_call`] 同源：优先还原 daemon 的
+    /// `{ code, message }` 信封（[`ClientError::Api`]），解析不出来才退回
+    /// [`ClientError::Http`]——诊断文案（如 config.load 的 TOML 解析错误）
+    /// 不得在客户端被吞掉。
     pub async fn query(&self, request: QueryRequest) -> Result<Value> {
         let (name, params) = request.into_parts();
         let session_id = self.session_id_header().await?;
@@ -459,11 +464,10 @@ impl Client {
             .json(&params)
             .send()
             .await?;
-        if !response.status().is_success() {
-            return Err(ClientError::Http {
-                status: response.status().as_u16(),
-                path,
-            });
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(crate::service::response_error(status.as_u16(), &path, &body));
         }
         Ok(response.json().await?)
     }
