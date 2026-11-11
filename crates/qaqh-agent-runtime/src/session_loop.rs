@@ -50,6 +50,16 @@ enum AskReply {
     Dismissed,
 }
 
+/// 上下文压力的硬档位（软提醒之外的收口）。
+enum HandoffPressure {
+    /// 还没到事。
+    Idle,
+    /// 折叠工具结果正文，换一次「模型自己写交接文档」的机会。
+    Fold(qaqh_types::ContextUsage),
+    /// 已经折叠过一次、模型仍未交接 → 爆错终止，不静默降级。
+    DeadEnd(qaqh_types::ContextUsage),
+}
+
 /// 回合循环:一个会话一个实例;回合互斥、输入排队、交互登记都在这里。
 pub struct SessionLoop {
     session_id: String,
@@ -69,6 +79,14 @@ struct LoopInner {
     active: Option<ActiveTurn>,
     permissions: HashMap<String, oneshot::Sender<PermissionAnswer>>,
     asks: HashMap<String, oneshot::Sender<AskReply>>,
+    /// 最近一次 provider 反馈的上下文占用：handoff 页脚与软阈值提醒的唯一读数源。
+    last_context: Option<qaqh_types::ContextUsage>,
+    /// 已封箱的回合：同回合第二次 handoff 只提示，不重复交接。
+    handed_off_turn: Option<String>,
+    /// 已发过软阈值提醒的回合：每回合最多提醒一次，不刷屏。
+    reminded_turn: Option<String>,
+    /// 已做过折叠腾位的回合：折叠只给一次机会，第二次直接判死。
+    slimmed_turn: Option<String>,
 }
 
 /// 回合任务统一 spawn 口:daemon 在 tokio 上下文里直接 spawn;CLI/测试等
@@ -143,6 +161,10 @@ impl SessionLoop {
                 active: None,
                 permissions: HashMap::new(),
                 asks: HashMap::new(),
+                last_context: None,
+                handed_off_turn: None,
+                reminded_turn: None,
+                slimmed_turn: None,
             }),
             last_activity_ms: AtomicU64::new(unix_now_ms().max(0) as u64),
         })
@@ -299,6 +321,8 @@ impl SessionLoop {
             .port
             .update_tool_allowlists(allowed_tools, global_allowed_tools);
         spec.tools = (!tools.is_empty()).then_some(tools);
+        // 重载后的清单来自 allowlist 过滤，必须把控制面工具补回去。
+        crate::handoff::ensure_declared(&mut spec.tools);
         *self
             .cwd
             .write()
@@ -465,6 +489,36 @@ impl SessionLoop {
                 });
             }
 
+            // 软阈值提醒：交接文档由模型写，后端只把真实读数摊开给它看。
+            self.maybe_remind_handoff(&turn_id, &mut messages).await;
+
+            // 硬阈值收口：不再赌模型自觉，也不把注定超限的请求推给上游换 400。
+            match self.handoff_pressure(&turn_id) {
+                HandoffPressure::Idle => {}
+                HandoffPressure::Fold(context) => {
+                    let folded = fold_tool_results(&mut messages);
+                    self.append_watchdog_input(
+                        &turn_id,
+                        &mut messages,
+                        crate::handoff::forced_reminder(folded, context),
+                    )
+                    .await;
+                }
+                HandoffPressure::DeadEnd(context) => {
+                    let message = format!(
+                        "上下文占用 {}%（{} / {} tokens），已腾过一次位，模型仍未调用 handoff；\
+                         本回合终止，下一次请求注定超限",
+                        context.used_pct(),
+                        context.used_tokens,
+                        context.window_tokens
+                    );
+                    log::error!("[loop] {} {message}", self.session_id);
+                    self.finish_failed(&turn, None, crate::handoff::ERR_MISSING_DOC, &message)
+                        .await;
+                    break 'rounds;
+                }
+            }
+
             let spec = self.current_spec();
             let blocks = AttemptBlocks::new(&turn_id, &spec.provider.model);
             let progress = ProgressStream {
@@ -481,6 +535,18 @@ impl SessionLoop {
                 Some(progress),
             )
             .await;
+            self.note_context(&outcome);
+            // 超限不伪装成一般 provider 失败：分母已按实测收敛，原因必须写清。
+            let provider_failure_code = if !outcome.cancelled
+                && outcome
+                    .error
+                    .as_deref()
+                    .is_some_and(crate::handoff::is_context_overflow)
+            {
+                "context_overflow"
+            } else {
+                "provider_failed"
+            };
             match outcome.evidence {
                 // 未出发:确认取消或 provider 准备失败,无任何可见输出。
                 Evidence::NotStarted => {
@@ -490,7 +556,7 @@ impl SessionLoop {
                         self.finish_failed(
                             &turn,
                             outcome.usage.clone(),
-                            "provider_failed",
+                            provider_failure_code,
                             outcome
                                 .error
                                 .as_deref()
@@ -512,7 +578,7 @@ impl SessionLoop {
                         self.finish_failed(
                             &turn,
                             outcome.usage.clone(),
-                            "provider_failed",
+                            provider_failure_code,
                             outcome
                                 .error
                                 .as_deref()
@@ -555,6 +621,7 @@ impl SessionLoop {
                                 self.declare(&turn, call_id, name, input).await;
                             }
                             let mut tool_messages = Vec::with_capacity(tool_uses.len());
+                            let mut handed_off = false;
                             for (call_id, name, input) in &tool_uses {
                                 let (ok, text) = match self
                                     .dispatch_tool(&turn, call_id, name, input, &cancel_rx)
@@ -569,6 +636,9 @@ impl SessionLoop {
                                         (false, "tool dispatch failed".to_string())
                                     }
                                 };
+                                if name == crate::handoff::TOOL_NAME && ok {
+                                    handed_off = true;
+                                }
                                 // ToolResult is the durable RingingV2 history fact. Keeping a
                                 // result only in this turn's in-memory request makes the next
                                 // context rebuild synthesize `missing tool result`.
@@ -596,6 +666,26 @@ impl SessionLoop {
                                     break 'rounds;
                                 }
                                 tool_messages.push(tool_result_message(call_id, &text, ok));
+                            }
+                            if handed_off {
+                                // 交接即终局：本会话不再回到模型。tool_result 已作为 durable
+                                // fact 落库，交接事实由这条调用自身在 timeline 里承载。
+                                self.finish_completed(&turn, outcome.usage.clone()).await;
+                                break 'rounds;
+                            }
+                            // 占用页脚只挂在本轮最后一条工具结果上：它是实时遥测，
+                            // 不进历史事实（重放时不该带上上一轮的百分比）。
+                            // 工具消息的正文块是 ToolResult 而非 Text——按 Text 匹配
+                            // 永远落空，页脚从未真正挂上去过；改为追加到信封正文
+                            // 尾部，随 render_xml_envelope 原样发出。
+                            if let Some(usage) = self.last_context()
+                                && let Some(last) = tool_messages.last_mut()
+                                && let Some(ContentBlock::ToolResult { result, .. }) = last.content.last_mut()
+                            {
+                                result.append_model_tail(&crate::handoff::ctx_footer(
+                                    usage.used_tokens,
+                                    usage.window_tokens
+                                ));
                             }
                             messages.push(message);
                             messages.extend(tool_messages);
@@ -658,6 +748,10 @@ impl SessionLoop {
         // ask:答案来自交互应答,不走 port。
         if tool_name == "ask" {
             return self.run_ask(turn, call_id, input, cancel_rx).await;
+        }
+        // handoff 是控制面工具：不走 port，不经权限审批，自己收尾生命周期。
+        if tool_name == crate::handoff::TOOL_NAME {
+            return self.run_handoff(turn, call_id, input).await;
         }
         let args = serde_json::to_vec(input).map_err(|error| {
             LoopError::Db(qaqh_session::db::DbError::Corrupt(error.to_string()))
@@ -974,6 +1068,232 @@ impl SessionLoop {
                 .ok();
         }
         self.settle_finished_text(call_id, "ask", &text);
+        Ok((true, text))
+    }
+
+    /// 记下占用，并把分母往「实测」方向收敛。
+    ///
+    /// 声明值只当初始猜测：被接受且用量更大 → 抬；上游判超限 → 压。收敛结果不落
+    /// `ModelDef`，所以模型编辑器「回填后整条覆盖」的固化行为影响不到它。
+    fn note_context(&self, outcome: &provider_job::ProviderOutcome) {
+        let spec = self.current_spec();
+        let declared = spec.context_window;
+        let base_url = spec.provider.base_url.as_str();
+        let model = spec.provider.model.as_str();
+        if let Some(usage) = outcome.usage.as_ref() {
+            let used = crate::handoff::total_input(usage);
+            crate::handoff::note_accepted(base_url, model, used, declared);
+            let window = crate::handoff::effective_window(base_url, model, declared);
+            if let Some(context) = crate::handoff::occupancy(usage, window) {
+                self.lock().last_context = Some(context);
+            }
+        }
+        if !outcome.cancelled
+            && outcome
+                .error
+                .as_deref()
+                .is_some_and(crate::handoff::is_context_overflow)
+        {
+            crate::handoff::note_overflow(base_url, model, declared);
+        }
+    }
+
+    fn last_context(&self) -> Option<qaqh_types::ContextUsage> {
+        self.lock().last_context
+    }
+
+    /// 每回合最多一次的软阈值提醒：落库成**可见的** timeline Input（`interject`），
+    /// 同时在下一轮请求里以 user 角色出现——与首条输入同一位置口径。
+    async fn maybe_remind_handoff(&self, turn_id: &str, messages: &mut Vec<Message>) {
+        let Some(context) = self.last_context() else {
+            return;
+        };
+        let spec = self.current_spec();
+        if spec.auto_compact_threshold <= 0.0
+            || u16::from(context.used_pct()) < (spec.auto_compact_threshold * 100.0) as u16
+        {
+            return;
+        }
+        if !self.claim_reminder(turn_id) {
+            return;
+        }
+        self.append_watchdog_input(turn_id, messages, crate::handoff::reminder(context))
+            .await;
+    }
+
+    /// 每回合只提醒一次：`reminded_turn` 记最近一次提醒的回合。
+    fn claim_reminder(&self, turn_id: &str) -> bool {
+        let mut inner = self.lock();
+        if inner.reminded_turn.as_deref() == Some(turn_id) {
+            return false;
+        }
+        inner.reminded_turn = Some(turn_id.to_string());
+        true
+    }
+
+    /// 硬阈值收口：到 `HARD_THRESHOLD_PCT` 就不再赌模型自觉。
+    ///
+    /// `autoCompactThreshold = 0`（契约里的「关闭自动压缩」）时整个收口停手：那是
+    /// 用户明确的选择，撞墙由上游报错，本模块不替他做主。
+    fn handoff_pressure(&self, turn_id: &str) -> HandoffPressure {
+        let Some(context) = self.last_context() else {
+            return HandoffPressure::Idle;
+        };
+        let spec = self.current_spec();
+        if spec.auto_compact_threshold <= 0.0
+            || u16::from(context.used_pct()) < crate::handoff::HARD_THRESHOLD_PCT
+        {
+            return HandoffPressure::Idle;
+        }
+        let mut inner = self.lock();
+        if inner.slimmed_turn.as_deref() == Some(turn_id) {
+            return HandoffPressure::DeadEnd(context);
+        }
+        inner.slimmed_turn = Some(turn_id.to_string());
+        HandoffPressure::Fold(context)
+    }
+
+    /// 看门狗发言：先落成会话事实（前端在 timeline 里看得见），再进本轮请求。
+    async fn append_watchdog_input(
+        &self,
+        turn_id: &str,
+        messages: &mut Vec<Message>,
+        text: String,
+    ) {
+        let entry = TimelineEntry::Input {
+            block_id: BlockId::new(format!("block_{}", generate_ulid())),
+            turn_id: Some(TurnId::new(turn_id.to_string())),
+            purpose: InputPurpose::Interject,
+            content: ContentValue::Inline { text: text.clone() },
+            attachments: Vec::new(),
+            images: Vec::new(),
+            inter_agent: None,
+            subagent_terminal: None,
+            actor: ActorRef {
+                kind: ActorKind::Api,
+                id: "handoff-watchdog".into(),
+                display_name: Some("上下文看门狗".into()),
+            },
+        };
+        if let Err(error) = self.owner.append_block(entry).await {
+            log::error!(
+                "[loop] {} watchdog input persist failed: {error}",
+                self.session_id
+            );
+        }
+        messages.push(Message {
+            msg_id: None,
+            role: "user".into(),
+            name: None,
+            content: vec![ContentBlock::Text { text }],
+        });
+    }
+
+    /// 本会话改过的文件清单：来源是 `tool_calls.code_delta`（每会话、已落库的事实），
+    /// 不是 `file_state` 那张进程级台账——后者会把别的会话混进来。
+    async fn file_ledger(&self) -> Result<Vec<crate::handoff::FileNote>, String> {
+        let state = self
+            .owner
+            .snapshot()
+            .await
+            .map_err(|error| format!("读取会话事实失败: {error}"))?;
+        let mut notes: Vec<crate::handoff::FileNote> = Vec::new();
+        for tool in &state.tools {
+            let Some(delta) = tool.code_delta.as_ref() else {
+                continue;
+            };
+            let Some(path) = delta.file.as_ref() else {
+                continue;
+            };
+            match notes.iter_mut().find(|note| &note.path == path) {
+                Some(note) => {
+                    note.added = note.added.saturating_add(delta.lines_added);
+                    note.removed = note.removed.saturating_add(delta.lines_removed);
+                }
+                None => notes.push(crate::handoff::FileNote {
+                    path: path.clone(),
+                    added: delta.lines_added,
+                    removed: delta.lines_removed,
+                }),
+            }
+        }
+        notes.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(notes)
+    }
+
+    fn claim_handoff(&self, turn_id: &str) -> bool {
+        let mut inner = self.lock();
+        if inner.handed_off_turn.as_deref() == Some(turn_id) {
+            return false;
+        }
+        inner.handed_off_turn = Some(turn_id.to_string());
+        true
+    }
+
+    fn release_handoff(&self, turn_id: &str) {
+        let mut inner = self.lock();
+        if inner.handed_off_turn.as_deref() == Some(turn_id) {
+            inner.handed_off_turn = None;
+        }
+    }
+
+    /// 执行交接：解析 → 台账 → 落盘 → 回一份机器可读的工具输出。
+    ///
+    /// 任何一步失败都当**交接失败**报错（模型可重调用），绝不静默降级成
+    /// 「没写成文档也算交接成功」。
+    async fn run_handoff(
+        &self,
+        turn: &TurnId,
+        call_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<(bool, String), LoopError> {
+        let args_json = serde_json::to_string(input).ok();
+        let doc = match crate::handoff::parse_doc(input) {
+            Ok(doc) => doc,
+            Err(error) => {
+                self.settle_failed(
+                    call_id,
+                    crate::handoff::TOOL_NAME,
+                    args_json,
+                    "handoff_invalid_args",
+                    &error,
+                );
+                return Ok((false, error));
+            }
+        };
+        if !self.claim_handoff(turn.as_str()) {
+            let text = crate::handoff::duplicate_output(&self.session_id);
+            self.settle_finished_text(call_id, crate::handoff::TOOL_NAME, &text);
+            return Ok((true, text));
+        }
+        let context = self.last_context();
+        let mirror = match self.file_ledger().await.and_then(|files| {
+            crate::handoff::write_mirror(&self.session_id, turn.as_str(), &doc, &files, context)
+                .map(|path| (path, files))
+        }) {
+            Ok(result) => result,
+            Err(error) => {
+                self.release_handoff(turn.as_str());
+                self.settle_failed(
+                    call_id,
+                    crate::handoff::TOOL_NAME,
+                    args_json,
+                    "handoff_write_failed",
+                    &error,
+                );
+                return Ok((false, error));
+            }
+        };
+        let (path, files) = mirror;
+        let text = crate::handoff::success_output(
+            &self.session_id,
+            turn.as_str(),
+            &doc,
+            &path,
+            &files,
+            context,
+        );
+        self.settle_finished_text(call_id, crate::handoff::TOOL_NAME, &text);
         Ok((true, text))
     }
 
@@ -1397,6 +1717,26 @@ fn flush_assistant(messages: &mut Vec<Message>, group: Option<Message>) {
     }
 }
 
+/// 腾出交接机会：只折工具结果的**模型投影正文**，`tool_use`/`tool_result` 配对、
+/// 状态与展示侧 summary 一律不动（折叠走 `set_model_projection` 这条现成口，与
+/// 工具侧折叠同一语义）。返回真正被折掉的条数。
+fn fold_tool_results(messages: &mut [Message]) -> usize {
+    let mut folded = 0usize;
+    for message in messages.iter_mut() {
+        for block in &mut message.content {
+            if let ContentBlock::ToolResult { result, .. } = block
+                && result.model_text() != crate::handoff::FOLD_NOTE
+            {
+                let truncated =
+                    result.model_text().chars().count() > crate::handoff::FOLD_NOTE.chars().count();
+                result.set_model_projection(crate::handoff::FOLD_NOTE.to_string(), truncated);
+                folded += 1;
+            }
+        }
+    }
+    folded
+}
+
 fn tool_result_message(call_id: &str, text: &str, ok: bool) -> Message {
     Message {
         msg_id: None,
@@ -1455,10 +1795,41 @@ impl ProgressSink for OwnerSink {
             &ToolCallId::new(update.call_id.to_string()),
             update.tool_name,
             update.args,
+            update.lines_added,
+            update.lines_removed,
         );
     }
 
     fn attempt_finished(&self, _turn_id: &str, _block_ids: &[String], _call_ids: &[String]) {
         // owner 无在飞身份登记;快照 + seq 水位自愈。
+    }
+}
+
+#[cfg(test)]
+mod fold_tests {
+    use super::*;
+
+    #[test]
+    fn fold_touches_only_tool_projections_and_counts_once() {
+        let mut messages = vec![
+            tool_result_message("call_1", &"x".repeat(4000), true),
+            tool_result_message("call_2", "短", false),
+        ];
+        assert_eq!(fold_tool_results(&mut messages), 2);
+        assert_eq!(fold_tool_results(&mut messages), 0, "已折叠的不重复计数");
+        let ContentBlock::ToolResult {
+            tool_use_id,
+            result,
+        } = &messages[0].content[0]
+        else {
+            panic!("折叠不得改变块类型与配对");
+        };
+        assert_eq!(tool_use_id, "call_1");
+        assert_eq!(result.model_text(), crate::handoff::FOLD_NOTE);
+        assert!(result.model_truncated());
+        let ContentBlock::ToolResult { result, .. } = &messages[1].content[0] else {
+            panic!("折叠不得改变块类型与配对");
+        };
+        assert!(!result.is_success(), "失败状态不随折叠被洗白");
     }
 }

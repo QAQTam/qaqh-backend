@@ -29,3 +29,6 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 18. 新闸门落地必须**反证**它真会红(用真实历史提交或临时插违规),并且要看 CI 的步骤明细而不是 job 绿灯 —— `continue-on-error` 会掩盖步骤失败;报错误行号的 lint 本身就是新的误导源。
 19. 本仓存在并发写入者:动同类文件前先 `git fetch` 并与 `origin/LTS-v3.0` 比对,合并后维持 **`main` ⊇ `LTS-v3.0`** 的超集不变量;撞车(同一缺陷被各自修两次)要在 ADR 留痕而不是悄悄 rebase 掉。
 20. 验证优先用官方命令(`check --against docs/api-surface/v3.0`、`check-lts-api-surface.py`、`cargo test -p <改动涉及的 crate>`),不要每次手搓等价比对;本机资源受限时 `--release` 全量构建交 CI(见规则 7/10)。
+21. 本仓库为LTS仓，遵循用户空间（前后端API）不可变，内核空间（后端）保持对外一致或同等效力下可以发生部分小破坏性变化或以exp设计接线。
+22. 本仓禁止直接使用git checkout，可以使用更加安全的新用法。
+23. shell新增uutils组件替换pwsh7的部分实现，调用时LLM可以较为自然的调用uutils

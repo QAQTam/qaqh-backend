@@ -600,8 +600,11 @@ fn validate_server_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// BYOK 未声明上下文窗口时的保守分母：宁可早压缩，也不把超限推给上游换 400。
-pub const DEFAULT_CONTEXT_LENGTH: u32 = 128_000;
+/// BYOK 未声明上下文窗口时的缺省分母（与 `qaqh-profile::ModelDef` 缺省窗口同口径）。
+///
+/// 方向性：这个数只当**初始猜测**，运行时按 provider 实测（接受/超限）收敛；
+/// 猜小了只是提早交接，猜大了才是撞墙。
+pub const DEFAULT_CONTEXT_LENGTH: u32 = 383_000;
 
 /// 首次启动落盘的预设配置（带注释，可直接编辑）。
 /// 存在的前提是"配置文件不在"（`load` 只在 `!store.exists()` 时写），因此损坏的
@@ -1189,7 +1192,7 @@ mod c3_migration_tests {
         assert!(cfg.profiles_catalog.providers.is_empty());
         assert_eq!(cfg.wire, qaqh_types::Wire::Chat);
         assert_eq!(cfg.max_tokens, 16_384);
-        assert_eq!(cfg.context_length, 128_000);
+        assert_eq!(cfg.context_length, 383_000);
         assert!(cfg.reasoning_effort.is_empty());
         assert!(cfg.api_key.is_empty(), "预设不得带密钥");
         assert_eq!(

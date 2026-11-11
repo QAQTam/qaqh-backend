@@ -32,16 +32,33 @@
    名称、params/result 类型形状、MethodKind、错误语义
 4. **命令与事件面**:`RingingCommand`、`RingingV2Event` 各变体的字段与判别方式
 5. **SDK 契约哈希**:`qaqh-contract-export` 的 `contract_hash` 相对 `v3.0.0` release 内契约 zip **不得变化**
+   (相对 v3.0.0 的偏离必须先在 §7 登记后才允许提交;additive 且不动 `contract_revision` 的偏离可记在
+   当前锁内,其余一律开新 LTS 线)。**"偏离必须留痕"这半句已由 `change-policy` 作业机器执法**
+   (见下表);至于"偏离是否允许",仍由本节判据 + §7 登记内容决定。
 
 **允许的改动**:bug 修复、内部重构(不触及上述面的)、新增仅在内部使用的代码路径、测试。
 
-**改动是否踩线的判定法**:本地两条都跑 ——
+**改动是否踩线的判定法**——先分清各闸门实际比什么(别把纪律当成 CI):
+
+| 闸门 | 实际比对对象 | 能抓到什么 |
+|---|---|---|
+| `lts-api-guard.yml` → `scripts/check-lts-api-surface.py` | HEAD 导出物 vs **仓内** `docs/api-surface/v3.0/` golden(逐字节,`manifest.json` 的 `source_revision`/`source_dirty` 除外)+ 路由表 + facade 清单 | 实现改了 wire 但没同步 golden(或反之) |
+| `sdk-contract.yml:48-49` | `export --out $T` 后 `check --against $T`,即**同一份** temp | 导出不确定/不可复现 |
+| `scripts/check-sdk-contract.py --typescript --release` | 由导出物自算 `contract_hash` 校验 manifest 自洽 + 严格 TS 消费者编译 | 契约自相矛盾、前端可见字段被删(表现为 `error TS2353`) |
+| `lts-api-guard.yml` → `scripts/check-frozen-ledger.py` | 本次改动的**文件集合** vs `docs/lts-v3.0-maintenance.md` 的 §7 新增条目 | 触碰前端可见冻结面(docs/api-surface、ringing-contract、ringing/src/v2、command.rs、qaqh-client、contract-export)却没有登记 |
+| `surface-policy.yml` → `scripts/check-surface-change-policy.py` | 金标准改动的 **wire 视图** 三分类(refreeze / tightening / doc-only,ADR-0009) | 谎报 doc-only 的 wire 实变;refreeze 混进冻结线 |
+
+本地两条官方命令都跑 ——
 ① `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0`(金标准比对。自 `52a0d0bb`
 起 `compare_trees` 豁免 `snapshots/`、`manifest.json` 走切除 `source_revision`/`source_dirty` 的语义比对,
 且 `.gitattributes` 已把金标准目录钉成 `eol=lf`,故 Windows 与 Linux 同样可用,本机实测 exit 0);
 ② `scripts/check-sdk-contract.py --typescript --release`(产物确定性 + 独立严格 TS 消费者)。
-判定:金标准、契约哈希或严格 TS 消费者任一失败,即踩线;LTS 上不允许用"顺手改夹具"的方式让它变绿
-(夹具只能修编译性破损,不得改描述被测行为的断言)。
+
+**仍然没有任何 CI 步骤把 `contract_hash` 与 `v3.0.0` release 资产比对**(那条比的是影子不是成因:一句 doc
+注释也能让 hash 漂移,见 §7.2)。所以 §1.5 的可执行形式是:**碰冻结面 ⇒ 必须留下 §7 登记**(`change-policy`
+红),而不是"hash 不许变"这种没人比的口号。LTS 上不允许用"顺手改夹具"的方式让它变绿(夹具只能修编译性破损,
+不得改描述被测行为的断言);`change-policy` 自身的判据由它的 `--self-test` 钉住——把 `FROZEN` 前缀删短或把
+§7 标题正则放宽,那一步会先红。
 
 **漂移事故参照**:model-config 重构删除 `SessionSettingsPatch.profile` 时,TS 严格消费者在 CI 抓到漂移
 —— LTS 上这类漂移 = 发布阻断,必须回退实现而非改夹具。
@@ -50,7 +67,8 @@
 `scripts/check-lts-api-surface.py`,把 HEAD 的契约导出物与 `docs/api-surface/v3.0/` 金标准逐字节比对
 (manifest 中随提交变化的 `source_revision/source_dirty` 除外),并冻结 HTTP 路由表与 qaqh-client facade 清单。
 CI 红 = 拒绝该改动;金标准只允许在两种情况下再生成:① 新 LTS 线(如 v3.1)切出时;
-② LTS 上明确批准的契约修订(此时它已不是"冻结"而是"换锁",需 bump revision 并重切 tag)。
+② LTS 上明确批准的契约修订(此时它已不是"冻结"而是"换锁"):additive 且不动 `contract_revision` 的偏离
+留在当前锁内、随 §7 登记提交即可;要删/改字段、改语义或 bump `contract_revision`,那是开新 LTS 线(v3.1)。
 再生成命令:`QAQH_SOURCE_REVISION=$(git rev-parse HEAD) QAQH_SOURCE_DIRTY=0 cargo run -p qaqh-contract-export -- export --out <tmp> --release`,
 随后把产物复制进金标准目录、连同 `snapshots/routes.txt`、`snapshots/facade.txt` 一并提交。
 
@@ -88,8 +106,13 @@ pwsh scripts/sync-version.ps1   # 先把 version.txt 改成 3.0.2026MMDD-N 之�
 # 2. 验证契约未冻结区被误伤(可选但强烈建议)
 just sdk-check
 
-# 3. 推分支 → sdk-contract CI 必须绿
-git push
+# 3. 走 PR(不再直推:LTS-v3.0 开了 Require PR + enforce_admins,直推按平台语义会被拒)
+git switch -c feat/<slice> && git push -u origin feat/<slice>
+gh pr create --base LTS-v3.0 --head feat/<slice> --title ... --body-file ...
+#    三项必需检查必须绿:contract(sdk-contract.yml)、freeze(lts-api-guard 内容一致)、
+#    change-policy(lts-api-guard 留痕)。required_approving_review_count=0 —— 单人维护者
+#    凑不出"非作者的 code owner",评审人头这道门已在 §7.3 撤掉,执法点改到上述三项。
+gh pr merge <n> --merge
 
 # 4. 干跑构建验证(不发版,两平台编一遍)
 #    GitHub → Actions → Release → Run workflow → 选 LTS-v3.0
@@ -146,7 +169,7 @@ required checks 保证。热修 tag 仍必须走 `v3.0.x` 序号,禁止 `latest`
 实测:引入整份金标准的 `b96f2b72` 判红;只改 `routes.txt` 的 ADR-0003 提交自动判 `guard-tightening` 放行;
 LTS 上那次注释重切(`ac54e508`+`4c3a26be`)判 `doc-only-refresh`。
 
-外部依赖钉子:`qaqtam/mutil-ai` @ `4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4`。
+外部依赖钉子:`qaqtam/mutil-ai` @ `b37ca25f23350a8c6cb78bc69fda023f2cb809aa`(2026-11-11 随 prompt-cache 收口升级;旧 pin `4387f74d` 经 merge-base 实测为其祖先)。
 LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级属 main 的权利。
 
 ## 5. 故障手册(本 SDK 实战踩过的坑)
@@ -161,15 +184,90 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 
 ## 6. 发版 checklist
 
-- [ ] `git log v3.0.<n-1>..LTS-v3.0` 里没有触碰 §1 冻结面的提交
-- [ ] `contract_hash` 与上一版 release 的契约 zip 一致(或差异有成文说明且仅限 main 线)
+- [ ] `git log v3.0.<n-1>..LTS-v3.0` 里触碰 §1 冻结面的提交都已在 §7 登记(未登记 = 本次发版阻断)
+- [ ] `change-policy` 作业在 PR 上为绿(它就是上一条的机器形式;它红 = 有冻结面改动没留痕)
+- [ ] `contract_hash` 与上一版 release 的契约 zip 一致;不一致时 §7 必须有对应条目,且偏离是 **additive + 未 bump `contract_revision`**
+- [ ] §7 登记条目里写清了「哪道闸门放行、为什么放行」(golden 同提交即 `freeze` 绿),别让下个维护者以为 CI 兜住了语义
 - [ ] `version.txt` 已改为本次补丁戳,Cargo.toml / package.json / Cargo.lock / qaqh-backend.lock.json 全部同步
 - [ ] sdk-contract 在 LTS-v3.0 绿
 - [ ] (标准流程)dispatch 干跑双平台绿
 - [ ] tag 已推,Release 页面出现且标记 Latest,资产齐全
 - [ ] 前端仓库把依赖 pin 到新 tag(契约 zip 里的 `QAQH_SOURCE_REVISION` 与 tag 提交一致)
 
-## 7. 仓库设置：LTS-v3.0 分支保护（2026-11-10 已开启）
+## 7. 锁内已批准的契约修订登记
+
+> 「换锁」的判据不是补丁号进位(3.0.0→3.0.1 只是版本号),而是这条锁的参照物有没有被改动后仍留在锁内。
+> 换锁 = bump `contract_revision` + 重切 tag,那属于开新 LTS 线(§1.2/§42);登记在案的 additive 偏离则
+> 留在当前锁内,以 golden 目录为锁内新基线。**换锁 ≠ 破坏性改动**:删字段/改语义是破坏性,加可选字段不是。
+>
+> 从 §7.3 起,本节不再只是纸面纪律:`change-policy` 作业会比对"触碰冻结面"与"本节新增条目",缺一即红。
+
+### 7.1 2026-11-10 · 随 `v3.0.1` 携带 · 事件面加可选行差估算字段
+
+- **变更**:`SessionEvent::ToolArgumentsDelta` 增 `lines_added` / `lines_removed`(累计行差估算)。
+- **兼容性判定**:纯 additive。未删字段、未改任何既有字段语义、未改事件判别方式;两字段
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`,旧客户端报文里根本不出现这两个键。
+- **`contract_revision` 未 bump**(仍 `ringing-commands-7` / `ringing-session-2`,`qaqh-ringing/src/v2/types.rs:39,44`):
+  客户端对它的校验是严格相等,bump 会让所有存量前端当场拒连——一个"先顶一下"的补丁 tag 承担不起。
+- **基线**:`docs/api-surface/v3.0/` 已随实现同提交再生成(变化面:
+  `cs/SessionEvent.cs`、`cs/SessionEventFrame.cs`、`types/qaqh/SessionEvent.ts`、`types/qaqh/SessionEventFrame.ts`、
+  `manifest.json`;路由表与 facade 未动)。`lts-api-guard` 以 golden 为准,故本条不会变红——**这是登记而非 CI 放行**。
+- **消费口径**:估算数的是已到达的**参数文本**行数,不是实际改动行数;终态 `ToolFinished.code_delta`
+  才是盘上真 diff(本次一并把 code_delta 从参数文本口径改为展示投影真 diff 单一事实源)。
+  前端把估算当进度条,不得把 `null` 渲染成 `+0 −0`。
+- **出口**:任何后续要删/改这些字段、改语义、或 bump revision 的变更 → 开 `v3.1` 线,不得再记在本节。
+
+### 7.2 2026-11-10 · 已合入 `4c3a26be` · 事后追认:doc 注释驱动的 hash 漂移
+
+- **事实**:`4c3a26be`(chore(contract): regenerate golden for ModelCapabilities layering docs)只改了两个
+  文件——`types/qaqh/ModelCapabilities.ts` 增加 13 行**注释**(源自 `ac54e508` 给
+  `crates/qaqh-types/src/provider.rs` 加的结构体文档),`manifest.json` 的 `contract_hash` 随导出物变化。
+  提交信息自己写明 "Shape unchanged - docs only"。C# 侧产物未变。
+- **性质**:**不是**字段/语义变更,`ModelCapabilities` 的形状(`tool_calls`/`image_input`/
+  `native_web_search`/`reasoning`)一字未动 → 对客户端零影响,不需要任何前端改动。
+- **为什么要追认**:它直推进了当时已开保护的 `LTS-v3.0`,触碰了 `docs/api-surface/**` 却无登记。
+  `contract_hash` 变了,而 §1.5 旧文面把它写成"不得变化"——按旧文面这次属违规,按实际影响这次属噪声。
+  这正是把纪律建在影子上而非成因上的后果,已在 §1.5 改写为"碰冻结面必留痕"并由 `change-policy` 执法:
+  同样内容今天会**强制**要求一条登记才允许合并。
+- **登记编号说明**:`§7.1` 在前、`§7.2` 在后按"入账顺序"排列而非按提交时间;`4c3a26be`(16:45)早于
+  `§7.1` 对应的 PR #16(20:29),但追认条目一律按登记时刻排在后。
+
+### 7.3 2026-11-10 · 锁的执法方式变更(B 方案,无代码影响)
+
+- **变更**(仓库设置,不进 git 树,故本条是唯一留痕处):`LTS-v3.0` 分支保护由
+  `required_approving_review_count=1` + `require_code_owner_reviews=true` + `enforce_admins=true`
+  改为 `count=0` + `code_owner=false`,**`enforce_admins` 与 strict `contract`/`freeze` 保留**。
+- **为什么必须改**:唯一有 write 权限的账号是 `QAQTam`,而 PR 作者也是 `QAQTam`;GitHub 硬规则禁止作者批准
+  自己的 PR(owner/admin 无例外),`enforce_admins=true` 又关掉了 admin 绕过,仓库级 auto-merge 也未开启 ⇒
+  合格批准人集合为空,**任何 PR 都进不来**(PR #16 当时 `reviewRequests: []`,平台自己也算不出人)。
+- **为什么不加第二个 code owner 了事**:单人维护下,"多一个人头"要么由 bot 自动批准(那实质就是机器执法,
+  不如把判据写成可测的断言),要么永远凑不齐(那就是现在这个死锁)。所以执法点迁到
+  `contract` + `freeze` + 新增的 `change-policy`。
+- **为什么保留 `enforce_admins=true`**:比原提案更严。它让 admin 也不能直推绕开三项检查——§7.2 那类
+  "绕过锁的推送"从此结构性不可能。代价:§2 的发版流程必须走 PR(已改写)。
+- **注意**:`.github/CODEOWNERS` 只存在于默认分支 `main`,`LTS-v3.0` 树上没有这个文件;`main` 那份把
+  冻结面与守卫脚本全部指向 `@QAQTam`,因此"Require review from Code Owners"在 main 上会复现同一个死锁。
+  主线若采纳同一判据,应把 code-owner 评审换成可自动判定的断言。
+- **兼容性**:零 wire 影响,不涉及 revision,不影响任何已发布契约。
+
+### 7.4 2026-11-11 · 随 v3.0 收口 PR #21 · client 读面错误信封还原(无 wire 影响)
+
+- **变更**:`qaqh-client::Client::query` 非 2xx 不再丢弃响应体,改复用 `service::response_error`
+  还原 daemon 的 `{code,message}` 信封(与 `service_call` 同源);解析不出才退回 `Http`。
+- **兼容性判定**:纯客户端错误投影改进,additive。HTTP wire、方法签名、facade 清单均未变
+  (`freeze` 实测绿);结构化错误下消费方从裸 `Http` 变为 `Api`(多拿 code/message),只读 status
+  的消费方不受影响。
+- **`contract_revision` 未 bump**(仍 `ringing-commands-7` / `ringing-session-2`)。
+- **闸门放行**:`freeze` 绿(导出物/路由/facade 不变);`change-policy` 以本条留痕;`contract` 见 PR CI。
+- **背景**:前端 browser-control 文本拼接器把 config.toml 的 headers 双写致 `config.load` 400,
+  根因文案(TOML duplicate key)被 `query()` 吞成 `code:null`。本修复让诊断到达前端;前端拼接器
+  根治(daemon 结构化写口)留 v3.1。同 PR 的 ctx 页脚/pwsh UTF-8 修复不触冻结面前缀,无需登记。
+
+### 7.5 分支保护基线(2026-11-10 开启的历史快照)
+
+> **取代说明**:评审人头与 code-owner 两行已被 §7.3 取代(count=0、code_owner=false);
+> `change-policy` 也已补进 required contexts(当前实测 contexts=[contract, freeze, change-policy])。
+> 下表保留其余基线事实(enforce_admins、strict、禁 force push 等),"两个缺口"均已落地。
 
 经所有者授权，已用 `gh api PUT /repos/QAQTam/qaqh-backend/branches/LTS-v3.0/protection` 开启并回读确认：
 
@@ -183,7 +281,7 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 | Allow force pushes / deletions | ❌（禁用） | 冻结线不可改写历史 |
 | **Enforce for admins** | ✅ **true**（2026-11-10 第二次收紧） | admin 也**不能直推冻结线**，热修改走 §3 的 PR 路径 |
 
-### 两个**故意留着**的缺口（不要误以为全通了）
+#### 两个**故意留着**的缺口（不要误以为全通了）
 
 1. `change-policy`（即 `surface-policy.yml` 的 job）**没有**加进 required contexts ——
    因为 workflow 文件是从**被推的那个 ref** 读取的，而 `surface-policy.yml` 目前只在 `main` 上。
@@ -194,6 +292,7 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
    当前对 LTS 的 PR 是"无匹配 owner → 不触发 code-owner 要求"。第 1 条落地时这条自动一起生效。
 
 `main` **未加保护**（快车，规则见 `docs/adr/0001` §决策）。
+
 
 ## 8. 换锁：开新 LTS 线（`contract-refreeze` 的唯一去处）
 
