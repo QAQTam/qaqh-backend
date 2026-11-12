@@ -44,6 +44,8 @@ winresource = "0.1"
 # 运行期依赖由 qaqh-runtime 传递，故只登记在 dev。
 qaqh-siwc = { path = "../qaqh-siwc" }
 tempfile = "3"
+# v2_storm_tests 需要逐帧 poll SSE 响应体（回放尾的"部分读取+截止"语义）。
+http-body-util = "0.1"
 
 [lints]
 workspace = true

@@ -10,6 +10,7 @@
 //! 测试同构(oneshot 回执两端均支持阻塞/异步等待)。
 
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -32,6 +33,125 @@ use crate::db::{Db, DbError, store, view};
 
 /// 每会话 SSE 事件缓冲;落后客户端经快照 + `seq` 水位重新同步(报告一 §194)。
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+/// 回放尾预算(P0-2026-11-10 报告 §6 H1'):帧数覆盖广播深度,字节预算
+/// 防 exec 大帧撑爆内存。超出覆盖范围的远古游标仍走快照 resync——回放尾
+/// 消灭的是「缺口即掐流」的活锁,不是 resync 本身。
+const REPLAY_FRAME_CAP: usize = 2 * EVENT_CHANNEL_CAPACITY;
+const REPLAY_BYTE_CAP: usize = 4 * 1024 * 1024;
+
+/// 会话事件回放尾。定序纪律:「先入环、后广播」(`emit`)与「先 grab receiver、
+/// 后读环」(`attach_after`)交错时,每帧要么已在环内被 replay 覆盖,要么其
+/// send 晚于 receiver 订阅由转发直送;两处重合同时由转发侧水位去重。
+/// 论证见 P0-2026-11-10 报告 §6 H1'。
+#[derive(Default)]
+pub struct ReplayRing {
+    state: Mutex<RingState>,
+}
+
+#[derive(Default)]
+struct RingState {
+    frames: VecDeque<SessionEventFrame>,
+    bytes: usize,
+}
+
+/// 一帧的粗算占用:结构体本体 + 主要堆文本。预算是护栏不是精确账本——
+/// 低速率大条目(TimelineAppended 等)走 serde 实测,高频 delta 直取字段。
+fn frame_footprint(frame: &SessionEventFrame) -> usize {
+    std::mem::size_of::<SessionEventFrame>() + event_heap_bytes(&frame.event)
+}
+
+fn event_heap_bytes(event: &SessionEvent) -> usize {
+    match event {
+        SessionEvent::ToolOutputDelta { text, .. }
+        | SessionEvent::ToolArgumentsDelta { text, .. }
+        | SessionEvent::MessageDelta { text, .. }
+        | SessionEvent::ExecSessionOutputDelta { text, .. } => text.len(),
+        SessionEvent::ToolFinished { output, .. } => output
+            .as_ref()
+            .map(|value| match value {
+                ContentValue::Inline { text } => text.len(),
+                ContentValue::Ref { .. } => 64,
+                ContentValue::Unavailable(_) => 8,
+            })
+            .unwrap_or_default(),
+        SessionEvent::ExecSessionStarted { session }
+        | SessionEvent::ExecSessionStateChanged { session }
+        | SessionEvent::ExecSessionFinished { session } => session.output_preview.len(),
+        SessionEvent::TimelineAppended { entry } => {
+            serde_json::to_string(entry).map(|json| json.len()).unwrap_or_default()
+        }
+        _ => 0,
+    }
+}
+
+impl ReplayRing {
+    fn push(&self, frame: SessionEventFrame) {
+        let footprint = frame_footprint(&frame);
+        let mut ring = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        ring.bytes += footprint;
+        ring.frames.push_back(frame);
+        while ring.frames.len() > REPLAY_FRAME_CAP
+            || (ring.frames.len() > 1 && ring.bytes > REPLAY_BYTE_CAP)
+        {
+            let Some(evicted) = ring.frames.pop_front() else { break };
+            ring.bytes = ring.bytes.saturating_sub(frame_footprint(&evicted));
+        }
+    }
+
+    /// `after_seq` = 客户端游标(exclusive 语义,同契约文档 SessionEventFrame
+    /// 头注:「跳过 `seq < state.seq`,处理 `seq >= state.seq`」)。
+    /// `None` = 无游标 live 直推(不回放既有帧)。
+    fn slice_after(&self, after_seq: Option<u64>) -> ReplaySlice {
+        let ring = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(after) = after_seq else {
+            return ReplaySlice {
+                frames: Vec::new(),
+                watermark: None,
+                gap: false,
+            };
+        };
+        let (Some(head), Some(back)) = (ring.frames.front(), ring.frames.back()) else {
+            // 本 epoch 内一帧未发:无东西可补,live 直推。
+            return ReplaySlice {
+                frames: Vec::new(),
+                watermark: None,
+                gap: false,
+            };
+        };
+        if head.seq > after {
+            // 游标与环首之间的事件已被淘汰——回放尾兜不住,回到快照 resync。
+            return ReplaySlice {
+                frames: Vec::new(),
+                watermark: None,
+                gap: true,
+            };
+        }
+        let frames: Vec<SessionEventFrame> =
+            ring.frames.iter().filter(|frame| frame.seq >= after).cloned().collect();
+        let watermark = frames.last().map(|frame| frame.seq);
+        debug_assert!(watermark.is_none_or(|last| last == back.seq));
+        ReplaySlice {
+            frames,
+            watermark,
+            gap: false,
+        }
+    }
+}
+
+pub struct ReplaySlice {
+    pub frames: Vec<SessionEventFrame>,
+    /// 本次补发的最大 seq;转发端跳过 `seq <= watermark` 的 receiver 重帧。
+    pub watermark: Option<u64>,
+    /// 游标早于回放尾覆盖范围——只能快照重同步。
+    pub gap: bool,
+}
+
+/// 读面原子 attach 结果:receiver 已先于环读取建立,补发与 live 无缝且无重。
+pub struct OwnerAttach {
+    pub replay: ReplaySlice,
+    pub receiver: tokio::sync::broadcast::Receiver<SessionEventFrame>,
+}
 
 /// 泵请求:提交 + 发布打包在闭包里,由泵线程串行执行。
 /// 返回 `Err` 时回执给调用方;闭包内部必须保证"先落库、后 emit"。
@@ -83,6 +203,7 @@ pub struct SessionOwner {
     events: tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: Arc<AtomicU64>,
     lifecycle_tx: mpsc::Sender<OwnerMsg>,
+    replay: Arc<ReplayRing>,
 }
 
 impl SessionOwner {
@@ -92,11 +213,13 @@ impl SessionOwner {
         let (events, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
         let next_seq = Arc::new(AtomicU64::new(0));
+        let replay = Arc::new(ReplayRing::default());
         let pump = OwnerPump {
             session_id: session_id.clone(),
             db: Arc::clone(&db),
             events: events.clone(),
             next_seq: Arc::clone(&next_seq),
+            replay: Arc::clone(&replay),
         };
         std::thread::Builder::new()
             .name(format!("qaqh-owner-{session_id}"))
@@ -112,6 +235,7 @@ impl SessionOwner {
             events,
             next_seq,
             lifecycle_tx,
+            replay,
         }
     }
 
@@ -148,6 +272,20 @@ impl SessionOwner {
     /// 订阅单流事件(P4 SSE 的来源;落后经快照重同步)。
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<SessionEventFrame> {
         self.events.subscribe()
+    }
+
+    /// 读面原子 attach(H1',P0-2026-11-10 报告 §6):**先 grab receiver,再切
+    /// 回放尾**。`gap=true` 时游标已跌出尾覆盖范围,调用方走快照 resync;
+    /// 否则 `replay.frames` 补发后由 receiver 无缝续 live。
+    pub fn attach_after(&self, after_seq: Option<u64>) -> OwnerAttach {
+        let receiver = self.events.subscribe();
+        let replay = self.replay.slice_after(after_seq);
+        OwnerAttach { replay, receiver }
+    }
+
+    /// Lagged 后的追赶补发:同 `attach_after` 的环切片,但不新建 receiver。
+    pub fn replay_after(&self, after_seq: Option<u64>) -> ReplaySlice {
+        self.replay.slice_after(after_seq)
     }
 
     /// 当前事件水位:即下一个将分配的 seq(exclusive);快照必须携带,客户端
@@ -569,13 +707,19 @@ impl SessionOwner {
 fn emit(
     events: &tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: &AtomicU64,
+    replay: &ReplayRing,
     event: SessionEvent,
 ) {
     // 无订阅者 = 无 SSE 连接;持久化数据不回滚,客户端经快照重同步。
-    let _ = events.send(SessionEventFrame {
+    let frame = SessionEventFrame {
         seq: next_seq.fetch_add(1, Ordering::Relaxed),
         event,
-    });
+    };
+    // 定序纪律(H1'):**先入环、后广播**。与 `attach_after` 的「先 grab receiver、
+    // 后读环」交错时,任一帧至少落在 replay 或 receiver 一处;两处重合同一帧时
+    // 由转发侧水位去重。
+    replay.push(frame.clone());
+    let _ = events.send(frame);
 }
 
 /// typed 列的 serde 形式;序列化失败按代码错误响(不静默降级为 NULL)。
@@ -941,11 +1085,12 @@ struct OwnerPump {
     db: Arc<Db>,
     events: tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: Arc<AtomicU64>,
+    replay: Arc<ReplayRing>,
 }
 
 impl OwnerPump {
     fn emit(&self, event: SessionEvent) {
-        emit(&self.events, &self.next_seq, event);
+        emit(&self.events, &self.next_seq, &self.replay, event);
     }
 
     /// 活跃回合:工具行落库时的回合归属。

@@ -1,6 +1,6 @@
 # LTS v3.0 维护发版说明书
 
-> 适用分支:`LTS-v3.0` · 起点版本:`v3.0.0`(tag 于 main @ `7fe35d96` 切出,与 LTS 分支同源)
+> 适用分支:`LTS-v3.0` · 起点版本:`v3.0.0`(tag 于 main @ `f9b3a7f8` 切出,与 LTS 分支同源)
 > 配套 CI:`.github/workflows/release.yml`(发版)、`.github/workflows/sdk-contract.yml`(契约校验)、
 > `.github/workflows/lts-api-guard.yml`(冻结守卫)
 > 决策台账:`docs/adr/`——本文写**怎么做**,`docs/adr/` 写**为什么这样定、以及哪些方案被否**。
@@ -49,7 +49,7 @@
 | `surface-policy.yml` → `scripts/check-surface-change-policy.py` | 金标准改动的 **wire 视图** 三分类(refreeze / tightening / doc-only,ADR-0009) | 谎报 doc-only 的 wire 实变;refreeze 混进冻结线 |
 
 本地两条官方命令都跑 ——
-① `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0`(金标准比对。自 `52a0d0bb`
+① `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0`(金标准比对。自 `c9a2db3b`
 起 `compare_trees` 豁免 `snapshots/`、`manifest.json` 走切除 `source_revision`/`source_dirty` 的语义比对,
 且 `.gitattributes` 已把金标准目录钉成 `eol=lf`,故 Windows 与 Linux 同样可用,本机实测 exit 0);
 ② `scripts/check-sdk-contract.py --typescript --release`(产物确定性 + 独立严格 TS 消费者)。
@@ -166,8 +166,8 @@ required checks 保证。热修 tag 仍必须走 `v3.0.x` 序号,禁止 `latest`
 
 标记写在 commit subject/body(`[doc-only-refresh]`)或 PR label。**是否真属 doc-only 由脚本自己算**
 (它对每个改动产物做去注释比较),谎报会被 `artifact added` / `wire-differs` 列表当场戳穿 —— 见 ADR-0009。
-实测:引入整份金标准的 `b96f2b72` 判红;只改 `routes.txt` 的 ADR-0003 提交自动判 `guard-tightening` 放行;
-LTS 上那次注释重切(`ac54e508`+`4c3a26be`)判 `doc-only-refresh`。
+实测:引入整份金标准的 `e3b2b618` 判红;只改 `routes.txt` 的 ADR-0003 提交自动判 `guard-tightening` 放行;
+LTS 上那次注释重切(`138e9101`+`5d2cdfcd`)判 `doc-only-refresh`。
 
 外部依赖钉子:`qaqtam/mutil-ai` @ `b37ca25f23350a8c6cb78bc69fda023f2cb809aa`(2026-11-11 随 prompt-cache 收口升级;旧 pin `4387f74d` 经 merge-base 实测为其祖先)。
 LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级属 main 的权利。
@@ -217,10 +217,10 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
   前端把估算当进度条,不得把 `null` 渲染成 `+0 −0`。
 - **出口**:任何后续要删/改这些字段、改语义、或 bump revision 的变更 → 开 `v3.1` 线,不得再记在本节。
 
-### 7.2 2026-11-10 · 已合入 `4c3a26be` · 事后追认:doc 注释驱动的 hash 漂移
+### 7.2 2026-11-10 · 已合入 `5d2cdfcd` · 事后追认:doc 注释驱动的 hash 漂移
 
-- **事实**:`4c3a26be`(chore(contract): regenerate golden for ModelCapabilities layering docs)只改了两个
-  文件——`types/qaqh/ModelCapabilities.ts` 增加 13 行**注释**(源自 `ac54e508` 给
+- **事实**:`5d2cdfcd`(chore(contract): regenerate golden for ModelCapabilities layering docs)只改了两个
+  文件——`types/qaqh/ModelCapabilities.ts` 增加 13 行**注释**(源自 `138e9101` 给
   `crates/qaqh-types/src/provider.rs` 加的结构体文档),`manifest.json` 的 `contract_hash` 随导出物变化。
   提交信息自己写明 "Shape unchanged - docs only"。C# 侧产物未变。
 - **性质**:**不是**字段/语义变更,`ModelCapabilities` 的形状(`tool_calls`/`image_input`/
@@ -229,7 +229,7 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
   `contract_hash` 变了,而 §1.5 旧文面把它写成"不得变化"——按旧文面这次属违规,按实际影响这次属噪声。
   这正是把纪律建在影子上而非成因上的后果,已在 §1.5 改写为"碰冻结面必留痕"并由 `change-policy` 执法:
   同样内容今天会**强制**要求一条登记才允许合并。
-- **登记编号说明**:`§7.1` 在前、`§7.2` 在后按"入账顺序"排列而非按提交时间;`4c3a26be`(16:45)早于
+- **登记编号说明**:`§7.1` 在前、`§7.2` 在后按"入账顺序"排列而非按提交时间;`5d2cdfcd`(16:45)早于
   `§7.1` 对应的 PR #16(20:29),但追认条目一律按登记时刻排在后。
 
 ### 7.3 2026-11-10 · 锁的执法方式变更(B 方案,无代码影响)
