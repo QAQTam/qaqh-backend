@@ -54,6 +54,11 @@
    适用于子会话（旧子代理豁免退役）。
 2. AgentPath **降格为会话血缘的投影**：冻结的 `Team*`/`Subagent*` DTO 由
    会话行 + effects 投影供数；`agent_catalog` 不再是权威源。
+   **实施口径**：懒投影 `ensure_agent_projection`——catalog 与 supervisor
+   边从会话行 `parent_session_id` 派生；名字取 `SubagentSpawned` effect
+   （`view::spawn_names` 一次性懒扫），无 effect 的会话（wire spawn）回落
+   id 派生名 `sub_<id12>`。加载/寻址即重建，重启后寻址、T-1-4 取消传播、
+   超时扫描不丢。
 3. **collector 线程与 `subagent_outcomes` 面退役**：子会话 turn 终态时由 loop
    经**终态端口**（`TurnTerminalPort`，registry 装配时注入）报告终态；
    registry 判定血缘后向父会话发 canonical `ConversationSendMessage`
@@ -76,6 +81,11 @@
    保留配额（`admit_outbound_message`）与自送禁止；root 保护改由
    driver/lease 状态表达（用户正在驱动的会话只 Queue 不 Trigger），
    不再用路径特权规则。
+   **实施口径**：UUID 含 `-`、自然名不含 → id/路径寻址无歧义。跨 root
+   信封以 session id 署名（path 的 namespace 是 root 相对的，跨 root 歧义），
+   同 root 保持 path 署名。消息面的 root 路径特权（child 不得 trigger/
+   steer root）退役——活动回合的保护由 loop 忙则入队语义表达；
+   `interrupt_agent` 保留 root/self 守卫（中断是控制操作，不是聊天）。
 6. 子会话 reload 走普通 `get_or_spawn`；废除"父必须加载"特权规则与
    `spawn_configs` 复录机制。
 7. 模型工具面按会话语义重写为最小集（spawn / send / wait / list / cancel）；
@@ -122,13 +132,10 @@
 
 ## 落地清单（未实施，逐条可勾）
 
-- [ ] 切片 A：spawn 收敛——`subagent.spawn` 直走会话创建路径；砍
-      `spawn_configs` / `AgentKind::Subagent` / reload 特权 / legacy bootstrap
-      （`registry/spawn.rs`、`handlers/session.rs`）。实施边界：catalog /
-      residency / supervisor 的**投影化**（数据源改会话行、重启可重建）
-      归切片 C 与寻址一并完成；切片 A 先退生命周期权威。
-- [ ] 切片 B：回传退役 collector——turn 终态 → canonical 跨会话消息；
-      deadline 落行 + 周期扫描（`subagent/lib.rs`、`session_loop.rs`）
+- [x] 切片 A：spawn 收敛（`181c66a4`）——`subagent.spawn` 直走会话创建路径；
+      砍 `spawn_configs` / `AgentKind::Subagent` / reload 特权 / legacy bootstrap。
+- [x] 切片 B：collector 退役（`dd154bdb`）——终态端口 + canonical 回传 +
+      config 驱动超时扫描；独立结果面/注入重试/subscribe 桥全退。
 - [ ] 切片 C：跨会话寻址——recipient 允许 session id；配额/自送禁止保留；
       root 保护改 driver/lease 表达（`host_impl.rs`、`registry/queries.rs`）
 - [ ] 工具面最小集重注册（`qaqh-subagent`、`registration.rs`）

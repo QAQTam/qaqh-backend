@@ -3,7 +3,7 @@
 
 use super::*;
 
-use crate::error::QaqhResult;
+use crate::error::{QaqhError, QaqhResult};
 
 impl AgentRegistry {
     /// Bounded-cardinality logical memory gauges for the daemon diagnostic API.
@@ -87,7 +87,7 @@ impl AgentRegistry {
         caller_session_id: &str,
         path_prefix: &str,
     ) -> QaqhResult<Vec<AgentMetadata>> {
-        self.ensure_root_metadata(caller_session_id)?;
+        self.ensure_agent_projection(caller_session_id)?;
         let caller = self
             .agent_catalog
             .get_by_id(caller_session_id)
@@ -194,7 +194,30 @@ impl AgentRegistry {
         caller_session_id: &str,
         target: &str,
     ) -> QaqhResult<AgentMetadata> {
-        self.ensure_root_metadata(caller_session_id)?;
+        self.ensure_agent_projection(caller_session_id)?;
+        // ADR-0014：session id 寻址（可跨 root）。UUID 含 '-'，自然名
+        // （[a-z0-9_]）不含 → 无歧义。
+        if target.contains('-') {
+            if let Some(metadata) = self.agent_catalog.get_by_id(target).cloned() {
+                return Ok(metadata);
+            }
+            let exists = self
+                .owners
+                .db()
+                .read_blocking({
+                    let target = target.to_string();
+                    move |conn| qaqh_session::db::store::session_exists(conn, &target)
+                })
+                .map_err(QaqhError::message)?;
+            if exists {
+                self.ensure_agent_projection(target)?;
+                return self
+                    .agent_catalog
+                    .get_by_id(target)
+                    .cloned()
+                    .ok_or_else(|| format!("target projection missing for {target}").into());
+            }
+        }
         let caller = self
             .agent_catalog
             .get_by_id(caller_session_id)
@@ -235,6 +258,67 @@ impl AgentRegistry {
                 return Err(format!("business parent lookup for {session_id}: {error}").into());
             }
         }
+        Ok(())
+    }
+
+    /// ADR-0014：懒投影——catalog 与 supervisor 边从会话行血缘派生，名字取
+    /// `SubagentSpawned` effect（缺席回落 id 派生名）。平行权威退役：重启后
+    /// 寻址 / T-1-4 取消传播 / 超时扫描都经此重建，不需要内存档案。
+    pub(super) fn ensure_agent_projection(&mut self, session_id: &str) -> QaqhResult<()> {
+        if session_id.is_empty() || self.agent_catalog.get_by_id(session_id).is_some() {
+            return Ok(());
+        }
+        let parent = self
+            .owners
+            .session_parent(session_id)
+            .map_err(|error| format!("business parent lookup for {session_id}: {error}"))?;
+        let Some(parent) = parent else {
+            self.register_root_agent(session_id, unix_ms())?;
+            return Ok(());
+        };
+        self.ensure_agent_projection(&parent)?;
+        let parent_meta = self
+            .agent_catalog
+            .get_by_id(&parent)
+            .cloned()
+            .ok_or_else(|| format!("parent projection missing for {parent}"))?;
+        if self.spawn_names.is_none() {
+            self.spawn_names = Some(
+                self.owners
+                    .db()
+                    .read_blocking(|conn| qaqh_session::db::view::spawn_names(conn))
+                    .map_err(QaqhError::message)?,
+            );
+        }
+        let name = self
+            .spawn_names
+            .as_ref()
+            .and_then(|names| names.get(session_id).cloned())
+            .unwrap_or_else(|| {
+                format!(
+                    "sub_{}",
+                    session_id.replace('-', "").chars().take(12).collect::<String>()
+                )
+            });
+        let child_path = parent_meta
+            .agent_path
+            .child(&name)
+            .map_err(|error| format!("invalid projected child name {name:?}: {error}"))?;
+        let metadata = AgentMetadata {
+            root_session_id: parent_meta.root_session_id.clone(),
+            agent_id: SessionId::new(session_id.to_string()),
+            agent_path: child_path,
+            parent_agent_path: Some(parent_meta.agent_path.clone()),
+            nickname: None,
+            role: Some(name),
+            created_at_ms: unix_ms(),
+        };
+        self.agent_catalog
+            .register_with_alias(metadata, Some(session_id))
+            .map_err(|error| -> QaqhError { error.into() })?;
+        self.supervisor
+            .link(&parent, session_id)
+            .map_err(QaqhError::from)?;
         Ok(())
     }
 

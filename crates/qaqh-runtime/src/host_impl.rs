@@ -160,20 +160,8 @@ impl SubagentHost for QaqhService {
         if caller.agent_id == target.agent_id {
             return Err("cannot send an agent message to self".to_string());
         }
-        if request.delivery == InterAgentDelivery::Trigger
-            && target.agent_path.is_root()
-            && !caller.agent_path.is_root()
-        {
-            return Err("child agents cannot trigger the root agent".to_string());
-        }
-        if matches!(
-            request.delivery,
-            InterAgentDelivery::Steer | InterAgentDelivery::Interject
-        ) && target.agent_path.is_root()
-            && !caller.agent_path.is_root()
-        {
-            return Err("child agents cannot steer or interject into the root agent".to_string());
-        }
+        // ADR-0014：root 路径特权退役——跨会话聊天对任意会话开放；活动
+        // 回合的保护由 loop 的忙则入队语义表达，配额阀 below 不变。
 
         // Phase 3 quota: in-flight is derived from the target's canonical
         // mailbox; outbound attempts are a runtime safety-valve counter.
@@ -192,11 +180,22 @@ impl SubagentHost for QaqhService {
         }
 
         let message_id = format!("msg_{}", qaqh_ringing_contract::ulid::generate_ulid());
+        // ADR-0014：跨 root 投递以 session id 署名（path 的 namespace 是
+        // root 相对的，跨 root 会歧义）；同 root 保持 path 署名。
+        let cross_root = caller.root_session_id != target.root_session_id;
         let envelope = InterAgentEnvelope {
             message_id: message_id.clone(),
             root_session_id: target.root_session_id.as_str().to_string(),
-            author: caller.agent_path.as_str().to_string(),
-            recipient: target.agent_path.as_str().to_string(),
+            author: if cross_root {
+                caller.agent_id.as_str().to_string()
+            } else {
+                caller.agent_path.as_str().to_string()
+            },
+            recipient: if cross_root {
+                target.agent_id.as_str().to_string()
+            } else {
+                target.agent_path.as_str().to_string()
+            },
             other_recipients: vec![],
             task_id: None,
             reply_to: None,

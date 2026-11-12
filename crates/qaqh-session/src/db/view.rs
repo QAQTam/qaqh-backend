@@ -233,6 +233,40 @@ pub fn turn_answer_text(
     Ok(answer)
 }
 
+/// ADR-0014：子会话 id → spawn 名（`SubagentSpawned` effect 是血缘命名权威）。
+/// 懒投影一次性全扫；无 effect 的会话（wire spawn）回落 id 派生名。
+pub fn spawn_names(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, String>, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT call_id, effects_json FROM tool_calls
+         WHERE effects_json LIKE '%subagent_spawned%'",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut names = std::collections::HashMap::new();
+    for row in rows {
+        let (call_id, effects_json) = row?;
+        let effects = parse_typed::<Vec<qaqh_ringing_contract::state::ToolEffectInfo>>(
+            &format!("tool call {call_id}"),
+            "effects",
+            &effects_json,
+        )?;
+        for effect in effects {
+            if let qaqh_ringing_contract::state::ToolEffectInfo::SubagentSpawned {
+                child_session_id,
+                name,
+                ..
+            } = effect
+            {
+                names.insert(child_session_id, name);
+            }
+        }
+    }
+    Ok(names)
+}
+
 fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT turn_id, input_id, phase, status, outcome_json FROM turns

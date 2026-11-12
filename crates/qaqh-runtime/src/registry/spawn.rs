@@ -96,7 +96,7 @@ impl AgentRegistry {
                 "session {session_id} not found"
             )));
         }
-        self.ensure_root_metadata(session_id)?;
+        self.ensure_agent_projection(session_id)?;
         if self.instances.contains_key(session_id) {
             return Ok(());
         }
@@ -124,7 +124,7 @@ impl AgentRegistry {
         if parent_session_id.is_empty() {
             return Err("subagent v2 requires a parent_session_id".into());
         }
-        self.ensure_root_metadata(parent_session_id)?;
+        self.ensure_agent_projection(parent_session_id)?;
         let parent = self
             .agent_catalog
             .get_by_id(parent_session_id)
