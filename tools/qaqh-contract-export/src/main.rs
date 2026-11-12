@@ -918,9 +918,6 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_types::SessionListEntry,
         qaqh_types::SessionMeta,
         qaqh_types::SessionRunStatus,
-        qaqh_types::SkillSessionEntry,
-        qaqh_types::SkillSessionEntryState,
-        qaqh_types::SkillSessionStateV2,
         // ── 配置 DTO 面（config.load / config.save 的读写形状）──
         qaqh_config_api::ConfigDto,
         qaqh_config_api::ConfigPatch,

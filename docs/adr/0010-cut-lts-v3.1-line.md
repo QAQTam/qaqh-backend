@@ -92,6 +92,15 @@
 - [ ] **IR 扩面**（ADR-0008 第 1 步剩余部分）：`qaqh-config-api` → `qaqh-types` →
       `qaqh-ringing*` → `qaqh-runtime::service_methods`；覆盖率从 8/236 抬起来之前，
       "新线 C# 面无精度损失"这句话无法被任何工具验证（本轮实测）
+- [ ] **Skills 子系统裁剪**（2026-11-12，`198e8ede`；exporter 对齐见同日修复提交）：
+      `qaqh_types::{SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2}` 删除，
+      `ToolEffectInfo` 失去 `skill_activated`/`skill_released` 变体（仅余 `subagent_spawned`）。
+      导出物 **−6 文件**（3 类型 × cs/ts；check 实测 599→596，含 ADR-0004 的 +3），
+      `contract_hash` 必变 ⇒ **wire 实变（类型/变体删除）**，切线时一次吸收。
+      连带修复：ts-rs 对单变体内标枚举退化为「字面量首字段 plain object」，
+      `cs_backend` 声明层将其归一为单变体 Union（否则 C# 投影报
+      "string literal outside discriminator position"）。skills 服务端点
+      （`skills.catalog`/`skills.list_tools`）与其参数类型不受影响。
 
 ## 被否选项
 
