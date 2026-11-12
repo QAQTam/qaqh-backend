@@ -265,19 +265,6 @@ impl AgentRegistry {
         })
     }
 
-    /// Roll back a child registration after its canonical spawn edge failed.
-    ///
-    /// The actor may already exist; closing it is safe, while the durable child
-    /// session remains available for recovery because V2 children are
-    /// persistent.
-    pub fn rollback_subagent(&mut self, session_id: &str, child_session_id: &str) {
-        self.agent_catalog.remove(child_session_id);
-        self.residency.remove(child_session_id);
-        // 结果面同步回滚：边从未成为权威事实，不得留下终态摘要。
-        self.subagent_outcomes.remove(child_session_id);
-        self.close(session_id);
-    }
-
     pub(super) fn spawn_subagent_internal(
         &mut self,
         session_id: &str,
@@ -395,6 +382,10 @@ impl AgentRegistry {
             input.sandbox = qaqh_agent_runtime::session_agent::assembly::subagent_sandbox();
         }
         let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
+        // ADR-0014：终态回传路由注入（loop 报告终态，registry 判定血缘）。
+        if let Some(router) = &self.terminal_router {
+            loop_.set_terminal_port(router.clone());
+        }
 
         self.instances.insert(
             session_id.to_string(),

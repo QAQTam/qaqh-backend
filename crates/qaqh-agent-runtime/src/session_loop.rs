@@ -19,7 +19,7 @@ use qaqh_ringing_contract::fact::AssistantBlockKind;
 use qaqh_ringing_contract::fact::{
     ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionChoice,
     InteractionDecision, InteractionId, InteractionKind, InterruptReason, ToolCallId,
-    ToolCallOutcome, TurnId,
+    ToolCallOutcome, TurnId, TurnTerminal,
 };
 use qaqh_ringing_contract::state::{
     InteractionView, PermissionRequestDetails, TimelineEntry, ToolCallState, TurnOutcome,
@@ -76,6 +76,8 @@ pub struct SessionLoop {
     mcp_projection_gen: AtomicU64,
     /// `lsp` 聚合工具已并入本会话动态层。
     lsp_projection_seeded: AtomicBool,
+    /// ADR-0014：终态通知端口（registry 注入；未注入 = 不回传）。
+    terminal_port: RwLock<Option<TurnTerminalPort>>,
 }
 
 struct LoopInner {
@@ -129,6 +131,10 @@ fn unix_now_ms() -> i64 {
 struct ActiveTurn {
     turn_id: String,
     cancel: watch::Sender<bool>,
+    /// ADR-0014：触发本回合的 inter-agent 信封（终态回传判据）。
+    trigger: Option<qaqh_ringing_contract::commands::InterAgentEnvelope>,
+    /// 回合开始毫秒时钟（超时扫描判据）。
+    started_ms: u64,
     /// 运行中合并(Steer/Interject):下一轮 provider 调用前注入。
     steers: Vec<String>,
     /// widget-directive §4：本回合收到的 modelContent 快照，下一轮 provider 请求前
@@ -146,6 +152,21 @@ pub enum LoopError {
     #[error(transparent)]
     Db(#[from] qaqh_session::db::DbError),
 }
+
+/// ADR-0014：回合终态通知。loop 只报告终态，路由（血缘判定/向父回传）
+/// 由 registry 决定——loop 不知道也不该知道 lineage。
+pub struct TurnTerminalNotice {
+    pub session_id: String,
+    pub turn_id: String,
+    pub terminal: TurnTerminal,
+    pub error: Option<String>,
+    /// 触发本回合的 inter-agent 信封（None = 用户/系统输入）。
+    /// 终态通知本身（subagent_terminal）不算触发，避免回传风暴。
+    pub trigger: Option<qaqh_ringing_contract::commands::InterAgentEnvelope>,
+}
+
+/// 终态通知端口：装配后由 registry 注入（`set_terminal_port`）。
+pub type TurnTerminalPort = Arc<dyn Fn(TurnTerminalNotice) + Send + Sync>;
 
 impl SessionLoop {
     pub fn new(
@@ -177,11 +198,31 @@ impl SessionLoop {
             last_activity_ms: AtomicU64::new(unix_now_ms().max(0) as u64),
             mcp_projection_gen: AtomicU64::new(0),
             lsp_projection_seeded: AtomicBool::new(false),
+            terminal_port: RwLock::new(None),
         })
     }
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// ADR-0014：注入终态通知端口（registry 装配时调用）。
+    pub fn set_terminal_port(&self, port: TurnTerminalPort) {
+        *self
+            .terminal_port
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(port);
+    }
+
+    /// 活动回合已运行的秒数（无活动回合 = 0）。子代理超时扫描判据。
+    pub fn turn_elapsed_secs(&self) -> u64 {
+        self.lock()
+            .active
+            .as_ref()
+            .map(|active| {
+                (unix_now_ms().max(0) as u64).saturating_sub(active.started_ms) / 1000
+            })
+            .unwrap_or(0)
     }
 
     /// 当前活动回合(无则 None)。
@@ -403,6 +444,10 @@ impl SessionLoop {
             inner.queue.push_back(input);
             return Ok(());
         }
+        let trigger = input
+            .inter_agent
+            .clone()
+            .filter(|_| input.subagent_terminal.is_none());
         let loop_ = Arc::clone(self);
         let task = spawn_task(async move {
             loop_.run_turn(input).await;
@@ -414,6 +459,8 @@ impl SessionLoop {
         inner.active = Some(ActiveTurn {
             turn_id,
             cancel,
+            trigger,
+            started_ms: unix_now_ms().max(0) as u64,
             steers: Vec::new(),
             widget_contexts: Vec::new(),
             pending_interactions: Vec::new(),
@@ -1615,6 +1662,7 @@ impl SessionLoop {
             )
             .await
             .ok();
+        self.notify_terminal(turn, TurnTerminal::Completed, None);
     }
 
     async fn finish_cancelled(&self, turn: &TurnId, usage: Option<UsageInfo>) {
@@ -1631,6 +1679,7 @@ impl SessionLoop {
             )
             .await
             .ok();
+        self.notify_terminal(turn, TurnTerminal::Cancelled, None);
     }
 
     async fn finish_failed(
@@ -1657,6 +1706,7 @@ impl SessionLoop {
             )
             .await
             .ok();
+        self.notify_terminal(turn, TurnTerminal::Failed, Some(format!("{code}: {message}")));
     }
 
     async fn resolve_pending_interactions(&self) {
@@ -1685,6 +1735,34 @@ impl SessionLoop {
             )
             .await
             .ok();
+        self.notify_terminal(
+            turn,
+            TurnTerminal::Failed,
+            Some(format!("interrupted: {reason:?}")),
+        );
+    }
+
+    /// ADR-0014：终态落库后通知端口。端口未注入或回合槽已换 = 静默跳过。
+    fn notify_terminal(&self, turn: &TurnId, terminal: TurnTerminal, error: Option<String>) {
+        let port = self
+            .terminal_port
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(port) = port else { return };
+        let trigger = self
+            .lock()
+            .active
+            .as_ref()
+            .filter(|active| active.turn_id == turn.as_ref())
+            .and_then(|active| active.trigger.clone());
+        port(TurnTerminalNotice {
+            session_id: self.session_id.clone(),
+            turn_id: turn.as_ref().to_string(),
+            terminal,
+            error,
+            trigger,
+        });
     }
 
     /// 回合收尾:清活动槽并续接队首输入。

@@ -290,6 +290,26 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
                             })
                             .await;
                         }
+                        // ADR-0014：子代理超时扫描（与 idle 卸载同周期；
+                        // config 是预算单一真相源）。
+                        let subagent_timeout = qaqh_config::watch::authoritative()
+                            .map(|config| config.subagent.timeout_secs)
+                            .unwrap_or(0);
+                        if subagent_timeout > 0 {
+                            let service = service.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let cancelled =
+                                    service.cancel_expired_subagent_turns(subagent_timeout);
+                                if !cancelled.is_empty() {
+                                    log::warn!(
+                                        "[daemon] subagent timeout sweep cancelled {} child turn(s): {:?}",
+                                        cancelled.len(),
+                                        cancelled
+                                    );
+                                }
+                            })
+                            .await;
+                        }
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {

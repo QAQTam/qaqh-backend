@@ -42,7 +42,7 @@ impl AgentRegistry {
                     .len()
                     .saturating_add(self.quota_ledgers.len())
                     .saturating_add(self.outbound_attempts.len())
-                    .saturating_add(self.armed_collectors.len()) as u64,
+                    .saturating_add(self.outbound_attempts.len()) as u64,
                 payload_bytes: None,
                 heap_estimate_bytes: None,
                 ..Default::default()
@@ -138,7 +138,9 @@ impl AgentRegistry {
                 status,
                 residency,
                 created_at_ms: agent.created_at_ms,
-                outcome: self.subagent_outcomes.get(agent.agent_id.as_str()).cloned(),
+                // ADR-0014：独立结果面退役；终态由 canonical 回合状态承载
+                // （工具面切片 D 改读会话投影）。
+                outcome: None,
             });
         }
         Ok(listed)
@@ -160,17 +162,6 @@ impl AgentRegistry {
         agent: &AgentMetadata,
         residency: ListedAgentResidency,
     ) -> QaqhResult<ListedAgentStatus> {
-        // 结果面优先:登记过终态摘要的子代理,状态就是终态(与 residency 无关)。
-        if !agent.agent_path.is_root()
-            && let Some(outcome) = self.subagent_outcomes.get(agent.agent_id.as_str())
-        {
-            return Ok(if outcome.exit_code == 0 {
-                ListedAgentStatus::Completed
-            } else {
-                ListedAgentStatus::Errored
-            });
-        }
-
         if residency == ListedAgentResidency::Loaded
             && let Some(instance) = self.instances.get(agent.agent_id.as_str())
         {
