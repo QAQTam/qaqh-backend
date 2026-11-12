@@ -28,7 +28,7 @@
 
 | 项目 | 调研时 HEAD | 主要职责 |
 | --- | --- | --- |
-| `qaqh-backend` | `d126a5e51a03e6639b2387e1578cd5af0292df0f` | RingingV2 权威契约、daemon、Rust 客户端、契约导出 |
+| `qaqh-backend` | `047bf47afe020e924995c1379532c88fec680b49` | RingingV2 权威契约、daemon、Rust 客户端、契约导出 |
 | `qaqh-electron` | `fe6a6dd86f5acf46248137b89cd5570f478ec641` | Electron 宿主、preload、renderer、安装包 |
 | `qaqh-sdk` | `c33bec7c2a91567a54828a784b708fc56c77df61` | 当前 TS 客户端及生成协议产物 |
 

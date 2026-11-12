@@ -5,7 +5,7 @@
 ## 背景（已核对事实）
 
 1. **分类闸看不见"改了契约但没碰金标准"的提交**。本轮 `contract-refreeze`
-   （`PermissionRequestDetails` 入导出物，commit `5880a867`）刻意**不动**
+   （`PermissionRequestDetails` 入导出物，commit `46e6dc76`）刻意**不动**
    `docs/api-surface/v3.0`，于是 `scripts/check-surface-change-policy.py` 对它输出
    `未触碰冻结金标准，规则不适用`（实测 exit 0）。它的判据一直是"改动落点是否落在
    金标准目录里"（ADR-0007 §决策 2），不是"契约是否变了"。
@@ -17,7 +17,7 @@
    （或直接手改一个产物），那条红就"消失"了，job 全绿，而规则 16「金标准只能机器写、
    不得手改」在 main 上没有任何硬闸守着。`export()` 的目录所有权检查只比
    `generator_version`（本轮实测保持 `0.2.0` ⇒ 不会拒绝就地重切）。
-4. 这条路不是理论风险：`ac54e508` + `4c3a26be` 就是**在 LTS 上就地重切金标准**
+4. 这条路不是理论风险：`138e9101` + `5d2cdfcd` 就是**在 LTS 上就地重切金标准**
    （事后被判 `doc-only-refresh`，ADR-0009）。"重切一下让它绿"是这个仓库真实发生过的动作。
 
 ## 决策
@@ -72,7 +72,7 @@
   `golden tree docs/api-surface/v3.0 is not the pinned lock: HEAD=91fd3e12… pinned=e0fc731c…`；
   分支已删除、工作区已复原（实测 `git status` 无残留）。
 - 分类闸的射程缺口本身**没有**被本 ADR 关掉（本 ADR 管的是"谁能动锁"，不是"谁改了契约"）：
-  实测 `check-surface-change-policy.py` 对 `5880a867` 仍是 `规则不适用` exit 0。
+  实测 `check-surface-change-policy.py` 对 `46e6dc76` 仍是 `规则不适用` exit 0。
   分工是有意为之：LTS 侧由 `lts-api-guard.yml` 的逐字节比对硬拦（改了代码就红），
   main 侧允许代码漂移（report-only），而"动锁"由本 ADR 的登记检查在两条线上都硬拦。
 - 本 ADR 自身那笔改动（只动 `snapshots/`）也被分类闸机器判过：

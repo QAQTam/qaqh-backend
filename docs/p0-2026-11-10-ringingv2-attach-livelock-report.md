@@ -88,9 +88,9 @@ Line |
 > 每次失败圈代价：全量快照 HTTP 读 ×2（client 取游标 + main 投 renderer）+ owner 泵/读池
 > 全表序列化 + `projection://reset` 前端整树清空重建。风暴自我喂燃料。
 
-历史注：该雷自 v1 SSE（8/28 `b6e89615`）就在，9/13 甚至把「Lagged 终止帧」固化为测试
-（`b955eef3`）；9/20 曾建成正确答案——reliable replay（`3c92b827` #154）+ replay window
-持久化（`c6aada7b` #172）；**11/03 P3-D「投影面全量退役」（`78b77876`，`replay_window.rs`
+历史注：该雷自 v1 SSE（8/28 `84603c6b`）就在，9/13 甚至把「Lagged 终止帧」固化为测试
+（`899aa9f0`）；9/20 曾建成正确答案——reliable replay（`71493977` #154）+ replay window
+持久化（`a1c6ea77` #172）；**11/03 P3-D「投影面全量退役」（`32f84029`，`replay_window.rs`
 -677 行、`projection/replay.rs` -261 行）把回放尾连坐删除**，读面退化为无尾缺口即断，
 而协议参数 `since_cursor` 与客户端时序假设原样保留 → 活锁复活并于本日引爆。
 
@@ -145,7 +145,7 @@ Line |
 H1' 落地后，本报告 §5 三测试**同 PR 翻转为回归守卫**：①实验组断言补发帧且流不掐；
 ②断言 `resync_cycles == 0` 且 `delivered > 0`；③断言追帧送达、不掐流。
 
-## 7. CI 闸门预判（LTS-v3.0，`432988c7` 基座）
+## 7. CI 闸门预判（LTS-v3.0，`79be94c3` 基座）
 
 - `freeze`：不改导出类型、不改 `.route(...)` 注册、不改 qaqh-client `pub use` → **绿**。
 - `change-policy`：H1'/F/A/C/B' 全部落在非 `FROZEN_PREFIXES`（session/daemon/gate/runtime/process-tools）→ **零登记**。
