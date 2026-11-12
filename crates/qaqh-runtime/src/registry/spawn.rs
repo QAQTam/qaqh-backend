@@ -111,64 +111,6 @@ impl AgentRegistry {
         self.spawn_session_inprocess(session_id)
     }
 
-    /// Assemble a child session loop with an explicit tool configuration.
-    /// 模型选择不在此传裸值：`selection` 缺省时子会话行继承父会话的选择，
-    /// 端点/密钥/max_tokens 由目录 + 会话行解析。
-    pub fn spawn_subagent(
-        &mut self,
-        session_id: &str,
-        tools: &[String],
-        selection: Option<&qaqh_types::ModelSelection>,
-    ) -> QaqhResult<()> {
-        self.spawn_subagent_in_workspace(session_id, tools, selection, None)
-    }
-
-    /// Spawn a subagent with the workspace the caller explicitly requested.
-    ///
-    /// The explicit path takes the same route as session creation: it is
-    /// validated once and written into the child's genesis fact, instead of
-    /// being inferred later from the parent metadata (report 2026-10-31
-    /// §11.1 F09, requirement 4).
-    pub fn spawn_subagent_in_workspace(
-        &mut self,
-        session_id: &str,
-        tools: &[String],
-        selection: Option<&qaqh_types::ModelSelection>,
-        workspace: Option<&str>,
-    ) -> QaqhResult<()> {
-        let persist = std::env::var("QAQH_SUBAGENT_PERSIST")
-            .is_ok_and(|value| matches!(value.as_str(), "1" | "true" | "on"));
-        let options = SubagentSpawnOptions {
-            tools,
-            selection,
-            workspace,
-            ephemeral: !persist,
-            // legacy/bootstrap 无父会话上下文，回落全局 config（fail-closed 1）。
-            permission_level: qaqh_config::Config::load()
-                .ok()
-                .map(|cfg| cfg.permission_level)
-                .unwrap_or(1),
-        };
-        let parent_session = qaqh_workspace::runtime::context()
-            .map(|ctx| ctx.active_session)
-            .unwrap_or_default();
-        if parent_session.is_empty() {
-            self.owners
-                .ensure_session(session_id, None, options.ephemeral)
-                .map_err(QaqhError::message)?;
-            return self.spawn_subagent_internal(
-                session_id,
-                &parent_session,
-                None,
-                SessionId::new(session_id.to_string()),
-                options,
-            );
-        }
-        let requested_name = legacy_child_name(session_id);
-        self.spawn_subagent_v2(session_id, &parent_session, &requested_name, options)
-            .map(|_| ())
-    }
-
     /// V2 spawn path: allocate a tree-relative child path, create the actor,
     /// and register logical metadata before the caller commits the canonical
     /// `SubagentSpawned` edge.
@@ -270,6 +212,17 @@ impl AgentRegistry {
             .map_err(|error| {
                 format!("ensure child business session row for {session_id}: {error}")
             })?;
+        // ADR-0014：工具白名单落会话行（reload 的唯一事实源）。空白名单 =
+        // STANDARD（无会话级限制）；非空 = CUSTOM。档位与普通会话同律：
+        // 装配时从有效 config 解析，不存在运行时继承链。
+        let (tool_mode, custom_tools) = if options.tools.is_empty() {
+            (qaqh_types::tool_mode::STANDARD.to_string(), Vec::new())
+        } else {
+            (
+                qaqh_types::tool_mode::CUSTOM.to_string(),
+                options.tools.to_vec(),
+            )
+        };
         self.owners
             .db()
             .write_blocking({
@@ -283,9 +236,9 @@ impl AgentRegistry {
                             title_source: None,
                             cwd: Some(cwd),
                             model: None,
-                            tool_mode: None,
+                            tool_mode: Some(tool_mode),
                             model_selection: child_selection,
-                            custom_tools: None,
+                            custom_tools: Some(custom_tools),
                             frozen_annotation: None,
                             archived: None,
                             ephemeral: None,
@@ -303,7 +256,7 @@ impl AgentRegistry {
             parent_session_id,
             identity,
             SessionId::new(session_id.to_string()),
-            options,
+            options.ephemeral,
         )?;
         Ok(SpawnedSubagentInfo {
             child_session_id: SessionId::new(session_id.to_string()),
@@ -331,15 +284,8 @@ impl AgentRegistry {
         parent_session: &str,
         identity: Option<(AgentMetadata, AgentPath)>,
         child_session_id: SessionId,
-        options: SubagentSpawnOptions<'_>,
+        ephemeral: bool,
     ) -> QaqhResult<()> {
-        let SubagentSpawnOptions {
-            tools,
-            selection: _,
-            workspace: _,
-            ephemeral,
-            permission_level,
-        } = options;
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}").into());
         }
@@ -358,13 +304,8 @@ impl AgentRegistry {
         // Durable reservation must exist before the child actor can perform
         // any side effect.
         let reservation = self.reserve_spawn(&root_session, session_id)?;
-        if let Err(error) = self.spawn_subagent_inprocess(
-            session_id,
-            SubagentSpawnSpec {
-                tools: tools.to_vec(),
-                permission_level,
-            },
-        ) {
+        // ADR-0014：子代理就是会话——同一条装配路径，sandbox 由血缘派生。
+        if let Err(error) = self.spawn_session_inprocess(session_id) {
             let _ = self.release_spawn(
                 &root_session,
                 &reservation.reservation_id,
@@ -420,51 +361,6 @@ impl AgentRegistry {
         Ok(())
     }
 
-    pub(super) fn spawn_subagent_inprocess(
-        &mut self,
-        session_id: &str,
-        spec: SubagentSpawnSpec,
-    ) -> QaqhResult<()> {
-        if self.instances.contains_key(session_id) {
-            return Err(format!("agent already running for {session_id}").into());
-        }
-
-        let agent_config = qaqh_agent_runtime::agent::session_config::session_effective_config(
-            &self.owners,
-            session_id,
-        )
-        .map_err(QaqhError::message)?;
-
-        let ws_dir = ensure_session_workspace(&self.owners, session_id)?;
-        let owner = self.owners.get_or_create(session_id);
-        let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(
-            qaqh_agent_runtime::session_agent::assembly::SpawnInput {
-                session_id,
-                owner,
-                config: &agent_config,
-                allowed_tools: spec.tools.clone(),
-                global_allowed_tools: None,
-                permission_level: spec.permission_level,
-                sandbox: qaqh_agent_runtime::session_agent::assembly::subagent_sandbox(),
-                workspace_root: ws_dir,
-                exec_sessions: self.exec_sessions(),
-            },
-        )?;
-
-        self.instances.insert(
-            session_id.to_string(),
-            AgentInstance {
-                session_id: session_id.to_string(),
-                loop_,
-                kind: AgentKind::Subagent(spec.clone()),
-            },
-        );
-        self.spawn_configs.insert(session_id.to_string(), spec);
-        self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
-        log::info!("[subagent] spawned session loop for subagent={session_id}");
-        Ok(())
-    }
-
     pub(super) fn spawn_session_inprocess(&mut self, session_id: &str) -> QaqhResult<()> {
         if self.instances.contains_key(session_id) {
             return Err(format!("agent already running for {session_id}").into());
@@ -480,24 +376,31 @@ impl AgentRegistry {
         let session = crate::session_meta::read(&self.owners, session_id)
             .ok_or_else(|| format!("session metadata unavailable for {session_id}"))?;
         let owner = self.owners.get_or_create(session_id);
-        let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(
-            qaqh_agent_runtime::session_agent::assembly::SpawnInput::for_session(
-                session_id,
-                &agent_config,
-                &session.tool_mode,
-                &session.custom_tools,
-                ws_dir,
-                owner,
-                self.exec_sessions(),
-            )?,
+        let mut input = qaqh_agent_runtime::session_agent::assembly::SpawnInput::for_session(
+            session_id,
+            &agent_config,
+            &session.tool_mode,
+            &session.custom_tools,
+            ws_dir,
+            owner,
+            self.exec_sessions(),
         )?;
+        // ADR-0014：sandbox 角色由血缘派生——会话行有父即子代理 sandbox。
+        if self
+            .owners
+            .session_parent(session_id)
+            .map_err(QaqhError::message)?
+            .is_some()
+        {
+            input.sandbox = qaqh_agent_runtime::session_agent::assembly::subagent_sandbox();
+        }
+        let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
 
         self.instances.insert(
             session_id.to_string(),
             AgentInstance {
                 session_id: session_id.to_string(),
                 loop_,
-                kind: AgentKind::Session,
             },
         );
         self.set_agent_residency(session_id, ListedAgentResidency::Loaded);
@@ -505,71 +408,10 @@ impl AgentRegistry {
         Ok(())
     }
 
-    /// Materialize the delivery target without turning a logical child into a
-    /// root session. Roots use the ordinary get-or-spawn path; children reload
-    /// only through a loaded immediate parent and reuse the spawn config
-    /// recorded by the registry at spawn time.
+    /// ADR-0014：子代理就是会话——冷会话一律走普通 get-or-spawn。
+    /// 血缘在会话行里，reload 不需要父加载，也不需要内存 spawn 档案。
     pub(super) fn ensure_loaded_for_command(&mut self, session_id: &str) -> QaqhResult<()> {
-        if self.instances.contains_key(session_id) {
-            return Ok(());
-        }
-        let Some(metadata) = self.agent_catalog.get_by_id(session_id).cloned() else {
-            return self.get_or_spawn(session_id);
-        };
-        if metadata.agent_path.is_root() {
-            return self.get_or_spawn(session_id);
-        }
-        let parent_path = metadata
-            .parent_agent_path
-            .as_ref()
-            .ok_or_else(|| format!("child agent {session_id} has no parent path"))?;
-        let parent = self
-            .agent_catalog
-            .get_by_path(metadata.root_session_id.as_str(), parent_path)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "child agent {session_id} parent metadata missing at {parent_path} in root {}",
-                    metadata.root_session_id
-                )
-            })?;
-        if !self.instances.contains_key(parent.agent_id.as_str()) {
-            return Err(format!(
-                "child agent {session_id} cannot reload: immediate parent {} is unloaded",
-                parent.agent_path
-            )
-            .into());
-        }
-        let spec = self.spawn_configs.get(session_id).cloned().ok_or_else(|| {
-            format!("child agent {session_id} has no recorded spawn config to reload")
-        })?;
-        self.reload_subagent_internal(session_id, parent.agent_id.as_str(), spec)
-    }
-
-    pub(super) fn reload_subagent_internal(
-        &mut self,
-        session_id: &str,
-        parent_id: &str,
-        spec: SubagentSpawnSpec,
-    ) -> QaqhResult<()> {
-        if self.instances.contains_key(session_id) {
-            return Ok(());
-        }
-        self.owners
-            .set_ephemeral(session_id, false)
-            .map_err(|error| format!("persist reload persistence for {session_id}: {error}"))?;
-        self.spawn_subagent_inprocess(session_id, spec)?;
-        if let Err(error) = self.link_subagent(parent_id, session_id) {
-            self.close(session_id);
-            return Err(format!(
-                "reload child {session_id} failed to restore parent edge: {error}"
-            )
-            .into());
-        }
-        log::info!(
-            "[registry] reloaded child agent {session_id} through loaded parent {parent_id}"
-        );
-        Ok(())
+        self.get_or_spawn(session_id)
     }
 
     /// T-1-4：登记父会话 → 子代理的派生关系（幂等）。

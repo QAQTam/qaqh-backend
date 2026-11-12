@@ -6,11 +6,6 @@ use std::time::{Duration, Instant};
 use qaqh_ringing_contract::fact::{AgentMetadata, AgentPath, SessionId};
 use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
-#[derive(Clone, Debug)]
-pub struct SubagentSpawnSpec {
-    pub tools: Vec<String>,
-    pub permission_level: u8,
-}
 use crate::agent_catalog::AgentCatalog;
 use crate::subagent_supervisor::SubagentSupervisor;
 use qaqh_agent_runtime::quota_ledger::{
@@ -231,16 +226,9 @@ fn background_command(program: &str) -> Command {
     command
 }
 
-#[derive(Clone)]
-enum AgentKind {
-    Session,
-    Subagent(SubagentSpawnSpec),
-}
-
 pub struct AgentInstance {
     session_id: String,
     loop_: Arc<qaqh_agent_runtime::session_loop::SessionLoop>,
-    kind: AgentKind,
 }
 
 /// Logical identity allocated for a newly spawned subagent.
@@ -261,8 +249,6 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     /// `None` = inherit the parent workspace / default session root.
     pub(crate) workspace: Option<&'a str>,
     pub(crate) ephemeral: bool,
-    /// P1-⑤：父会话档位；legacy/bootstrap 路径回落全局 config。
-    pub(crate) permission_level: u8,
 }
 
 pub(crate) struct CollectorArmSpec {
@@ -318,8 +304,6 @@ pub struct AgentRegistry {
     /// 答复，由 `list_agents` 直接返回（与 codex `AgentStatus::Completed`
     /// 同构）。键是 canonical 主键，reload 不会换 id。
     subagent_outcomes: HashMap<String, AgentOutcome>,
-    /// 子代理 spawn 参数(reload 用):child id → spawn spec。
-    spawn_configs: HashMap<String, SubagentSpawnSpec>,
 }
 
 impl AgentRegistry {
@@ -340,7 +324,6 @@ impl AgentRegistry {
             outbound_attempts: HashMap::new(),
             armed_collectors: HashMap::new(),
             subagent_outcomes: HashMap::new(),
-            spawn_configs: HashMap::new(),
         }
     }
 
@@ -355,10 +338,6 @@ mod queries;
 pub(crate) mod spawn;
 
 impl AgentInstance {
-    fn kind_name(&self) -> AgentKind {
-        self.kind.clone()
-    }
-
     fn shutdown(self) {
         self.loop_.abandon();
     }
@@ -368,14 +347,6 @@ impl AgentInstance {
 /// error instead of `Ok(())` keeps entry acceptance from lying about execution.
 fn ringing_command_name(command: &qaqh_ringing::RingingCommand) -> &'static str {
     command.name()
-}
-
-/// Stable, grammar-valid name for legacy direct `spawn_subagent` callers.
-fn legacy_child_name(session_id: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    session_id.hash(&mut hasher);
-    format!("sub_{:016x}", hasher.finish())
 }
 
 /// Millisecond wall clock for logical agent registration.

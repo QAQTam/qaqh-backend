@@ -45,7 +45,13 @@
 1. `subagent.spawn` 的实现收敛到**唯一的会话创建路径**：会话行 +
    `parent_session_id` 血缘 + 工具白名单 + sandbox 标志。不保留第二 actor 种类
    （`AgentKind::Subagent` 退役）。冻结命令名保留，它是"模型可控的新对话"的
-   正式入口，不是兼容别名。
+   正式入口，不是兼容别名。命令目标（`CommandTarget::Session`）即父会话，
+   不再从线程局部 runtime context 猜父。
+   **权限档位口径（实施时定稿）**：与普通会话同律——装配时从有效 config
+   解析。P1-⑤ 的"运行时继承父档位"随双机构退役：档位从未落库，
+   `spawn_configs` 是其唯一载体；config 是档位的单一真相源，跨 config
+   变更的 reload 取当前值而非陈旧继承值。全局工具允许列表天花板同理
+   适用于子会话（旧子代理豁免退役）。
 2. AgentPath **降格为会话血缘的投影**：冻结的 `Team*`/`Subagent*` DTO 由
    会话行 + effects 投影供数；`agent_catalog` 不再是权威源。
 3. **collector 线程与 `subagent_outcomes` 面退役**：子会话 turn 终态时由 loop
@@ -107,8 +113,10 @@
 ## 落地清单（未实施，逐条可勾）
 
 - [ ] 切片 A：spawn 收敛——`subagent.spawn` 直走会话创建路径；砍
-      `agent_catalog` 平行权威 / residency / reload 特权 / `spawn_configs` /
-      `AgentKind::Subagent`（`registry/spawn.rs`、`handlers/session.rs`）
+      `spawn_configs` / `AgentKind::Subagent` / reload 特权 / legacy bootstrap
+      （`registry/spawn.rs`、`handlers/session.rs`）。实施边界：catalog /
+      residency / supervisor 的**投影化**（数据源改会话行、重启可重建）
+      归切片 C 与寻址一并完成；切片 A 先退生命周期权威。
 - [ ] 切片 B：回传退役 collector——turn 终态 → canonical 跨会话消息；
       deadline 落行 + 周期扫描（`subagent/lib.rs`、`session_loop.rs`）
 - [ ] 切片 C：跨会话寻址——recipient 允许 session id；配额/自送禁止保留；

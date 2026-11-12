@@ -64,40 +64,31 @@ impl AgentRegistry {
             qaqh_ringing::RingingCommand::AgentReloadConfig
         )
         .then(|| {
-            let mut config = qaqh_agent_runtime::agent::session_config::session_effective_config(
+            let config = qaqh_agent_runtime::agent::session_config::session_effective_config(
                 &self.owners,
                 session_id,
             )?;
-            let kind = self
-                .instances
-                .get(session_id)
-                .map(AgentInstance::kind_name)
-                .ok_or_else(|| format!("loaded agent unavailable for {session_id}"))?;
-            let (allowed_tools, global_allowed_tools, role) = match &kind {
-                AgentKind::Session => {
-                    let session = crate::session_meta::read(&self.owners, session_id)
-                        .ok_or_else(|| format!("session metadata unavailable for {session_id}"))?;
-                    let allowed =
-                        qaqh_agent_runtime::session_agent::assembly::session_tool_allowlist(
-                            &session.tool_mode,
-                            &session.custom_tools,
-                        )?;
-                    (
-                        allowed,
-                        config
-                            .tool_allowlist_enabled
-                            .then(|| config.tool_allowlist.clone()),
-                        qaqh_workspace::tool_api::SandboxMode::Main,
-                    )
-                }
-                AgentKind::Subagent(spec) => {
-                    config.permission_level = spec.permission_level;
-                    (
-                        spec.tools.clone(),
-                        None,
-                        qaqh_agent_runtime::session_agent::assembly::subagent_sandbox(),
-                    )
-                }
+            // ADR-0014：reload 统一读会话行；sandbox 由血缘派生，档位与
+            // 全局允许列表天花板与普通会话同律（不再有子代理豁免）。
+            let session = crate::session_meta::read(&self.owners, session_id)
+                .ok_or_else(|| format!("session metadata unavailable for {session_id}"))?;
+            let allowed_tools =
+                qaqh_agent_runtime::session_agent::assembly::session_tool_allowlist(
+                    &session.tool_mode,
+                    &session.custom_tools,
+                )?;
+            let global_allowed_tools = config
+                .tool_allowlist_enabled
+                .then(|| config.tool_allowlist.clone());
+            let role = if self
+                .owners
+                .session_parent(session_id)
+                .map_err(|error| error.to_string())?
+                .is_some()
+            {
+                qaqh_agent_runtime::session_agent::assembly::subagent_sandbox()
+            } else {
+                qaqh_workspace::tool_api::SandboxMode::Main
             };
             let provider =
                 qaqh_agent_runtime::session_agent::assembly::provider_spec(&config, Vec::new())?;

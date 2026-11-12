@@ -461,7 +461,7 @@ impl QaqhService {
                 handlers::workspace::handle_ringing(self, target, command)
             }
             RingingCommand::SubagentSpawn { .. } => {
-                handlers::session::handle_ringing(self, command)
+                handlers::session::handle_ringing(self, target, command)
             }
             RingingCommand::TodoSet { .. }
             | RingingCommand::TodoCancel { .. }

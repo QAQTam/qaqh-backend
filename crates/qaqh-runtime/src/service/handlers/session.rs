@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use qaqh_ringing::{RingingCommand, SessionCreateResult};
+use qaqh_ringing::{CommandTarget, RingingCommand, SessionCreateResult};
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::QaqhService;
@@ -274,7 +274,11 @@ fn create_business_row(
         .map_err(|error| format!("create business row for {error_session_id}: {error}"))
 }
 
-pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) -> QaqhResult<Value> {
+pub(crate) fn handle_ringing(
+    service: &QaqhService,
+    target: &CommandTarget,
+    command: &RingingCommand,
+) -> QaqhResult<Value> {
     let RingingCommand::SubagentSpawn {
         tools,
         selection,
@@ -286,8 +290,19 @@ pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) ->
             command.name()
         )));
     };
+    // ADR-0014：subagent.spawn 的目标就是父会话——血缘由命令目标表达，
+    // 不再从线程局部 runtime context 猜父。
+    let CommandTarget::Session {
+        session_id: parent_session_id,
+    } = target
+    else {
+        return Err(QaqhError::invalid(
+            "subagent.spawn must target the parent session",
+        ));
+    };
     spawn_subagent(
         service,
+        parent_session_id,
         tools,
         selection.as_ref(),
         workspace.as_deref(),
@@ -296,6 +311,7 @@ pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) ->
 
 fn spawn_subagent(
     service: &QaqhService,
+    parent_session_id: &str,
     tools: &[String],
     selection: Option<&qaqh_types::ModelSelection>,
     workspace: Option<&str>,
@@ -308,26 +324,33 @@ fn spawn_subagent(
             .unwrap_or_default();
         qaqh_profile::resolve_model_selection(&catalog, selection).map_err(QaqhError::message)?;
     }
-    // 子代理继承主代理的 workspace：spawn 前把 workspace 作为 cwd 落进子会话
-    // meta（`allocate_agent_session(workspace)` → `create_new_session(..., cwd, ...)`），
-    // 子 worker 启动时经 `load_session_workspace` 读 meta.cwd，从而正确解析
-    // 相对路径并以主代理工作区为权限边界。
     let workspace = workspace
         .map(str::trim)
         .filter(|workspace| !workspace.is_empty() && *workspace != ".");
-    // BETA-01：子代理与主会话共享 id 规则；cwd 由 spawn_subagent_in_workspace
-    // 落进业务行（显式 workspace 优先，其次继承父会话 cwd）。
+    // ADR-0014：子代理 = 带血缘的新会话。id 与普通会话同规则；名字取
+    // canonical id 前段（[a-z0-9_] 语法），cwd/白名单/模型选择落子会话行。
     let session_id = service.sessions.allocate_session();
-    if let Some(workspace) = workspace {
-        log::info!("[subagent] inherited workspace for seed={session_id}: {workspace}");
-    }
+    let requested_name = format!(
+        "sub_{}",
+        session_id.replace('-', "").chars().take(12).collect::<String>()
+    );
     service
         .registry()
         .map_err(QaqhError::message)?
-        .spawn_subagent_in_workspace(&session_id, tools, selection, workspace)
+        .spawn_subagent_v2(
+            &session_id,
+            parent_session_id,
+            &requested_name,
+            crate::registry::SubagentSpawnOptions {
+                tools,
+                selection,
+                workspace,
+                ephemeral: false,
+            },
+        )
         .map_err(QaqhError::message)?;
     log::info!(
-        "[subagent] spawned subagent worker seed={session_id} tools={}",
+        "[subagent] spawned child session seed={session_id} parent={parent_session_id} tools={}",
         tools.len()
     );
     Ok(json!({ "session_id": session_id }))

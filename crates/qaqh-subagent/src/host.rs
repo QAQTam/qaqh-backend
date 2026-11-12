@@ -174,8 +174,6 @@ pub struct SpawnSubagentRequest<'a> {
     /// 显式 provider+model 选择；`None` = 子会话行继承父会话行的选择。
     pub selection: Option<&'a qaqh_types::ModelSelection>,
     pub workspace: Option<&'a str>,
-    /// P1-⑤：父会话权限档位，子代理原样继承。
-    pub permission_level: u8,
 }
 
 #[derive(Debug, Clone)]

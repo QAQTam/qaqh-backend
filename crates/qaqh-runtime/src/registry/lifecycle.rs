@@ -107,7 +107,6 @@ impl AgentRegistry {
         for id in ids {
             self.agent_catalog.remove(id);
             self.residency.remove(id);
-            self.spawn_configs.remove(id);
             self.subagent_outcomes.remove(id);
             self.outbound_attempts.remove(id);
             self.armed_collectors.remove(id);
