@@ -62,3 +62,25 @@
 - 契约面零改动：`docs/api-surface/`、`snapshots/` 未触；
   `scripts/check-surface-change-policy.py` 仅 docstring 变化（py_compile 绿），
   不触发家规 15 分类。
+
+## CI 余波（执行后核查，2026-11-12）
+
+1. **一次性 classify 失效（graft 引入，已自愈）**：force-push 触发的 Surface policy
+   run（43152954813）以 push 事件的 `before`（`2b15cdc7`，graft 前对象）为
+   `SURFACE_BASE_SHA`，该对象在新史中不存在 ⇒ `git diff` exit 128。后续正常 push
+   的 classify 步骤已通过（849020f2 run 实证）。**不为此加防御性 fallback**（宪法 5）：
+   一次性历史事件，不是 recurring 失效模式。
+2. **facade baseline 红 = 预存治理债（非 graft 引入，未掩盖）**：Surface policy
+   自 `cc5f6bdf`（LTS 收口 merge，新史 `db41f0ea`，run 43039744069）起即红。证据链：锁登记于
+   `4e0f7160`（tree `e0fc731c` = pinned，登记时正确）；收口 merge 带入 `d134d9a6`
+   （stream line-delta estimates，**wire 实变**：`contract_hash`
+   `c25b08f1… → 1a0db0e0…`）使 main 金标准树变为 `e626a3c5`，未走 refreeze；
+   graft 前后该树哈希逐字节一致（`e626a3c5`），与 graft 无关。按 ADR-0011，
+   在 main 上 `--pin-frozen` 改绿 = 偷换锁，禁止；正路是 ADR-0010 的 v3.1 换锁线
+   （所有者待拍板：revision 取值与前端先行）。**本 ADR 只登记事实，不代替决策。**
+3. **sbx-win hardening 的 `sddl_snapshot_roundtrip_restores_dacl` 本机失败 =
+   预存环境性**：在 graft 前代码（849020f2 临时 worktree，共享 target）上 bisect，
+   同一机器同一失败（恢复后 DACL 多 `AI` 控制旗，ACE 全同）——scratch 位于用户
+   Temp，ACL 继承链机器相关。非本批在制品回归（该批 acl.rs 改动经逐行核对为纯
+   Option 包装迁移）。同套件已有环境敏感先例（`escape_probe` 显式 ignored）。
+   是否被 windows CI matrix 覆盖未验证；测试本身的去环境化设计留待所有者决定。
