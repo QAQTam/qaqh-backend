@@ -353,6 +353,8 @@ fn spawn_subagent(
                 selection,
                 workspace,
                 ephemeral: false,
+                // wire 冻结命令不带 mode：恒 fresh。fork 经工具面 mode 参数。
+                fork: false,
             },
         )
         .map_err(QaqhError::message)?;

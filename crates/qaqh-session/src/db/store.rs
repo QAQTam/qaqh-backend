@@ -1465,6 +1465,303 @@ pub fn copy_session_content(
     Ok(true)
 }
 
+/// ADR-0014 切片G：真 fork —— 以父会话**已完成回合前缀**种子化子会话日志。
+///
+/// 前缀 = seq 序直到首个在飞回合（`status='active'`）之前的全部回合。前缀内
+/// turns/blocks/tool_calls 整体复制：主键重生成（turn_/block_/call_ + ULID），
+/// 交叉引用与 payload 内的 id 字段同步重写（payload 是唯一权威 timeline，
+/// 列是查询冗余）；content 引用随迁（缺失的历史引用跳过——与父视图同等
+/// 解析效力）。在飞回合不复制：fork 继承已完成历史，不含父级当前回合。
+/// 会话级块（turn_id=NULL，如压缩摘要）不复制：压缩尚无写入方，且摘要
+/// 语义绑定父会话的压缩水位。子日志必须为空（fork 只在 spawn 时调用）。
+/// 返回种子化的回合数。
+pub fn fork_session_prefix(
+    conn: &mut Connection,
+    parent_session_id: &str,
+    child_session_id: &str,
+) -> Result<usize, DbError> {
+    use qaqh_ringing_contract::fact::{BlockId, ContentValue, ToolCallId, TurnId};
+    use qaqh_ringing_contract::state::TimelineEntry;
+    use qaqh_ringing_contract::ulid::generate_ulid;
+    use std::collections::{HashMap, HashSet};
+
+    struct PrefixTurn {
+        turn_id: String,
+        seq: i64,
+        input_id: Option<String>,
+        status: String,
+        outcome_json: Option<String>,
+        started_at_ms: i64,
+        finished_at_ms: Option<i64>,
+    }
+    let mut stmt = conn.prepare(
+        "SELECT turn_id, seq, input_id, status, outcome_json, started_at_ms, finished_at_ms
+         FROM turns WHERE session_id = ?1 ORDER BY seq",
+    )?;
+    let prefix: Vec<PrefixTurn> = stmt
+        .query_map([parent_session_id], |row| {
+            Ok(PrefixTurn {
+                turn_id: row.get(0)?,
+                seq: row.get(1)?,
+                input_id: row.get(2)?,
+                status: row.get(3)?,
+                outcome_json: row.get(4)?,
+                started_at_ms: row.get(5)?,
+                finished_at_ms: row.get(6)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .take_while(|turn| turn.status != "active")
+        .collect();
+    if prefix.is_empty() {
+        return Ok(0);
+    }
+    let turn_map: HashMap<String, String> = prefix
+        .iter()
+        .map(|turn| (turn.turn_id.clone(), format!("turn_{}", generate_ulid())))
+        .collect();
+
+    let mut content_refs: HashSet<String> = HashSet::new();
+    let collect_content = |content: &ContentValue, refs: &mut HashSet<String>| {
+        if let ContentValue::Ref { content_ref } = content {
+            refs.insert(content_ref.hash().as_str().to_string());
+        }
+    };
+
+    // tool_calls：call_id 重生成，其余列原样（exec/interaction 引用是历史事实）。
+    let mut call_map: HashMap<String, String> = HashMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT call_id, turn_id, tool_name, args_json, state_json, state_kind,
+                    exec_session_id, interaction_id, output_text, output_ref, output_truncated,
+                    meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms
+             FROM tool_calls WHERE session_id = ?1",
+        )?;
+        struct CallRow {
+            call_id: String,
+            turn_id: Option<String>,
+            tool_name: String,
+            args_json: Option<String>,
+            state_json: String,
+            state_kind: String,
+            exec_session_id: Option<String>,
+            interaction_id: Option<String>,
+            output_text: Option<String>,
+            output_ref: Option<String>,
+            output_truncated: i64,
+            meta_json: Option<String>,
+            effects_json: Option<String>,
+            code_delta_json: Option<String>,
+            started_at_ms: Option<i64>,
+            finished_at_ms: Option<i64>,
+        }
+        let calls: Vec<CallRow> = stmt
+            .query_map([parent_session_id], |row| {
+                Ok(CallRow {
+                    call_id: row.get(0)?,
+                    turn_id: row.get(1)?,
+                    tool_name: row.get(2)?,
+                    args_json: row.get(3)?,
+                    state_json: row.get(4)?,
+                    state_kind: row.get(5)?,
+                    exec_session_id: row.get(6)?,
+                    interaction_id: row.get(7)?,
+                    output_text: row.get(8)?,
+                    output_ref: row.get(9)?,
+                    output_truncated: row.get(10)?,
+                    meta_json: row.get(11)?,
+                    effects_json: row.get(12)?,
+                    code_delta_json: row.get(13)?,
+                    started_at_ms: row.get(14)?,
+                    finished_at_ms: row.get(15)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        for call in calls {
+            let Some(new_turn) = call.turn_id.as_deref().and_then(|t| turn_map.get(t)) else {
+                continue;
+            };
+            let new_call = format!("call_{}", generate_ulid());
+            call_map.insert(call.call_id.clone(), new_call.clone());
+            if let Some(output_ref) = &call.output_ref {
+                content_refs.insert(output_ref.clone());
+            }
+            conn.execute(
+                "INSERT INTO tool_calls
+                    (call_id, session_id, turn_id, tool_name, args_json, state_json, state_kind,
+                     exec_session_id, interaction_id, output_text, output_ref, output_truncated,
+                     meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    new_call,
+                    child_session_id,
+                    new_turn,
+                    call.tool_name,
+                    call.args_json,
+                    call.state_json,
+                    call.state_kind,
+                    call.exec_session_id,
+                    call.interaction_id,
+                    call.output_text,
+                    call.output_ref,
+                    call.output_truncated,
+                    call.meta_json,
+                    call.effects_json,
+                    call.code_delta_json,
+                    call.started_at_ms,
+                    call.finished_at_ms,
+                ],
+            )?;
+        }
+    }
+
+    // turns：seq/终态/时间戳原样；phase 清空（终态回合无 phase）。
+    for turn in &prefix {
+        conn.execute(
+            "INSERT INTO turns
+                (turn_id, session_id, seq, input_id, phase, status, outcome_json,
+                 started_at_ms, finished_at_ms)
+             VALUES (?1, ?2, ?3, ?4, NULL, ?5, ?6, ?7, ?8)",
+            params![
+                turn_map[&turn.turn_id],
+                child_session_id,
+                turn.seq,
+                turn.input_id,
+                turn.status,
+                turn.outcome_json,
+                turn.started_at_ms,
+                turn.finished_at_ms,
+            ],
+        )?;
+    }
+
+    // blocks：payload 内 id 字段同步重写；ord 在子日志从 1 重排。
+    let mut stmt = conn.prepare(
+        "SELECT block_id, turn_id, ord, kind, text, call_id, payload_json, created_at_ms
+         FROM blocks WHERE session_id = ?1 ORDER BY ord",
+    )?;
+    let blocks: Vec<BlockRow> = stmt
+        .query_map([parent_session_id], |row| {
+            Ok(BlockRow {
+                block_id: row.get(0)?,
+                turn_id: row.get(1)?,
+                ord: row.get(2)?,
+                kind: row.get(3)?,
+                text: row.get(4)?,
+                call_id: row.get(5)?,
+                payload_json: row.get(6)?,
+                created_at_ms: row.get(7)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut ord = 0i64;
+    for block in blocks {
+        let Some(new_turn) = block.turn_id.as_deref().and_then(|t| turn_map.get(t)) else {
+            continue;
+        };
+        let new_block = format!("block_{}", generate_ulid());
+        let payload = block
+            .payload_json
+            .as_deref()
+            .ok_or_else(|| DbError::Corrupt(format!("block {} has no payload_json", block.block_id)))?;
+        let mut entry: TimelineEntry = serde_json::from_str(payload)
+            .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))?;
+        let map_turn = |t: &TurnId| -> Result<TurnId, DbError> {
+            turn_map
+                .get(t.as_str())
+                .map(|id| TurnId::new(id.clone()))
+                .ok_or_else(|| DbError::Corrupt(format!("fork: turn {} outside prefix", t.as_str())))
+        };
+        let map_call = |c: &ToolCallId| -> Result<ToolCallId, DbError> {
+            call_map
+                .get(c.as_str())
+                .map(|id| ToolCallId::new(id.clone()))
+                .ok_or_else(|| DbError::Corrupt(format!("fork: call {} outside prefix", c.as_str())))
+        };
+        match &mut entry {
+            TimelineEntry::Input {
+                block_id,
+                turn_id,
+                content,
+                attachments,
+                ..
+            } => {
+                *block_id = BlockId::new(new_block.clone());
+                if let Some(t) = turn_id {
+                    *t = map_turn(t)?;
+                }
+                collect_content(content, &mut content_refs);
+                for attachment in attachments {
+                    content_refs.insert(attachment.hash().as_str().to_string());
+                }
+            }
+            TimelineEntry::AssistantBlock {
+                block_id,
+                turn_id,
+                content,
+                ..
+            } => {
+                *block_id = BlockId::new(new_block.clone());
+                *turn_id = map_turn(turn_id)?;
+                collect_content(content, &mut content_refs);
+            }
+            TimelineEntry::ToolCall { call_id, turn_id } => {
+                *call_id = map_call(call_id)?;
+                if let Some(t) = turn_id {
+                    *t = map_turn(t)?;
+                }
+            }
+            TimelineEntry::ToolResult {
+                call_id,
+                turn_id,
+                content,
+            } => {
+                *call_id = map_call(call_id)?;
+                if let Some(t) = turn_id {
+                    *t = map_turn(t)?;
+                }
+                collect_content(content, &mut content_refs);
+            }
+            TimelineEntry::Compaction { .. } => {}
+        }
+        let payload_json = serde_json::to_string(&entry)
+            .map_err(|error| DbError::Corrupt(format!("fork payload serialize: {error}")))?;
+        let new_call = block
+            .call_id
+            .as_deref()
+            .map(|c| {
+                call_map.get(c).cloned().ok_or_else(|| {
+                    DbError::Corrupt(format!("fork: call {c} outside prefix"))
+                })
+            })
+            .transpose()?;
+        ord += 1;
+        conn.execute(
+            "INSERT INTO blocks
+                (block_id, session_id, turn_id, ord, kind, text, call_id, payload_json, created_at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                new_block,
+                child_session_id,
+                new_turn,
+                ord,
+                block.kind,
+                block.text,
+                new_call,
+                payload_json,
+                block.created_at_ms,
+            ],
+        )?;
+    }
+
+    // content 引用随迁：缺失的历史引用跳过（父视图同样解析不出）。
+    for content_id in &content_refs {
+        copy_session_content(conn, parent_session_id, child_session_id, content_id)?;
+    }
+    Ok(prefix.len())
+}
+
 pub fn session_content_owners(
     conn: &Connection,
     content_id: &str,
@@ -1477,4 +1774,189 @@ pub fn session_content_owners(
     )?;
     let rows = statement.query_map([bare_content_id(content_id)], |row| row.get(0))?;
     rows.collect()
+}
+
+#[cfg(test)]
+mod fork_tests {
+    use super::*;
+    use qaqh_ringing_contract::fact::{
+        ActorKind, ActorRef, AssistantBlockKind, BlockId, ContentValue, InputPurpose, ToolCallId,
+        TurnId,
+    };
+    use qaqh_ringing_contract::state::{TimelineEntry, ToolCallState};
+
+    fn new_session(conn: &mut Connection, id: &str, parent: Option<&str>) {
+        create_session(
+            conn,
+            &NewSession {
+                session_id: id.into(),
+                parent_session_id: parent.map(str::to_string),
+                title: String::new(),
+                title_source: None,
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            },
+        )
+        .expect("create session");
+    }
+
+    fn block(session: &str, turn: &str, entry: TimelineEntry, kind: &'static str) -> NewBlock {
+        let (block_id, call_id) = match &entry {
+            TimelineEntry::Input { block_id, .. } | TimelineEntry::AssistantBlock { block_id, .. } => {
+                (block_id.as_str().to_string(), None)
+            }
+            TimelineEntry::ToolCall { call_id, .. } => {
+                (format!("blk_call_{call_id}"), Some(call_id.as_str().to_string()))
+            }
+            TimelineEntry::ToolResult { call_id, .. } => {
+                (format!("blk_result_{call_id}"), Some(call_id.as_str().to_string()))
+            }
+            TimelineEntry::Compaction { .. } => unreachable!(),
+        };
+        NewBlock {
+            block_id,
+            session_id: session.into(),
+            turn_id: Some(turn.into()),
+            kind,
+            text: None,
+            call_id,
+            payload_json: serde_json::to_string(&entry).expect("serialize entry"),
+        }
+    }
+
+    fn input(id: &str, turn: &str, text: &str) -> TimelineEntry {
+        TimelineEntry::Input {
+            block_id: BlockId::new(id),
+            turn_id: Some(TurnId::new(turn)),
+            purpose: InputPurpose::TriggerTurn,
+            content: ContentValue::Inline { text: text.into() },
+            attachments: vec![],
+            images: vec![],
+            inter_agent: None,
+            subagent_terminal: None,
+            actor: ActorRef { kind: ActorKind::User, id: "user".into(), display_name: None },
+        }
+    }
+
+    /// 切片G 闸门：前缀种子化无损（内容逐字保留）、id 全重写、在飞回合不复制。
+    #[test]
+    fn fork_seeds_completed_prefix_losslessly_and_rewrites_ids() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::db::schema::initialize(&mut conn).expect("schema");
+        new_session(&mut conn, "parent", None);
+        new_session(&mut conn, "child", Some("parent"));
+
+        // 父回合1（已完成）：input + assistant + tool call/result。
+        start_turn(&mut conn, "turn_p1", "parent", Some("input_p1")).unwrap();
+        append_block(&mut conn, &block("parent", "turn_p1", input("block_p1", "turn_p1", "hello"), "input")).unwrap();
+        append_block(&mut conn, &block("parent", "turn_p1", TimelineEntry::AssistantBlock {
+            block_id: BlockId::new("block_p2"),
+            turn_id: TurnId::new("turn_p1"),
+            block_kind: AssistantBlockKind::Answer,
+            content: ContentValue::Inline { text: "world".into() },
+            model: "m".into(),
+            usage: None,
+            generated_ms: None,
+            opaque: vec![],
+        }, "assistant")).unwrap();
+        upsert_tool_call(&mut conn, &ToolCallUpsert {
+            call_id: "call_p1".into(),
+            session_id: "parent".into(),
+            turn_id: Some("turn_p1".into()),
+            tool_name: "read".into(),
+            args_json: Some("{\"path\":\"a.rs\"}".into()),
+            state_json: serde_json::to_string(&ToolCallState::Declared).unwrap(),
+            state_kind: "declared",
+        }).unwrap();
+        append_block(&mut conn, &block("parent", "turn_p1", TimelineEntry::ToolCall {
+            call_id: ToolCallId::new("call_p1"),
+            turn_id: Some(TurnId::new("turn_p1")),
+        }, "tool_call")).unwrap();
+        append_block(&mut conn, &block("parent", "turn_p1", TimelineEntry::ToolResult {
+            call_id: ToolCallId::new("call_p1"),
+            turn_id: Some(TurnId::new("turn_p1")),
+            content: ContentValue::Inline { text: "file body".into() },
+        }, "tool_result")).unwrap();
+        finish_turn(&mut conn, "turn_p1", "completed", None).unwrap();
+
+        // 父回合2（在飞）：不得进入 fork。
+        start_turn(&mut conn, "turn_p2", "parent", Some("input_p2")).unwrap();
+        append_block(&mut conn, &block("parent", "turn_p2", input("block_p3", "turn_p2", "in flight"), "input")).unwrap();
+
+        let seeded = fork_session_prefix(&mut conn, "parent", "child").expect("fork");
+        assert_eq!(seeded, 1);
+
+        // 子日志：1 回合 4 块，内容逐字保留，id 全重写。
+        let child_turns: Vec<(String, i64, String)> = conn
+            .prepare("SELECT turn_id, seq, status FROM turns WHERE session_id = 'child' ORDER BY seq")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(child_turns.len(), 1);
+        assert_eq!(child_turns[0].1, 1);
+        assert_eq!(child_turns[0].2, "completed");
+        assert_ne!(child_turns[0].0, "turn_p1");
+
+        let child_blocks = read_transcript_page(&conn, "child", None, 100).unwrap();
+        assert_eq!(child_blocks.len(), 4);
+        let texts: Vec<String> = child_blocks
+            .iter()
+            .map(|b| {
+                let entry: TimelineEntry =
+                    serde_json::from_str(b.payload_json.as_deref().unwrap()).unwrap();
+                match entry {
+                    TimelineEntry::Input { content, block_id, turn_id, .. } => {
+                        assert_ne!(block_id.as_str(), "block_p1");
+                        assert_ne!(turn_id.unwrap().as_str(), "turn_p1");
+                        match content { ContentValue::Inline { text } => text, _ => unreachable!() }
+                    }
+                    TimelineEntry::AssistantBlock { content, .. } => {
+                        match content { ContentValue::Inline { text } => text, _ => unreachable!() }
+                    }
+                    TimelineEntry::ToolCall { call_id, .. } => {
+                        assert_ne!(call_id.as_str(), "call_p1");
+                        // 重写后的 call_id 必须能在子 tool_calls 表找到（join 不断）。
+                        let found: String = conn
+                            .query_row(
+                                "SELECT call_id FROM tool_calls WHERE session_id = 'child' AND call_id = ?1",
+                                [call_id.as_str()],
+                                |r| r.get(0),
+                            )
+                            .expect("child tool_call row");
+                        found
+                    }
+                    TimelineEntry::ToolResult { content, .. } => {
+                        match content { ContentValue::Inline { text } => text, _ => unreachable!() }
+                    }
+                    TimelineEntry::Compaction { .. } => unreachable!(),
+                }
+            })
+            .collect();
+        assert!(texts.contains(&"hello".to_string()));
+        assert!(texts.contains(&"world".to_string()));
+        assert!(texts.contains(&"file body".to_string()));
+
+        // 父日志原样：2 回合 5 块。
+        let parent_turn_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM turns WHERE session_id = 'parent'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(parent_turn_count, 2);
+        assert_eq!(read_transcript_page(&conn, "parent", None, 100).unwrap().len(), 5);
+
+        // 空前缀：在飞回合开头的会话 fork 出 0 回合。
+        new_session(&mut conn, "child2", Some("parent"));
+        let mut conn2 = Connection::open_in_memory().expect("open2");
+        crate::db::schema::initialize(&mut conn2).expect("schema2");
+        new_session(&mut conn2, "p2", None);
+        new_session(&mut conn2, "c2", Some("p2"));
+        start_turn(&mut conn2, "turn_x", "p2", None).unwrap();
+        assert_eq!(fork_session_prefix(&mut conn2, "p2", "c2").unwrap(), 0);
+    }
 }

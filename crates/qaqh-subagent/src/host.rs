@@ -111,6 +111,8 @@ pub struct SpawnSubagentRequest<'a> {
     /// 显式 provider+model 选择；`None` = 子会话行继承父会话行的选择。
     pub selection: Option<&'a qaqh_types::ModelSelection>,
     pub workspace: Option<&'a str>,
+    /// ADR-0014 切片G：true = 以父会话已完成回合前缀种子化子日志（真 fork）。
+    pub fork: bool,
 }
 
 #[derive(Debug, Clone)]
