@@ -6,9 +6,9 @@
 
 LTS 上刚发生这样两个提交：
 
-1. `ac54e508 docs(types): ModelCapabilities layering contract - eligibility ceiling, not runtime switch`
+1. `138e9101 docs(types): ModelCapabilities layering contract - eligibility ceiling, not runtime switch`
    —— 只给 Rust doc comment 加了一段分层说明（端点层门禁 / 会话层 tool_mode / 本结构只做资格校验）。
-2. `4c3a26be chore(contract): regenerate golden for ModelCapabilities layering docs`
+2. `5d2cdfcd chore(contract): regenerate golden for ModelCapabilities layering docs`
    —— 重切金标准，改动 `manifest.json` + `types/qaqh/ModelCapabilities.ts` 两个文件。
 
 后果：**`contract_hash` 由 `ead943ac…` 变成 `c25b08f1…`，而 wire 内容零变化** ——
@@ -64,8 +64,8 @@ TS 侧只多了一段 JSDoc，字段一个没动（`tool_calls/image_input/nativ
 
 | 用例 | 期望 | 实测 |
 |---|---|---|
-| `ac54e508..4c3a26be` 无标记 | 红，且要求 `doc-only-refresh` | exit 1，"导出物 2 / 快照 0 / **wire 实变 0** ⇒ 需要标记 `[doc-only-refresh]`" ✅ |
+| `138e9101..5d2cdfcd` 无标记 | 红，且要求 `doc-only-refresh` | exit 1，"导出物 2 / 快照 0 / **wire 实变 0** ⇒ 需要标记 `[doc-only-refresh]`" ✅ |
 | 同上 + `doc-only-refresh` | 绿 | exit 0 ✅ |
-| `a595d145..b96f2b72`（整份金标准新增）挂 `doc-only-refresh` | 红（谎报被戳穿）| exit 1，列出 `artifact added: …` ✅ |
-| `0a4b4d31..65437929`（只动 `snapshots/routes.txt`）| 绿，判收紧 | exit 0 ✅ |
+| `bd5c0f12..e3b2b618`（整份金标准新增）挂 `doc-only-refresh` | 红（谎报被戳穿）| exit 1，列出 `artifact added: …` ✅ |
+| `dafdd012..93aeb3c5`（只动 `snapshots/routes.txt`）| 绿，判收紧 | exit 0 ✅ |
 | 未碰金标准的提交 | 规则不适用 | exit 0，明确打印"未触碰" ✅ |

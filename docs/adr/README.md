@@ -47,6 +47,7 @@
 | [0010](0010-cut-lts-v3.1-line.md) | 换锁：v3.1 线的待拍板取值与攒着的 refreeze 清单 | `提议中` · §待决 2 **已决：暂不切线**（所有者 2026-11-10）· revision 取值与前端先行仍待拍板 |
 | [0011](0011-frozen-lock-identity.md) | 冻结线的锁必须有登记身份：main 上「改金标准让它变绿」这条路从此被封死 | **已采纳（agent 落地于 main，待 owner 复核）** · 反证已做 |
 | [0012](0012-exec-pwsh-uutils-preamble.md) | exec 的 pwsh 壳集成 uutils coreutils：探测式 preamble 注入 + 最小别名手术 | **已采纳（代码已落地）** · vendor 分发与引导下载延后（另行 ADR） |
+| [0013](0013-legacy-history-graft.md) | 旧史嫁接：QAQ-Harness 298 提交并入 qaqh-backend（1387 连续历史） | 已采纳 · 已执行并 force-push · commit-map 与 gpgsig 陷阱见正文 |
 
 ## 阅读顺序
 

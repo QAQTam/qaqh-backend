@@ -149,7 +149,7 @@ C# 投影会静默生成 `long`，小数被截断**；而
 的断言互相印证；`export_preserves_non_exporter_directories` 则证明导出器不会往非自有目录里灌东西，
 `schema-preview` 的 manifest.json 拒写检查与此同构）。
 
-**合并后的复核**：main 随后 merge 了 `origin/LTS-v3.0`（含 `52a0d0bb` 的 `compare_trees` snapshots
+**合并后的复核**：main 随后 merge 了 `origin/LTS-v3.0`（含 `c9a2db3b` 的 `compare_trees` snapshots
 豁免 + 两个新测试），测试数从 5 变 **7 passed / 0 failed**，且
 `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0` 返回 **exit 0** ——
 即"第 1 步零影响"这条断言现在由**官方工具**在合并树上验证，而不只是本 worker 手搓的逐字节比对。

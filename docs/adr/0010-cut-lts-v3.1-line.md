@@ -22,7 +22,7 @@
    `continue-on-error: ${{ target != 'LTS-v3.0' }}` 让它在 main 上只报告、在 LTS 上硬拦。
    **不得**为了让它变绿而重切或手改 `docs/api-surface/v3.0`（规则 16）。
 5. 但"不许重切"这句话原本**没有机器闸**：分类闸的判据是"改动落点是否落在
-   `docs/api-surface/**`"，而本轮这条 refreeze 恰恰不动金标准 —— 实测它对 `5880a867`
+   `docs/api-surface/**`"，而本轮这条 refreeze 恰恰不动金标准 —— 实测它对 `46e6dc76`
    输出`未触碰冻结金标准，规则不适用`（exit 0）。于是 main 上唯一看得见契约漂移的一步
    是 report-only 的，"重切一下它就绿"没有东西拦。这一条由 **ADR-0011** 补上
    （锁身份登记 + 守卫硬比 tree OID，`--skip-export` 下也跑）。切 `LTS-v3.1` 时
