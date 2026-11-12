@@ -204,6 +204,8 @@ pub struct SpawnInput<'a> {
     pub sandbox: qaqh_workspace::tool_api::SandboxMode,
     pub workspace_root: PathBuf,
     pub exec_sessions: Arc<qaqh_process_tools::exec_session::ExecSessionManager>,
+    /// ADR-0014：外部工具注册器（子代理工具面经此进入每个会话）。
+    pub tool_registrars: &'a [qaqh_workspace::registration::ToolRegistrar],
 }
 
 impl<'a> SpawnInput<'a> {
@@ -229,6 +231,7 @@ impl<'a> SpawnInput<'a> {
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             workspace_root,
             exec_sessions,
+            tool_registrars: &[],
         })
     }
 }
@@ -270,9 +273,10 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         sandbox,
         workspace_root,
         exec_sessions,
+        tool_registrars,
     } = input;
 
-    let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
+    let mut tool_manager = qaqh_workspace::registration::build_tool_manager(tool_registrars);
     tool_manager.set_global_allowed(global_allowed_tools);
     tool_manager.apply_init(allowed_tools);
     let mut provider = provider_spec(config, tool_defs(&tool_manager))?;

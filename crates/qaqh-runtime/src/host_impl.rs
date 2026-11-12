@@ -8,7 +8,6 @@
 //! 工具 handler 通过该宿主句柄直达进程内 `AgentRegistry` + `RingingHub`，
 //! 不再建立 HTTP/SSE 连接。事件订阅直接走 hub 进程内 broadcast。
 
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qaqh_ringing::RingingWorkerCommandEnvelope;

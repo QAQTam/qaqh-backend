@@ -13,8 +13,9 @@
 //!
 //! ## Registration
 //!
-//! 工具面正按会话语义重写（ADR-0014 切片 D），生产注册器暂不注册本 crate
-//! 工具；`register` 为显式消费方与测试保留完整工具集。
+//! ADR-0014 切片 D：最小工具集（spawn_subagent / send_message / wait_agent /
+//! list_agents / interrupt_agent）经 `SpawnInput.tool_registrars` 进入每个
+//! 会话。task/board 工具仍悬置（`register_collaboration_tools` 显式 opt-in）。
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
@@ -70,9 +71,6 @@ pub struct SpawnSubagentArgs {
     /// Optional background context to hand to the subagent before the task.
     #[serde(default)]
     context: Option<String>,
-    /// Maximum time in seconds before the subagent is cancelled. Default 120.
-    #[serde(default)]
-    timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -235,10 +233,16 @@ impl TypedTool for ListAgentsTool {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgentMessageArgs {
-    /// Absolute AgentPath or caller-relative path of the recipient.
+    /// Recipient: AgentPath (absolute or caller-relative) or a session id
+    /// (cross-session chat, ADR-0014).
     to: String,
     /// Message body to deliver to the recipient.
     message: String,
+    /// Delivery mode: queue (default, merge at turn boundary), trigger
+    /// (start a turn when idle), steer / interject (merge into the running
+    /// turn at the next safe point).
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -290,7 +294,7 @@ impl TypedTool for SendMessageTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "send_message",
-            "Queue a canonical message to another agent in the current root tree without starting a turn.",
+            "Send a canonical message to another conversation (agent path or session id; cross-session allowed). mode: queue (default, merged at the turn boundary), trigger (start a turn when idle), steer/interject (merge into the running turn).",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(30),
@@ -302,82 +306,20 @@ impl TypedTool for SendMessageTool {
         ctx: &ToolCallContext,
         args: AgentMessageArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, InterAgentDelivery::Queue)
-    }
-}
-
-pub struct FollowupTaskTool;
-
-impl TypedTool for FollowupTaskTool {
-    type Args = AgentMessageArgs;
-    type Output = AgentMessageOutput;
-
-    fn meta(&self) -> ToolMeta {
-        ToolMeta::new(
-            "followup_task",
-            "Queue a canonical task to another agent and trigger its turn when idle.",
-            qaqh_workspace::permission::ToolCategory::Exec,
-            ToolRisk::Administrative,
-            Duration::from_secs(30),
-        )
-    }
-
-    fn run(
-        &self,
-        ctx: &ToolCallContext,
-        args: AgentMessageArgs,
-    ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, InterAgentDelivery::Trigger)
-    }
-}
-
-pub struct SteerAgentTool;
-
-impl TypedTool for SteerAgentTool {
-    type Args = AgentMessageArgs;
-    type Output = AgentMessageOutput;
-
-    fn meta(&self) -> ToolMeta {
-        ToolMeta::new(
-            "steer_agent",
-            "Merge a steering message into the target's current turn at the next safe point. Does not start an idle turn.",
-            qaqh_workspace::permission::ToolCategory::Exec,
-            ToolRisk::Administrative,
-            Duration::from_secs(30),
-        )
-    }
-
-    fn run(
-        &self,
-        ctx: &ToolCallContext,
-        args: AgentMessageArgs,
-    ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, InterAgentDelivery::Steer)
-    }
-}
-
-pub struct InterjectAgentTool;
-
-impl TypedTool for InterjectAgentTool {
-    type Args = AgentMessageArgs;
-    type Output = AgentMessageOutput;
-
-    fn meta(&self) -> ToolMeta {
-        ToolMeta::new(
-            "interject_agent",
-            "Merge an urgent correction into the target's current turn at the next safe point. Does not cancel the turn or start an idle turn.",
-            qaqh_workspace::permission::ToolCategory::Exec,
-            ToolRisk::Administrative,
-            Duration::from_secs(30),
-        )
-    }
-
-    fn run(
-        &self,
-        ctx: &ToolCallContext,
-        args: AgentMessageArgs,
-    ) -> Result<Self::Output, ToolExecutionError> {
-        handle_agent_message(ctx, args, InterAgentDelivery::Interject)
+        let delivery = match args.mode.as_deref().map(str::trim) {
+            None | Some("") | Some("queue") => InterAgentDelivery::Queue,
+            Some("trigger") => InterAgentDelivery::Trigger,
+            Some("steer") => InterAgentDelivery::Steer,
+            Some("interject") => InterAgentDelivery::Interject,
+            Some(other) => {
+                return Err(subagent_error(
+                    "invalid_mode",
+                    format!("send_message: unknown mode {other:?}"),
+                    "Use queue, trigger, steer or interject.",
+                ));
+            }
+        };
+        handle_agent_message(ctx, args, delivery)
     }
 }
 
@@ -720,7 +662,7 @@ impl TypedTool for SpawnSubagentTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "spawn_subagent",
-            "Spawn an isolated subagent for a focused task. Returns the child agent path; its final answer is injected as a [SUBAGENT] message when done - do not poll. Track it with list_agents (outcome carries the final answer) and cancel it with interrupt_agent. agent_name = verb+task phrase (e.g. 'explore_task').",
+            "Spawn a child conversation (subagent) for a focused task and deliver the task immediately. Returns the child session id and agent path; its final answer arrives as a canonical message when the turn ends - do not poll. Track with list_agents, chat with send_message, cancel with interrupt_agent. agent_name = verb+task phrase (e.g. 'explore_task').",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(180),
@@ -743,17 +685,10 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(ListAgentsTool);
     mgr.register_display("send_message", project_agent_message_display);
     mgr.register_typed(SendMessageTool);
-    mgr.register_display("followup_task", project_agent_message_display);
-    mgr.register_typed(FollowupTaskTool);
-    mgr.register_display("steer_agent", project_agent_message_display);
-    mgr.register_typed(SteerAgentTool);
-    mgr.register_display("interject_agent", project_agent_message_display);
-    mgr.register_typed(InterjectAgentTool);
     mgr.register_display("wait_agent", project_wait_agent_display);
     mgr.register_typed(WaitAgentTool);
     mgr.register_display("interrupt_agent", project_interrupt_agent_display);
     mgr.register_typed(InterruptAgentTool);
-    register_collaboration_tools(mgr);
 }
 
 /// Register task/board tools without exposing subagent creation or control.
@@ -769,14 +704,6 @@ pub fn register_collaboration_tools(mgr: &mut ToolManager) {
     mgr.register_typed(board_tools::BoardPostTool);
     mgr.register_typed(board_tools::BoardSubscribeTool);
     mgr.register_typed(board_tools::BoardListTool);
-}
-
-fn unix_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
@@ -905,18 +832,14 @@ fn handle_spawn_subagent(
     let task = args.task_description;
     let context = args.context.unwrap_or_default();
 
-    // 模型面只暴露 4 个参数；工具白名单 / 超时默认值取自用户设置
-    // （cfg.subagent.*，前端设置页可调）。模型选择的唯一真源是
-    // providers.toml 目录 + 会话行 model_selection：子代理缺省继承父会话
-    // 的选择，不存在 model/base-url/max-tokens 覆盖链。
+    // ADR-0014：模型面只暴露 3 个参数。工具白名单取自用户设置
+    // （cfg.subagent.default_tools）；超时预算 = cfg.subagent.timeout_secs，
+    // 由 daemon 周期扫描执行（不再 per-spawn 覆盖）。模型选择继承父会话行。
     let (tools, cfg_timeout) = qaqh_config::Config::load()
         .ok()
         .map(|cfg| (cfg.subagent.default_tools.clone(), cfg.subagent.timeout_secs))
         .unwrap_or_default();
-    let timeout_secs = args
-        .timeout_secs
-        .unwrap_or(cfg_timeout.max(1))
-        .clamp(1, 3600);
+    let timeout_secs = cfg_timeout.max(1);
 
     if task.trim().is_empty() {
         return Err(subagent_error(
@@ -935,8 +858,7 @@ fn handle_spawn_subagent(
     } else {
         Some(parent_workspace.into_owned())
     };
-    // ── 1. Create the child actor only. The task is delivered by the runtime
-    // after the canonical `SubagentSpawned` edge is committed. ──
+    // ── 1. Create the child conversation (ADR-0014: subagent = session). ──
     let host = host().ok_or_else(|| {
         subagent_error(
             "host_unavailable",
@@ -971,14 +893,26 @@ fn handle_spawn_subagent(
     let parent_agent_path = spawned.parent_agent_path;
     let child_agent_path = spawned.child_agent_path;
 
-    // ── 2. Hand the child over to the runtime. The collector starts only after
-    // the canonical spawn edge is committed; the child is addressed by its
-    // canonical ids from here on. ──
+    // ── 2. Deliver the task as a canonical inter-agent message. The child's
+    // turn terminal routes the answer back to this session's mailbox. ──
+    host.send_agent_message(SendAgentMessageRequest {
+        caller_session_id: &ctx.session_id,
+        target: &child_session_id,
+        text: &task_text,
+        delivery: InterAgentDelivery::Trigger,
+    })
+    .map_err(|error| {
+        subagent_error(
+            "send_error",
+            format!("spawn_subagent: task delivery rejected: {error}"),
+            "The child session exists; retry with send_message(mode=trigger).",
+        )
+    })?;
     log::info!(
-        "[SUBAGENT] '{name}' actor created (seed={session_id}, path={child_agent_path}); awaiting canonical edge"
+        "[SUBAGENT] '{name}' child conversation created (seed={session_id}, path={child_agent_path}); task delivered"
     );
     let content = format!(
-        "Subagent '{name}' spawned at {child_agent_path}; the task starts after the canonical spawn edge is committed. Track it with list_agents; cancel it with interrupt_agent(target=\"{child_agent_path}\")."
+        "Subagent '{name}' spawned at {child_agent_path} (session {child_session_id}); task delivered. Its final answer arrives as a message when the turn ends — do not poll. Track with list_agents; chat with send_message; cancel with interrupt_agent(target=\"{child_agent_path}\")."
     );
     Ok(SpawnSubagentOutput {
         timeis: qaqh_workspace::now_utc8(),
@@ -1079,7 +1013,7 @@ mod tests {
         let mut manager = ToolManager::new();
         register(&mut manager);
 
-        for name in ["send_message", "followup_task"] {
+        for name in ["send_message"] {
             let handler = manager.lookup(name).expect("agent message tool registered");
             let properties = handler.input_schema["properties"]
                 .as_object()
@@ -1140,7 +1074,7 @@ mod tests {
     #[test]
     fn task_tools_are_registered_with_closed_schemas() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register_collaboration_tools(&mut manager);
 
         for name in [
             "task_create",
@@ -1153,8 +1087,6 @@ mod tests {
             "board_post",
             "board_subscribe",
             "board_list",
-            "steer_agent",
-            "interject_agent",
         ] {
             let handler = manager
                 .lookup(name)
@@ -1182,9 +1114,9 @@ mod tests {
             .as_object()
             .expect("tool properties should be an object");
 
-        // 模型面只有 4 个参数；system_prompt / tools / model / base_url /
-        // max_tokens 不再暴露（由设置页配置或内置身份提示提供）。
-        let expected: Vec<&str> = vec!["task_description", "agent_name", "context", "timeout_secs"];
+        // ADR-0014：模型面只有 3 个参数；超时预算 = config（daemon 扫描），
+        // system_prompt / tools / model / base_url / max_tokens 不暴露。
+        let expected: Vec<&str> = vec!["task_description", "agent_name", "context"];
         assert_eq!(properties.len(), expected.len());
         for key in expected {
             assert!(properties.contains_key(key), "missing {key}");
@@ -1303,7 +1235,6 @@ mod tests {
                     task_description: "   ".to_string(),
                     agent_name: None,
                     context: None,
-                    timeout_secs: None,
                 },
             )
             .expect_err("empty task must fail before host lookup");

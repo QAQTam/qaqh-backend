@@ -254,14 +254,12 @@ pub fn spawn_names(
             &effects_json,
         )?;
         for effect in effects {
-            if let qaqh_ringing_contract::state::ToolEffectInfo::SubagentSpawned {
+            let qaqh_ringing_contract::state::ToolEffectInfo::SubagentSpawned {
                 child_session_id,
                 name,
                 ..
-            } = effect
-            {
-                names.insert(child_session_id, name);
-            }
+            } = effect;
+            names.insert(child_session_id, name);
         }
     }
     Ok(names)

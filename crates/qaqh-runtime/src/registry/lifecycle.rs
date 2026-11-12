@@ -3,8 +3,6 @@
 
 use super::*;
 
-use crate::error::QaqhResult;
-
 impl AgentRegistry {
     pub(crate) fn forget_sessions(&mut self, ids: &[String]) {
         for id in ids {
