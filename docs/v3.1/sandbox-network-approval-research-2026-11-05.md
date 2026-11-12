@@ -24,7 +24,7 @@ backend 已有工具级网络审批，但缺少“沙箱内实际联网请求 �
 
 | 项目 | 本地目录 | 调研时 HEAD |
 | --- | --- | --- |
-| backend | `/home/qaqtamsy/Projects/qaqh-backend` | `d126a5e51a03e6639b2387e1578cd5af0292df0f` |
+| backend | `/home/qaqtamsy/Projects/qaqh-backend` | `047bf47afe020e924995c1379532c88fec680b49` |
 | Codex | `/home/qaqtamsy/Projects/codex` | `db3c44414c2cd4ae33adaf4fa33382cb3dde6bd5` |
 
 结论依据本地工作区源码，而非仅依据提交快照。backend 调研时存在未提交修改，其中包括 `crates/qaqh-process-tools/src/exec_session/tool.rs`；本文描述的是当时磁盘上的实现，不保证上述 HEAD 的纯净检出具有完全相同的执行链路。调研没有覆盖或回退这些修改。

@@ -37,20 +37,20 @@
    被行尾符打到；`compare_snapshot` 用 `read_text()`，Python 的 universal newlines 已把 `\r\n`
    归一 —— 把 `routes.txt`/`facade.txt` 临时改成 CRLF 再跑守卫自己的函数，**两种行尾都 PASS**。
    即这是一道**单点**缺陷，不是三道全废（写 ADR 时容易顺手夸大成"整个守卫在 Windows 不可用"）。
-   **本条已于 2026-11-10 修好**（`52a0d0bb`，落在 `LTS-v3.0`，main 已 merge）：
+   **本条已于 2026-11-10 修好**（`c9a2db3b`，落在 `LTS-v3.0`，main 已 merge）：
    `.gitattributes` 加了 `docs/api-surface/** text eol=lf`，且 `compare_trees` 现在豁免
    `snapshots/` 并把 `manifest.json` 交给带 volatile 字段切除的语义比对。修好后
    `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0` 在 Windows
    checkout 上 **exit 0**（本机实测），所以它从此就是**正确的本地金标准预检命令**。
-   撞车记录（ governance 价值的一条实证）：本 worker 在 `13e6dc1e` 里独立加了同一条
-   `docs/api-surface/** text eol=lf`，与 `52a0d0bb` 在 merge 时正面冲突（且 git 会把
+   撞车记录（ governance 价值的一条实证）：本 worker 在 `d37170a4` 里独立加了同一条
+   `docs/api-surface/** text eol=lf`，与 `c9a2db3b` 在 merge 时正面冲突（且 git 会把
    `.gitattributes` 里的 `>>>>>>> origin/LTS-v3.0` 冲突标记**当成属性行解析**，报
    `not a valid attribute name`）。两人 20 分钟内各自修同一个洞、互不知情 ——
    这正是决策 1（CODEOWNERS）与决策 2/3（refreeze 标签 + 成文 ADR）要解决的形状，
-   而不是抽象的官僚流程。合并时保留 `52a0d0bb` 的版本、删掉重复规则。
-   撞车记录 2（2026-11-10 第二轮）：`origin/LTS-v3.0` 前进到 `cdaf6dbd` 之后，两个 worker
-   在数十分钟内**各自**把 LTS merge 回 main 恢复超集不变量 —— 本地 `c8e06526`，
-   对端 `b3f139a8`（它把这次 merge 标成 `[doc-only-refresh]`，而两侧改动都没碰金标准，
+   而不是抽象的官僚流程。合并时保留 `c9a2db3b` 的版本、删掉重复规则。
+   撞车记录 2（2026-11-10 第二轮）：`origin/LTS-v3.0` 前进到 `6aaabe1a` 之后，两个 worker
+   在数十分钟内**各自**把 LTS merge 回 main 恢复超集不变量 —— 本地 `a952c737`，
+   对端 `894d897c`（它把这次 merge 标成 `[doc-only-refresh]`，而两侧改动都没碰金标准，
    分类闸对两者都输出`未触碰冻结金标准，规则不适用`）。合并无内容冲突
    （`presets.rs` 里那条新增只出现一次，实测计数 = 1）。
    留这条的真正原因不是追责，而是：**`main ⊇ LTS-v3.0` 目前没有机器闸** —— 它只写在
@@ -85,7 +85,7 @@
      ⇒ 允许进 LTS，**不**需要 bump revision。
    required job 判的是"变化的文件集合落在哪一类"，不是"有没有动 docs/api-surface"。
    分类判据本身从"字节"改为"wire 视图"的过程与被否方案，见 **ADR-0009**（触发它的是
-   `ac54e508`+`4c3a26be` 那次零 wire 变化的注释改动被误判成换锁）。
+   `138e9101`+`5d2cdfcd` 那次零 wire 变化的注释改动被误判成换锁）。
 3. **refreeze 必须成文**：带标签的 PR 附一份 ADR（模板见 `docs/adr/README.md`），
    内容至少含：新 `contract_revision` 值、被破坏的 capability 清单、迁移窗口、
    以及 ADR-0005 配对测试的结论。无 ADR 链接 ⇒ job 红。
@@ -123,7 +123,7 @@
 - CODEOWNERS 在小团队会退化为"自己批自己"。这是治理成本而非机制缺陷；即便如此，
   §2/§3 的标签+ADR 仍留下了**可追溯记录**，价值主要在事后而非事前。
 - `main` 上的非阻断比对**不需要** release 导出：`surface-policy.yml` 里跑的
-  `check --against docs/api-surface/v3.0`（debug 即可，`52a0d0bb` 之后它已豁免 `snapshots/`）
+  `check --against docs/api-surface/v3.0`（debug 即可，`c9a2db3b` 之后它已豁免 `snapshots/`）
   加上秒级的 `--skip-export`（路由表 + lint + 门面）。原设想中的 `just surface-quick`
   配方由这两个标志替代，未另建 recipe。
 
@@ -140,7 +140,7 @@
       Windows 控制台下 CJK 有被写坏的风险，本轮实测后改写了一次）
 - [x] `scripts/check-surface-change-policy.py` + `.github/workflows/surface-policy.yml`：
       按**改动落点**自动分类。实测 5 例全对 —— 只改 `snapshots/routes.txt` 的 0003 提交判
-      `guard-tightening` 放行；引入整份金标准的 `b96f2b72` 无标记判红；同一改动声明
+      `guard-tightening` 放行；引入整份金标准的 `e3b2b618` 无标记判红；同一改动声明
       `contract-refreeze` 且目标 `LTS-v3.0` 判红；目标换 `LTS-v3.1` 放行；无基线时
       明确提示"未经分类"而不是静默绿。
 - [~] 决策 3（refreeze 必须附 ADR 链接）**只落了标签这一半**：脚本校验标记，暂不校验
@@ -149,7 +149,7 @@
       `surface-policy.yml` 用 `continue-on-error: target != 'LTS-v3.0'` 实现"main 只报告、
       LTS 硬拦"，免得两条 workflow 各跑一份 release 构建。
 - [x] 手册 §4 增 `surface-policy.yml` 行与分类判据；新增 §7 写清需要 admin 的两项设置
-- [x] `.gitattributes` 追加 `docs/api-surface/** text eol=lf`（由 `52a0d0bb` 落在 LTS，main 已 merge；
+- [x] `.gitattributes` 追加 `docs/api-surface/** text eol=lf`（由 `c9a2db3b` 落在 LTS，main 已 merge；
       本 worker 的重复规则在 merge 时删掉，保留一份）
 - [x] 手册 §1 判定法改为可执行的两条：`check --against docs/api-surface/v3.0`（金标准，本地可用）
       + `check-sdk-contract.py --typescript --release`（确定性与严格 TS 消费者）

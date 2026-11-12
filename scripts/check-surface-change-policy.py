@@ -60,8 +60,8 @@ def wire_view(path: str, text: str) -> str:
     """产物里"客户端能观察到的部分"：去掉注释后的内容。
 
     注释不进 wire 语义 —— 但它进 `contract_hash`（哈希的是字节）。不区分这两件事的后果
-    是真实发生过的：`ac54e508` 只给 `ModelCapabilities` 的 Rust doc 加了一段分层说明，
-    `4c3a26be` 重切金标准后 `contract_hash` 由 `ead943ac…` 变成 `c25b08f1…`，
+    是真实发生过的：`138e9101` 只给 `ModelCapabilities` 的 Rust doc 加了一段分层说明，
+    `5d2cdfcd` 重切金标准后 `contract_hash` 由 `ead943ac…` 变成 `c25b08f1…`，
     于是一次**零 wire 影响**的文档改动被当成"换锁"。这里把它拆出来单独分类。
     只在代码后缀上去行尾注释，避免误伤 JSON 字符串里的 `//`。
     """
