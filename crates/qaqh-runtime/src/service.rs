@@ -90,14 +90,26 @@ impl QaqhService {
             config.subagent.message_in_flight_per_pair,
             config.subagent.message_outbound_per_sender,
         );
-        Self {
+        let service = Self {
             registry: Arc::new(Mutex::new(registry)),
             hub: std::sync::OnceLock::new(),
             owners,
             sessions,
             siwc: std::sync::OnceLock::new(),
             dsaccount: std::sync::OnceLock::new(),
+        };
+        // ADR-0014：终态回传路由——loop 报告终态，registry 判定血缘回传。
+        // 闭包持 service clone；终态时锁 registry 路由（短临界区、无 await，
+        // 与 send_input 的入队语义无死锁）。
+        let router_service = service.clone();
+        if let Ok(mut registry) = service.registry() {
+            registry.set_terminal_router(Some(Arc::new(move |notice| {
+                if let Ok(mut registry) = router_service.registry() {
+                    registry.route_turn_terminal(notice);
+                }
+            })));
         }
+        service
     }
 
     /// SIWC 会话管理器（懒装配到 `<data_dir>/siwc`）。
@@ -255,6 +267,18 @@ impl QaqhService {
             release_freed_heap_memory();
         }
         unloaded
+    }
+
+    /// ADR-0014：子代理超时扫描——取消超预算的子会话活动回合。
+    /// `timeout_secs` == 0 为 no-op。取代 per-child collector 的 deadline 循环。
+    pub fn cancel_expired_subagent_turns(&self, timeout_secs: u64) -> Vec<String> {
+        if timeout_secs == 0 {
+            return Vec::new();
+        }
+        let Ok(mut registry) = self.registry() else {
+            return Vec::new();
+        };
+        registry.cancel_expired_subagent_turns(timeout_secs)
     }
 
     fn refresh_memory_components(&self) {

@@ -8,27 +8,25 @@
 //! 工具 handler 通过该宿主句柄直达进程内 `AgentRegistry` + `RingingHub`，
 //! 不再建立 HTTP/SSE 连接。事件订阅直接走 hub 进程内 broadcast。
 
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use qaqh_ringing::RingingWorkerCommandEnvelope;
 use qaqh_ringing_contract::commands::InterAgentEnvelope;
 use qaqh_ringing_contract::fact::InterAgentDelivery;
-use qaqh_ringing_contract::fact::{
-    AssistantBlockKind, ContentHash, ContentRef as CanonicalContentRef, ContentValue,
-};
+use qaqh_ringing_contract::fact::{ContentHash, ContentRef as CanonicalContentRef};
 use qaqh_ringing_contract::team::{
     ChannelId, PostId, TaskId, TeamBoardChannel, TeamBoardPost, TeamBoardSnapshot,
     TeamBoardSubscription, TeamBoardSubscriptionTarget, TeamBoardThread, ThreadId,
 };
 use qaqh_subagent::{
-    ArmSubagentCollectorRequest, BoardChannel, BoardChannelCreateRequest, BoardHost,
+    BoardChannel, BoardChannelCreateRequest, BoardHost,
     BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
     BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
-    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest, CollectorBatch,
-    CollectorEvent, CollectorSubscription, ContentRef, InterruptAgentRequest, InterruptedAgent,
+    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
+    InterruptAgentRequest, InterruptedAgent,
     ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
-    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, StartSubagentRequest, SubagentHost,
+    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, SubagentHost,
     TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
     TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
     TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
@@ -213,34 +211,6 @@ impl SubagentHost for QaqhService {
             InterAgentDelivery::Interject => qaqh_ringing_contract::fact::InputPurpose::Interject,
             InterAgentDelivery::Interrupt => unreachable!(),
         };
-        let arm_spec =
-            if request.delivery == InterAgentDelivery::Trigger && !target.agent_path.is_root() {
-                self.registry()?
-                    .prepare_collector_arm(target.agent_id.as_str())?
-            } else {
-                None
-            };
-        if let Some(spec) = arm_spec {
-            let collector_host: Arc<dyn SubagentHost> = Arc::new(self.clone());
-            if let Err(error) = qaqh_subagent::arm_subagent_collector(
-                collector_host,
-                ArmSubagentCollectorRequest {
-                    session_id: target.agent_id.as_str(),
-                    child_session_id: &spec.child_session_id,
-                    name: &spec.name,
-                    parent_session_id: &spec.parent_session_id,
-                    parent_call_id: &spec.parent_call_id,
-                    timeout_secs: spec.timeout_secs,
-                    root_session_id: &spec.root_session_id,
-                    parent_agent_path: &spec.parent_agent_path,
-                    child_agent_path: &spec.child_agent_path,
-                },
-            ) {
-                self.registry()?
-                    .unmark_collector_armed(target.agent_id.as_str());
-                return Err(format!("arm subagent collector: {error}"));
-            }
-        }
         self.send_ringing(
             target.agent_id.as_str(),
             qaqh_ringing::RingingCommand::ConversationSendMessage(
@@ -359,81 +329,6 @@ impl SubagentHost for QaqhService {
         })
     }
 
-    fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String> {
-        let host =
-            qaqh_subagent::host().ok_or_else(|| "subagent host is not installed".to_string())?;
-        let metadata = self
-            .registry()?
-            .agent_metadata(request.child_session_id)
-            .ok_or_else(|| {
-                format!(
-                    "subagent metadata missing for child {}",
-                    request.child_session_id
-                )
-            })?;
-        let author = metadata
-            .parent_agent_path
-            .as_ref()
-            .map(|path| path.as_str().to_string())
-            .unwrap_or_else(|| "/root".to_string());
-        let envelope = InterAgentEnvelope {
-            message_id: format!("msg_{}", qaqh_ringing_contract::ulid::generate_ulid()),
-            root_session_id: metadata.root_session_id.as_str().to_string(),
-            author,
-            recipient: metadata.agent_path.as_str().to_string(),
-            other_recipients: vec![],
-            task_id: None,
-            reply_to: None,
-            causation_id: None,
-            delivery: InterAgentDelivery::Trigger,
-            created_at_ms: (nanos() / 1_000_000) as i64,
-        };
-        let child_session_id = request.child_session_id.to_string();
-        qaqh_subagent::start_subagent_collector(
-            host,
-            StartSubagentRequest {
-                inter_agent: Some(envelope),
-                ..request
-            },
-        )?;
-        self.registry()?
-            .mark_collector_armed(&child_session_id, request.parent_call_id);
-        Ok(())
-    }
-
-    fn rollback_subagent(&self, session_id: &str, child_session_id: &str) {
-        // 边未成为权威事实：目录注册与结果面一起撤销。子代理从未登记进
-        // 进程注册表，故这里不再有 process_id 可回收。
-        match self.registry() {
-            Ok(mut registry) => registry.rollback_subagent(session_id, child_session_id),
-            Err(error) => {
-                log::warn!(
-                    "[SUBAGENT-HOST] rollback registry unavailable for {session_id}: {error}"
-                );
-                let _ = self.close(session_id);
-            }
-        }
-    }
-
-    fn abort_subagent(&self, session_id: &str) {
-        if let Err(error) = self.close(session_id) {
-            log::warn!("[SUBAGENT-HOST] abort close failed for {session_id}: {error}");
-        }
-    }
-
-    fn finish_subagent(&self, child_session_id: &str, answer: &str, exit_code: i32) {
-        match self.registry() {
-            Ok(mut registry) => {
-                registry.record_subagent_outcome(child_session_id, answer, exit_code);
-            }
-            Err(error) => {
-                log::warn!(
-                    "[SUBAGENT-HOST] outcome registry unavailable for {child_session_id}: {error}"
-                );
-            }
-        }
-    }
-
     fn send_ringing(
         &self,
         session_id: &str,
@@ -444,75 +339,6 @@ impl SubagentHost for QaqhService {
         self.registry()?
             .send_ringing(session_id, &env)
             .map_err(|error| error.to_string())
-    }
-
-    fn subscribe(&self, session_id: &str) -> CollectorSubscription {
-        let (tx, rx) = mpsc::channel::<CollectorBatch>();
-        // owner 单流广播即子代理输出源:Answer 块 seal → AnswerSealed,
-        // 回合终态 → TurnFinished。只收 live 事件(订阅点即起点),
-        // 与旧桥接的订阅时机语义一致。
-        let mut event_rx = self.owners().get_or_create(session_id).subscribe();
-        let (stop_tx, stop_rx) = mpsc::channel::<()>();
-        let bridge_session = session_id.to_string();
-        let bridge = std::thread::Builder::new()
-            .name(format!("qaqh-subagent-sub-{session_id}"))
-            .spawn(move || {
-                loop {
-                    if stop_rx.try_recv().is_ok() {
-                        break;
-                    }
-                    match event_rx.blocking_recv() {
-                        Ok(frame) => {
-                            if let Some(event) = collector_event_from_session_event(&frame.event) {
-                                let batch = CollectorBatch {
-                                    session_id: bridge_session.clone(),
-                                    events: vec![event],
-                                };
-                                if tx.send(batch).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                        // Lagged:收集器侧有超时与 Disconnected 兜底,丢一段
-                        // 输出不中断收集;Closed = owner 已销毁。
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-            })
-            .ok();
-        CollectorSubscription::new(rx, move || {
-            let _ = stop_tx.send(());
-            if let Some(bridge) = bridge {
-                let _ = bridge.join();
-            }
-        })
-    }
-
-    fn download_content(
-        &self,
-        session_id: &str,
-        reference: &ContentRef,
-    ) -> Result<Vec<u8>, String> {
-        let raw_ref = reference.hash().as_str();
-        let canonical_ref = canonical_content_ref(raw_ref)?;
-        let content_hash = canonical_ref.hash().as_str().trim_start_matches("sha256:");
-        let store_id = content_hash.to_string();
-        let hub = self
-            .hub
-            .get()
-            .ok_or_else(|| "Ringing database is not attached".to_string())?;
-        let entry = hub
-            .get_content(session_id, &store_id)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("content {raw_ref} not found"))?;
-        Ok(entry.bytes)
-    }
-
-    fn close(&self, session_id: &str) -> Result<(), String> {
-        // 与 daemon action `session.close`/`SessionClose` 拦截一致：关闭 registry
-        // 实例并清理临时会话；结果已注入主会话 + 终态已回写注册表，残留不丢数据。
-        self.close_session(session_id, None)
     }
 }
 
@@ -1025,14 +851,11 @@ impl BoardHost for QaqhService {
 }
 
 impl QaqhService {
-    /// Wait until every target agent has a recorded terminal outcome.
+    /// Wait until every target session's canonical run state is settled.
     ///
-    /// This is the `wait_agent(targets=...)` path and the replacement for
-    /// `process wait {id}` on subagents. The completion test is a pure
-    /// in-memory read of the result plane (`subagent_outcomes`) — it never
-    /// reads canonical logs, so a long wait costs no I/O. A target that is not
-    /// a subagent (e.g. the root) simply never satisfies the test and the call
-    /// returns `TimedOut`.
+    /// ADR-0014：独立结果面退役——终态判据 = 会话运行态（无活动回合且非
+    /// never-started）。`wait_agent(targets=...)` 路径；root 等无回合会话
+    /// 永不满足判据，调用返回 `TimedOut`。
     fn wait_for_agent_outcomes(
         &self,
         caller_session_id: &str,
@@ -1059,11 +882,12 @@ impl QaqhService {
             if should_cancel() {
                 return Ok(WaitAgentOutcome::Cancelled);
             }
-            // 锁必须在 sleep 之前释放：`finish_subagent` 由 collector 线程持锁写入。
-            let all_finished = {
-                let registry = self.registry()?;
-                agent_ids.iter().all(|id| registry.has_subagent_outcome(id))
-            };
+            let all_finished = agent_ids.iter().all(|id| {
+                matches!(
+                    self.owners.session_run_state(id),
+                    Ok(qaqh_session::owner::SessionRunState::Idle)
+                )
+            });
             if all_finished {
                 return Ok(WaitAgentOutcome::Activity {
                     activity_fact_seq: 0,
@@ -1599,54 +1423,6 @@ fn parse_task_state(state: &str) -> Result<qaqh_ringing_contract::team::TaskStat
     }
 }
 
-/// 会话事件 → 收集器事件。
-///
-/// 只翻译收集器关心的语义:终答正文(Answer 块 seal)与回合终态。
-fn collector_event_from_session_event(
-    event: &qaqh_ringing_contract::events::SessionEvent,
-) -> Option<CollectorEvent> {
-    use qaqh_ringing_contract::events::SessionEvent;
-    use qaqh_ringing_contract::fact::TurnTerminal;
-    use qaqh_ringing_contract::state::{TimelineEntry, TurnOutcome};
-    match event {
-        SessionEvent::TimelineAppended {
-            entry:
-                TimelineEntry::AssistantBlock {
-                    block_kind: AssistantBlockKind::Answer,
-                    content,
-                    ..
-                },
-        } => Some(CollectorEvent::AnswerSealed {
-            text: match content {
-                ContentValue::Inline { text } => Some(text.clone()),
-                _ => None,
-            },
-            output_ref: None,
-        }),
-        SessionEvent::TurnEnded { outcome, .. } => Some(CollectorEvent::TurnFinished {
-            failed: match outcome {
-                TurnOutcome::Finished { terminal, .. } => *terminal == TurnTerminal::Failed,
-                TurnOutcome::Interrupted { .. } => true,
-            },
-            cancelled: matches!(
-                outcome,
-                TurnOutcome::Finished {
-                    terminal: TurnTerminal::Cancelled,
-                    ..
-                }
-            ),
-            error: match outcome {
-                TurnOutcome::Finished {
-                    error: Some(error), ..
-                } => Some(format!("{}: {}", error.code, error.message)),
-                TurnOutcome::Interrupted { reason } => Some(format!("{reason:?}")),
-                _ => None,
-            },
-        }),
-        _ => None,
-    }
-}
-
 fn nanos() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1656,48 +1432,4 @@ fn nanos() -> u128 {
 
 fn unix_ms() -> i64 {
     (nanos() / 1_000_000).min(i64::MAX as u128) as i64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::collector_event_from_session_event;
-    use qaqh_ringing_contract::events::SessionEvent;
-    use qaqh_ringing_contract::fact::{InterruptReason, TurnId, TurnTerminal};
-    use qaqh_ringing_contract::state::TurnOutcome;
-    use qaqh_subagent::CollectorEvent;
-
-    fn collect_turn(outcome: TurnOutcome) -> CollectorEvent {
-        collector_event_from_session_event(&SessionEvent::TurnEnded {
-            turn_id: TurnId::new("turn_test".to_string()),
-            outcome,
-        })
-        .expect("turn end projects to a collector event")
-    }
-
-    #[test]
-    fn collector_preserves_typed_cancellation_and_legacy_interrupt_unknown() {
-        let CollectorEvent::TurnFinished {
-            failed, cancelled, ..
-        } = collect_turn(TurnOutcome::Finished {
-            terminal: TurnTerminal::Cancelled,
-            usage: None,
-            error: None,
-        })
-        else {
-            panic!("expected a turn-finished collector event");
-        };
-        assert!(!failed);
-        assert!(cancelled);
-
-        let CollectorEvent::TurnFinished {
-            failed, cancelled, ..
-        } = collect_turn(TurnOutcome::Interrupted {
-            reason: InterruptReason::CancelBeforeSeal,
-        })
-        else {
-            panic!("expected a turn-finished collector event");
-        };
-        assert!(failed);
-        assert!(!cancelled);
-    }
 }

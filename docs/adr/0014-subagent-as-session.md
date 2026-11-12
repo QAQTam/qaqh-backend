@@ -55,12 +55,22 @@
 2. AgentPath **降格为会话血缘的投影**：冻结的 `Team*`/`Subagent*` DTO 由
    会话行 + effects 投影供数；`agent_catalog` 不再是权威源。
 3. **collector 线程与 `subagent_outcomes` 面退役**：子会话 turn 终态时由 loop
-   直接向父会话发 canonical `ConversationSendMessage`（携带既有
-   `subagent_terminal` 字段；delivery=Queue，父 idle 时 TriggerTurn），经
-   owner/ledger 持久化。无重试线程——mailbox 持久，注入拒绝不再是丢失路径。
-4. 超时 deadline 落子会话行；daemon 既有周期任务扫过期并发
-   `ConversationCancel`。保留 T-1-2 不变量：被取消的终态不注入正文，
+   经**终态端口**（`TurnTerminalPort`，registry 装配时注入）报告终态；
+   registry 判定血缘后向父会话发 canonical `ConversationSendMessage`
+   （携带既有 `subagent_terminal` 字段 + inter-agent 署名；父 idle 开新回合、
+   忙则入队回合边界合流、冷则先加载），经 owner/ledger 持久化。
+   loop 不知道血缘——路由是 registry 的职责。终答从 canonical blocks
+   回读（`view::turn_answer_text`）。无重试线程——mailbox 持久，
+   注入拒绝不再是丢失路径。
+4. 超时 = daemon 既有周期任务扫描子会话**回合时钟**
+   （`config.subagent.timeout_secs` 单一真相源），超预算发
+   `ConversationCancel`。**实施偏差**：不落 per-spawn deadline 列——
+   避免为悬置功能加 schema 迁移；config 驱动即等效，per-spawn 覆盖
+   待工具面确有需要时再加列。超时终态呈 Cancelled（旧 TIMEOUT 标签
+   退役，扫描日志留痕）。保留 T-1-2 不变量：被取消的终态不注入正文，
    仅状态面可查。
+   **实施偏差 2**：终态后不自动卸载子会话（旧 collector 会 SessionClose）——
+   子代理=会话，会话留存供追问；idle 卸载周期任务统一回收。
 5. **跨会话消息**：`InterAgentEnvelope.recipient`（本就是 string）允许携带
    session id 跨 root 投递；wire 形状不变，语义扩展以本 ADR 为据。
    保留配额（`admit_outbound_message`）与自送禁止；root 保护改由

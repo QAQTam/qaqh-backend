@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use qaqh_ringing_contract::fact::{AgentMetadata, AgentPath, SessionId};
-use qaqh_subagent::{AgentOutcome, ListedAgent, ListedAgentResidency, ListedAgentStatus};
+use qaqh_subagent::{ListedAgent, ListedAgentResidency, ListedAgentStatus};
 
 use crate::agent_catalog::AgentCatalog;
 use crate::subagent_supervisor::SubagentSupervisor;
@@ -251,17 +251,6 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     pub(crate) ephemeral: bool,
 }
 
-pub(crate) struct CollectorArmSpec {
-    pub(crate) child_session_id: String,
-    pub(crate) name: String,
-    pub(crate) parent_session_id: String,
-    pub(crate) parent_call_id: String,
-    pub(crate) timeout_secs: u64,
-    pub(crate) root_session_id: String,
-    pub(crate) parent_agent_path: String,
-    pub(crate) child_agent_path: String,
-}
-
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。
@@ -295,15 +284,9 @@ pub struct AgentRegistry {
     /// Runtime-only outbound attempt counters: root -> author path -> count.
     /// 消息配额是安全阀，不要求跨 daemon 重启持久化。
     outbound_attempts: HashMap<String, HashMap<String, u64>>,
-    /// Child result collectors currently armed for a running/reloaded turn.
-    /// 已武装的子代理收集器:child id → 关联的父工具 call id。
-    armed_collectors: HashMap<String, String>,
-    /// V2 子代理终态摘要（**结果面**）：`child_session_id` → outcome。
-    ///
-    /// 结果不再寄存在 `ProcessRegistry` 的 `answer` 槽：状态面自己承载最终
-    /// 答复，由 `list_agents` 直接返回（与 codex `AgentStatus::Completed`
-    /// 同构）。键是 canonical 主键，reload 不会换 id。
-    subagent_outcomes: HashMap<String, AgentOutcome>,
+    /// ADR-0014：回合终态通知路由（service init 注入）。loop 报告终态 →
+    /// registry 判定血缘回传；取代 per-child collector 线程与独立结果面。
+    terminal_router: Option<qaqh_agent_runtime::session_loop::TurnTerminalPort>,
 }
 
 impl AgentRegistry {
@@ -322,13 +305,20 @@ impl AgentRegistry {
             message_in_flight_per_pair: 16,
             message_outbound_per_sender: 1024,
             outbound_attempts: HashMap::new(),
-            armed_collectors: HashMap::new(),
-            subagent_outcomes: HashMap::new(),
+            terminal_router: None,
         }
     }
 
     pub fn exec_sessions(&self) -> Arc<qaqh_agent_runtime::ExecSessionManager> {
         Arc::clone(&self.exec_sessions)
+    }
+
+    /// ADR-0014：注入终态回传路由（service init 调用一次）。
+    pub fn set_terminal_router(
+        &mut self,
+        router: Option<qaqh_agent_runtime::session_loop::TurnTerminalPort>,
+    ) {
+        self.terminal_router = router;
     }
 }
 

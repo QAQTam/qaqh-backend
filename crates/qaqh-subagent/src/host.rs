@@ -5,10 +5,9 @@
 //! 回连自己——直接调用宿主（daemon 进程内 AgentRegistry + RingingHub +
 //! SessionManager）提供的 actor 句柄即可。
 //!
-//! 本 trait 只依赖 Ringing 契约类型（`RingingCommand`、`ContentRef`、
-//! `CollectorBatch` 等，PR-4-2 起直接取自 qaqh-ringing-contract /
-//! qaqh-ringing），不引用 qaqh-runtime 任何类型，保证依赖方向
-//! `runtime → subagent` 不回环。
+//! 本 trait 只依赖 Ringing 契约类型（`RingingCommand` 等，取自
+//! qaqh-ringing-contract / qaqh-ringing），不引用 qaqh-runtime 任何类型，
+//! 保证依赖方向 `runtime → subagent` 不回环。
 //!
 //! 安装：daemon 装配（`QaqhService::init`）时调用 [`install_host`]；工具
 //! handler 通过 [`host`] 探测。宿主不可用（非 daemon 进程 / 单元测试）即
@@ -23,72 +22,11 @@ use qaqh_ringing_contract::fact::InterAgentDelivery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-/// 大内容引用（宿主实现 `download_content` 需要；与 trait 签名同类型），
-/// re-export 供 qaqh-runtime 消费。
-pub use qaqh_ringing_contract::fact::ContentRef;
-
-/// 收集器消费的精简事件（hub-fact-bus spec 阶段 2.2）。
-///
-/// 宿主桥（qaqh-runtime `host_impl`）把 V2ProjectionHub 的 `ProjectionPayload`
-/// 翻译成这几个变体；qaqh-subagent 因此保持不依赖 qaqh-session。
-#[derive(Debug, Clone)]
-pub enum CollectorEvent {
-    /// 一段已 seal 的 Answer block。`text` 为内联正文；大内容外化时为
-    /// `None`，`output_ref` 携带内容引用供 `download_content` 回拉。
-    AnswerSealed {
-        text: Option<String>,
-        output_ref: Option<ContentRef>,
-    },
-    /// turn 终态（Completed/Failed/Cancelled 三态压平成两个布尔位）。
-    TurnFinished {
-        failed: bool,
-        cancelled: bool,
-        error: Option<String>,
-    },
-}
-
-/// 单次轮询拿到的批次。保留 `session_id` 以维持收集器的会话过滤语义。
-#[derive(Debug)]
-pub struct CollectorBatch {
-    pub session_id: String,
-    pub events: Vec<CollectorEvent>,
-}
-
-/// Receiver plus a cancellation hook for the producer-side bridge.
-/// Dropping it stops the bridge even if no further events arrive.
-pub struct CollectorSubscription {
-    receiver: std::sync::mpsc::Receiver<CollectorBatch>,
-    stop: Option<Box<dyn FnOnce() + Send>>,
-}
-
-impl CollectorSubscription {
-    pub fn new(
-        receiver: std::sync::mpsc::Receiver<CollectorBatch>,
-        stop: impl FnOnce() + Send + 'static,
-    ) -> Self {
-        Self {
-            receiver,
-            stop: Some(Box::new(stop)),
-        }
-    }
-
-    pub fn receiver(&self) -> &std::sync::mpsc::Receiver<CollectorBatch> {
-        &self.receiver
-    }
-}
-
-impl Drop for CollectorSubscription {
-    fn drop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            stop();
-        }
-    }
-}
 
 /// Result of creating an in-process subagent actor.
 ///
-/// The actor is not yet running its task. The caller must durably record the
-/// `SubagentSpawned` edge before invoking [`SubagentHost::start_subagent`].
+/// ADR-0014：子代理就是会话——创建即落会话行（血缘/白名单/模型选择）。
+/// 任务由调用方以 inter-agent 消息投递；终态经 registry 路由回传。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnedSubagent {
     pub session_id: String,
@@ -177,18 +115,6 @@ pub struct SpawnSubagentRequest<'a> {
 }
 
 #[derive(Debug, Clone)]
-pub struct StartSubagentRequest<'a> {
-    pub session_id: &'a str,
-    pub child_session_id: &'a str,
-    pub name: &'a str,
-    pub task_text: &'a str,
-    pub timeout_secs: u64,
-    pub parent_session_id: &'a str,
-    pub parent_call_id: &'a str,
-    pub inter_agent: Option<InterAgentEnvelope>,
-}
-
-#[derive(Debug, Clone)]
 pub struct SendAgentMessageRequest<'a> {
     pub caller_session_id: &'a str,
     pub target: &'a str,
@@ -214,9 +140,8 @@ pub struct WaitAgentRequest<'a> {
     ///
     /// Empty keeps the mailbox semantics (wait for the caller's own mailbox
     /// watermark). Non-empty switches to **outcome** semantics: the wait ends
-    /// once every target has a recorded terminal outcome on the agent status
-    /// plane (`list_agents`). This is the replacement for `process wait {id}`,
-    /// which used to be the only way to wait on a subagent.
+    /// once every target's canonical session run state is settled (no active
+    /// turn, not never-started). ADR-0014：独立结果面退役，终态即会话状态。
     pub targets: &'a [String],
 }
 
@@ -237,19 +162,6 @@ pub struct InterruptAgentRequest<'a> {
 pub struct InterruptedAgent {
     pub recipient: String,
     pub previous_status: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ArmSubagentCollectorRequest<'a> {
-    pub session_id: &'a str,
-    pub child_session_id: &'a str,
-    pub name: &'a str,
-    pub parent_session_id: &'a str,
-    pub parent_call_id: &'a str,
-    pub timeout_secs: u64,
-    pub root_session_id: &'a str,
-    pub parent_agent_path: &'a str,
-    pub child_agent_path: &'a str,
 }
 
 /// Task board task projection exposed to tools and the daemon wire.
@@ -553,11 +465,6 @@ pub trait SubagentHost: Send + Sync {
         path_prefix: &str,
     ) -> Result<Vec<ListedAgent>, String>;
 
-    /// Deliver the initial task after the caller durably recorded the spawn
-    /// edge. The tool handler registers the process beforehand; implementations
-    /// own result collection.
-    fn start_subagent(&self, request: StartSubagentRequest<'_>) -> Result<(), String>;
-
     /// Deliver a canonical inter-agent message to a loaded target agent.
     fn send_agent_message(
         &self,
@@ -577,38 +484,10 @@ pub trait SubagentHost: Send + Sync {
         request: InterruptAgentRequest<'_>,
     ) -> Result<InterruptedAgent, String>;
 
-    /// Roll back a child whose canonical spawn edge could not be committed.
-    ///
-    /// Unlike [`Self::abort_subagent`], this also removes the logical catalog
-    /// registration because the edge never became authoritative. The child is
-    /// addressed by its canonical `child_session_id` — the same primary key the
-    /// `SubagentSpawned` fact carries — not by an exec process handle.
-    fn rollback_subagent(&self, session_id: &str, child_session_id: &str);
-
-    /// Close a child after its canonical spawn edge was committed.
-    fn abort_subagent(&self, session_id: &str);
-
-    /// Record the child's terminal outcome on the **result plane**.
-    ///
-    /// The collector calls this exactly once when its loop ends. It replaces the
-    /// old `ProcessRegistry::set_answer` + `mark_exited` pair, so the final
-    /// answer is readable through `list_agents` instead of `process check`.
-    fn finish_subagent(&self, child_session_id: &str, answer: &str, exit_code: i32);
-
     /// 进程内直接向指定 seed 的 actor 命令队列发送一条 Ringing 命令
     /// （等价 HTTP attach + send_command，但进程内无 lease/owns 语义）。
     fn send_ringing(&self, session_id: &str, command: RingingCommand) -> Result<(), String>;
 
-    /// 订阅某 seed 的实时事件批次流（等价 SSE 单条连接；宿主内部按 seed
-    /// 过滤后以 `CollectorBatch` 聚合）。返回 std mpsc receiver，供 std 线程消费。
-    fn subscribe(&self, session_id: &str) -> CollectorSubscription;
-
-    /// 进程内读取外置大内容（等价 HTTP `download_content`）。
-    fn download_content(&self, session_id: &str, reference: &ContentRef)
-    -> Result<Vec<u8>, String>;
-
-    /// 进程内关闭子代理 worker（等价 HTTP `SessionClose`）。
-    fn close(&self, session_id: &str) -> Result<(), String>;
 }
 
 /// 进程级宿主安装位。多个 actor 并发调用 `host()` 读取；daemon 只安装一次。

@@ -87,10 +87,10 @@ async fn spawn_failure_preserves_the_session_baseline() {
     );
 }
 
-/// 结果面:collector 经 `SubagentHost::finish_subagent` 落到 agent 状态上,
-/// `list_agents` 直接返回终态,unloaded 与 completed 正交。
+/// ADR-0014：独立结果面退役——listing 的 residency 与状态从 canonical
+/// 会话态派生；outcome 不再承载终答（终答经回传消息进父会话 mailbox）。
 #[test]
-fn list_agents_reports_recorded_outcome_and_residency() {
+fn list_agents_reports_residency_and_canonical_status() {
     let root_dir = std::env::temp_dir().join(format!(
         "qaqh-registry-list-state-{}-{}",
         std::process::id(),
@@ -130,8 +130,6 @@ fn list_agents_reports_recorded_outcome_and_residency() {
         .residency
         .insert(child.as_str().to_string(), ListedAgentResidency::Unloaded);
 
-    registry.record_subagent_outcome(child.as_str(), "final answer body", 0);
-
     let listed = registry
         .list_agents_with_state_for_caller(&root, "/root")
         .expect("list agents with state");
@@ -139,14 +137,13 @@ fn list_agents_reports_recorded_outcome_and_residency() {
         .iter()
         .find(|agent| agent.agent_id == child.as_str())
         .expect("child listing");
-    assert_eq!(child_state.status, ListedAgentStatus::Completed);
+    // 从未开回合 → canonical NeverStarted → PendingInit。
+    assert_eq!(child_state.status, ListedAgentStatus::PendingInit);
     assert_eq!(child_state.residency, ListedAgentResidency::Unloaded);
-    let outcome = child_state
-        .outcome
-        .as_ref()
-        .expect("outcome on the status plane");
-    assert_eq!(outcome.answer.as_deref(), Some("final answer body"));
-    assert_eq!(outcome.exit_code, 0);
+    assert!(
+        child_state.outcome.is_none(),
+        "result plane retired: terminal answer rides the canonical return message"
+    );
 }
 
 /// 消息配额:in-flight 与累计 outbound 双闸,按 root/author 隔离。

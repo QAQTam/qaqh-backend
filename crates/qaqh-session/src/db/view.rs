@@ -202,6 +202,37 @@ fn rusqlite_error(error: rusqlite::Error) -> DbError {
     DbError::Corrupt(format!("query failed: {error}"))
 }
 
+/// ADR-0014：回读指定回合的答复文本（assistant 块按 payload 的
+/// block_kind=Answer 过滤，ord 序拼接）。新 loop 的答复恒为 inline；
+/// 外置大内容属旧框架，不在此列。
+pub fn turn_answer_text(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<String, DbError> {
+    let mut stmt = conn.prepare(
+        "SELECT payload_json FROM blocks
+         WHERE session_id = ?1 AND turn_id = ?2 AND kind = 'assistant'
+         ORDER BY ord",
+    )?;
+    let rows = stmt
+        .query_map([session_id, turn_id], |row| row.get::<_, String>(0))
+        .map_err(rusqlite_error)?;
+    let mut answer = String::new();
+    for row in rows {
+        let payload = row.map_err(rusqlite_error)?;
+        if let Ok(TimelineEntry::AssistantBlock {
+            block_kind: qaqh_ringing_contract::fact::AssistantBlockKind::Answer,
+            content: qaqh_ringing_contract::fact::ContentValue::Inline { text },
+            ..
+        }) = serde_json::from_str::<TimelineEntry>(&payload)
+        {
+            answer.push_str(&text);
+        }
+    }
+    Ok(answer)
+}
+
 fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT turn_id, input_id, phase, status, outcome_json FROM turns

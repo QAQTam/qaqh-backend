@@ -6,110 +6,11 @@ use super::*;
 use crate::error::QaqhResult;
 
 impl AgentRegistry {
-    /// Record a child's terminal outcome on the **result plane**.
-    ///
-    /// Called exactly once by the collector (through
-    /// `SubagentHost::finish_subagent`). This is the replacement for the old
-    /// `ProcessRegistry::set_answer` + `mark_exited` pair: the answer now lives
-    /// with the agent identity instead of the exec process table.
-    pub fn record_subagent_outcome(
-        &mut self,
-        child_session_id: &str,
-        answer: &str,
-        exit_code: i32,
-    ) {
-        if child_session_id.is_empty() {
-            return;
-        }
-        self.subagent_outcomes.insert(
-            child_session_id.to_string(),
-            AgentOutcome {
-                answer: (!answer.is_empty()).then(|| answer.to_string()),
-                exit_code,
-            },
-        );
-    }
-
-    pub(crate) fn has_subagent_outcome(&self, child_session_id: &str) -> bool {
-        self.subagent_outcomes.contains_key(child_session_id)
-    }
-
-    pub(crate) fn prepare_collector_arm(
-        &mut self,
-        child_id: &str,
-    ) -> QaqhResult<Option<CollectorArmSpec>> {
-        if self.armed_collectors.contains_key(child_id) {
-            return Ok(None);
-        }
-        let child = self
-            .agent_catalog
-            .get_by_id(child_id)
-            .cloned()
-            .ok_or_else(|| format!("child agent metadata missing for {child_id}"))?;
-        if child.agent_path.is_root() {
-            return Ok(None);
-        }
-        let parent_path = child
-            .parent_agent_path
-            .as_ref()
-            .ok_or_else(|| format!("child agent {child_id} has no parent path"))?;
-        let parent = self
-            .agent_catalog
-            .get_by_path(child.root_session_id.as_str(), parent_path)
-            .cloned()
-            .ok_or_else(|| format!("child agent {child_id} parent metadata missing"))?;
-        if !self.instances.contains_key(parent.agent_id.as_str()) {
-            return Err(format!(
-                "child agent {child_id} collector cannot arm: parent {} is unloaded",
-                parent.agent_path
-            )
-            .into());
-        }
-        let parent_call_id = self
-            .armed_collectors
-            .get(child_id)
-            .cloned()
-            .unwrap_or_default();
-        self.armed_collectors
-            .insert(child_id.to_string(), parent_call_id.clone());
-        Ok(Some(CollectorArmSpec {
-            child_session_id: child.agent_id.as_str().to_string(),
-            name: child.role.clone().unwrap_or_else(|| {
-                child
-                    .agent_path
-                    .as_str()
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or("subagent")
-                    .to_string()
-            }),
-            parent_session_id: parent.agent_id.as_str().to_string(),
-            parent_call_id,
-            // 收集器超时:spawn spec 不再携带 canonical 超时配置,取 15 分钟
-            // 上界(子代理回合自身有 provider/tool 超时兜底)。
-            timeout_secs: 900,
-            root_session_id: child.root_session_id.as_str().to_string(),
-            parent_agent_path: parent.agent_path.as_str().to_string(),
-            child_agent_path: child.agent_path.as_str().to_string(),
-        }))
-    }
-
-    pub(crate) fn mark_collector_armed(&mut self, child_id: &str, parent_call_id: &str) {
-        self.armed_collectors
-            .insert(child_id.to_string(), parent_call_id.to_string());
-    }
-
-    pub(crate) fn unmark_collector_armed(&mut self, child_id: &str) {
-        self.armed_collectors.remove(child_id);
-    }
-
     pub(crate) fn forget_sessions(&mut self, ids: &[String]) {
         for id in ids {
             self.agent_catalog.remove(id);
             self.residency.remove(id);
-            self.subagent_outcomes.remove(id);
             self.outbound_attempts.remove(id);
-            self.armed_collectors.remove(id);
             self.quota_ledgers.remove(id);
         }
     }
@@ -135,12 +36,10 @@ impl AgentRegistry {
         for child in descendants {
             self.finish_for_unload(&child);
             self.supervisor.unlink(&child);
-            self.armed_collectors.remove(&child);
         }
 
         self.finish_for_unload(session_id);
         self.supervisor.unlink(session_id);
-        self.armed_collectors.remove(session_id);
     }
 
     /// Detach the loop and request cancellation; its turn settles through the owner.
@@ -223,5 +122,142 @@ impl AgentRegistry {
             self.close(&session_id);
         }
         self.exec_sessions.shutdown();
+    }
+
+    /// ADR-0014：回合终态路由——子会话的 inter-agent 触发回合终态时，向父
+    /// 会话发 canonical 回传消息。mailbox 持久：父 idle 开新回合、忙则入队
+    /// 回合边界合流、冷则先加载。不需要重试线程。
+    pub fn route_turn_terminal(
+        &mut self,
+        notice: qaqh_agent_runtime::session_loop::TurnTerminalNotice,
+    ) {
+        use qaqh_ringing::ConversationSendMessage;
+        use qaqh_ringing_contract::commands::{
+            InterAgentEnvelope, SubagentTerminalKind, SubagentTerminalNotification,
+        };
+        use qaqh_ringing_contract::fact::{InputPurpose, InterAgentDelivery, TurnTerminal};
+
+        let Some(trigger) = notice.trigger else { return };
+        let Ok(Some(parent)) = self.owners.session_parent(&notice.session_id) else {
+            return;
+        };
+        let Some(child) = self.agent_catalog.get_by_id(&notice.session_id).cloned() else {
+            return;
+        };
+        let Some(parent_meta) = self.agent_catalog.get_by_id(&parent).cloned() else {
+            return;
+        };
+
+        let answer = self
+            .owners
+            .db()
+            .read_blocking({
+                let session_id = notice.session_id.clone();
+                let turn_id = notice.turn_id.clone();
+                move |conn| qaqh_session::db::view::turn_answer_text(conn, &session_id, &turn_id)
+            })
+            .unwrap_or_default();
+
+        let (kind, state_tag, exit) = match notice.terminal {
+            TurnTerminal::Completed => (SubagentTerminalKind::Completed, "completed", 0),
+            TurnTerminal::Cancelled => (SubagentTerminalKind::Cancelled, "cancelled", 0),
+            TurnTerminal::Failed => (SubagentTerminalKind::Failed, "error", 1),
+        };
+        let name = child.role.clone().unwrap_or_else(|| {
+            child
+                .agent_path
+                .as_str()
+                .rsplit('/')
+                .next()
+                .unwrap_or("subagent")
+                .to_string()
+        });
+        // T-1-2：被取消的终态不注入正文（防复活已取消的父会话）。
+        let text = if matches!(kind, SubagentTerminalKind::Cancelled) {
+            String::new()
+        } else {
+            let header = if matches!(kind, SubagentTerminalKind::Failed) {
+                format!("subagent '{name}' failed (exit={exit})")
+            } else {
+                format!("subagent '{name}' completed")
+            };
+            let body = if answer.trim().is_empty() {
+                notice.error.clone().unwrap_or_default()
+            } else {
+                answer
+            };
+            format!(
+                "<qaqh_subagent_result name=\"{name}\" state=\"{state_tag}\" exit=\"{exit}\">\n{header}\n{body}\n</qaqh_subagent_result>"
+            )
+        };
+        let message_id = format!("subagent-result:{}:{}", notice.session_id, notice.turn_id);
+        let envelope = InterAgentEnvelope {
+            message_id: message_id.clone(),
+            root_session_id: child.root_session_id.as_str().to_string(),
+            author: child.agent_path.as_str().to_string(),
+            recipient: parent_meta.agent_path.as_str().to_string(),
+            other_recipients: vec![],
+            task_id: None,
+            reply_to: Some(trigger.message_id.clone()),
+            causation_id: None,
+            delivery: InterAgentDelivery::Queue,
+            created_at_ms: unix_ms(),
+        };
+        let command = qaqh_ringing::RingingCommand::ConversationSendMessage(ConversationSendMessage {
+            text,
+            images: vec![],
+            attachments: None,
+            message_id: Some(message_id),
+            input_purpose: InputPurpose::TriggerTurn,
+            as_system: false,
+            inter_agent: Some(envelope),
+            subagent_terminal: Some(SubagentTerminalNotification {
+                child_session_id: notice.session_id.clone(),
+                parent_call_id: trigger.message_id,
+                terminal: kind,
+            }),
+            widget_context: None,
+        });
+        let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
+            &parent,
+            format!("subagent-terminal:{}", notice.turn_id),
+            command,
+        );
+        if let Err(error) = self.send_ringing(&parent, &env) {
+            log::warn!(
+                "[subagent] terminal return to parent {parent} failed: {error}; answer recoverable from child {} turn {}",
+                notice.session_id,
+                notice.turn_id
+            );
+        } else {
+            log::info!(
+                "[subagent] terminal return delivered to parent {parent} (child={}, state={state_tag})",
+                notice.session_id
+            );
+        }
+    }
+
+    /// ADR-0014：子代理超时扫描——取消超预算的子会话活动回合。取代
+    /// per-child collector 的 deadline 循环；预算单一真相源 = config。
+    pub fn cancel_expired_subagent_turns(&mut self, timeout_secs: u64) -> Vec<String> {
+        if timeout_secs == 0 || self.shutting_down {
+            return Vec::new();
+        }
+        let expired: Vec<String> = self
+            .instances
+            .iter()
+            .filter(|(id, instance)| {
+                self.supervisor.parent_of(id).is_some()
+                    && instance.loop_.turn_elapsed_secs() >= timeout_secs
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            if let Some(instance) = self.instances.get(id) {
+                instance.loop_.cancel_turn(None);
+            }
+            log::warn!("[subagent] timeout sweep cancelled child {id} (budget {timeout_secs}s)");
+        }
+        expired
     }
 }
