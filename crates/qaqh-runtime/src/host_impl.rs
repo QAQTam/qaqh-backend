@@ -85,7 +85,6 @@ impl SubagentHost for QaqhService {
             tools,
             selection,
             workspace,
-            permission_level,
         } = request;
         // BUG-2026-09-13-24 + BETA-01：子代理也先分配 canonical identity，
         // 目录名与 `child_session_id` 必须是同一个 UUID。子代理目录保持
@@ -105,7 +104,6 @@ impl SubagentHost for QaqhService {
                 // genesis fact; the session tree never re-derives it.
                 workspace: workspace.filter(|w| !w.is_empty() && *w != "."),
                 ephemeral: false,
-                permission_level,
             },
         )?;
         log::info!(

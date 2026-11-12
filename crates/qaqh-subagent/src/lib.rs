@@ -1011,8 +1011,6 @@ fn handle_spawn_subagent(
             tools: &tools,
             selection: None,
             workspace: workspace.as_deref(),
-            // P1-⑤：子代理档位继承父会话，不再回落全局 permission_tier。
-            permission_level: ctx.permission_level as u8,
         })
         .map_err(|error| {
             subagent_error(

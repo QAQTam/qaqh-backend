@@ -15,12 +15,14 @@ impl AgentRegistry {
         let mut session_id_bytes = 0usize;
         let mut session_workers = 0_u64;
         let mut subagent_workers = 0_u64;
-        for (session_id, instance) in &self.instances {
+        for (session_id, _instance) in &self.instances {
             session_id_bytes = session_id_bytes.saturating_add(session_id.capacity());
             worker_heap = worker_heap.saturating_add(std::mem::size_of::<AgentInstance>());
-            match &instance.kind {
-                AgentKind::Session => session_workers += 1,
-                AgentKind::Subagent(_) => subagent_workers += 1,
+            // ADR-0014：gauge 口径不变，血缘取内存 parent/child 索引。
+            if self.supervisor.parent_of(session_id).is_some() {
+                subagent_workers += 1;
+            } else {
+                session_workers += 1;
             }
         }
         // 回合循环不缓存上下文:消息流每回合从 SQLite 组装,无 mailbox/索引
@@ -40,8 +42,7 @@ impl AgentRegistry {
                     .len()
                     .saturating_add(self.quota_ledgers.len())
                     .saturating_add(self.outbound_attempts.len())
-                    .saturating_add(self.armed_collectors.len())
-                    .saturating_add(self.spawn_configs.len()) as u64,
+                    .saturating_add(self.armed_collectors.len()) as u64,
                 payload_bytes: None,
                 heap_estimate_bytes: None,
                 ..Default::default()
