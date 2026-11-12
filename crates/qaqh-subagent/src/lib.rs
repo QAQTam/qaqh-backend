@@ -15,7 +15,8 @@
 //!
 //! ADR-0014 切片 D：最小工具集（spawn_subagent / send_message / wait_agent /
 //! list_agents / interrupt_agent）经 `SpawnInput.tool_registrars` 进入每个
-//! 会话。task/board 工具仍悬置（`register_collaboration_tools` 显式 opt-in）。
+//! 会话。切片 E：协作工具面（task_*/board_*，`register_collaboration_tools`）
+//! 同路进入每个会话——任务板按根树键控，lead 建任务、子级认领干活。
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
@@ -691,8 +692,9 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(InterruptAgentTool);
 }
 
-/// Register task/board tools without exposing subagent creation or control.
-/// Explicit opt-in only; production agents currently suspend these tools too.
+/// Register the collaboration surface (task_*/board_*) alongside the agent
+/// tools. Production sessions receive both registrars (ADR-0014 切片E); the
+/// board is keyed by the caller's root tree, so lead and teammates share it.
 pub fn register_collaboration_tools(mgr: &mut ToolManager) {
     mgr.register_typed(task_tools::TaskCreateTool);
     mgr.register_typed(task_tools::TaskClaimTool);
