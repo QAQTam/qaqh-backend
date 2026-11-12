@@ -329,10 +329,17 @@ fn spawn_subagent(
         .filter(|workspace| !workspace.is_empty() && *workspace != ".");
     // ADR-0014：子代理 = 带血缘的新会话。id 与普通会话同规则；名字取
     // canonical id 前段（[a-z0-9_] 语法），cwd/白名单/模型选择落子会话行。
+    // 会话 id 是 ULID（Crockford 大写）——必须小写化才过 path 段校验；
+    // 冒烟实测：直接截取大写前段会被 agent path 拒绝（wire 入口专属缺陷）。
     let session_id = service.sessions.allocate_session();
     let requested_name = format!(
         "sub_{}",
-        session_id.replace('-', "").chars().take(12).collect::<String>()
+        session_id
+            .replace('-', "")
+            .chars()
+            .take(12)
+            .collect::<String>()
+            .to_lowercase()
     );
     service
         .registry()

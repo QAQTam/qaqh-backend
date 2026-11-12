@@ -242,6 +242,10 @@ impl RingingCommand {
                 | Self::TodoSet { .. }
                 | Self::TodoCancel { .. }
                 | Self::PlanAction { .. }
+                // ADR-0014：subagent.spawn 的 target 就是父会话——血缘由命令
+                // target 表达（service handler 同口径）。此前误列 global 操作，
+                // 信封校验与 handler 互相矛盾，wire 入口两种 target 都被拒。
+                | Self::SubagentSpawn { .. }
         )
     }
 
@@ -284,7 +288,6 @@ impl RingingCommand {
                 | Self::WorkspaceCreate { .. }
                 | Self::DiagnosticsMemoryStart { .. }
                 | Self::DiagnosticsMemoryStop { .. }
-                | Self::SubagentSpawn { .. }
         )
     }
 }
@@ -1006,5 +1009,39 @@ mod tests {
         assert_eq!(envelope.validate(), Err("invalid_command_envelope"));
         envelope = envelope.with_client_identity("instance-1", "session-1");
         envelope.validate().expect("valid v2 command envelope");
+    }
+
+    /// ADR-0014 冒烟实测缺陷回归：subagent.spawn 的血缘由命令 target（父会话）
+    /// 表达，service handler 要求 Session target；信封校验曾误列 global 操作，
+    /// 两种 target 互相矛盾导致 wire 入口永远被拒（工具路径不经信封故单测全绿）。
+    #[test]
+    fn subagent_spawn_envelope_targets_the_parent_session() {
+        let command = RingingCommand::SubagentSpawn {
+            tools: vec![],
+            selection: None,
+            workspace: None,
+        };
+        assert!(command.requires_session_target());
+        assert!(!command.is_global_operation());
+        let envelope = RingingV2CommandEnvelope::new(
+            "cmd-spawn",
+            CommandTarget::Session {
+                session_id: "parent-1".into(),
+            },
+            command,
+        )
+        .with_client_identity("instance-1", "session-1");
+        envelope.validate().expect("session-targeted spawn envelope");
+        let global = RingingV2CommandEnvelope::new(
+            "cmd-spawn-global",
+            CommandTarget::Global,
+            RingingCommand::SubagentSpawn {
+                tools: vec![],
+                selection: None,
+                workspace: None,
+            },
+        )
+        .with_client_identity("instance-1", "session-1");
+        assert_eq!(global.validate(), Err("target_mismatch"));
     }
 }
