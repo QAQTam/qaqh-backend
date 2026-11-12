@@ -511,13 +511,25 @@ mod handoff_tests {
         window: u32,
         threshold: f64,
     ) -> Harness {
+        harness_titled(dir, script, tools, window, threshold, "handoff", Some("user")).await
+    }
+
+    async fn harness_titled(
+        dir: &std::path::Path,
+        script: Vec<(u16, String)>,
+        tools: Vec<qaqh_types::ToolDef>,
+        window: u32,
+        threshold: f64,
+        title: &str,
+        title_source: Option<&str>,
+    ) -> Harness {
         let owners = Arc::new(OwnerDirectory::open(dir.join("qaqh.db")).expect("open owners db"));
         let owner = owners
             .create_session(store::NewSession {
                 session_id: "SES-HANDOFF".into(),
                 parent_session_id: None,
-                title: "handoff".into(),
-                title_source: Some("user".into()),
+                title: title.into(),
+                title_source: title_source.map(str::to_string),
                 cwd: None,
                 model: None,
                 tool_mode: None,
@@ -753,12 +765,12 @@ mod handoff_tests {
     }
 
     #[tokio::test]
-    async fn session_title_sets_business_row_and_prunes_the_surface() {
-        // 模型自命名:业务行落 title + title_source=auto,快照带新题,
-        // 工具在下一轮请求体里被摘除(handoff 同款控制面纹理,零契约新增)。
+    async fn session_title_sets_business_row_and_stays_declared_for_revision() {
+        // 模型自命名:业务行落 title + title_source=auto,快照带新题;
+        // 工具留在声明面——任务需求变化时可重新生成(零契约新增)。
         let dir = tempfile::tempdir().expect("tempdir");
         let doc = serde_json::json!({ "title": "daemon 启动崩溃排查" });
-        let h = harness(
+        let h = harness_titled(
             dir.path(),
             vec![
                 (200, tool_call_body("session_title", &doc, "call-t1", &cache_usage())),
@@ -767,6 +779,8 @@ mod handoff_tests {
             vec![crate::session_title::tool_def()],
             10_000,
             0.0,
+            "",
+            None,
         )
         .await;
         h.loop_
@@ -794,7 +808,7 @@ mod handoff_tests {
             })
             .expect("read title_source");
         assert_eq!(source, "auto");
-        // 第二轮请求体的**声明面**不再含 session_title(摘面当回合生效);
+        // 第二轮请求体的**声明面**仍含 session_title(auto 标题可修订);
         // 消息历史里的 tool_call 回显是合法内容,不参与断言。
         let requests = h.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 2);
@@ -815,10 +829,115 @@ mod handoff_tests {
         };
         assert!(declared(&requests[0]).contains(&"session_title".to_string()));
         assert!(
-            !declared(&requests[1]).contains(&"session_title".to_string()),
-            "落笔后不得再向模型声明命名工具: {:?}",
+            declared(&requests[1]).contains(&"session_title".to_string()),
+            "auto 标题落笔后工具必须留在声明面以供修订: {:?}",
             declared(&requests[1])
         );
+    }
+
+    #[tokio::test]
+    async fn session_title_regenerates_when_task_changes() {
+        // 任务需求变化:第二次调用覆盖旧题,title_source 仍为 auto,
+        // 每一轮请求体都声明命名工具。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = serde_json::json!({ "title": "旧任务排查" });
+        let new = serde_json::json!({ "title": "新任务排查" });
+        let h = harness_titled(
+            dir.path(),
+            vec![
+                (200, tool_call_body("session_title", &old, "call-t1", &cache_usage())),
+                (200, tool_call_body("session_title", &new, "call-t2", &cache_usage())),
+                (200, text_body("改题完成")),
+            ],
+            vec![crate::session_title::tool_def()],
+            10_000,
+            0.0,
+            "",
+            None,
+        )
+        .await;
+        h.loop_
+            .send_input(input("任务变了"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle" && value["title"] == "新任务排查"
+        })
+        .await;
+        assert!(
+            timeline_tool_result(&state).contains("新任务排查"),
+            "修订回执必须入库: {state}"
+        );
+        let source: String = h
+            .owners
+            .db()
+            .read_blocking(|conn| {
+                conn.query_row(
+                    "SELECT title_source FROM sessions WHERE session_id = 'SES-HANDOFF'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("read title_source");
+        assert_eq!(source, "auto");
+        let requests = h.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        for body in &requests {
+            let names: Vec<String> = serde_json::from_str::<serde_json::Value>(body)
+                .expect("request body json")
+                .get("tools")
+                .and_then(|tools| tools.as_array())
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .map(|tool| {
+                            tool["function"]["name"].as_str().unwrap_or("").to_string()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            assert!(names.contains(&"session_title".to_string()), "每轮都应声明: {names:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_title_refuses_to_overwrite_user_named_session() {
+        // 用户命名的会话(harness 默认 "handoff"/user):即使工具被预声明,
+        // 写口守卫也必须拒绝覆盖,title 与 title_source 原样不动。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let doc = serde_json::json!({ "title": "模型想覆盖" });
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, tool_call_body("session_title", &doc, "call-t1", &cache_usage())),
+                (200, text_body("明白，不覆盖用户命名")),
+            ],
+            vec![crate::session_title::tool_def()],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("给会话改名"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            timeline_tool_result(value).contains("用户命名")
+        })
+        .await;
+        assert_eq!(state["title"], "handoff", "用户标题不得被覆盖: {state}");
+        let source: String = h
+            .owners
+            .db()
+            .read_blocking(|conn| {
+                conn.query_row(
+                    "SELECT title_source FROM sessions WHERE session_id = 'SES-HANDOFF'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("read title_source");
+        assert_eq!(source, "user");
     }
 
     /// 占用页脚挂在本轮最后一条工具结果的信封正文尾部：实时遥测，不进历史事实。

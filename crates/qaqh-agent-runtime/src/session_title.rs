@@ -9,9 +9,10 @@
 //! 走已有的 `session_meta_changed{title}` 帧；`title_source="auto"` 是业务列，
 //! 不进 v3.0 冻结契约。
 //!
-//! 生命周期：仅根会话（子代理不进会话列表，命名无意义）且业务行尚无标题时
-//! 声明；模型落笔成功即从请求面摘除，后续回合不再占用 token。客户端在
-//! `session.create` 起过名或 `session.rename` 过的会话从头就不该看见它。
+//! 生命周期：仅根会话（子代理不进会话列表，命名无意义）且业务行无标题或标题
+//! 来源为 `auto` 时声明；落笔成功后工具留在请求面，任务需求变化时模型可重新
+//! 生成。客户端在 `session.create` 起过名或 `session.rename` 过的会话从头就不该
+//! 看见它；会话中途被用户改名时，写口（`run_session_title`）再挡一次。
 
 use qaqh_types::{ToolDef, ToolFunction};
 
@@ -23,9 +24,12 @@ pub const FIELD_TITLE: &str = "title";
 pub const MAX_TITLE_CHARS: usize = 60;
 
 fn tool_description() -> String {
-    "给本会话命名（用于客户端会话列表展示）。在你明确任务之后、第一个回合内调用一次：\
-     名词短语、不超过 20 个字、不加引号与末尾标点、写意图而非结论（如「daemon 启动崩溃\
-     排查」而不是「已修复」）。标题写库后本工具自动下线，本回合的其余工作照常继续。"
+    "Name this session for the client's session list. At the start of the session, \
+     generate a fitting title from the user's request; you may regenerate it when the \
+     task requirements change. A noun phrase of at most 20 characters, no quotes or \
+     trailing punctuation, describing intent rather than outcome (e.g. \"Daemon startup \
+     crash investigation\", not \"Fixed\"). The title is persisted immediately and the \
+     turn continues; sessions already named by the user never expose this tool."
         .to_string()
 }
 
@@ -42,7 +46,7 @@ pub fn tool_def() -> ToolDef {
                 "properties": {
                     FIELD_TITLE: {
                         "type": "string",
-                        "description": "会话标题：名词短语，≤20 字，无引号/末尾标点"
+                        "description": "Session title: noun phrase, at most 20 characters, no quotes or trailing punctuation"
                     }
                 },
                 "required": [FIELD_TITLE]
@@ -51,9 +55,15 @@ pub fn tool_def() -> ToolDef {
     }
 }
 
+/// 声明闸口（根会话判定由调用方负责）：无标题、或标题出自模型（`auto`）时
+/// 声明——后者允许任务需求变化时重新生成；用户命名（`user`）的会话永不声明。
+pub fn should_declare(title: Option<&str>, source: Option<&str>) -> bool {
+    title.is_none() || source == Some("auto")
+}
+
 /// 幂等把 `session_title` 追加进模型面工具清单。
 ///
-/// 只在「根会话且业务行尚无标题」的闸口下调用；调用方负责闸口，这里只管去重。
+/// 只在 `should_declare` 闸口下调用；调用方负责闸口，这里只管去重。
 pub fn ensure_declared(tools: &mut Option<Vec<ToolDef>>) {
     match tools {
         Some(list) => {
@@ -62,13 +72,6 @@ pub fn ensure_declared(tools: &mut Option<Vec<ToolDef>>) {
             }
         }
         None => *tools = Some(vec![tool_def()]),
-    }
-}
-
-/// 标题落定后把本工具从请求面摘除（回合内下一轮 provider 调用即生效）。
-pub fn prune(tools: &mut Option<Vec<ToolDef>>) {
-    if let Some(list) = tools {
-        list.retain(|tool| tool.function.name != TOOL_NAME);
     }
 }
 
@@ -98,7 +101,7 @@ pub fn parse_title(input: &serde_json::Value) -> Result<String, String> {
 /// 落库成功的回执文案。
 #[must_use]
 pub fn success_output(title: &str) -> String {
-    format!("已为会话命名：{title}（title_source=auto，本工具已下线）")
+    format!("已为会话命名：{title}（title_source=auto）")
 }
 
 #[cfg(test)]
@@ -119,12 +122,19 @@ mod tests {
     }
 
     #[test]
-    fn declare_is_idempotent_and_prune_removes() {
+    fn declare_is_idempotent() {
         let mut tools: Option<Vec<ToolDef>> = None;
         ensure_declared(&mut tools);
         ensure_declared(&mut tools);
         assert_eq!(tools.as_ref().unwrap().len(), 1);
-        prune(&mut tools);
-        assert!(tools.as_ref().unwrap().is_empty());
+    }
+
+    #[test]
+    fn declare_gate_allows_revision_of_auto_titles_only() {
+        assert!(should_declare(None, None));
+        assert!(should_declare(None, Some("user")));
+        assert!(should_declare(Some("模型起的题"), Some("auto")));
+        assert!(!should_declare(Some("用户起的题"), Some("user")));
+        assert!(!should_declare(Some("来历不明的题"), None));
     }
 }

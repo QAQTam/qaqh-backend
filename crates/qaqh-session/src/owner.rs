@@ -243,22 +243,27 @@ impl SessionOwner {
         &self.session_id
     }
 
-    /// 读 `sessions.title` 现值:空串/缺行归一为 `None`(与 `view::session_title`
-    /// 同口径)。读取失败同样返回 `None`:调用方只用它决定控制面工具是否声明,
-    /// 最坏后果是多声明一个工具,不是业务错误。
-    pub fn current_title(&self) -> Option<String> {
+    /// 读 `sessions` 的标题现态 `(title, title_source)`:空串/缺行归一为 `None`
+    /// (与 `view::session_title` 同口径)。读取失败同样返回 `(None, None)`:
+    /// 调用方只用它决定控制面工具是否声明,最坏后果是多声明一个工具,不是业务错误。
+    pub fn title_state(&self) -> (Option<String>, Option<String>) {
         let session_id = self.session_id.clone();
         self.db
             .read_blocking(move |conn| {
                 conn.query_row(
-                    "SELECT title FROM sessions WHERE session_id = ?1",
+                    "SELECT title, title_source FROM sessions WHERE session_id = ?1",
                     [session_id],
-                    |row| row.get::<_, Option<String>>(0),
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                        ))
+                    },
                 )
             })
             .ok()
-            .flatten()
-            .filter(|title| !title.is_empty())
+            .map(|(title, source)| (title.filter(|title| !title.is_empty()), source))
+            .unwrap_or((None, None))
     }
 
     /// 执行路径侧句柄:工具生命周期上报从这里进入 owner。

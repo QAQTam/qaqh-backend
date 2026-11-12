@@ -323,12 +323,13 @@ impl SessionLoop {
         spec.tools = (!tools.is_empty()).then_some(tools);
         // 重载后的清单来自 allowlist 过滤，必须把控制面工具补回去。
         crate::handoff::ensure_declared(&mut spec.tools);
-        // `session_title` 只对根会话、且业务行尚无标题时在场（模型落笔后由
-        // `run_session_title` 摘除，客户端起过名的会话永不声明）。
-        if policy.sandbox == qaqh_workspace::tool_api::SandboxMode::Main
-            && self.owner.current_title().is_none()
-        {
-            crate::session_title::ensure_declared(&mut spec.tools);
+        // `session_title` 只对根会话、且无标题或 auto 标题时在场（任务需求变化
+        // 时可修订；客户端起过名的会话永不声明）。
+        if policy.sandbox == qaqh_workspace::tool_api::SandboxMode::Main {
+            let (title, source) = self.owner.title_state();
+            if crate::session_title::should_declare(title.as_deref(), source.as_deref()) {
+                crate::session_title::ensure_declared(&mut spec.tools);
+            }
         }
         *self
             .cwd
@@ -1308,8 +1309,9 @@ impl SessionLoop {
         Ok((true, text))
     }
 
-    /// 模型自命名:校验 → `owner::update_metadata`(title + title_source=auto,
-    /// 成功即发 `session_meta_changed`)→ 从请求面摘除本工具。不占用回合终态。
+    /// 模型自命名:校验 → 用户命名守卫 → `owner::update_metadata`(title +
+    /// title_source=auto,成功即发 `session_meta_changed`)。工具留在请求面,
+    /// 任务需求变化时可重新生成。不占用回合终态。
     async fn run_session_title(
         &self,
         call_id: &str,
@@ -1329,6 +1331,20 @@ impl SessionLoop {
                 return Ok((false, error));
             }
         };
+        // 声明闸口只在 assembly 时判定;会话中途被用户改名时写口必须再挡一次:
+        // 用户命名的会话不许模型覆盖。
+        let (_, source) = self.owner.title_state();
+        if source.as_deref() == Some("user") {
+            let message = "会话已由用户命名，模型不得覆盖；如需更改请由用户重命名。".to_string();
+            self.settle_failed(
+                call_id,
+                crate::session_title::TOOL_NAME,
+                args_json,
+                "session_title_user_named",
+                &message,
+            );
+            return Ok((false, message));
+        }
         let result = self.owner.update_metadata(qaqh_session::db::store::SessionColumnPatch {
             title: Some(title.clone()),
             title_source: Some("auto".to_string()),
@@ -1336,12 +1352,6 @@ impl SessionLoop {
         });
         match result {
             Ok(_) => {
-                let mut spec = self
-                    .spec
-                    .write()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                crate::session_title::prune(&mut spec.tools);
-                drop(spec);
                 let text = crate::session_title::success_output(&title);
                 self.settle_finished_text(call_id, crate::session_title::TOOL_NAME, &text);
                 Ok((true, text))
