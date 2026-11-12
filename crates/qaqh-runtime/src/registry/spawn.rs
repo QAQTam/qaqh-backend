@@ -258,6 +258,21 @@ impl AgentRegistry {
             })
             .map_err(|error| format!("persist child cwd for {session_id}: {error}"))?;
 
+        // ADR-0014 切片G：真 fork —— 子会话行就绪后、loop 装配前种子化日志。
+        // 子级首个回合的 assemble_context 即含父级已完成历史（无损）。
+        if options.fork {
+            let parent = parent_session_id.to_string();
+            let child = session_id.to_string();
+            let seeded = self
+                .owners
+                .db()
+                .write_blocking(move |conn| {
+                    qaqh_session::db::store::fork_session_prefix(conn, &parent, &child)
+                })
+                .map_err(|error| format!("fork seed for {session_id}: {error}"))?;
+            log::info!("[subagent] fork seeded {seeded} completed turn(s) into {session_id}");
+        }
+
         let identity = Some((parent.clone(), child_path.clone()));
         self.spawn_subagent_internal(
             session_id,

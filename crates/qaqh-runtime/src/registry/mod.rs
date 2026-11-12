@@ -249,6 +249,10 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     /// `None` = inherit the parent workspace / default session root.
     pub(crate) workspace: Option<&'a str>,
     pub(crate) ephemeral: bool,
+    /// ADR-0014 切片G：真 fork —— 以父会话已完成回合前缀种子化子日志。
+    /// false = fresh（子级不见父历史）。wire subagent.spawn 恒 false（冻结
+    /// 命令不加字段）；fork 经 spawn_subagent 工具的 mode 参数进入。
+    pub(crate) fork: bool,
 }
 
 pub struct AgentRegistry {

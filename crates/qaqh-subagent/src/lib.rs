@@ -72,6 +72,21 @@ pub struct SpawnSubagentArgs {
     /// Optional background context to hand to the subagent before the task.
     #[serde(default)]
     context: Option<String>,
+    /// Context inheritance: fresh (default) = child does not see this
+    /// conversation; fork = the parent's completed turns are seeded into the
+    /// child's log (the current in-flight turn is not included).
+    #[serde(default)]
+    mode: Option<SpawnMode>,
+}
+
+/// ADR-0014 切片G：子代理上下文继承模式（dsh subagent/subagent_fork 同语义，
+/// 本仓收进单一工具的 mode 参数，不另立工具）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SpawnMode {
+    #[default]
+    Fresh,
+    Fork,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -663,7 +678,7 @@ impl TypedTool for SpawnSubagentTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "spawn_subagent",
-            "Spawn a child conversation (subagent) for a focused task and deliver the task immediately. Returns the child session id and agent path; its final answer arrives as a canonical message when the turn ends - do not poll. Track with list_agents, chat with send_message, cancel with interrupt_agent. agent_name = verb+task phrase (e.g. 'explore_task').",
+            "Spawn a child conversation (subagent) for a focused task and deliver the task immediately. Returns the child session id and agent path; its final answer arrives as a canonical message when the turn ends - do not poll. Track with list_agents, chat with send_message, cancel with interrupt_agent. agent_name = verb+task phrase (e.g. 'explore_task'). mode: fresh (default) = the child does not see this conversation; fork = the child inherits your completed turns (not the current in-flight turn) - use fork when the task needs the history you already built.",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(180),
@@ -711,8 +726,15 @@ pub fn register_collaboration_tools(mgr: &mut ToolManager) {
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
 /// （`<main_subagent_message>`，防止子代理把传入内容当作自己的 user 消息
 /// 而直接动项目）+ 任务（`[TASK]`）。
-fn build_subagent_task(task_description: &str, context: &str) -> String {
-    let mut parts = vec![format!("[SYSTEM]\n{SUBAGENT_IDENTITY_PROMPT}")];
+/// 上下文可见性措辞由 fork 派生（dsh inheritsParentContext 同口径）：
+/// fresh 不见父对话；fork 继承已完成回合、不见父级在飞回合。
+fn build_subagent_task(task_description: &str, context: &str, fork: bool) -> String {
+    let visibility = if fork {
+        "You are a forked subagent: the parent's completed turns are seeded into your context; you do not see the parent's current in-flight turn."
+    } else {
+        "You are a fresh subagent: you do not see the parent conversation."
+    };
+    let mut parts = vec![format!("[SYSTEM]\n{SUBAGENT_IDENTITY_PROMPT}\n{visibility}")];
     if !context.trim().is_empty() {
         parts.push(format!(
             "[CONTEXT]\n<main_subagent_message>\n{}\n</main_subagent_message>",
@@ -833,6 +855,7 @@ fn handle_spawn_subagent(
     validate_agent_name(&name)?;
     let task = args.task_description;
     let context = args.context.unwrap_or_default();
+    let fork = args.mode.unwrap_or_default() == SpawnMode::Fork;
 
     // ADR-0014：模型面只暴露 3 个参数。工具白名单取自用户设置
     // （cfg.subagent.default_tools）；超时预算 = cfg.subagent.timeout_secs，
@@ -850,7 +873,7 @@ fn handle_spawn_subagent(
             "Provide a task description.",
         ));
     }
-    let task_text = build_subagent_task(&task, &context);
+    let task_text = build_subagent_task(&task, &context, fork);
 
     // 子代理继承主代理的工作区。workspace 由显式 ToolCallContext 注入，
     // 派生工具线程不再读取线程局部状态。为空/`.` 时不传。
@@ -875,6 +898,7 @@ fn handle_spawn_subagent(
             tools: &tools,
             selection: None,
             workspace: workspace.as_deref(),
+            fork,
         })
         .map_err(|error| {
             subagent_error(
@@ -1116,9 +1140,10 @@ mod tests {
             .as_object()
             .expect("tool properties should be an object");
 
-        // ADR-0014：模型面只有 3 个参数；超时预算 = config（daemon 扫描），
-        // system_prompt / tools / model / base_url / max_tokens 不暴露。
-        let expected: Vec<&str> = vec!["task_description", "agent_name", "context"];
+        // ADR-0014：模型面 4 个参数（切片G 增 mode）；超时预算 = config
+        // （daemon 扫描），system_prompt / tools / model / base_url /
+        // max_tokens 不暴露。
+        let expected: Vec<&str> = vec!["task_description", "agent_name", "context", "mode"];
         assert_eq!(properties.len(), expected.len());
         for key in expected {
             assert!(properties.contains_key(key), "missing {key}");
@@ -1146,21 +1171,27 @@ mod tests {
     #[test]
     fn task_builder_injects_identity_and_wraps_context() {
         // 无 context：身份提示 + 任务，无 context 段。
-        let bare = build_subagent_task("do the thing", "");
+        let bare = build_subagent_task("do the thing", "", false);
         assert!(bare.contains("[SYSTEM]"));
         assert!(bare.contains(SUBAGENT_IDENTITY_PROMPT));
         assert!(bare.contains("[TASK]\ndo the thing"));
         assert!(!bare.contains("[CONTEXT]"));
+        assert!(bare.contains("you do not see the parent conversation"));
 
         // 有 context：必须包裹在 <main_subagent_message> 内，防止子代理把
         // 传入内容误判为自身 user 消息而直接修改项目。
-        let with_ctx = build_subagent_task("review the diff", "repo at F:\\proj\nbranch main");
+        let with_ctx = build_subagent_task("review the diff", "repo at F:\\proj\nbranch main", false);
         assert!(with_ctx.contains(
             "<main_subagent_message>\nrepo at F:\\proj\nbranch main\n</main_subagent_message>"
         ));
         assert!(with_ctx.contains("[TASK]\nreview the diff"));
         // 身份提示在前，任务在后。
         assert!(with_ctx.find("[SYSTEM]").unwrap() < with_ctx.find("[TASK]").unwrap());
+
+        // fork 措辞：继承已完成回合、不见在飞回合（切片G）。
+        let forked = build_subagent_task("continue", "", true);
+        assert!(forked.contains("completed turns are seeded into your context"));
+        assert!(forked.contains("do not see the parent's current in-flight turn"));
     }
 
     #[test]
@@ -1237,6 +1268,7 @@ mod tests {
                     task_description: "   ".to_string(),
                     agent_name: None,
                     context: None,
+                    mode: None,
                 },
             )
             .expect_err("empty task must fail before host lookup");

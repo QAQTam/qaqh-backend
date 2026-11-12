@@ -21,7 +21,10 @@ param(
     [int]$TurnTimeoutSec = 120,
     # 显式模型选择（自包含，不依赖用户默认设置）；子级继承父会话行。
     [string]$ProviderId = "qwen-token-plan-cn-provider",
-    [string]$ModelId = "qwen3.8-flash"
+    [string]$ModelId = "qwen3.8-flash",
+    # 切片G：真 fork 行为证明——秘密码先落父级已完成回合，fork 子级必须
+    # 看得见（子 bootstrap 含秘密 = 种子化铁证；子答复秘密 = 模型真用了历史）。
+    [switch]$Fork
 )
 $ErrorActionPreference = "Stop"
 
@@ -47,7 +50,10 @@ $base = "http://127.0.0.1:$DaemonPort"
 $auth = "Authorization: Bearer $env:QAQH_SERVER_TOKEN"
 $nonce = [guid]::NewGuid().ToString("N").Substring(0, 8)
 $token = "SMOKE-OK-$nonce"
+$secret = "PURPLE-$nonce"
 $instance = "smoke-subagent-$nonce"
+# 命令目录代际：open 426 时按 daemon 声明自动协商（Goal 模式 bump 9 等）。
+$revision = "ringing-commands-8"
 
 function Post-Json {
     param([string]$Path, [string]$BodyFile, [string]$OutFile, [string]$Lease)
@@ -62,7 +68,7 @@ function Send-Command {
     $target = @{ kind = $TargetKind }
     if ($SessionId) { $target["session_id"] = $SessionId }
     $body = @{
-        schema = "qaqh.Ringing"; version = 2; contract_revision = "ringing-commands-8"
+        schema = "qaqh.Ringing"; version = 2; contract_revision = $revision
         command_id = [guid]::NewGuid().ToString()
         client_instance_id = $instance; client_session_id = $Lease
         target = $target; preconditions = @(); command = $Command
@@ -115,11 +121,25 @@ try {
     # open 预检两个代际字段（spec §11）：缺字段/不匹配在 lease 分配前即失败。
     $openBody = @{
         schema = "qaqh.Ringing"; version = 2; client_instance_id = $instance
-        command_contract_revision = "ringing-commands-8"
+        command_contract_revision = $revision
         session_contract_revision = "ringing-session-2"
     } | ConvertTo-Json -Compress
     $openBody | Out-File (Join-Path $data "open.json") -Encoding ascii
     $code = Post-Json "/ringing/v2/clients/open" (Join-Path $data "open.json") (Join-Path $data "open-resp.json") $null
+    if ($code -eq "426") {
+        $resp = Get-Content (Join-Path $data "open-resp.json") -Raw
+        if ($resp -match "daemon provides (ringing-commands-\d+)") {
+            $revision = $Matches[1]
+            Write-Host "[..] contract revision negotiated: $revision"
+            $openBody = @{
+                schema = "qaqh.Ringing"; version = 2; client_instance_id = $instance
+                command_contract_revision = $revision
+                session_contract_revision = "ringing-session-2"
+            } | ConvertTo-Json -Compress
+            $openBody | Out-File (Join-Path $data "open.json") -Encoding ascii
+            $code = Post-Json "/ringing/v2/clients/open" (Join-Path $data "open.json") (Join-Path $data "open-resp.json") $null
+        }
+    }
     if ($code -ne "200") { throw "clients/open failed (HTTP $code): $(Get-Content (Join-Path $data 'open-resp.json') -Raw)" }
     $lease = (Get-Content (Join-Path $data "open-resp.json") -Raw | ConvertFrom-Json).client_session_id
     Write-Host "[ok] lease open ($lease)"
@@ -140,8 +160,29 @@ try {
     Send-Command "session" $root @{ type = "session.attach" } $lease "attach" | Out-Null
     Write-Host "[ok] root session $root"
 
+    if ($Fork) {
+        # ── 2b. 秘密先落父级**已完成**回合（fork 只继承已完成前缀）──
+        Send-Command "session" $root @{ type = "conversation.send_message"; text = "Remember the secret code $secret. Reply with exactly 'noted' and nothing else. Do not call any tools." } $lease "secret" | Out-Null
+        $noted = $false
+        $deadline = (Get-Date).AddSeconds($TurnTimeoutSec)
+        while (-not $noted) {
+            Start-Sleep -Milliseconds 500
+            Renew-Lease $lease
+            foreach ($s in (Get-Sessions $lease)) {
+                if ($s.session_id -eq $root -and $s.turn_count -ge 1 -and "$($s.status)" -match "idle") { $noted = $true }
+            }
+            if ((Get-Date) -gt $deadline) { break }
+        }
+        if (-not $noted) { throw "fork prep: parent secret turn did not settle" }
+        Write-Host "[ok] fork prep: secret landed in parent completed turn"
+    }
+
     # ── 3. 父回合：指示模型走生产工具链（spawn_subagent 即建会话即投递）──
-    $instruction = "Use the spawn_subagent tool now with agent_name `"smoke_child`" and task_description `"Reply with exactly the token $token and nothing else. Do not call any tools.`". Then call wait_agent with targets set to the returned child session id (timeout_ms 90000). After wait_agent returns, reply with the exact token the child returned. Do not create tasks or use any other tools."
+    if ($Fork) {
+        $instruction = "Use the spawn_subagent tool now with agent_name `"fork_child`", mode `"fork`", and task_description `"What is the secret code mentioned earlier in this conversation? Reply with exactly that code and nothing else. Do not call any tools.`". Then call wait_agent with targets set to the returned child session id (timeout_ms 90000). After wait_agent returns, reply with the exact code the child returned. Do not create tasks or use any other tools."
+    } else {
+        $instruction = "Use the spawn_subagent tool now with agent_name `"smoke_child`" and task_description `"Reply with exactly the token $token and nothing else. Do not call any tools.`". Then call wait_agent with targets set to the returned child session id (timeout_ms 90000). After wait_agent returns, reply with the exact token the child returned. Do not create tasks or use any other tools."
+    }
     Send-Command "session" $root @{ type = "conversation.send_message"; text = $instruction } $lease "lead" | Out-Null
     Write-Host "[..] lead turn started, waiting for child to appear"
 
@@ -173,6 +214,15 @@ try {
     if (-not $settled) { throw "child turn did not settle in ${TurnTimeoutSec}s; daemon log: $(Get-Content (Join-Path $env:QAQH_DATA_DIR 'qaqh-daemon.log') -Tail 30 -ErrorAction SilentlyContinue)" }
     Write-Host "[ok] B: child turn settled (turn_count>=1, idle)"
 
+    if ($Fork) {
+        # ── 5b. 断言 E：子级 bootstrap 含父级已完成回合的秘密（种子化铁证）──
+        Send-Command "session" $child @{ type = "session.attach" } $lease "attach-child" | Out-Null
+        Renew-Lease $lease
+        $childBoot = Get-Bootstrap $child $lease
+        if ($childBoot -notmatch [regex]::Escape($secret)) { throw "E failed: secret $secret absent from child bootstrap (fork did not seed parent history)" }
+        Write-Host "[ok] E: child bootstrap carries parent's completed-turn secret (lossless fork)"
+    }
+
     # ── 6. 断言 C/D：轮询父级 bootstrap 直到合流 Input 出现 ──
     # （终态 TriggerTurn 自动唤醒父回合；合流 Input 在回合开始即落块，
     #  不依赖父模型是否答完——比等 turn_count 更稳。）
@@ -186,10 +236,11 @@ try {
         if ((Get-Date) -gt $deadline) { throw "C failed: no subagent_terminal for $child in parent bootstrap within ${TurnTimeoutSec}s" }
     }
     Write-Host "[ok] C: parent bootstrap carries subagent_terminal for $child"
-    if ($boot -notmatch [regex]::Escape($token)) { throw "D failed: child answer token $token absent from parent merge" }
-    Write-Host "[ok] D: child answer token merged into parent"
+    $expected = $(if ($Fork) { $secret } else { $token })
+    if ($boot -notmatch [regex]::Escape($expected)) { throw "D failed: child answer $expected absent from parent merge" }
+    Write-Host "[ok] D: child answer merged into parent"
 
-    Write-Host "=== SUBAGENT SMOKE PASS ==="
+    Write-Host "=== SUBAGENT SMOKE PASS $(if ($Fork) { '(FORK)' } else { '(FRESH)' }) ==="
     Write-Host "artifacts in $data"
 }
 catch {

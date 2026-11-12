@@ -162,7 +162,28 @@
       agent-runtime/ringing）；子代理系列契约导出物零改动（wire 形状不变；
       信封 target 分类属内核校验行为修正，非 DTO 形状变化）
 - [x] 并发排序拍板结果回填 §后果 4（2026-11-12：genui 先行提交 `2ef60928`）
-- [ ] 切片 G：真 fork（父已完成回合前缀种子化子日志；turns/blocks/tool_calls
-      复制 + id 重写，content 引用随迁）——委派原语，非 handoff 替代
+- [x] 切片 G：真 fork（本提交；fork 冒烟 PASS）
+      —— `store::fork_session_prefix`：seq 序取已完成回合前缀（首个 active
+      回合截止），turns/blocks/tool_calls 整体复制，主键重生成（turn_/block_/
+      call_ + ULID）且 payload 内 id 字段同步重写（payload 是唯一权威），
+      content 引用随迁（缺失历史引用跳过=与父视图同等解析效力）；会话级块
+      （压缩摘要）不复制。工具面 `spawn_subagent.mode = fresh|fork`（dsh
+      subagent_fork 同语义收进单工具），措辞由 fork 派生（fresh 不见父对话/
+      fork 继承已完成回合不见在飞回合）。wire `subagent.spawn` 冻结不加字段，
+      恒 fresh。挂钩点：spawn_subagent_v2 子会话行就绪后、loop 装配前。
+      委派原语，非 handoff 替代（handoff 是上下文压力逃生阀）。
+      **验证**：`fork_seeds_completed_prefix_losslessly_and_rewrites_ids`
+      存储层闸门绿；四 crate lib 套件绿（36+47+25+11）；
+      `smoke-subagent.ps1 -Fork` 真实 daemon+模型 PASS——秘密码先落父级
+      已完成回合，fork 子级 bootstrap 含秘密（E，种子化铁证）、子级答复
+      秘密经终态合流回父（D，模型真用了继承历史）。
+      **并发留痕（规则 19）**：实施期间另一会话逐 crate 写入 Goal 模式
+      （ADR-0015），共享树瞬态编译失败；所有者拍板等其写完后继续。
+      完成后 Goal 代码仍未提交（在工作区），组合树验证绿；本切片经部分
+      暂存只取 fork hunk（store.rs/spawn.rs/mod.rs 双方同文件不同区），
+      Goal 改动原样留工作区由其所有者提交。Goal 把命令目录 bump 到
+      ringing-commands-9（wire 实变，v3.1 线）；冒烟脚本 open 426 自动
+      协商代际，不硬编码。根会话工具面开关（ROOT_TOOL_REGISTRARS）由
+      ADR-0015 落地，与本 ADR 落地清单的「Team 根开关」同构。
 - [ ] writeScopes 提示字段 + 重叠警告（TeamTaskSnapshot 冻结 DTO → 搭 v3.1）
 - [ ] Team 根开关（任务工具按根会话条件注册，dsh 默认关；本轮先全量注册）
