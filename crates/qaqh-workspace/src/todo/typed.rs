@@ -508,7 +508,7 @@ impl TypedTool for TodoUpdateTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "todo_update",
-            "Set one task's status: {id, status, evidence?}. One task per call — loop for batches.",
+            "Set one task's status: {title, status, evidence?}. One task per call — loop for batches.",
             ToolCategory::Write,
             ToolRisk::Write,
             Duration::from_secs(15),

@@ -81,6 +81,12 @@ fn event_heap_bytes(event: &SessionEvent) -> usize {
         SessionEvent::TimelineAppended { entry } => {
             serde_json::to_string(entry).map(|json| json.len()).unwrap_or_default()
         }
+        SessionEvent::TimelineTruncated {
+            removed_turn_ids, ..
+        } => removed_turn_ids
+            .iter()
+            .map(|turn| turn.as_ref().len())
+            .sum(),
         _ => 0,
     }
 }
@@ -423,6 +429,41 @@ impl SessionOwner {
         Ok(())
     }
 
+    /// 撤回(硬截断):同步进泵,删除 `turn_id` **含自身**及其后的全部历史事实,
+    /// 落库成功后追加一条 [`SessionEvent::TimelineTruncated`]。
+    ///
+    /// 泵串行化是这条链的定序纪律:`truncate` 与 `start_turn`/`append_block` 同队,
+    /// 所以「活动回合冲突」的判据在写点判定,不需要调用方再加一道锁。冲突/找不到
+    /// 时**既不写也不发**,回执原样带出错误给命令面(不静默降级成「什么都没删」)。
+    pub fn truncate_from_turn(&self, turn_id: &str) -> Result<Vec<TurnId>, DbError> {
+        let session_id = self.session_id.clone();
+        let row_turn_id = turn_id.to_string();
+        let from_turn_id = TurnId::new(turn_id.to_string());
+        let (tx, rx) = mpsc::channel();
+        self.send_request(move |pump| {
+            let owned = session_id.clone();
+            let row = row_turn_id.clone();
+            let result = pump
+                .db
+                .write_blocking(move |conn| store::truncate_from_turn(conn, &owned, &row));
+            match result {
+                Ok(removed) => {
+                    let removed: Vec<TurnId> = removed.into_iter().map(TurnId::new).collect();
+                    pump.emit(SessionEvent::TimelineTruncated {
+                        from_turn_id: from_turn_id.clone(),
+                        removed_turn_ids: removed.clone(),
+                    });
+                    let _ = tx.send(Ok(removed));
+                }
+                Err(error) => {
+                    let _ = tx.send(Err(error));
+                }
+            }
+            Ok(())
+        });
+        rx.recv().map_err(|_| DbError::ExecutorStopped)?
+    }
+
     /// 交互升起:interaction 行 + InteractionRequested 事件。
     pub async fn interaction_requested(&self, interaction: InteractionView) -> Result<(), DbError> {
         let interaction_id = interaction.interaction_id.as_ref().to_string();
@@ -524,6 +565,8 @@ impl SessionOwner {
         text: &str,
         lines_added: Option<u32>,
         lines_removed: Option<u32>,
+        target_files: Vec<String>,
+        args_complete: bool,
     ) {
         let turn_id = turn_id.clone();
         let call_id = call_id.clone();
@@ -537,6 +580,8 @@ impl SessionOwner {
                 text,
                 lines_added,
                 lines_removed,
+                target_files,
+                args_complete,
             });
             Ok(())
         });

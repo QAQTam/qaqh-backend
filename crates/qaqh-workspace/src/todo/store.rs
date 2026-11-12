@@ -157,7 +157,7 @@ pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value
             json_err_string(
                 "not_found",
                 format!("todo {id} not found"),
-                "Use todo(action=\"list\") to see all IDs.",
+                "Use the todo.list service method to see all IDs.",
             )
         })?;
 

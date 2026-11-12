@@ -300,6 +300,18 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         owner.lifecycle(),
         exec_sessions,
     ));
+    // 会话可视化目录（widget-directive 协议 §2）：fragment 唯一合法落点。
+    // 建目录失败只 warn——widget 通道 best-effort，不得阻塞会话启动。
+    let widgets_dir = workspace_root
+        .join(".qaqh")
+        .join("widgets")
+        .join(session_id);
+    if let Err(error) = std::fs::create_dir_all(&widgets_dir) {
+        log::warn!(
+            "[assemble] widgets_dir {} create failed: {error}",
+            widgets_dir.display()
+        );
+    }
     Ok(SessionLoop::new(
         session_id,
         owner,

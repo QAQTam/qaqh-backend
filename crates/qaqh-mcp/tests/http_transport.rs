@@ -209,8 +209,7 @@ async fn http_round_trip() {
     wait_caches(&manager, "mock").await;
 
     // 投影批次：聚合工具钉底 + server 工具。
-    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager)
-        .expect("caches populated — batch must exist");
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager);
     let names: Vec<&str> = batch.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         names,

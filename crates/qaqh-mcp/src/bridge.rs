@@ -14,7 +14,7 @@
 //! - 错误码映射：`McpError`/`CallToolResult::is_error` → 设计 §7 的
 //!   ToolResult JSON（timeis/status/code/message/hint）；
 //! - 投影批次：连接层工具缓存变化（[`crate::connection::ServerConnection`]
-//!   置脏）后，[`take_projection_batch`] 产出全量重建批次，runtime 在回合
+//!   bump 代数）后，[`projection_batch`] 产出全量重建批次，会话 loop 在回合
 //!   边界 `clear_dynamic` + 逐条 `register_dynamic`（refresh 语义）。
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -431,13 +431,18 @@ fn hint_for(kind: McpErrorKind) -> &'static str {
     }
 }
 
-/// 回合边界投影批次（runtime 侧接线入口，设计 §5.3）：
+/// 投影批次代数（会话 loop 每轮比对的游标；无副作用读）。
+pub fn projection_generation() -> u64 {
+    manager_slot().projection_generation()
+}
+
+/// 全量重建批次（设计 §5.3，聚合工具钉底 + 全部已连接 server 的缓存）。
 ///
-/// 全局 dirty 标记未被置位 → `None`（零开销快路径）；置位 → 全量重建批次
-/// （所有已连接 server 的缓存 → [`project_tools`]）。调用方（qaqh-runtime
-/// 的 run_lap）随后 `clear_dynamic` + 逐条 `register_dynamic` 并重建
-/// `tool_defs`。crash/idle 回收会清缓存并置脏 → 模型面与连接状态一致。
-pub fn take_projection_batch() -> Option<Vec<(String, DynamicTool)>> {
+/// 无副作用读：任何会话都可按自己的代数游标消费，多会话互不抢批次。
+/// crash/idle 回收会清缓存并 bump 代数 → 模型面与连接状态一致。调用方
+/// （qaqh-agent-runtime 会话 loop 回合边界）随后对本会话 manager
+/// `clear_dynamic` + 逐条 `register_dynamic` 并重建模型面 `tool_defs`。
+pub fn projection_batch() -> Vec<(String, DynamicTool)> {
     projection_batch_with(&manager_slot())
 }
 
@@ -479,13 +484,11 @@ pub fn get_prompt_blocking(
     }
 }
 
-/// [`take_projection_batch`] 的可测形态：manager 显式注入。
+/// [`projection_batch`] 的可测形态：manager 显式注入（代数门控已上移到调用方
+/// 游标比对，此处恒定产出）。
 /// 仅经 [`crate::bridge_for_tests`] 垫片暴露（doc(hidden)，非公共 API 契约）。
 #[doc(hidden)]
-pub fn projection_batch_with(manager: &Arc<McpManager>) -> Option<Vec<(String, DynamicTool)>> {
-    if !manager.take_dirty() {
-        return None;
-    }
+pub fn projection_batch_with(manager: &Arc<McpManager>) -> Vec<(String, DynamicTool)> {
     let mut batch = Vec::new();
     // PR-M2-1：聚合资源工具钉在批次头部（enabled 即在场，与连接状态解耦——
     // 零 server 配置时 `mcp list_servers` 也能答"无配置"；schema 与 dispatcher
@@ -508,7 +511,7 @@ pub fn projection_batch_with(manager: &Arc<McpManager>) -> Option<Vec<(String, D
             dispatch,
         ));
     }
-    Some(batch)
+    batch
 }
 
 #[cfg(test)]

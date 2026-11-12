@@ -273,14 +273,28 @@ pub(crate) async fn dispatch_session(
                 worker_command,
             )
             .with_actor(identity_worker_actor(state, identity));
-            if let Err(e) = state.service.send_ringing_command(&session_id, &worker_env) {
-                return fail(
-                    state,
-                    envelope.command_id.clone(),
-                    StatusCode::BAD_GATEWAY,
-                    "dispatch_failed",
-                    e.to_string(),
-                );
+            // 领域拒绝保留命令面稳定码(见 `CommandRejection`):客户端按码分支,
+            // 不 grep 文案。状态档在这里定——协议层的码不绑 HTTP 语义。
+            if let Err(error) = state.service.send_ringing_command(&session_id, &worker_env) {
+                return match error {
+                    qaqh_runtime::QaqhError::Rejected { code, message } => fail(
+                        state,
+                        envelope.command_id.clone(),
+                        match code {
+                            qaqh_ringing::CommandRejection::TurnActive => StatusCode::CONFLICT,
+                            qaqh_ringing::CommandRejection::TurnNotFound => StatusCode::NOT_FOUND,
+                        },
+                        code.code(),
+                        message,
+                    ),
+                    other => fail(
+                        state,
+                        envelope.command_id.clone(),
+                        StatusCode::BAD_GATEWAY,
+                        "dispatch_failed",
+                        other.to_string(),
+                    ),
+                };
             }
             // 回执终态由 execute_command 的返回值直接落库:命令成功进入会话
             // 循环即 Succeeded(回合的业务进展经 SSE 事件承载,不再有第二条

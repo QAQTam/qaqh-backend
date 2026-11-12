@@ -13,7 +13,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use super::DbError;
 use super::store::now_ms;
 
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -255,16 +255,22 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
                 supported: SCHEMA_VERSION,
             });
         }
-        // schema 5 → 6:一次性升级(spec §9.3),在新 daemon 对外服务前完成。
-        // 5 → 7 需要链式执行,否则 5 代库会跳过 6→7 的数据归一。
+        // schema 5 → 6(spec-exec-session-lifecycle §9.3)后接 6→7、7→8:
+        // 链式执行,否则旧代库会跳过后续的数据归一。
         Some(5) => {
             upgrade_5_to_6(&tx)?;
             upgrade_6_to_7(&tx)?;
+            upgrade_7_to_8(&tx)?;
         }
         // schema 6 → 7:content id 形态收口(裸 hex),数据归一在新 daemon
-        // 对外服务前完成。
+        // 对外服务前完成;随后接 7→8 存量 effects 归一。
         Some(6) => {
             upgrade_6_to_7(&tx)?;
+            upgrade_7_to_8(&tx)?;
+        }
+        // schema 7 → 8:skills 裁剪的存量 effects 归一(ADR-0010)。
+        Some(7) => {
+            upgrade_7_to_8(&tx)?;
         }
         Some(found) if found < SCHEMA_VERSION => {
             return Err(DbError::SchemaTooOld {
@@ -504,6 +510,88 @@ fn upgrade_6_to_7(tx: &Transaction<'_>) -> Result<(), DbError> {
     )
     .map_err(|error| DbError::Corrupt(format!("upgrade 6→7 normalize content ids: {error}")))?;
     log::info!("[schema] upgraded 6→7: content ids normalized to bare hex");
+    Ok(())
+}
+
+/// schema 7 → 8：skills 裁剪（`198e8ede`，ADR-0010 清单"Skills 子系统裁剪"条）
+/// 的数据层补齐。
+///
+/// 背景：该提交把 `ToolEffectInfo` 的 `skill_activated`/`skill_released` 变体
+/// 从类型层删了，但旧 daemon 写进 `tool_calls.effects_json` 的存量行仍带这两个
+/// kind ⇒ 读侧 `parse_typed::<Vec<ToolEffectInfo>>` fail-closed 报
+/// `unknown variant`（`DbError::Corrupt`），含 legacy 行的历史会话被永久毒化，
+/// 所有走 `owner.snapshot()` 的会话级读端点（bootstrap/approvals）500。
+///
+/// 规则：逐行解析 JSON 数组，**只**剔除 `kind` 恰为两个 legacy 名的元素；
+/// 数组清空后与写入侧形态对齐落 NULL（写侧约定 `!effects.is_empty()` 才存）。
+/// 解析不通过的行原样不动——那不是本次裁剪的债，形状错误仍归读侧 Corrupt
+/// 如实报出，本迁移不顺手掩盖。
+fn upgrade_7_to_8(tx: &Transaction<'_>) -> Result<(), DbError> {
+    const LEGACY_KINDS: [&str; 2] = ["skill_activated", "skill_released"];
+    // LIKE 只做候选预筛（避免全表逐行 parse）；是否真含 legacy kind 由
+    // 解析后的精确判定决定，子串假阳性不会被改写。
+    let mut statement = tx
+        .prepare(
+            "SELECT call_id, effects_json FROM tool_calls
+             WHERE effects_json LIKE '%skill_activated%'
+                OR effects_json LIKE '%skill_released%'",
+        )
+        .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 read tool_calls: {error}")))?;
+    let candidates = statement
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 query: {error}")))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 iterate: {error}")))?;
+    drop(statement);
+
+    let mut stripped_rows = 0i64;
+    let mut stripped_entries = 0i64;
+    for (call_id, effects_json) in candidates {
+        let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(&effects_json)
+        else {
+            // 不是合法 JSON 数组：非本次裁剪的债，留给读侧如实报 Corrupt。
+            continue;
+        };
+        let total = entries.len();
+        let kept: Vec<serde_json::Value> = entries
+            .into_iter()
+            .filter(|entry| {
+                !matches!(
+                    entry.get("kind").and_then(|kind| kind.as_str()),
+                    Some(kind) if LEGACY_KINDS.contains(&kind)
+                )
+            })
+            .collect();
+        if kept.len() == total {
+            // 子串假阳性（如 task_text 里提到 legacy 名）：原样保留。
+            continue;
+        }
+        stripped_entries += (total - kept.len()) as i64;
+        stripped_rows += 1;
+        if kept.is_empty() {
+            tx.execute(
+                "UPDATE tool_calls SET effects_json = NULL WHERE call_id = ?1",
+                [&call_id],
+            )
+            .map_err(|error| {
+                DbError::Corrupt(format!("upgrade 7→8 nullify {call_id}: {error}"))
+            })?;
+        } else {
+            let text = serde_json::to_string(&serde_json::Value::Array(kept)).map_err(|error| {
+                DbError::Corrupt(format!("upgrade 7→8 serialize {call_id}: {error}"))
+            })?;
+            tx.execute(
+                "UPDATE tool_calls SET effects_json = ?1 WHERE call_id = ?2",
+                rusqlite::params![text, call_id],
+            )
+            .map_err(|error| {
+                DbError::Corrupt(format!("upgrade 7→8 rewrite {call_id}: {error}"))
+            })?;
+        }
+    }
+    log::info!(
+        "[schema] upgraded 7→8: stripped {stripped_entries} legacy skill effect entries from {stripped_rows} tool_calls rows"
+    );
     Ok(())
 }
 
@@ -920,11 +1008,22 @@ mod tests {
         assert_eq!(versions, (1, SCHEMA_VERSION));
     }
 
-    // v6 形态最小 fixture:仅 6→7 归一所触碰的表与版本行(6 代库必含
-    // session_contents;exec_sessions 由 5→6 或全新建库保证存在)。
+    // v6 形态最小 fixture:6→7 归一所触碰的表与版本行,外加 7→8 链式执行
+    // 所需的 tool_calls(真实 v6 库必含)。
     const V6: &str = r#"
         CREATE TABLE schema_version (version INTEGER NOT NULL);
         INSERT INTO schema_version VALUES (6);
+        CREATE TABLE tool_calls (
+            call_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT,
+            tool_name TEXT NOT NULL, args_json TEXT, state_json TEXT NOT NULL,
+            state_kind TEXT NOT NULL, exec_session_id TEXT, interaction_id TEXT,
+            output_text TEXT, output_ref TEXT, output_truncated INTEGER NOT NULL DEFAULT 0,
+            meta_json TEXT, effects_json TEXT, code_delta_json TEXT,
+            started_at_ms INTEGER, finished_at_ms INTEGER
+        );
+        INSERT INTO tool_calls (call_id, session_id, tool_name, state_json, state_kind, effects_json)
+        VALUES ('chain', 's1', 'read', '{"kind":"finished"}', 'finished',
+                '[{"kind":"skill_activated","name":"old"}]');
         CREATE TABLE sessions (
             session_id TEXT PRIMARY KEY,
             title TEXT NOT NULL DEFAULT '',
@@ -1009,6 +1108,154 @@ mod tests {
             )
             .expect("bare lookup");
         assert_eq!(hit, 1);
+        // 链式 7→8 同步执行:legacy effects 行落 NULL。
+        let chain_effects: Option<String> = conn
+            .query_row(
+                "SELECT effects_json FROM tool_calls WHERE call_id = 'chain'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("chain row");
+        assert_eq!(chain_effects, None);
+    }
+
+    // v7 形态最小 fixture:仅 7→8 所触碰的表与版本行。tool_calls 列形态取
+    // 6 代重建后的权威形状。
+    const V7: &str = r#"
+        CREATE TABLE schema_version (version INTEGER NOT NULL);
+        INSERT INTO schema_version VALUES (7);
+        CREATE TABLE tool_calls (
+            call_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT,
+            tool_name TEXT NOT NULL, args_json TEXT, state_json TEXT NOT NULL,
+            state_kind TEXT NOT NULL, exec_session_id TEXT, interaction_id TEXT,
+            output_text TEXT, output_ref TEXT, output_truncated INTEGER NOT NULL DEFAULT 0,
+            meta_json TEXT, effects_json TEXT, code_delta_json TEXT,
+            started_at_ms INTEGER, finished_at_ms INTEGER
+        );
+        -- 混合行:legacy 条目 + 合法 subagent 条目 → 只剥 legacy。
+        INSERT INTO tool_calls (call_id, session_id, tool_name, state_json, state_kind, effects_json)
+        VALUES ('mixed', 's1', 'read', '{"kind":"finished"}', 'finished',
+                '[{"kind":"skill_activated","name":"old"},{"kind":"subagent_spawned","child_session_id":"c1","name":"sub","task_text":"job"}]');
+        -- 纯 legacy 行 → 清空落 NULL(与写侧 `!effects.is_empty()` 形态对齐)。
+        INSERT INTO tool_calls (call_id, session_id, tool_name, state_json, state_kind, effects_json)
+        VALUES ('legacy-only', 's1', 'read', '{"kind":"finished"}', 'finished',
+                '[{"kind":"skill_released","name":"old"}]');
+        -- 子串假阳性:task_text 提到 legacy 名,kind 合法 → 原样保留。
+        INSERT INTO tool_calls (call_id, session_id, tool_name, state_json, state_kind, effects_json)
+        VALUES ('false-positive', 's1', 'read', '{"kind":"finished"}', 'finished',
+                '[{"kind":"subagent_spawned","child_session_id":"c2","name":"n","task_text":"mention skill_activated inside"}]');
+        -- 坏 JSON 但含 legacy 子串:非裁剪的债,原样留给读侧如实报 Corrupt。
+        INSERT INTO tool_calls (call_id, session_id, tool_name, state_json, state_kind, effects_json)
+        VALUES ('broken', 's1', 'read', '{"kind":"finished"}', 'finished',
+                'not-json skill_released');
+    "#;
+
+    #[test]
+    fn initialize_upgrades_v7_by_stripping_legacy_skill_effects() {
+        use qaqh_ringing_contract::state::ToolEffectInfo;
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(V7).expect("v7 fixture");
+        initialize(&mut conn).expect("upgrade");
+        let versions: (i64, u32) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(version) FROM schema_version",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("version");
+        assert_eq!(versions, (1, SCHEMA_VERSION));
+
+        // 混合行:剥 legacy 后可被读侧 parse_typed 消费,合法条目原样在。
+        let effects: Option<String> = conn
+            .query_row(
+                "SELECT effects_json FROM tool_calls WHERE call_id = 'mixed'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("mixed row");
+        let effects = serde_json::from_str::<Vec<ToolEffectInfo>>(&effects.expect("mixed effects"))
+            .expect("mixed effects readable");
+        assert_eq!(
+            effects,
+            vec![ToolEffectInfo::SubagentSpawned {
+                child_session_id: "c1".into(),
+                name: "sub".into(),
+                task_text: "job".into(),
+            }]
+        );
+
+        // 纯 legacy 行 → NULL。
+        let legacy_only: Option<String> = conn
+            .query_row(
+                "SELECT effects_json FROM tool_calls WHERE call_id = 'legacy-only'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("legacy-only row");
+        assert_eq!(legacy_only, None);
+
+        // 假阳性与坏 JSON 行不动。
+        for call_id in ["false-positive", "broken"] {
+            let raw: Option<String> = conn
+                .query_row(
+                    "SELECT effects_json FROM tool_calls WHERE call_id = ?1",
+                    [call_id],
+                    |row| row.get(0),
+                )
+                .expect("untouched row");
+            assert!(raw.is_some(), "{call_id} must stay untouched");
+        }
+        let false_positive = conn
+            .query_row(
+                "SELECT effects_json FROM tool_calls WHERE call_id = 'false-positive'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("false-positive row");
+        assert!(serde_json::from_str::<Vec<ToolEffectInfo>>(&false_positive).is_ok());
+    }
+
+    /// 反证（规则 18）：对真实生产库的**副本**跑迁移，迁移前必须红
+    /// （毒化会话以 unknown variant 报 Corrupt），迁移后全部会话必须可读。
+    /// 路径来自环境变量 `QAQH_DB_SNAPSHOT`；默认 ignore，仅供人工取证。
+    #[test]
+    #[ignore = "requires QAQH_DB_SNAPSHOT pointing at a copy of a production db"]
+    fn real_db_snapshot_upgrades_and_all_sessions_load() {
+        let path = std::env::var("QAQH_DB_SNAPSHOT").expect("QAQH_DB_SNAPSHOT");
+        let mut conn = Connection::open(&path).expect("open snapshot");
+
+        let ids: Vec<String> = conn
+            .prepare("SELECT session_id FROM sessions")
+            .expect("sessions stmt")
+            .query_map([], |row| row.get(0))
+            .expect("sessions ids")
+            .collect::<Result<_, _>>()
+            .expect("sessions collect");
+        assert!(!ids.is_empty(), "snapshot must contain sessions");
+
+        let corrupt_before: Vec<String> = ids
+            .iter()
+            .filter(|id| {
+                let error = super::super::view::load_session_state(&conn, id)
+                    .err()
+                    .map(|error| error.to_string())
+                    .unwrap_or_default();
+                error.contains("unknown variant `skill_activated`")
+                    || error.contains("unknown variant `skill_released`")
+            })
+            .cloned()
+            .collect();
+        assert!(
+            !corrupt_before.is_empty(),
+            "expected legacy skill effect corruption before migration"
+        );
+
+        initialize(&mut conn).expect("upgrade snapshot");
+
+        for id in &ids {
+            super::super::view::load_session_state(&conn, id)
+                .unwrap_or_else(|error| panic!("session {id} unreadable after migration: {error}"));
+        }
     }
 
     #[test]

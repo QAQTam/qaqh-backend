@@ -10,6 +10,7 @@ qaqh-config = { path = "../qaqh-config" }
 qaqh-profile = { path = "../qaqh-profile" }
 qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 qaqh-gate = { path = "../qaqh-gate" }
+qaqh-lsp = { path = "../qaqh-lsp" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
 qaqh-ringing = { path = "../qaqh-ringing" }

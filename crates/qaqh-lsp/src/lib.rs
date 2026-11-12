@@ -44,15 +44,3 @@ pub fn install_manager(manager: Arc<LspManager>) -> Arc<LspManager> {
     std::mem::replace(&mut *slot, manager)
 }
 
-/// UI 直调同步投影（mcp `sync_projection_now` 同款：`lsp` 聚合工具 enabled
-/// 即在场，批次钉底——无脏时也需要首轮可见；幂等）。
-pub fn sync_projection_now() -> bool {
-    match take_projection_batch() {
-        Some(batch) => {
-            let applied = qaqh_workspace::runtime::replace_dynamic_tools(batch);
-            log::info!("[lsp] projection applied on UI invoke path ({applied} tools)");
-            true
-        }
-        None => false,
-    }
-}

@@ -34,18 +34,13 @@ fn first_human_line(output: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// 从本工具 JSON 信封提取人类可读正文；非 JSON 输出原样透传。
-fn human_body(output: &str) -> String {
-    let view = json_view(output);
-    json_string(view.as_ref(), &["content", "message"]).unwrap_or_else(|| output.to_string())
-}
-
 /// 从本工具 JSON 信封提取人类可读 content/message。
 fn json_summary(output: &str) -> Option<String> {
     let view = json_view(output);
     json_string(view.as_ref(), &["content", "message"]).or_else(|| first_human_line(output))
 }
 
+#[cfg(test)]
 fn text_body(output: &str) -> ToolBody {
     ToolBody::Text {
         text: output.to_string(),

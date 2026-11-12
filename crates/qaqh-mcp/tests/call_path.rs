@@ -259,9 +259,9 @@ async fn echo_round_trip() {
     let conn = manager.get_or_connect("mock").await.unwrap();
     wait_cached_tools(&manager, "mock");
 
-    // 投影批次：连接置脏 → 全量批次 → 注册进 ToolManager → 模型面合并。
-    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager)
-        .expect("cache just populated — batch must exist");
+    // 投影批次：连接后代数已 bump → 全量批次 → 注册进 ToolManager → 模型面合并。
+    let gen_before = qaqh_mcp::McpManager::projection_generation(&manager);
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager);
     let names: Vec<&str> = batch.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(
         names,
@@ -281,8 +281,11 @@ async fn echo_round_trip() {
     }
     assert!(tool_manager.category_of("mcp__mock__echo").is_some());
 
-    // 消费后置脏复位：无变化 → None。
-    assert!(qaqh_mcp::bridge_for_tests::projection_batch_with(&manager).is_none());
+    // 批次构建无副作用：重复取批次内容一致，代数不因读取而移动
+    // （消费游标在各会话 loop，互不抢占）。
+    let again = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager);
+    assert_eq!(again.len(), batch.len());
+    assert_eq!(qaqh_mcp::McpManager::projection_generation(&manager), gen_before);
 
     // 调用：echo 回声。
     let cancel = AtomicBool::new(false);

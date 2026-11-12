@@ -114,6 +114,89 @@ pub fn delete_session_tree(conn: &mut Connection, root: &str) -> Result<Vec<Stri
     Ok(ids)
 }
 
+/// 撤回(硬截断):删除 `turn_id` **含自身**及其后的全部回合事实,返回被删回合
+/// id(按 seq 升序,供事件携带)。
+///
+/// - **块按 `ord` 截断,不按 turn_id 逐条匹配**:`ord` 是会话内单调追加序
+///   ([`next_block_ord`]),所以回合归属为 NULL 的会话级块(压缩摘要)只要落在
+///   截断点之后也一并消失,不会留下「历史已删、摘要还在」的半截事实。
+/// - 工具调用/交互/执行会话随行删除:留着它们等于让 bootstrap 快照里的卡片
+///   指向一条不存在的历史。
+/// - 存在 `status='active'` 的回合时**当场拒绝**——撤回与在飞回合冲突。判据落在
+///   这里而不是调用方:owner 泵串行化了本函数与 [`start_turn`],所以无竞态;
+///   进程重启遗留的 active 行由 restart recovery 统一置 interrupted,不会永久锁死撤回口。
+/// - 只回历史,**不回副作用**:文件改动、执行会话进程、子代理、已通过的审批
+///   一律不动;journal 原样保留,要回滚文件另按它走。
+pub fn truncate_from_turn(
+    conn: &mut Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Vec<String>, DbError> {
+    let tx = conn.transaction()?;
+    let Some(target_seq) = tx
+        .query_row(
+            "SELECT seq FROM turns WHERE turn_id = ?1 AND session_id = ?2",
+            params![turn_id, session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+    else {
+        return Err(DbError::TurnNotFound {
+            session_id: session_id.to_string(),
+            turn_id: turn_id.to_string(),
+        });
+    };
+    if let Some(active) = active_turn_id(&tx, session_id)? {
+        return Err(DbError::TruncateConflict {
+            session_id: session_id.to_string(),
+            turn_id: active,
+        });
+    }
+    // 被删回合集合:三张子表共用同一条内联子查询,省掉手工拼 IN 列表。
+    let doomed = "(SELECT turn_id FROM turns WHERE session_id = ?1 AND seq >= ?2)";
+    let removed: Vec<String> = tx
+        .prepare(&format!(
+            "SELECT turn_id FROM turns WHERE session_id = ?1 AND seq >= ?2 ORDER BY seq"
+        ))?
+        .query_map(params![session_id, target_seq], |row| {
+            row.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let cutoff: Option<i64> = tx.query_row(
+        &format!("SELECT MIN(ord) FROM blocks WHERE session_id = ?1 AND turn_id IN {doomed}"),
+        params![session_id, target_seq],
+        |row| row.get(0),
+    )?;
+    tx.execute(
+        &format!("DELETE FROM tool_calls WHERE session_id = ?1 AND turn_id IN {doomed}"),
+        params![session_id, target_seq],
+    )?;
+    tx.execute(
+        &format!("DELETE FROM interactions WHERE session_id = ?1 AND turn_id IN {doomed}"),
+        params![session_id, target_seq],
+    )?;
+    tx.execute(
+        &format!(
+            "DELETE FROM exec_sessions WHERE session_id = ?1 AND origin_turn_id IN {doomed}"
+        ),
+        params![session_id, target_seq],
+    )?;
+    tx.execute(
+        "DELETE FROM blocks WHERE session_id = ?1 AND (?2 IS NULL OR ord >= ?2)",
+        params![session_id, cutoff],
+    )?;
+    tx.execute(
+        "DELETE FROM turns WHERE session_id = ?1 AND seq >= ?2",
+        params![session_id, target_seq],
+    )?;
+    tx.execute(
+        "UPDATE sessions SET updated_at_ms = ?2 WHERE session_id = ?1",
+        params![session_id, now_ms()],
+    )?;
+    tx.commit()?;
+    Ok(removed)
+}
+
 /// Spawn 期登记:行不存在则插入默认行,已存在则不动(幂等)。
 /// 血缘后补:spawn 先建行、拿到父会话后再把 `parent_session_id` 补上——
 /// 只在当前为 NULL 时写,不覆盖已有的明确血缘。

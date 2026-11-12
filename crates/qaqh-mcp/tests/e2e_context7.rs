@@ -76,8 +76,7 @@ async fn e2e_context7_real_server() {
     assert!(!tools.is_empty(), "context7 must expose at least one tool");
 
     // 投影批次：聚合工具 + e2e 工具（结构不变量，不锁上游工具名清单）。
-    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager)
-        .expect("cache populated — batch must exist");
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager);
     let names: Vec<&str> = batch.iter().map(|(name, _)| name.as_str()).collect();
     assert_eq!(names[0], "mcp", "聚合工具钉底");
     assert!(

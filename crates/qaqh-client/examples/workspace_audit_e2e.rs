@@ -109,6 +109,7 @@ fn main() {
                     as_system: false,
                     inter_agent: None,
                     subagent_terminal: None,
+                    widget_context: None,
                 }),
                 CommandOptions {
                     command_id: Some(command_id.clone()),

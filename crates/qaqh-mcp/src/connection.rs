@@ -169,9 +169,9 @@ pub struct ServerConnection {
     settings: LifecycleSettings,
     /// manager 共享的 `shutting_down` 闸。
     gate: Arc<AtomicBool>,
-    /// manager 共享的“工具缓存已变脏”标记（连接填充/清空缓存时置位；
-    /// [`crate::bridge::take_projection_batch`] 消费后复位）。
-    dirty: Arc<AtomicBool>,
+    /// manager 共享的投影批次代数（连接填充/清空缓存时 bump；会话 loop 比对
+    /// [`crate::bridge::projection_generation`] 变化才取批次）。
+    projection_gen: Arc<AtomicU64>,
     /// 本代连接 spawn 的进程组 id（adapter 登记；组杀兜底清扫用，Unix）。
     pgid: StdMutex<Option<u32>>,
     state: StdMutex<ConnState>,
@@ -189,7 +189,7 @@ impl ServerConnection {
         idle_secs: u64,
         settings: LifecycleSettings,
         gate: Arc<AtomicBool>,
-        dirty: Arc<AtomicBool>,
+        projection_gen: Arc<AtomicU64>,
         connect_factory: ConnectFactory,
     ) -> Self {
         Self {
@@ -198,7 +198,7 @@ impl ServerConnection {
             idle_secs: AtomicU64::new(idle_secs),
             settings,
             gate,
-            dirty,
+            projection_gen,
             pgid: StdMutex::new(None),
             state: StdMutex::new(ConnState {
                 service: None,
@@ -388,7 +388,7 @@ impl ServerConnection {
                     let mut state = self.lock_state();
                     state.tools = Some(Arc::new(tools));
                 }
-                self.dirty.store(true, Ordering::Relaxed);
+                self.projection_gen.fetch_add(1, Ordering::AcqRel);
                 log::info!("[mcp] server {} cached {count} tool(s)", self.name);
             }
             Ok(Err(error)) => {
@@ -566,7 +566,7 @@ impl ServerConnection {
         self.ensure_watchdog();
     }
 
-    /// 当前工具缓存（只读快照；投影层 [`crate::bridge::take_projection_batch`] 消费）。
+    /// 当前工具缓存（只读快照；投影层 [`crate::bridge::projection_batch`] 消费）。
     pub fn cached_tools(&self) -> Option<Arc<Vec<rmcp::model::Tool>>> {
         self.lock_state().tools.clone()
     }
@@ -962,7 +962,7 @@ impl ServerConnection {
         };
         drop(service);
         if had_tools {
-            self.dirty.store(true, Ordering::Relaxed);
+            self.projection_gen.fetch_add(1, Ordering::AcqRel);
         }
         log::warn!("[mcp] server {} crashed: {detail}", self.name);
         // crash 后 server 的后代（若 server 自己 spawn 过子进程）成孤儿风险

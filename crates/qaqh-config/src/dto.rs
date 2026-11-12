@@ -26,7 +26,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
         font_family: cfg.font_family.clone(),
         theme: cfg.theme.clone(),
         notifications_enabled: cfg.notifications_enabled.unwrap_or(true),
-        compliance_enabled: cfg.compliance_enabled,
         subagent: SubagentDto {
             timeout_secs: cfg.subagent.timeout_secs,
             default_tools: cfg.subagent.default_tools.clone(),
@@ -97,9 +96,6 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     patch.validate()?;
     if let Some(v) = patch.auto_compact_threshold {
         cfg.auto_compact_threshold = v;
-    }
-    if let Some(v) = patch.compliance_enabled {
-        cfg.compliance_enabled = v;
     }
     if let Some(v) = patch.permission_level {
         // validate() 已保证 1..=4（BUG-2026-09-13-15；四档制含沙箱档）。

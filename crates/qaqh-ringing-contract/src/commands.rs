@@ -64,3 +64,25 @@ pub struct SubagentTerminalNotification {
     pub parent_call_id: String,
     pub terminal: SubagentTerminalKind,
 }
+
+/// widget-directive §4：fragment 的身份引用（marker payload 的 path/title 原样）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct WidgetRef {
+    /// daemon 侧绝对路径（`.qaqh/widgets/<session>/…html`）。
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+/// widget-directive §4：widget→模型的结构化状态回流。user-send 一等字段，
+/// daemon 把它作为回合内存在记忆 reminder 注入 provider 上下文——不落时间线、
+/// 不拼用户可见文本；缺失/版本不符只少上下文，不失败回合。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct WidgetContext {
+    pub session_id: String,
+    pub widget: WidgetRef,
+    /// 用户确认 follow-up 时 iframe 的**当下最新** modelContent 快照（任意 JSON）。
+    pub model_content: serde_json::Value,
+}

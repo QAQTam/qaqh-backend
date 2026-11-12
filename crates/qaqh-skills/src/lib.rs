@@ -616,7 +616,7 @@ mod tests {
         write_skill(&temp.path().join(".agents/skills"), "alpha", "from agents", "AGENTS");
         write_skill(&temp.path().join(".agents/skills"), "beta", "only beta", "BETA");
         let catalog = discover_with_home(temp.path(), Some(temp.path()));
-        assert_eq!(catalog.skills.len(), 11, "2 disk skills + 9 bundled");
+        assert_eq!(catalog.skills.len(), 12, "2 disk skills + 10 bundled");
         let alpha = catalog.skills.iter().find(|s| s.name == "alpha").unwrap();
         assert!(alpha.path.to_string_lossy().contains(".qaqh"));
         assert!(catalog

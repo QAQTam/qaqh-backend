@@ -73,6 +73,10 @@ pub struct ProviderOutcome {
     pub message: Option<Message>,
     pub opaque_items: Vec<serde_json::Value>,
     pub usage: Option<UsageInfo>,
+    /// 内核实测产出区间(毫秒):本次流式响应第一个产出碎片(reasoning/正文/
+    /// 工具参数)到最后一个碎片的跨度。随 `TimelineEntry::AssistantBlock` 下发,
+    /// 是前端吐字速率结算的权威分母;无产出为 `None`。
+    pub generated_ms: Option<u64>,
     pub stop_reason: Option<String>,
     /// Terminal classification; only a complete finish may start tools or
     /// the next round.
@@ -210,6 +214,8 @@ fn stream_once(
     let mut partial_text = String::new();
     let mut partial_reasoning = String::new();
     let mut last_emit: Option<Instant> = None;
+    let mut first_output_at: Option<Instant> = None;
+    let mut last_output_at: Option<Instant> = None;
     let mut tool_args: HashMap<usize, ToolInputStream> = HashMap::new();
     let result = qaqh_gate::chat_stream(
         &spec.provider,
@@ -219,7 +225,21 @@ fn stream_once(
         spec.effort,
         Some(user_id),
         Some(flag),
-        &mut |event| match event {
+        &mut |event| {
+            // 产出锚点按**到达 gate** 的碎片计,不等节流发布:节流管展示频率,
+            // 管不着模型实际产出到哪儿了。`return` 早退的碎片同样是产出证据。
+            if matches!(
+                event,
+                qaqh_gate::StreamEvent::ContentDelta(_)
+                    | qaqh_gate::StreamEvent::ReasoningDelta { .. }
+                    | qaqh_gate::StreamEvent::ToolCallProgress { .. }
+                    | qaqh_gate::StreamEvent::NativeToolProgress { .. }
+            ) {
+                let at = Instant::now();
+                first_output_at.get_or_insert(at);
+                last_output_at = Some(at);
+            }
+            match event {
             qaqh_gate::StreamEvent::Done {
                 raw_message,
                 usage,
@@ -276,8 +296,10 @@ fn stream_once(
                 }
                 // 每一片都喂：节流只管发布频率，管不着计数。
                 entry.push_fragment(&args_chunk);
+                // 参数一吐完就抢发一帧（不等下一个窗）：这是"第一个工具到手即可
+                // 解析"的那一帧，仍然只是展示旁路。
                 if let Some(display) = &display
-                    && due(&mut last_emit)
+                    && (entry.mark_complete() || due(&mut last_emit))
                 {
                     publish_tool_input(display, entry);
                 }
@@ -304,20 +326,25 @@ fn stream_once(
                 }
                 entry.absorb_snapshot(&input_so_far);
                 if let Some(display) = &display
-                    && due(&mut last_emit)
+                    && (entry.mark_complete() || due(&mut last_emit))
                 {
                     publish_tool_input(display, entry);
                 }
             }
             qaqh_gate::StreamEvent::WebSearchStatus(_)
             | qaqh_gate::StreamEvent::Retrying { .. } => {}
+            }
         },
     );
+    // 无论这条出口走向哪里，先补欠的尾巴：失败/重复 Done 的回合同样有过在飞的
+    // 参数，渲染层要的是「模型最后吐到哪」。
+    flush_tool_input_tails(&display, &mut tool_args);
     if let Err(error) = result {
         let detail = stream_error.unwrap_or_else(|| error.to_string());
         let mut outcome = failed_after_start(&detail);
         outcome.partial_text = (!partial_text.is_empty()).then_some(partial_text);
         outcome.partial_reasoning = (!partial_reasoning.is_empty()).then_some(partial_reasoning);
+        outcome.generated_ms = output_window_ms(first_output_at, last_output_at);
         return outcome;
     }
     if duplicate_done {
@@ -350,6 +377,7 @@ fn stream_once(
         message: Some(message),
         opaque_items,
         usage: done_usage.or(stream_usage),
+        generated_ms: output_window_ms(first_output_at, last_output_at),
         stop_reason,
         finish: Some(finish),
         incomplete_reason,
@@ -425,18 +453,51 @@ fn publish_block(display: &ProgressStream, kind: ProgressBlockKind, text: &str) 
     });
 }
 
-fn publish_tool_input(display: &ProgressStream, entry: &ToolInputStream) {
+fn publish_tool_input(display: &ProgressStream, entry: &mut ToolInputStream) {
     // 没建估算器 = 这个工具没有行数概念：出 null，让客户端画「正在生成参数」
     // 而不是替它编一个 +0 −0。
     let estimate = entry.estimate_lines();
+    let args = entry.text.clone();
+    let target_files = entry.target_files();
     display.sink.tool_input(ToolInputProgress {
         turn_id: &display.blocks.turn_id,
         call_id: &entry.call_id,
         tool_name: &entry.name,
-        args: &entry.text,
+        args: &args,
         lines_added: estimate.map(|estimate| estimate.lines_added),
         lines_removed: estimate.map(|estimate| estimate.lines_removed),
+        target_files,
+        args_complete: entry.completed,
     });
+    entry.published_len = args.len();
+}
+
+/// 补齐被节流窗吞掉的参数尾巴。
+///
+/// [`PROGRESS_INTERVAL`] 的文档早就承诺「Final values are always published
+/// regardless of this interval」，但工具参数这条通道此前只在片段到达时按窗发，
+/// 模型吐完最后一个调用的收尾几十字符通常不足一个窗 —— 那一帧就永久丢了。
+/// 渲染层现在直接从累计前缀解目标文件（前端
+/// `tools/presentation.ts` 的 `scanArgsPrefix` / `scanPatchHeaders`），欠这一帧
+/// 就等于「将改哪个文件」停在半截上，而 `tool_declared` 要等整条响应结算才发。
+/// 按 index 升序补，回放顺序与声明顺序一致。
+fn flush_tool_input_tails(
+    display: &Option<ProgressStream>,
+    tool_args: &mut HashMap<usize, ToolInputStream>,
+) {
+    let Some(display) = display else {
+        return;
+    };
+    let mut indices = tool_args.keys().copied().collect::<Vec<_>>();
+    indices.sort_unstable();
+    for index in indices {
+        let Some(entry) = tool_args.get_mut(&index) else {
+            continue;
+        };
+        if entry.text.len() > entry.published_len {
+            publish_tool_input(display, entry);
+        }
+    }
 }
 
 /// 一路在飞的工具参数流：累计原文 + 行差估算器。
@@ -450,6 +511,11 @@ struct ToolInputStream {
     /// 参数来自哪条 provider 面：JSON 参数面，还是 codex 原生 freeform 文本面。
     native: bool,
     estimator: Option<Estimator>,
+    /// 最后一次发布的累计长度。[`due()`] 的合并窗必然吞掉尾巴，终帧补齐就靠它
+    /// 判断「还欠不欠一帧」——不欠就不多发一帧。
+    published_len: usize,
+    /// 参数是否已经吐完并已抢发过一次：只抢发一次，后续片段回到节流窗。
+    completed: bool,
 }
 
 impl ToolInputStream {
@@ -460,6 +526,8 @@ impl ToolInputStream {
             text: String::new(),
             native,
             estimator: None,
+            published_len: 0,
+            completed: false,
         }
     }
 
@@ -472,6 +540,10 @@ impl ToolInputStream {
 
     fn reseed(&mut self) {
         self.estimator = Estimator::new(&self.name, self.native);
+        // 正文换代（改名或 provider 重发不同快照）：长度与"已吐完"都要作废，
+        // 否则新正文的补齐会被旧值判成「不欠帧」。
+        self.published_len = 0;
+        self.completed = false;
         if let Some(estimator) = &mut self.estimator {
             estimator.push_fragment(&self.text);
         }
@@ -500,11 +572,44 @@ impl ToolInputStream {
         }
     }
 
+    /// 参数是否**刚刚**吐完。两条 provider 面的闭合条件本来就不是一回事，
+    /// 不能都拿「末字符是 `}`」当准：
+    /// - JSON 参数面：末字符是 `}` 且整段 parse 得动。先做 O(1) 末字符试探再
+    ///   parse，绝不在每个片段上重 parse 一遍——一个 50KB 补丁能吐几百片。
+    /// - codex 原生 freeform 面：正文不是 JSON，`*** End Patch` 行就是终态。
+    ///
+    /// 返回 `true` = 这一帧要抢在节流窗外立刻发（此后回到节流窗，见
+    /// [`Self::completed`]）。**永不参与执行与授权**：执行仍等
+    /// [`crate::session_loop`] 从终帧 `Done` 取完整参数，这里只提前渲染。
+    fn mark_complete(&mut self) -> bool {
+        if self.completed {
+            return false;
+        }
+        let closed = if self.native {
+            self.text.contains("*** End Patch")
+        } else {
+            self.text.ends_with('}')
+                && serde_json::from_str::<serde_json::Value>(&self.text).is_ok()
+        };
+        self.completed = closed;
+        closed
+    }
+
     /// 当前累计估算。`None` = 该工具没有行数概念（或估算器还没建起来）。
     fn estimate_lines(&self) -> Option<qaqh_workspace::arg_estimate::ArgLineEstimate> {
         self.estimator
             .as_ref()
             .map(|estimator| estimator.estimate())
+    }
+
+    /// 内核认出的目标文件（见 [`qaqh_workspace::arg_estimate::ArgLineEstimator::target_files`]：
+    /// 只有补丁类调用出得来）。没有估算器 = 空表，不是「不改文件」。
+    /// 在发布时刻读一次 hunk 表，代价与节流窗同频，不随片段增长。
+    fn target_files(&self) -> Vec<String> {
+        self.estimator
+            .as_ref()
+            .map(|estimator| estimator.target_files())
+            .unwrap_or_default()
     }
 }
 
@@ -538,6 +643,13 @@ impl Estimator {
         match self {
             Self::Json(estimator) => estimator.estimate(),
             Self::RawPatch(estimator) => estimator.estimate(),
+        }
+    }
+
+    fn target_files(&self) -> Vec<String> {
+        match self {
+            Self::Json(estimator) => estimator.target_files(),
+            Self::RawPatch(estimator) => estimator.target_files(),
         }
     }
 }
@@ -598,6 +710,17 @@ fn classify(stop_reason: Option<&str>, message: &Message) -> (ProviderFinish, Op
     }
 }
 
+/// 首末产出碎片的跨度(毫秒)。从未产出 → `None`;产出全在同一瞬间
+/// (端点单 chunk 冲刷)→ `0`,消费方据此如实判定"窗口测不出",不得伪造分母。
+fn output_window_ms(first: Option<Instant>, last: Option<Instant>) -> Option<u64> {
+    match (first, last) {
+        (Some(first), Some(last)) => {
+            Some(last.saturating_duration_since(first).as_millis() as u64)
+        }
+        _ => None,
+    }
+}
+
 /// Nothing was submitted to the provider under this identity.
 fn not_started(message: &str) -> ProviderOutcome {
     ProviderOutcome {
@@ -605,6 +728,7 @@ fn not_started(message: &str) -> ProviderOutcome {
         message: None,
         opaque_items: Vec::new(),
         usage: None,
+        generated_ms: None,
         stop_reason: None,
         finish: None,
         incomplete_reason: None,
@@ -623,6 +747,7 @@ fn failed_after_start(message: &str) -> ProviderOutcome {
         message: None,
         opaque_items: Vec::new(),
         usage: None,
+        generated_ms: None,
         stop_reason: None,
         finish: None,
         incomplete_reason: None,
@@ -682,5 +807,30 @@ mod tests {
         json.rebind("read".to_string());
         json.push_fragment(r#"{"path":"src/a.rs"}"#);
         assert!(json.estimate_lines().is_none());
+    }
+
+    /// 「参数吐完」的两条判定各自成立，且同一份正文只抢发一次；provider 换体重发
+    /// 后必须重新认定，否则新正文的补齐会被旧标记吞掉。
+    #[test]
+    fn completed_arguments_fire_once_per_body_generation() {
+        let mut json = ToolInputStream::new("call_4".to_string(), false);
+        json.rebind("edit".to_string());
+        json.push_fragment(r#"{"file_path":"a.rs","old_string":"x""#);
+        assert!(!json.mark_complete(), "半截 JSON 不算吐完");
+        json.push_fragment(r#", "new_string":"y"}"#);
+        assert!(json.mark_complete(), "闭合并 parse 得动的那一帧必须抢发");
+        assert!(!json.mark_complete(), "同一正文只抢发一次，之后回到节流窗");
+
+        let mut native = ToolInputStream::new("call_5".to_string(), true);
+        native.rebind("apply_patch".to_string());
+        native.absorb_snapshot("*** Begin Patch\n*** Add File: a.txt\n+one");
+        assert!(!native.mark_complete(), "补丁没写到 End Patch 不算吐完");
+        native.absorb_snapshot("*** Begin Patch\n*** Add File: a.txt\n+one\n*** End Patch\n");
+        assert!(native.mark_complete(), "原生 freeform 面的终态是 End Patch 行");
+        native.absorb_snapshot("*** Begin Patch\n*** Update File: b.txt\n@@\n-x\n+Y\n");
+        assert!(
+            !native.mark_complete(),
+            "换体重发后旧标记作废，未闭合的正文不得抢发"
+        );
     }
 }

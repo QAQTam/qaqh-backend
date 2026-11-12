@@ -8,7 +8,7 @@
 //!   AgentRegistry 同名字段语义）→ 逐连接优雅关闭；`Drop` 为兜底网络。
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use qaqh_config::secrets::SecretStore;
@@ -35,8 +35,11 @@ pub struct McpManager {
     cfg: StdMutex<McpConfig>,
     settings: LifecycleSettings,
     gate: Arc<AtomicBool>,
-    /// 任一连接的工具缓存变化时置位；`take_projection_batch` 消费后复位。
-    dirty: Arc<AtomicBool>,
+    /// 投影批次代数：工具缓存/配置每次变化 +1。各会话 loop 记录自己最后消费
+    /// 的代数、变化才取批次（[`crate::bridge::projection_batch`] 无副作用读，
+    /// 多会话之间互不抢批次——旧的单一 dirty 旗标是先到先得，后到的会话永远
+    /// 拿不到投影，属遗留竞态）。
+    projection_gen: Arc<AtomicU64>,
     conns: StdMutex<BTreeMap<String, Arc<ServerConnection>>>,
     /// None → 生产工厂（adapter stdio）；测试注入 in-memory。
     factory_override: Option<ConnectFactory>,
@@ -83,7 +86,9 @@ impl McpManager {
             cfg: StdMutex::new(cfg),
             settings,
             gate: Arc::new(AtomicBool::new(false)),
-            dirty: Arc::new(AtomicBool::new(false)),
+            // 构造即第 1 代：装配/新建会话首轮必然看到批次（聚合工具 enabled
+            // 即在场），不再依赖连接置脏的先后顺序。
+            projection_gen: Arc::new(AtomicU64::new(1)),
             conns: StdMutex::new(BTreeMap::new()),
             factory_override,
             secret_store: secret_store.unwrap_or_else(SecretStore::default_location),
@@ -127,15 +132,15 @@ impl McpManager {
         self.lock_conns().values().cloned().collect()
     }
 
-    /// 取走“工具缓存已变脏”标记（投影批次消费入口；幂等：无脏返回 false）。
-    pub fn take_dirty(&self) -> bool {
-        self.dirty.swap(false, Ordering::Relaxed)
+    /// 投影批次当前代数（会话 loop 每轮比对；无副作用读）。
+    pub fn projection_generation(&self) -> u64 {
+        self.projection_gen.load(Ordering::Acquire)
     }
 
-    /// 手动置脏（PR-M2-1 测试垫片用：零 server 配置时无连接可触发置脏，
-    /// 测试需验证“空批次仍含聚合工具”）。生产路径不调用。
-    pub(crate) fn mark_dirty(&self) {
-        self.dirty.store(true, Ordering::Relaxed);
+    /// 缓存/配置变化 bump（连接层与热重载调用；测试垫片经
+    /// `bridge_for_tests::bump_projection_gen`）。
+    pub(crate) fn bump_projection_gen(&self) {
+        self.projection_gen.fetch_add(1, Ordering::AcqRel);
     }
 
     /// P2-1：热重载——新 `[mcp]` 配置并入运行时（免重启 daemon）。
@@ -196,7 +201,7 @@ impl McpManager {
         }
 
         self.set_cfg(new_cfg);
-        self.dirty.store(true, Ordering::Relaxed);
+        self.bump_projection_gen();
         report
     }
 
@@ -238,7 +243,7 @@ impl McpManager {
                     cfg_snapshot.idle_shutdown_secs,
                     self.settings.clone(),
                     Arc::clone(&self.gate),
-                    Arc::clone(&self.dirty),
+                    Arc::clone(&self.projection_gen),
                     factory,
                 ));
                 conns.insert(server.to_owned(), Arc::clone(&conn));
@@ -254,8 +259,8 @@ impl McpManager {
     /// 没有预热时存在先有鸡还是先有蛋：连接唯一触发点是工具执行（dispatch），
     /// 而工具要被调用必须先投影进工具表，投影只在连接后的批次里——全新
     /// daemon 上模型永远看不到 MCP 工具。逐 server 失败只告警不短路（部分
-    /// 可用优于全部不可用）；成功连接即缓存 tools/list 并置脏，下个回合边界
-    /// `take_projection_batch` 即可拉到批次。
+    /// 可用优于全部不可用）；成功连接即缓存 tools/list 并 bump 投影代数，
+    /// 下个回合边界会话 loop 按代数游标拉到批次（[`crate::bridge::projection_batch`]）。
     pub async fn prime_all(&self) {
         if !self.snapshot_cfg().enabled {
             return;

@@ -255,6 +255,7 @@ impl SubagentHost for QaqhService {
                     as_system: false,
                     inter_agent: Some(envelope),
                     subagent_terminal: None,
+                    widget_context: None,
                 },
             ),
         )?;

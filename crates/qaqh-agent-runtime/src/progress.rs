@@ -35,6 +35,13 @@ pub struct ToolInputProgress<'a> {
     /// number is the terminal `code_delta`, which is a real-diff measure.
     pub lines_added: Option<u32>,
     pub lines_removed: Option<u32>,
+    /// 内核认出来的目标文件（只有 `apply_patch` 出得来：它的参数里没有路径字段，
+    /// 文件只存在于补丁文法里，文法唯一事实源是补丁引擎）。空 = 内核没认出来，
+    /// 不代表这次调用不改文件——其余工具的路径在参数键上，由客户端直读 `args`。
+    pub target_files: Vec<String>,
+    /// 参数文本已吐完且形状合法（JSON 面闭合可 parse / 原生面见 `*** End Patch`）。
+    /// 只用于渲染：不授权执行，也不代替 `ToolDeclared` 的权威 `args`。
+    pub args_complete: bool,
 }
 
 /// Host-owned destination for in-flight display updates.

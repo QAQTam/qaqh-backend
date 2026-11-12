@@ -121,3 +121,18 @@ pub(crate) fn strip_ansi(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    /// 回归钉：pwsh/ConPTY 实测泄露进模型侧 tool result 的全部形态——
+    /// DEC 私有模式（?9001/?1004/?25）、SGR 彩色、光标定位、OSC 标题——
+    /// exec_session 读出口（result_from_core）与 pty_exec 共用这条净化线。
+    #[test]
+    fn strip_ansi_removes_conpty_control_frames() {
+        let leaked = "\u{1b}[?9001h\u{1b}[?1004h\u{1b}[m\u{1b}]0;C:\\pwsh.exe\u{7}\u{1b}[?25h\
+                      \u{1b}[32m\u{1b}[1mMode\u{1b}[m \u{1b}[4;1Htext\u{1b}[7mHILITE\u{1b}[0m\u{1b}[?25l\u{1b}[?9001l\u{1b}[?1004l";
+        assert_eq!(strip_ansi(leaked), "Mode textHILITE");
+    }
+}

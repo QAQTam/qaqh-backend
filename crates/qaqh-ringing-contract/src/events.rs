@@ -17,6 +17,15 @@ use crate::state::{
     TurnOutcome, TurnPhase,
 };
 
+/// `skip_serializing_if` 用的假值判定:值为 `false` 时整键缺席。
+///
+/// additive 字段在不 bump revision 的窗口期必须能「缺席即默认」,否则新客户端
+/// 对着旧 daemon 会读到凭空出现的键;与 [`SessionEvent::ToolArgumentsDelta`]
+/// 里 `lines_added` 的 `None` 口径同律。
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// 普通工具(无执行会话)实时输出流标识;无输出的工具不产生 output.delta 事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -80,6 +89,13 @@ pub enum SessionEvent {
     /// 只对写工具出数:`None` = 该工具没有行数概念(read/grep/exec…)或估算已
     /// 冻结,客户端不得用 `?? 0` 把「不知道」渲染成「零变化」。
     /// 终态一到权威值立刻接管(`ToolFinished.code_delta` 是真 diff 口径)。
+    /// `target_files` 是**内核数出来的**目标文件:只有 `apply_patch` 会填——
+    /// 它的参数里没有路径字段,文件只存在于 Codex 补丁文法里,而该文法的唯一
+    /// 事实源是补丁引擎;其余工具的目标文件就是参数键本身,客户端按 schema 直读
+    /// `args`,内核不重复发明 JSON 键名。缺席 = 内核没认出来,**不是**「不改文件」。
+    /// `args_complete` = 参数文本已经吐完且形状合法(JSON 面闭合可 parse /
+    /// 原生面见到 `*** End Patch`)。它只说明「这一帧的 `text` 就是最终参数」,
+    /// 不授权执行、不代表已声明:声明仍由 `ToolDeclared` 落库并携带权威 `args`。
     ToolArgumentsDelta {
         call_id: ToolCallId,
         turn_id: TurnId,
@@ -89,6 +105,10 @@ pub enum SessionEvent {
         lines_added: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         lines_removed: Option<u32>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        target_files: Vec<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        args_complete: bool,
     },
     /// 模型声明工具调用:declared 行已落库;`args` 是最终参数(裸 JSON 对象
     /// 或 null)。实时订阅者据此建立与 bootstrap `tools` 视图一致的工具身份。
@@ -151,6 +171,18 @@ pub enum SessionEvent {
     },
     TimelineAppended {
         entry: TimelineEntry,
+    },
+    /// 撤回(硬截断):`from_turn_id` 起(含)的整段历史已从会话事实源删除——
+    /// 不落备份、不可恢复。本帧是**追加**的一条截断事实,已发出的帧不回收
+    /// (`SessionEventFrame.seq` 单调与 bootstrap 水位线的口径不得单方改动);
+    /// 客户端据此把 `removed_turn_ids` 的回合从本地视图整枝移除(输入、正文、
+    /// 工具卡片、交互一并消失),`removed_turn_ids` 是内核算出的权威集合,客户端
+    /// 不得自行按顺序推断。断线重连的客户端无需处理本帧:bootstrap 快照里
+    /// 本就没有被删的回合。只回历史,**不回副作用**——文件改动、执行会话进程、
+    /// 子代理、已通过的审批一律不动(journal 保留原样,需要时按它另行回滚)。
+    TimelineTruncated {
+        from_turn_id: TurnId,
+        removed_turn_ids: Vec<TurnId>,
     },
     /// 模型文本流式片段;同一 block_id 的后续事件替换已展示内容。
     /// `block_kind` 区分 reasoning 与 answer,与 sealed AssistantBlock 同词表。

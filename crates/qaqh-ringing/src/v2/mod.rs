@@ -5,7 +5,8 @@
 mod types;
 
 pub use types::{
-    COMMAND_CONTRACT_REVISION, SESSION_CONTRACT_REVISION, CommandPrecondition, CommandTarget,
+    COMMAND_CONTRACT_REVISION, SESSION_CONTRACT_REVISION, CommandPrecondition, CommandRejection,
+    CommandTarget,
     ProviderUpsertDto, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
     RingingV2Capabilities, RingingV2ClientKind, RingingV2ClientView, RingingV2CommandAck,
     RingingV2CommandEnvelope, RingingV2CommandResult,

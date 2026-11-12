@@ -101,6 +101,94 @@
       `cs_backend` 声明层将其归一为单变体 Union（否则 C# 投影报
       "string literal outside discriminator position"）。skills 服务端点
       （`skills.catalog`/`skills.list_tools`）与其参数类型不受影响。
+      **数据层补齐（同日）**：类型裁剪后旧库 `tool_calls.effects_json` 存量仍带
+      legacy kind，读侧 fail-closed（ADR-0004 §决策 4）把含 legacy 行的历史会话
+      永久毒化为 bootstrap/approvals 500（`DbError::Corrupt` → `state_unavailable`）。
+      落 schema **7→8 一次性迁移**：精确剔除 `kind` 为 `skill_activated`/`skill_released`
+      的数组元素，清空落 NULL（与写侧形态对齐）；非 JSON 数组的行原样不动——
+      那不是裁剪的债，仍归读侧如实报。反证测试 `#[ignore]` 于生产库副本跑红→绿。
+- [ ] **流式参数预览字段**（2026-11-12，A+B 工具卡片时机）：
+      `SessionEvent::ToolArgumentsDelta` 新增 `target_files: Vec<String>` 与
+      `args_complete: bool`，两者都是 `#[serde(default, skip_serializing_if = …)]`
+      ——**additive**：旧客户端读不到就忽略，新客户端把缺席当默认（与同变体里
+      `lines_added: Option<_>` 的「缺席 ≠ 零」口径同律）。
+      - `target_files` 只有 `apply_patch` 会填：它的参数里没有路径字段，文件名只存在于
+        Codex 补丁文法里，而该文法的唯一事实源是 `StreamingPatchParser`（`stats().files`）。
+        其余工具的路径就是参数键本身，客户端按 schema 直读 `args`，内核不再发明 JSON 键名。
+      - `args_complete` = 参数文本闭合可 parse（JSON 面）或已见 `*** End Patch`（原生面）。
+        只说明「这一帧的 `text` 就是最终参数」，不授权执行，也不代替 `ToolDeclared` 的权威 `args`。
+      发射侧连带：`PROGRESS_INTERVAL` 的文档早就承诺 "Final values are always published
+      regardless of this interval"，但工具参数通道此前只在片段到达时按 40ms 窗发，
+      尾帧被吞（`provider_job::stream_once` 全出口现已补齐），且闭合那一帧改为抢发。
+      导出物影响：`types/qaqh/SessionEvent.ts` 与 `cs/SessionEvent.cs` 字节变 ⇒
+      **wire 实变（产物字段新增）**，金标准留给切线时由机器重切（规则 16），main 上
+      `docs/api-surface/v3.0` 一个字节不动。
+      口径选择：**不 bump** `SESSION_CONTRACT_REVISION`——沿用本 ADR §背景 4 对纯增量的
+      判断（旧客户端只是看不见新键）；"`ringing-session-2` 从此对应两把锁"的代价仍归
+      §待决 1 统一裁决，不在本条偷跑 bump。
+      前端连带：`webui` reducer 把两字段落到 `step.targetFiles/argsComplete`，
+      `toolPaths` 优先采用内核结论，并**删除**客户端自建的补丁头正则——同一份文法
+      不在两端各养一遍（宪法 4/6）。
+- [ ] **消息撤回（截断）**（2026-11-12，`conversation.truncate`）：新增命令
+      `conversation.truncate { turn_id }` 与事件 `SessionEvent::TimelineTruncated {
+      from_turn_id, removed_turn_ids }` ⇒ **wire 实变（命令枚举新增变体 + 事件新增变体）**，
+      触及 `RingingCommand.ts/.cs`、`SessionEvent.ts/.cs`。语义与取舍：
+      - **档位 = 尾部截断（A+B）**，语义是「从该回合（**含自身**）起的整段历史删除」，
+        不是「撤回单条中间消息」。中间撤回（C）会静默腐化历史：`assemble_context` 的
+        `ToolResult` 分支取不到 tool 时走 `unwrap_or(false)`，删 `tool_calls` 留
+        `ToolResult` 不会 400，而是把那次调用**改写成历史上失败**。要做 C，前置是给
+        tool_use/tool_result 配对加硬校验（孤儿当场报错），那是独立一条 ADR，不在本轮。
+      - **硬删除、不落备份**（用户口径「丢失即可」）：`store::truncate_from_turn` 在同一
+        事务里删 `turns`/`blocks`/`tool_calls`/`interactions`/`exec_sessions`。块按会话
+        `ord` 截断而非逐条匹配 `turn_id`，否则回合归属为 NULL 的压缩摘要会留下
+        「历史已删、摘要还在」的半截事实。
+      - **只回历史，不回副作用**：文件改动、执行会话进程、子代理、已通过的审批一律不动；
+        `journal` 原样保留（要回滚文件另按它走，本轮不做）。
+      - **不允许冲突撤回**：存在 `status='active'` 回合时当场拒（`DbError::TruncateConflict`），
+        既不写也不发事件。判据落在写点（owner 泵串行化了它与 `start_turn`），调用方不
+        重复设第二道判据。重启遗留的 active 行由 restart recovery 统一置 `interrupted`，
+        不会永久锁死撤回口。
+      - **事件流自身仍 append-only**：撤回是**追加**一条截断事实，不回收已发的帧——
+        `SessionEventFrame.seq`  epoch 内 0 基单调、bootstrap `state.seq` 是水位线、客户端
+        靠「跳过 `< state.seq`」自愈（`events.rs` 头注明写不得单方改动）。断线重连的客户端
+        无需处理该帧：快照里本就没有被删的回合。
+      - 路由零新增：命令走既有 `POST /ringing/v2/commands`，两张路由表（规则 16）不动。
+      - **拒绝码进命令面词汇表**（同日 B 决定）：`qaqh_ringing::CommandRejection`
+        （`turn_active` / `turn_not_found`）+ `QaqhError::Rejected { code, message }`
+        原型；daemon 侧 `Route::Engine` 收口把它渲染成 409 / 404 + 该码，其余仍走
+        `dispatch_failed`。落地的连带修复：`RuntimeService::send_ringing_command`
+        原本 `-> Result<(), String>`（在边界上 `to_string` 掉变体，正是 daemon
+        `commands.rs` §"Conflict 不得伪装成 502" 那条教训的同款缺陷），已改回
+        `QaqhResult<()>`。码字符串由 `qaqh-ringing` 单测钉住
+        （`truncate_rejection_codes_are_stable`）。先例：`46e6dc76 [contract-refreeze]`
+        「approvals 错误码进契约」——错误码扩面本就按 refreeze 记账。
+        前端连带：`CommandRejectedError`（`electron.ts`）把 `ack.code` 提成可分型字段，
+        `message` 拼装逐字未变，故现有只读 `error.message` 的 catch 行为不变；
+        `TurnView` 按码分三路文案。
+      - **已 bump `COMMAND_CONTRACT_REVISION` → `ringing-commands-8`**（2026-11-12，
+        仓库所有者口径：既然会话库 `SCHEMA_VERSION` 已到 8，命令面这代也升 8）。
+        按该常量自己的头注「字段和语义变更需显式升级」，新增命令 + 新增拒绝码就是
+        升级触发条件。**代价如实登记**：
+        - open 握手对仍报 `-7` 的客户端返回 428 `unsupported_contract_revision`
+          （`axum_impl/v2.rs:56`）；`contract_revision` 为 `-7` 的信封在
+          `RingingV2CommandEnvelope::validate()`（`types.rs:141`）当场拒。即**未重编的
+          旧客户端一律拒**，不做半兼容——这与 spec §11 的既有闸门语义一致。
+        - 与 `ADR-0001` §「`ringing-commands-7` 在整个 LTS 周期保持原值」和
+          `docs/lts-v3.0-maintenance.md` §「保持原值不动」**正面冲突**。本条是后发的
+          决策记录，两处原文按「ADR 不可变」不改写；维护手册那句在 v3.0 线上仍成立，
+          冲突由 §待决 2「v3.1 先不切」吸收：main 上带着 `-8`，`LTS-v3.0` 若要合入
+          这个提交必须先决定要不要破它自己的锁（超集不变量在此处不再免费）。
+        - 冻结金标准有 **5 个产物的值**由本常量机器生成（`constants.ts`、
+          `cs/ContractConstants.cs`、`fixtures/{open-request,open-response,command-attach}.json`），
+          本轮一个字节未手改；`check --against docs/api-surface/v3.0` 的产物差异表
+          因此在原有「文件集 596 vs 599」之外新增这 5 项**值差异**，留给切线时
+          exporter + `--rebaseline` 机器重切（规则 16）。
+        - `SESSION_CONTRACT_REVISION` 仍 `ringing-session-2`（本轮只升命令目录代际；
+          事件面那两把锁的代价继续挂 §待决 1）。
+      - 前端连带：`reducer.removeTurns` 按后端给出的 `removed_turn_ids` 整枝移除
+        `turns`/`slots`/`waits`/`interactionIds`/`execSessions`，`totalTurns` 用后端权威条数
+        递减（未加载的回合也在删除之列，本地遍历数不出来）；撤回按钮只在非运行中的回合
+        出现，本地**不做乐观删除**——删除只有一个来源，即事件。
 
 ## 被否选项
 

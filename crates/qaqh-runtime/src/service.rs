@@ -183,12 +183,13 @@ impl QaqhService {
         &self,
         session_id: &str,
         env: &qaqh_ringing::RingingWorkerCommandEnvelope,
-    ) -> Result<(), String> {
+    ) -> QaqhResult<()> {
+        // 保留 QaqhError 原型:daemon 要按 `CommandRejection` 出稳定码,在这里
+        // `to_string` 掉变体等于把「先停止再撤」和「历史已变」压成同一条文案。
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .send_ringing(session_id, env)
-            .map_err(|error| error.to_string())
     }
 
     /// 关闭会话（Ringing `SessionClose` 命令语义，契约 §2）：
@@ -587,8 +588,7 @@ impl QaqhService {
     /// 构造 Ringing worker 命令信封并转发给 agent（legacy Ui2Agent 帧已拆除）。
     fn send_ringing_cmd(&self, session_id: String, command: RingingCommand) -> QaqhResult<Value> {
         let env = RingingWorkerCommandEnvelope::new(session_id.clone(), command_id(), command);
-        self.send_ringing_command(&session_id, &env)
-            .map_err(QaqhError::message)?;
+        self.send_ringing_command(&session_id, &env)?;
         Ok(Value::Null)
     }
 

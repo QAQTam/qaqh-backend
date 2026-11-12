@@ -369,18 +369,15 @@ async fn aggregate_tool_pinned_in_batch_head() {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager)
-        .expect("cache populated — batch must exist");
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager);
     assert_eq!(batch[0].0, "mcp", "聚合工具必须钉在批次头部（PR-M2-1）");
     assert_eq!(batch[0].1.category, qaqh_workspace::ToolCategory::Read);
     assert_eq!(batch[0].1.def.function.name, "mcp");
 
-    // 批次消费后置脏复位；零 server 配置的新 manager 首次置脏（prime/连接）
-    // 时批次也含聚合工具。
+    // 零 server 配置的新 manager 也恒定产出聚合工具（enabled 即在场，
+    // 代数门控在消费方游标，构建本身无副作用）。
     let empty = make_manager_named(None);
-    qaqh_mcp::bridge_for_tests::mark_dirty(&empty);
-    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&empty)
-        .expect("dirty set — batch must exist even with zero servers");
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&empty);
     assert_eq!(
         batch
             .iter()
@@ -396,8 +393,7 @@ async fn aggregate_description_carries_configured_servers() {
     // 替代「把资源清单注入历史」：模型从 tools 数组就能知道有哪些 server，
     // 再按需调 list_resources。description 随 tools_hash 变化，不进历史。
     let empty = make_manager_named(None);
-    qaqh_mcp::bridge_for_tests::mark_dirty(&empty);
-    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&empty).expect("batch");
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&empty);
     let description = &batch[0].1.def.function.description;
     assert!(
         description.contains("No MCP servers are configured"),
@@ -409,8 +405,7 @@ async fn aggregate_description_carries_configured_servers() {
     );
 
     let manager = make_manager_multi(vec!["alpha".to_owned(), "beta".to_owned()]);
-    qaqh_mcp::bridge_for_tests::mark_dirty(&manager);
-    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager).expect("batch");
+    let batch = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager);
     let description = &batch[0].1.def.function.description;
     assert!(description.contains("2 MCP server(s)"), "{description}");
     assert!(

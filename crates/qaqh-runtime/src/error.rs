@@ -39,6 +39,16 @@ pub enum QaqhError {
     #[error("{message}")]
     Conflict { message: String },
 
+    /// 命令受理前的领域拒绝，**自带协议词汇表里的稳定码**
+    /// （`qaqh_ringing::CommandRejection`）。与 `Conflict`/`NotFound` 的分工：那两个
+    /// 只说 HTTP 语义档、码由传输层定；这一条的码属于命令面，调用方（daemon / CLI /
+    /// FFI）拿到的都是同一原型，不再靠 `to_string` 把结构压成文案让客户端猜。
+    #[error("{}: {message}", .code.code())]
+    Rejected {
+        code: qaqh_ringing::CommandRejection,
+        message: String,
+    },
+
     /// 带上下文的失败：`{context}: {message}`（例如 `session.create: allocate session failed: …`）。
     #[error("{context}: {message}")]
     Context {
@@ -77,6 +87,14 @@ impl QaqhError {
     /// 目标不存在。
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::NotFound {
+            message: message.into(),
+        }
+    }
+
+    /// 领域拒绝 + 命令面稳定码（客户端按码分支）。
+    pub fn rejected(code: qaqh_ringing::CommandRejection, message: impl Into<String>) -> Self {
+        Self::Rejected {
+            code,
             message: message.into(),
         }
     }

@@ -149,6 +149,13 @@ pub enum TimelineEntry {
         content: ContentValue,
         model: String,
         usage: Option<UsageInfo>,
+        /// 内核实测的本次尝试产出区间(毫秒):本次流式响应从第一个产出碎片
+        /// (reasoning/正文/工具参数)到最后一个碎片的跨度。additive:旧行与旧
+        /// daemon 缺席即 `None`。前端结算吐字速率以此**为准分母**(分子就是
+        /// `usage.completion_tokens`,同一次请求);缺席时才退回客户端到货时间
+        /// 估算——到货时间会被代理缓冲/批量冲刷压成假高速,不是产出时间。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generated_ms: Option<u64>,
         /// Provider 专属续传状态(Responses API encrypted reasoning 等),
         /// 下一轮原样回传;客户端不解读。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

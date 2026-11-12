@@ -35,7 +35,6 @@ pub struct ConfigDto {
     /// 语义缺省（开）由**产出侧**决定：`qaqh-config/src/dto.rs::to_dto` 里
     /// `unwrap_or(true)`。读侧不再兜底——见 `dto_rejects_a_partial_payload`。
     pub notifications_enabled: bool,
-    pub compliance_enabled: bool,
     pub subagent: SubagentDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
     pub mcp: McpDto,
@@ -185,8 +184,6 @@ pub struct ConfigPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     /// 值域 `[0,1]`；`0` = 关闭自动压缩。
     pub auto_compact_threshold: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compliance_enabled: Option<bool>,
     // 客户端本地偏好（theme / lang / fontFamily / notificationsEnabled）刻意
     // **不出现在写模型里**：它们不是 daemon 设置，只是桌面壳的本地展示偏好，
     // 仍保留在读模型 [`ConfigDto`] 供其它客户端读取。
@@ -337,7 +334,6 @@ mod tests {
             "fontFamily": "",
             "theme": null,
             "notificationsEnabled": true,
-            "complianceEnabled": false,
             "subagent": {
                 "timeoutSecs": 120,
                 "defaultTools": ["read"]

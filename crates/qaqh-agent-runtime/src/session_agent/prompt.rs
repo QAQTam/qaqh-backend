@@ -10,7 +10,7 @@ const MAX_AGENTS_BYTES: usize = 16 * 1024;
 /// Build the deterministic system prompt for one session.
 ///
 /// Contains workspace, model, declared tools and current project instructions.
-pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
+pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -> String {
     let mut prompt = String::new();
     prompt.push_str(
         "You are QAQ, an autonomous coding agent operating on the user's workspace.\n\
@@ -18,6 +18,10 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
          what you actually observed and never claim work you did not perform.\n",
     );
     prompt.push_str(&format!("\n[Environment]\nworkspace: {}\n", cwd.display()));
+    prompt.push_str(&format!(
+        "widgets_dir: {}\n",
+        cwd.join(".qaqh").join("widgets").join(session_id).display()
+    ));
     prompt.push_str(&format!("model: {}\n", spec.provider.model));
     if let Some(tools) = &spec.tools {
         let names: Vec<&str> = tools

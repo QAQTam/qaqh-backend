@@ -1,32 +1,11 @@
-//! todo::actions — 工具与服务面入口（write/update/list）。
+//! todo::actions — **seed 参数化**的服务面直访入口。
 //!
-//! 文本范式（apply_patch 形态）收敛后：create/insert/positioned 等遗留
-//! 路径已随 ID 体系退役；`todo_write`（全量文本覆写）与 `todo_update`
-//!（按 title 单条翻转）是唯二变更通道。
+//! 文本范式（apply_patch 形态）收敛后，create/insert/positioned 等遗留路径已随
+//! ID 体系退役。模型侧的变更通道是 `typed::{todo_write_for_typed,
+//! todo_update_for_typed}`，它们从 runtime 线程上下文取当前会话；本文件只留
+//! **显式带 session_id** 的那批——HTTP service 面与 CLI 直访没有线程上下文可取。
 
 use serde_json::Value;
-
-// ═══════════════════════════════════════════════════════
-// Status parsing（服务面字符串 → typed enum）
-// ═══════════════════════════════════════════════════════
-
-// ═══════════════════════════════════════════════════════
-// 工具入口（runtime ctx → typed canonical 路径）
-// ═══════════════════════════════════════════════════════
-
-pub(crate) fn exec_todo_write(args: &Value) -> Result<String, String> {
-    let session_id = crate::runtime::context()
-        .map(|ctx| ctx.active_session)
-        .unwrap_or_default();
-    super::typed::todo_write_for_typed(&session_id, args)?.to_envelope_string()
-}
-
-pub(crate) fn exec_todo_set(args: &Value) -> Result<String, String> {
-    let session_id = crate::runtime::context()
-        .map(|ctx| ctx.active_session)
-        .unwrap_or_default();
-    todo_set_for(&session_id, args)
-}
 
 /// Seed 参数化的 todo.set 直访变体（HTTP service 面 / CLI 用；不依赖
 /// runtime 线程局部上下文）。

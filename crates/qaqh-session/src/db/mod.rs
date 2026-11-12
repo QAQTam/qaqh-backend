@@ -58,6 +58,10 @@ pub enum DbError {
     ReadLockPoisoned,
     #[error("session {session_id} not found")]
     SessionNotFound { session_id: String },
+    #[error("turn {turn_id} not found in session {session_id}")]
+    TurnNotFound { session_id: String, turn_id: String },
+    #[error("session {session_id} has an active turn {turn_id}; truncate requires an idle session")]
+    TruncateConflict { session_id: String, turn_id: String },
     #[error("corrupt business row: {0}")]
     Corrupt(String),
     #[error("workspace operation: {0}")]

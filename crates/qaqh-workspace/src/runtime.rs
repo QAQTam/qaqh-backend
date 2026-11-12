@@ -308,11 +308,12 @@ pub fn all_tools() -> Vec<ToolDef> {
     with_manager(|manager| manager.filtered_defs()).unwrap_or_default()
 }
 
-/// 回合边界 MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义）。
+/// MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义，thread-local 目标形态）。
 ///
-/// 调用方：qaqh-runtime 在 run_lap 开头拿到 qaqh-mcp 投影批次后调用——
-/// 先 `clear_dynamic` 再逐条 `register_dynamic`（碰撞拒绝的批次条目计数
-/// 跳过并告警，不阻断其余）。必须在与 [`install_actor_tool_manager`]
+/// 调用方：in-process actor（`install_actor_tool_manager` 的线程）与投影回归
+/// 测试。根会话模型面不走本函数——回合边界经
+/// `WorkspaceToolPort::apply_dynamic_projection` 直接重建会话私有 manager，
+/// 避免 thread-local 与 port 实例错位。必须在与 [`install_actor_tool_manager`]
 /// 相同的 actor 线程上调用（thread-local manager）。返回被拒绝的条目数。
 pub fn replace_dynamic_tools(batch: Vec<(String, crate::DynamicTool)>) -> usize {
     with_manager(|manager| {

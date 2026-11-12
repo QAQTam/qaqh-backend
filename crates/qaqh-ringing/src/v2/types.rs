@@ -35,8 +35,45 @@ pub enum CommandPrecondition {
     ConfigRevision { revision: u64 },
 }
 
+/// 命令**受理前**的领域拒绝类别 —— 客户端要按码分支,不能靠 `to_string` 猜文案。
+///
+/// `code()` 是 `RingingV2CommandAck.code` 词表里的稳定字符串;HTTP 状态由传输层
+/// 按变体定(这里是唯一一次映射),所以 CLI/FFI 这些没有 HTTP 的调用方拿到的
+/// 仍是同一条原型 + 同一份文案。新增变体属命令面词汇表扩面 ⇒ 契约记账(规则 15)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandRejection {
+    /// 有回合在飞:撤回不允许与活动回合冲突(先 `conversation.cancel`,再撤回)。
+    TurnActive,
+    /// 目标回合不存在(从未存在,或已被撤回过)。
+    TurnNotFound,
+}
+
+impl CommandRejection {
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::TurnActive => "turn_active",
+            Self::TurnNotFound => "turn_not_found",
+        }
+    }
+}
+
 /// 命令目录代际。字段和语义变更需显式升级。
-pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-7";
+///
+/// `-8`（2026-11-12，仓库所有者拍板）：新增 `conversation.truncate` 命令 +
+/// `turn_active` / `turn_not_found` 两个拒绝码 ⇒ 命令目录语义扩面，按本常量自己的
+/// 「显式升级」口径 bump。代价如实登记，不藏：
+/// - open 握手对仍报 `-7` 的客户端返回 428 `unsupported_contract_revision`
+///   （`axum_impl/v2.rs`），每个 `contract_revision` 为 `-7` 的信封在
+///   [`RingingV2CommandEnvelope::validate`] 当场拒——**未重编的旧客户端一律拒**，
+///   不做半兼容（spec §11 的既有口径）。
+/// - 这与 `ADR-0001` §「`ringing-commands-7` 在整个 LTS 周期保持原值」及
+///   `docs/lts-v3.0-maintenance.md` §「保持原值不动」**冲突**，冲突已记进
+///   `ADR-0010`（该两处的原文不在此改写：ADR 是不可变记录，口径变更走新 ADR）。
+/// - 冻结金标准里 5 个产物（`constants.ts`、`cs/ContractConstants.cs`、
+///   `fixtures/{open-request,open-response,command-attach}.json`）的值都由本常量
+///   机器生成（exporter `main.rs`/`cs_backend.rs`），所以**只能由机器重切**，
+///   手改金标准等于作弊（规则 16）。
+pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-8";
 
 /// 会话读模型/事件词表契约代际(spec §11)。管理事件与读模型的破坏性变化;
 /// open 与 bootstrap 均携带,客户端必须严格校验。首个显式修订 = ringing-session-2,
@@ -193,6 +230,7 @@ impl RingingCommand {
                 | Self::AgentReloadConfig
                 | Self::ConversationSendMessage(_)
                 | Self::ConversationCancel { .. }
+                | Self::ConversationTruncate { .. }
                 | Self::InteractionAskRespond { .. }
                 | Self::InteractionAskDismiss { .. }
                 | Self::DriverClaim { .. }
@@ -774,6 +812,24 @@ pub fn events_path(session_id: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 撤回的两种拒绝是**命令面词汇表**：客户端按码分支（前者引导「先停止」，
+    /// 后者引导「历史已变，重读」）。改名 = 破坏用户空间契约，所以钉在这里。
+    #[test]
+    fn truncate_rejection_codes_are_stable() {
+        assert_eq!(CommandRejection::TurnActive.code(), "turn_active");
+        assert_eq!(CommandRejection::TurnNotFound.code(), "turn_not_found");
+    }
+
+    #[test]
+    fn conversation_truncate_round_trips_by_name() {
+        let value = serde_json::to_value(RingingCommand::ConversationTruncate {
+            turn_id: "t2".into(),
+        })
+        .expect("serialize truncate");
+        assert_eq!(value["type"], "conversation.truncate");
+        assert_eq!(value["turn_id"], "t2");
+    }
 
     #[test]
     fn session_create_round_trips_model_selection() {

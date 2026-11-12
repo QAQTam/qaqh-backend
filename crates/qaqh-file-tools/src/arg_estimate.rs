@@ -59,6 +59,25 @@ impl RawPatchLineEstimator {
     pub fn estimate(&self) -> ArgLineEstimate {
         self.estimate
     }
+
+    /// 见 [`ArgLineEstimator::target_files`]：原生 freeform 面走的是同一个引擎
+    /// 解析器，所以结论同源；`frozen`（补丁文本读不下去）时停在最后一次好状态，
+    /// 与行差读数一样由终态接管。
+    pub fn target_files(&self) -> Vec<String> {
+        patch_target_files(&self.parser)
+    }
+}
+
+/// [`StreamingPatchParser`] 的逐文件结论 → 去重后的路径表（保持 hunk 顺序）。
+fn patch_target_files(parser: &StreamingPatchParser) -> Vec<String> {
+    let mut paths: Vec<String> = Vec::new();
+    for file in parser.stats().files {
+        let path = file.path.to_string_lossy().into_owned();
+        if !paths.iter().any(|existing| *existing == path) {
+            paths.push(path);
+        }
+    }
+    paths
 }
 
 /// 一个参数键对行数的作用。
@@ -175,6 +194,27 @@ impl ArgLineEstimator {
             lines_added: self.added.lines().saturating_add(self.patch_added),
             lines_removed: self.removed.lines().saturating_add(self.patch_removed),
         }
+    }
+
+    /// 补丁 hunk 指向的目标文件；**只有 `apply_patch` 出得来**，其余工具是空表。
+    ///
+    /// 为什么边界画在这里：`edit`/`write`/`read` 的目标文件就是参数键本身，
+    /// 客户端按 schema 直读 `args` 即可，内核不该把 JSON 键名再发明一遍；而
+    /// `apply_patch` 的参数里**没有路径字段**，文件只存在于 Codex 补丁文法里，
+    /// 这套文法的唯一事实源是 [`StreamingPatchParser`]——本方法把引擎已经数完
+    /// 的结论交给渲染层，省得客户端拿正则考古 `*** Update File:`。
+    ///
+    /// 只报已提交的 hunk（[`StreamingPatchParser::stats`]，不含 pending 行）：
+    /// header 还在吐的时候不报文件，与行差读数同一口径。
+    pub fn target_files(&self) -> Vec<String> {
+        if !self
+            .targets
+            .iter()
+            .any(|(_, target)| matches!(target, Target::Patch))
+        {
+            return Vec::new();
+        }
+        patch_target_files(&self.patch)
     }
 
     fn step(&mut self, ch: char) {
@@ -581,5 +621,51 @@ mod tests {
             ArgLineEstimate::default()
         );
         assert_eq!(estimate("edit", "{}"), ArgLineEstimate::default());
+    }
+
+    /// 目标文件只从补丁文法里数：JSON 面与原生 freeform 面同源、逐片段与整段
+    /// 一致，header 未收尾时不报；非补丁工具一律空表（路径在参数键上，归客户端读）。
+    #[test]
+    fn target_files_come_from_the_patch_grammar_only() {
+        fn files_of(tool: &str, args_json: &str, chunk: usize) -> Vec<String> {
+            let mut est = ArgLineEstimator::for_tool(tool).expect("tool is estimable");
+            let chars: Vec<char> = args_json.chars().collect();
+            for piece in chars.chunks(chunk) {
+                est.push_fragment(&piece.iter().collect::<String>());
+            }
+            est.target_files()
+        }
+
+        let multi = r#"{"patch":"*** Begin Patch\n*** Update File: crates\\a.rs\n@@\n-x\n+X\n*** Add File: 示例\\新文件.rs\n+new\n*** End Patch\n"}"#;
+        assert_eq!(
+            files_of("apply_patch", multi, usize::MAX),
+            vec![r"crates\a.rs".to_string(), r"示例\新文件.rs".to_string()],
+            "多文件补丁逐个报；JSON 转义的双反斜杠要还原成分隔符，非 ASCII 文件名原样保留"
+        );
+        assert_eq!(
+            files_of("apply_patch", multi, 1),
+            files_of("apply_patch", multi, usize::MAX),
+            "逐片段到达与整段喂必须同一个结论"
+        );
+        assert_eq!(
+            files_of("apply_patch", r#"{"patch":"*** Begin Patch\n*** Update File: a.r"#, usize::MAX),
+            Vec::<String>::new(),
+            "header 还在吐（未收尾的行）不得报半截文件名"
+        );
+        assert_eq!(
+            files_of("write", WRITE_ARGS, usize::MAX),
+            Vec::<String>::new(),
+            "write 的目标文件是参数键，不是补丁文法"
+        );
+
+        // 原生面：同一个引擎解析器，结论必须与 JSON 面同源。
+        let mut raw = RawPatchLineEstimator::default();
+        for fragment in [
+            "*** Begin Patch\n*** Update File: ",
+            "crates\\a.rs\n@@\n-x\n+X\n*** End Patch\n",
+        ] {
+            raw.push_fragment(fragment);
+        }
+        assert_eq!(raw.target_files(), vec![r"crates\a.rs".to_string()]);
     }
 }

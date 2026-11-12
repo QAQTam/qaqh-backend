@@ -1,8 +1,8 @@
 //! todo — 会话级任务清单（Session-scoped todo management）。
 //!
-//! 由单文件 `todo.rs` 拆分（Phase 2-3）：按既有 ═══ 分段切分，对外 API 不变。
-//! 持久化 `sessions/{seed}/todo.json`；公共契约v4 形态（全量覆写，2026-09-12）：
-//! todo_write（items 即完整清单，整体替换）/ todo_update（单条状态）/ todo_list（只读）。
+//! 持久化 `sessions/{seed}/todo.json`。模型工具面 = `todo_write`（纯文本全量
+//! 覆写，`list` 是唯一参数）/ `todo_update`（按 title 单条翻转）；只读 `todo_list`
+//! 已从模型面退役，仅作为 service/CLI 直访变体存在（`actions::todo_list_for`）。
 
 pub mod actions;
 pub mod model;
