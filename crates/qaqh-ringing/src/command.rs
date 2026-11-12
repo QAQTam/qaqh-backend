@@ -1,7 +1,7 @@
 //! RingingV2 的唯一业务命令目录。
 
 use qaqh_ringing_contract::commands::{
-    AskAnswer, ImageBlock, InterAgentEnvelope, SubagentTerminalNotification,
+    AskAnswer, ImageBlock, InterAgentEnvelope, SubagentTerminalNotification, WidgetContext,
 };
 use qaqh_ringing_contract::fact::{ContentRef, InputPurpose};
 use serde::{Deserialize, Serialize};
@@ -37,6 +37,10 @@ pub struct ConversationSendMessage {
     /// Set by trusted runtime invocation context, never accepted from public JSON.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_terminal: Option<SubagentTerminalNotification>,
+    /// widget-directive §4：用户确认 widget follow-up 时携带的 modelContent 快照。
+    /// 直进回合 reminder（`<widget-state>`），绝不拼进用户可见文本、永不落盘。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_context: Option<WidgetContext>,
 }
 
 /// RingingV2 业务命令根。target、身份、revision 和 driver epoch 只由提交信封表达。
@@ -85,6 +89,10 @@ pub enum RingingCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
     },
+    /// 撤回:`turn_id` **含自身**及其后的全部回合硬截断,不落备份。
+    /// 与活动回合冲突时当场拒(不允许冲突撤回);先 cancel,后 truncate。
+    #[serde(rename = "conversation.truncate")]
+    ConversationTruncate { turn_id: String },
     #[serde(rename = "interaction.ask.respond")]
     InteractionAskRespond {
         interaction_id: String,
@@ -207,6 +215,7 @@ impl RingingCommand {
             Self::AgentReloadConfig => "agent.reload_config",
             Self::ConversationSendMessage(_) => "conversation.send_message",
             Self::ConversationCancel { .. } => "conversation.cancel",
+            Self::ConversationTruncate { .. } => "conversation.truncate",
             Self::InteractionAskRespond { .. } => "interaction.ask.respond",
             Self::InteractionAskDismiss { .. } => "interaction.ask.dismiss",
             Self::DriverClaim { .. } => "driver.claim",
@@ -255,6 +264,7 @@ mod tests {
             as_system: false,
             inter_agent: None,
             subagent_terminal: None,
+            widget_context: None,
         });
         let value = serde_json::to_value(&command).expect("serialize command");
         assert_eq!(value["type"], "conversation.send_message");

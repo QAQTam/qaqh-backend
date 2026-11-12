@@ -595,4 +595,174 @@ mod tests {
             }
         });
     }
+
+    /// 撤回的落库面:块按会话 `ord` 硬截断,工具调用与未决交互随行消失,事件流
+    /// 只追加**一条**截断事实;目标回合不存在或与活动回合冲突时既不写也不发。
+    #[test]
+    fn truncate_from_turn_hard_deletes_history_and_publishes_one_fact() {
+        fn new_session(id: &str) -> store::NewSession {
+            store::NewSession {
+                session_id: id.into(),
+                parent_session_id: None,
+                title: id.into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            }
+        }
+        fn input_entry(block: &str, turn: &str) -> TimelineEntry {
+            TimelineEntry::Input {
+                block_id: BlockId::new(block),
+                turn_id: Some(TurnId::new(turn)),
+                purpose: InputPurpose::TriggerTurn,
+                content: ContentValue::Inline {
+                    text: format!("第 {turn} 轮的输入"),
+                },
+                attachments: vec![],
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                actor: ActorRef {
+                    kind: ActorKind::User,
+                    id: "user".into(),
+                    display_name: None,
+                },
+            }
+        }
+        fn finished_outcome() -> TurnOutcome {
+            TurnOutcome::Finished {
+                terminal: qaqh_ringing_contract::fact::TurnTerminal::Completed,
+                usage: None,
+                error: None,
+            }
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(new_session("SES-TRUNC"))
+                .await
+                .expect("create session");
+
+            // 三个已收尾的回合,每回合一个输入块。
+            for (turn, block) in [("T1", "B1"), ("T2", "B2"), ("T3", "B3")] {
+                owner.start_turn(turn, None).await.expect("start turn");
+                owner
+                    .append_block(input_entry(block, turn))
+                    .await
+                    .expect("append block");
+                owner
+                    .finish_turn(turn, "finished", finished_outcome())
+                    .await
+                    .expect("finish turn");
+            }
+            // T2 额外带一个工具调用与一条未决交互:撤回它们所在的回合时必须随行消失,
+            // 否则 bootstrap 的 `tools`/`interactions` 会指向一条不存在的历史。
+            owners
+                .db()
+                .write_blocking(|conn| {
+                    store::upsert_tool_call(
+                        conn,
+                        &store::ToolCallUpsert {
+                            call_id: "C2".into(),
+                            session_id: "SES-TRUNC".into(),
+                            turn_id: Some("T2".into()),
+                            tool_name: "read".into(),
+                            args_json: None,
+                            state_json: serde_json::to_string(&ToolCallState::Declared)
+                                .expect("state"),
+                            state_kind: "declared",
+                        },
+                    )
+                })
+                .expect("tool row");
+            owners
+                .db()
+                .write_blocking(|conn| {
+                    store::create_interaction(
+                        conn,
+                        &store::NewInteraction {
+                            interaction_id: "I2".into(),
+                            session_id: "SES-TRUNC".into(),
+                            turn_id: Some("T2".into()),
+                            call_id: None,
+                            kind: "permission".into(),
+                            payload_json: "{}".into(),
+                        },
+                    )
+                })
+                .expect("interaction row");
+
+            let mut rx = owner.subscribe();
+            let removed = owner.truncate_from_turn("T2").expect("truncate");
+            assert_eq!(
+                removed
+                    .iter()
+                    .map(|turn| turn.as_ref().to_string())
+                    .collect::<Vec<_>>(),
+                vec!["T2".to_string(), "T3".to_string()],
+                "撤回含自身:目标回合与其后每个回合都要现身"
+            );
+            match recv_event(&mut rx) {
+                SessionEvent::TimelineTruncated {
+                    from_turn_id,
+                    removed_turn_ids,
+                } => {
+                    assert_eq!(from_turn_id.as_ref(), "T2");
+                    assert_eq!(removed_turn_ids.len(), 2);
+                }
+                other => panic!("expected timeline truncated, got {other:?}"),
+            }
+
+            // 重连客户端的读模型只剩 T1。
+            let state = owner.snapshot().await.expect("snapshot");
+            assert_eq!(state.turns.len(), 1);
+            assert_eq!(state.timeline.len(), 1);
+            assert!(state.tools.is_empty(), "被删回合的工具调用不得留在快照里");
+            assert!(
+                state.interactions.is_empty(),
+                "被删回合的未决交互不得留在快照里"
+            );
+
+            // 同一 turn_id 第二次撤回:回合已经不在了,必须当场报错而不是「什么都没删」的假成功。
+            let error = owner
+                .truncate_from_turn("T2")
+                .expect_err("already truncated");
+            assert!(
+                matches!(error, crate::db::DbError::TurnNotFound { .. }),
+                "{error}"
+            );
+
+            // 活动回合冲突:先清掉 T4 开场的帧,再证明被拒的撤回一帧都不追加。
+            owner.start_turn("T4", None).await.expect("start T4");
+            let error = owner
+                .truncate_from_turn("T1")
+                .expect_err("active turn must block truncate");
+            assert!(
+                matches!(error, crate::db::DbError::TruncateConflict { .. }),
+                "{error}"
+            );
+            let mut frames = 0;
+            while let Ok(frame) = rx.try_recv() {
+                assert!(
+                    !matches!(frame.event, SessionEvent::TimelineTruncated { .. }),
+                    "被拒的撤回不得留下截断帧"
+                );
+                frames += 1;
+            }
+            assert_eq!(frames, 3, "只应有 T4 开场三帧");
+            let state = owner.snapshot().await.expect("snapshot after reject");
+            assert_eq!(state.turns.len(), 2, "T1 仍在,新开的 T4 也在");
+            assert_eq!(state.timeline.len(), 1, "拒绝不得动任何块");
+        });
+    }
 }

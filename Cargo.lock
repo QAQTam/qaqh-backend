@@ -2837,6 +2837,7 @@ dependencies = [
  "qaqh-config",
  "qaqh-dsaccount",
  "qaqh-gate",
+ "qaqh-lsp",
  "qaqh-mcp",
  "qaqh-memwatch",
  "qaqh-process-tools",
@@ -3125,7 +3126,6 @@ name = "qaqh-policy"
 version = "3.0.20261110-g1842986"
 dependencies = [
  "serde",
- "unicode-normalization",
 ]
 
 [[package]]

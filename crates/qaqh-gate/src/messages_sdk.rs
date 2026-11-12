@@ -688,11 +688,12 @@ pub fn chat_stream_messages(
 
 /// Anthropic 面显式缓存断点（`cache_control: {"type":"ephemeral"}`）总开关。
 ///
-/// Messages wire 的协议语义就包含 ephemeral 断点，默认开；逃生口对齐
-/// Claude Code 的 `DISABLE_PROMPT_CACHING` 惯例——个别不认 `cache_control`
-/// 的 Anthropic 兼容网关用环境变量一键关掉，不改请求面配置。
+/// 默认**关**。qwen3.8-flash 实测挂牌价里显式命中与隐式命中同价（0.1/M），
+/// 而显式每次前缀增量都要按 1.25/M 付创建费、5 分钟未命中即归零重建——
+/// 成本维度被隐式严格支配，买到的只是命中确定性。需要延迟 SLO 的部署用
+/// `QAQH_ENABLE_PROMPT_CACHING=1` 显式开启。
 fn prompt_cache_enabled() -> bool {
-    !std::env::var("QAQH_DISABLE_PROMPT_CACHING")
+    std::env::var("QAQH_ENABLE_PROMPT_CACHING")
         .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 

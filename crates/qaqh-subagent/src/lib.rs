@@ -1139,6 +1139,7 @@ pub fn start_subagent_collector(
         as_system: false,
         inter_agent,
         subagent_terminal: None,
+        widget_context: None,
     });
     match transport.send_command(session_id, send) {
         Ok(true) => {}
@@ -1430,6 +1431,7 @@ fn collect_subagent_result(
             as_system: !v2_delivery,
             inter_agent: completion_inter_agent,
             subagent_terminal: Some(terminal_notification),
+            widget_context: None,
         });
         let mut accepted = false;
         let mut last_rejected: Option<String> = None;

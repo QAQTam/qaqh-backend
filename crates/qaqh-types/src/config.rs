@@ -46,12 +46,6 @@ pub struct PersistentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<PersistentSubagentConfig>,
 
-    // ── Compliance / content filter ──
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compliance_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub compliance_allowlist: Option<Vec<String>>,
-
     // ── Permission ──
     /// Agent permission tier(2026-10-03 三档制): 1=read-only, 2=workspace-write,
     /// 3=skip-permissions (explicit dangerous bypass; all ordinary tools auto).

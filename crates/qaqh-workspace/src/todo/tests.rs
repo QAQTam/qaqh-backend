@@ -1,7 +1,7 @@
 //! todo 测试（纯文本范式）：title 即身份、无 ID 分配、并行 in_progress、
 //! meta 快照状态机。行格式解析的单元测试在 parse.rs；本文件锁工具面行为。
 
-use super::actions::{exec_todo_set, todo_set_for};
+use super::actions::todo_set_for;
 use super::model::{TodoStatus, TodoStore};
 use super::store::{read_store, todo_meta_snapshot, todo_path};
 use serde_json::Value;
@@ -59,37 +59,48 @@ fn titles(store: &TodoStore) -> Vec<String> {
     store.items.iter().map(|item| item.title.clone()).collect()
 }
 
+/// 生产入口只有 typed（`split::register` → `register_typed`）。曾经垫在中间的
+/// `handle_write`/`handle_update` 只是 `reject_fields` 白名单 + `ToolResult` 信封
+/// 拆装:形态锁已由 `TodoWriteArgs`/`TodoUpdateArgs` 的 `deny_unknown_fields` 承担,
+/// 错误信封由 typed 自己产出,那层壳没有剩下任何职责——用例因此直接打 typed。
+fn current_session() -> String {
+    crate::runtime::context()
+        .expect("todo 用例必须先 with_isolated_todo 设上下文")
+        .active_session
+}
+
+/// Ok = 输出信封；Err = typed 的 `json_err_string` 信封（code/message/hint）。
+fn typed_write(args: Value) -> Result<serde_json::Value, serde_json::Value> {
+    super::typed::todo_write_for_typed(&current_session(), &args)
+        .and_then(|out| out.to_envelope_value())
+        .map_err(|error| parse_error_envelope(&error))
+}
+
+fn typed_update(args: Value) -> Result<serde_json::Value, serde_json::Value> {
+    todo_set_for(&current_session(), &args)
+        .map(|text| parse_tool_result(&text))
+        .map_err(|error| parse_error_envelope(&error))
+}
+
 fn write_list(text: &str) -> serde_json::Value {
-    parse_tool_result(
-        handle_write(&split_ctx(
-            "todo_write",
-            serde_json::json!({ "list": text }),
-        ))
-        .model_text(),
-    )
+    typed_write(serde_json::json!({ "list": text }))
+        .unwrap_or_else(|error| panic!("todo_write 不得失败: {error}"))
 }
 
 fn update_title(title: &str, status: &str) -> serde_json::Value {
-    let result = handle_update(&split_ctx(
-        "todo_update",
-        serde_json::json!({"title": title, "status": status}),
-    ));
-    assert!(
-        result.error.is_none(),
-        "todo_update {title}→{status} 不得失败: {:?}",
-        result.error
-    );
-    parse_tool_result(result.model_text())
+    typed_update(serde_json::json!({ "title": title, "status": status }))
+        .unwrap_or_else(|error| panic!("todo_update {title}→{status} 不得失败: {error}"))
 }
-
-use super::split::{handle_update, handle_write};
 
 fn parse_tool_result(text: &str) -> serde_json::Value {
     serde_json::from_str(text).unwrap()
 }
 
-fn split_ctx(_name: &str, args: Value) -> Value {
-    args
+/// 错误通道一般是 `json_err_string` 信封；不是 JSON 就原样包一层，让断言读得到
+/// code/message，而不是在 unwrap 上炸掉用例本身。
+fn parse_error_envelope(raw: &str) -> serde_json::Value {
+    serde_json::from_str(raw)
+        .unwrap_or_else(|_| serde_json::json!({ "code": "tool_error", "message": raw }))
 }
 
 // ═══════════════════════════════════════════════════════
@@ -117,11 +128,10 @@ fn write_parses_the_full_text_block() {
 #[test]
 fn write_rejects_duplicate_titles() {
     with_isolated_todo(|_session| {
-        let result = handle_write(&split_ctx(
-            "todo_write",
-            serde_json::json!({"list": "- [ ] same\n- [x] same"}),
-        ));
-        assert!(result.error.is_some(), "重复标题必须拒绝");
+        assert!(
+            typed_write(serde_json::json!({"list": "- [ ] same\n- [x] same"})).is_err(),
+            "重复标题必须拒绝"
+        );
     });
 }
 
@@ -188,18 +198,19 @@ fn update_output_carries_full_items() {
 fn update_unknown_title_lists_the_current_list() {
     with_isolated_todo(|_session| {
         write_list("- [ ] real-task");
-        let result = handle_update(&split_ctx(
-            "todo_update",
-            serde_json::json!({"title": "real task", "status": "completed"}),
-        ));
-        let error = result.error.expect("近似标题必须 not_found");
-        assert_eq!(error.code, "not_found");
+        let error = typed_update(serde_json::json!({
+            "title": "real task", "status": "completed"
+        }))
+        .expect_err("近似标题必须 not_found");
+        assert_eq!(error["code"], "not_found");
         // 提示里带当前清单——模型可自行纠正拼写。
         assert!(
-            error.message.contains("real-task")
-                || error
-                    .hint
-                    .as_deref()
+            error["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("real-task")
+                || error["hint"]
+                    .as_str()
                     .unwrap_or_default()
                     .contains("real-task"),
             "错误面必须列出可用标题: {error:?}"
@@ -272,73 +283,50 @@ fn meta_snapshot_unarchives_on_rebuild() {
 // ═══════════════════════════════════════════════════════
 
 #[test]
-fn split_handlers_reject_cross_fields() {
-    // write 只认 `list`：旧 items 形态与顶层便利字段一律拒绝。
-    assert!(
-        handle_write(&split_ctx(
-            "todo_write",
-            serde_json::json!({"list": "- [ ] t", "items": []})
-        ))
-        .error
-        .is_some()
-    );
-    assert!(
-        handle_write(&split_ctx(
-            "todo_write",
-            serde_json::json!({"items": [{"title": "t", "status": "pending"}]})
-        ))
-        .error
-        .is_some()
-    );
-    assert!(
-        handle_write(&split_ctx("todo_write", serde_json::json!({"title": "t"})))
-            .error
-            .is_some()
-    );
-    // update 只认 {title, status, evidence?}：ids/updates/id 一律拒绝。
-    assert!(
-        handle_update(&split_ctx(
-            "todo_update",
-            serde_json::json!({"ids": ["x"], "status": "pending"})
-        ))
-        .error
-        .is_some()
-    );
-    assert!(
-        handle_update(&split_ctx(
-            "todo_update",
-            serde_json::json!({"id": "x", "status": "pending"})
-        ))
-        .error
-        .is_some()
-    );
-    assert!(
-        handle_update(&split_ctx(
-            "todo_update",
-            serde_json::json!({"updates": [{"title": "x", "status": "pending"}]})
-        ))
-        .error
-        .is_some()
-    );
+fn typed_entries_reject_cross_fields() {
+    with_isolated_todo(|_session| {
+        // write 只认 `list`：旧 items 形态与顶层便利字段一律拒绝
+        // （形态锁 = TodoWriteArgs 的 deny_unknown_fields，不再有第二层白名单）。
+        assert!(
+            typed_write(serde_json::json!({"list": "- [ ] t", "items": []})).is_err()
+        );
+        assert!(
+            typed_write(serde_json::json!({"items": [{"title": "t", "status": "pending"}]}))
+                .is_err()
+        );
+        assert!(typed_write(serde_json::json!({"title": "t"})).is_err());
+        // update 只认 {title, status, evidence?}：ids/updates/id 一律拒绝。
+        assert!(
+            typed_update(serde_json::json!({"ids": ["x"], "status": "pending"})).is_err()
+        );
+        assert!(
+            typed_update(serde_json::json!({"id": "x", "status": "pending"})).is_err()
+        );
+        assert!(
+            typed_update(serde_json::json!({"updates": [{"title": "x", "status": "pending"}]}))
+                .is_err()
+        );
+    });
 }
 
 #[test]
 fn v1_v2_action_vocabulary_retired() {
-    for verb in [
-        "create",
-        "insert",
-        "set",
-        "list",
-        "create_batch",
-        "update",
-        "cancel",
-    ] {
-        let out = handle_write(&split_ctx(
-            "todo_write",
-            serde_json::json!({ "action": verb, "list": "" }),
-        ));
-        assert!(out.error.is_some(), "action={verb} 必须返回错误");
-    }
+    with_isolated_todo(|_session| {
+        for verb in [
+            "create",
+            "insert",
+            "set",
+            "list",
+            "create_batch",
+            "update",
+            "cancel",
+        ] {
+            assert!(
+                typed_write(serde_json::json!({ "action": verb, "list": "" })).is_err(),
+                "action={verb} 必须返回错误"
+            );
+        }
+    });
 }
 
 #[test]
@@ -365,11 +353,11 @@ fn session_parameterized_set_and_list_hit_explicit_session() {
 fn set_status_never_erases_metadata() {
     with_isolated_todo(|_session| {
         write_list("- [ ] Keep me | Keep this too");
-        exec_todo_set(&serde_json::json!({
+        typed_update(serde_json::json!({
             "title": "Keep me", "status": "in_progress"
         }))
         .unwrap();
-        exec_todo_set(&serde_json::json!({
+        typed_update(serde_json::json!({
             "title": "Keep me", "status": "completed", "evidence": "verified"
         }))
         .unwrap();

@@ -123,6 +123,18 @@ impl ClientV2Subscription {
             let reset: RingingV2ResyncRequired = serde_json::from_str(&frame.data)?;
             return Ok(ClientV2SubscriptionEvent::Reset(reset));
         }
+        // SSE 事件名即信封外层，只有 `ringing.event`（空名 = 旧形态兼容）承载
+        // SessionEventFrame。旁路帧不注册会话事件词表、data 也不是帧形状
+        // （`diagnostics.memory` 载原始快照 JSON，无 seq；`ringing.stream_terminated`
+        // 载 {code,session_id,message}）——拿 SessionEventFrame 硬解它们必然 Err，
+        // 而 v2 流把任何 Err 当断流退避重连：内存探测开着时 daemon 每秒推一帧
+        // `diagnostics.memory`，重连风暴与探测同生命周期、停表即愈（2026-11-12 真机
+        // 事故：右下角「网络波动(第 N 次)」无限递增）。字节到了 = 链路活着，按
+        // KeepAlive 上报复位空闲计时器即符合此处字节层探活的既有口径。
+        // 未来新控制帧要改变这一默认语义的，必须在本函数显式匹配事件名。
+        if !frame.event_type.is_empty() && frame.event_type != "ringing.event" {
+            return Ok(ClientV2SubscriptionEvent::KeepAlive);
+        }
         let event: SessionEventFrame = serde_json::from_str(&frame.data)?;
         Ok(ClientV2SubscriptionEvent::Event(Box::new(event)))
     }

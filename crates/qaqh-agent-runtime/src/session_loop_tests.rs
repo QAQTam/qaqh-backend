@@ -134,6 +134,7 @@ mod tests {
                 images: vec![],
                 inter_agent: None,
                 subagent_terminal: None,
+                widget_context: None,
             })
             .expect("send input");
 
@@ -220,6 +221,7 @@ mod tests {
                 images: vec![],
                 inter_agent: None,
                 subagent_terminal: None,
+                widget_context: None,
             })
             .expect("send input");
         // 等回合出现(sse mock 立即完成,给 spawn 一点时间)。
@@ -274,6 +276,7 @@ mod tests {
                 images: vec![],
                 inter_agent: None,
                 subagent_terminal: None,
+                widget_context: None,
             })
             .expect("send input");
 
@@ -336,6 +339,7 @@ mod tests {
                 images: vec![],
                 inter_agent: None,
                 subagent_terminal: None,
+                widget_context: None,
             })
             .expect("send input");
 
@@ -397,6 +401,7 @@ mod tests {
                 }],
                 inter_agent: Some(inter_agent.clone()),
                 subagent_terminal: Some(terminal.clone()),
+                widget_context: None,
             })
             .expect("send input");
 
@@ -615,6 +620,7 @@ mod handoff_tests {
             as_system: false,
             inter_agent: None,
             subagent_terminal: None,
+            widget_context: None,
         }
     }
 

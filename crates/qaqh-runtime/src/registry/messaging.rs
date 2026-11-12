@@ -29,7 +29,10 @@ impl AgentRegistry {
         }
         if !self.instances.contains_key(session_id) {
             match &env.command {
-                qaqh_ringing::RingingCommand::ConversationSendMessage(_) => {
+                qaqh_ringing::RingingCommand::ConversationSendMessage(_)
+                | qaqh_ringing::RingingCommand::ConversationTruncate { .. } => {
+                    // 撤回与发消息同源:冷会话先拉起再执行,否则「历史在库里、
+                    // owner 泵不在」的不对称会让撤回对未加载的会话静默失效。
                     self.ensure_loaded_for_command(session_id)?;
                 }
                 qaqh_ringing::RingingCommand::AgentReloadConfig
@@ -117,6 +120,32 @@ impl AgentRegistry {
                 qaqh_ringing::RingingCommand::ConversationCancel { turn_id } => {
                     loop_.cancel_turn(turn_id.as_deref());
                     Ok(())
+                }
+                qaqh_ringing::RingingCommand::ConversationTruncate { turn_id } => {
+                    // 拒绝理由保留原型:在飞冲突与回合不存在是两种不同的客户端动作
+                    // (前者「先停止再撤」,后者「历史已变,重读快照」),压成一条字符串
+                    // 等于逼前端 grep 文案。
+                    loop_.truncate_turn(turn_id).map_err(|error| match error {
+                        qaqh_agent_runtime::session_loop::LoopError::Db(
+                            qaqh_session::db::DbError::TruncateConflict {
+                                session_id,
+                                turn_id: active,
+                            },
+                        ) => QaqhError::rejected(
+                            qaqh_ringing::CommandRejection::TurnActive,
+                            format!("session {session_id} has an active turn {active}; cancel it before truncating"),
+                        ),
+                        qaqh_agent_runtime::session_loop::LoopError::Db(
+                            qaqh_session::db::DbError::TurnNotFound {
+                                session_id,
+                                turn_id,
+                            },
+                        ) => QaqhError::rejected(
+                            qaqh_ringing::CommandRejection::TurnNotFound,
+                            format!("turn {turn_id} not found in session {session_id}"),
+                        ),
+                        other => QaqhError::context("conversation.truncate", other),
+                    })
                 }
                 qaqh_ringing::RingingCommand::InteractionAskRespond {
                     interaction_id,

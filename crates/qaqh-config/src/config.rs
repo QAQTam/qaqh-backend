@@ -124,10 +124,6 @@ pub struct Config {
     pub subagent: SubagentConfig,
     /// exec tool default shell selection.
     pub exec: ExecConfig,
-    /// Whether the content filter is active.
-    pub compliance_enabled: bool,
-    /// Whitelisted patterns exempt from content filtering.
-    pub compliance_allowlist: Vec<String>,
     /// Agent permission tier (裸 u8,wire 兼容;2026-10-03 三档制取代 L1–L4):
     /// 1 = read-only, 2 = workspace-write,
     /// 3 = skip-permissions (explicit dangerous bypass; all ordinary tools auto).
@@ -663,8 +659,6 @@ impl Default for Config {
             notifications_enabled: None,
             subagent: SubagentConfig::default(),
             exec: ExecConfig::default(),
-            compliance_enabled: true,
-            compliance_allowlist: Vec::new(),
             permission_level: 2, // workspace-write — safe autonomous default
             tokenizer_path: None,
             auto_compact_threshold: 0.75,
@@ -808,14 +802,6 @@ impl Config {
                     let shell = shell.trim().to_ascii_lowercase();
                     (!shell.is_empty() && shell != "auto").then_some(shell)
                 });
-            }
-
-            // ── Compliance ──
-            if let Some(enabled) = pc.compliance_enabled {
-                cfg.compliance_enabled = enabled;
-            }
-            if let Some(ref allowlist) = pc.compliance_allowlist {
-                cfg.compliance_allowlist = allowlist.clone();
             }
 
             // ── Multimodal (vision) ──
@@ -973,12 +959,6 @@ falling back to 1 (read-only)"
                     })
                     .cloned(),
             }),
-            compliance_enabled: Some(self.compliance_enabled),
-            compliance_allowlist: if self.compliance_allowlist.is_empty() {
-                None
-            } else {
-                Some(self.compliance_allowlist.clone())
-            },
             permission_tier: Some(self.permission_level),
             // 旧键不再写出:防止数字 3 在新三档下被再次当成旧 WorkspaceFree
             permission_level: None,

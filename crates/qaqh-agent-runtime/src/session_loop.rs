@@ -71,6 +71,11 @@ pub struct SessionLoop {
     inner: Mutex<LoopInner>,
     /// 最近一次回合活动的毫秒时钟(idle 卸载的判据)。
     last_activity_ms: AtomicU64,
+    /// MCP 动态层投影代数游标:0 = 本会话尚未播种(manager 构造即第 1 代,
+    /// 首轮必拉到批次);此后仅在代数变化时重建目录。
+    mcp_projection_gen: AtomicU64,
+    /// `lsp` 聚合工具已并入本会话动态层。
+    lsp_projection_seeded: AtomicBool,
 }
 
 struct LoopInner {
@@ -126,6 +131,9 @@ struct ActiveTurn {
     cancel: watch::Sender<bool>,
     /// 运行中合并(Steer/Interject):下一轮 provider 调用前注入。
     steers: Vec<String>,
+    /// widget-directive §4：本回合收到的 modelContent 快照，下一轮 provider 请求前
+    /// 统一渲染为 `<widget-state>` reminder（内存态，消费即清，不落盘）。
+    widget_contexts: Vec<qaqh_ringing_contract::commands::WidgetContext>,
     /// 本回合升起、未决的交互(中断时统一取消)。
     pending_interactions: Vec<InteractionId>,
     task: tokio::task::JoinHandle<()>,
@@ -167,6 +175,8 @@ impl SessionLoop {
                 slimmed_turn: None,
             }),
             last_activity_ms: AtomicU64::new(unix_now_ms().max(0) as u64),
+            mcp_projection_gen: AtomicU64::new(0),
+            lsp_projection_seeded: AtomicBool::new(false),
         })
     }
 
@@ -247,6 +257,9 @@ impl SessionLoop {
                 let turn = self.owner_input_block(&active.turn_id, &input);
                 self.owner.queue_block(turn)?;
                 active.steers.push(input.text);
+                if let Some(widget_context) = input.widget_context {
+                    active.widget_contexts.push(widget_context);
+                }
                 return Ok(());
             }
             inner.queue.push_back(input);
@@ -281,6 +294,24 @@ impl SessionLoop {
             let _ = active.cancel.send(true);
         }
         true
+    }
+
+    /// 撤回:`turn_id` **含自身**及其后的历史硬截断,由 owner 泵落库并发布
+    /// `TimelineTruncated`。在飞回合的冲突判据在写点(owner 泵)裁决,这里不重复
+    /// 设一道锁——两处判据迟早会漂移。
+    ///
+    /// 截断成功后把回合级内存标记一并作废:`handed_off`/`reminded`/`slimmed` 只是
+    /// 「每回合最多一次」的节流缓存,留着会指向一条已不存在的回合;`last_context`
+    /// 是上一次 provider 反馈的占用,历史变短后它高估上下文,宁可等下次反馈重算,
+    /// 也不拿旧值去算 handoff 压力。
+    pub fn truncate_turn(&self, turn_id: &str) -> Result<(), LoopError> {
+        self.owner.truncate_from_turn(turn_id)?;
+        let mut inner = self.lock();
+        inner.handed_off_turn = None;
+        inner.reminded_turn = None;
+        inner.slimmed_turn = None;
+        inner.last_context = None;
+        Ok(())
     }
 
     /// 工具权限应答(call_id 不匹配 = 忽略)。
@@ -384,6 +415,7 @@ impl SessionLoop {
             turn_id,
             cancel,
             steers: Vec::new(),
+            widget_contexts: Vec::new(),
             pending_interactions: Vec::new(),
             task,
         });
@@ -448,6 +480,12 @@ impl SessionLoop {
             self.finish_active(&turn_id).await;
             return;
         }
+        // 回合开场的 widget 快照与 steer 同走 reminder 通道（§4）。
+        if let Some(widget_context) = input.widget_context.clone()
+            && let Some(active) = self.lock().active.as_mut()
+        {
+            active.widget_contexts.push(widget_context);
+        }
 
         // 上下文:SQLite 组装 + 每回合重建的系统提示前缀(不落盘:配置即真相)。
         let mut messages = match self.assemble_context().await {
@@ -468,7 +506,7 @@ impl SessionLoop {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let system = prompt::system_prompt(&self.current_spec(), &cwd);
+        let system = prompt::system_prompt(&self.current_spec(), &cwd, &self.session_id);
         messages.insert(
             0,
             Message {
@@ -494,6 +532,27 @@ impl SessionLoop {
                     role: "user".into(),
                     name: None,
                     content: vec![ContentBlock::Text { text }],
+                });
+            }
+            // widget-directive §4：结构化状态回流——快照序列化成 reminder 消息，
+            // 随本轮请求发出；时间线/用户文本永不出现这段内容。
+            let widget_contexts = {
+                let mut inner = self.lock();
+                match inner.active.as_mut() {
+                    Some(active) => std::mem::take(&mut active.widget_contexts),
+                    None => Vec::new(),
+                }
+            };
+            if !widget_contexts.is_empty() {
+                let payload = serde_json::to_string(&widget_contexts)
+                    .unwrap_or_else(|_| "[]".to_string());
+                messages.push(Message {
+                    msg_id: None,
+                    role: "user".into(),
+                    name: None,
+                    content: vec![ContentBlock::Text {
+                        text: format!("<widget-state>\n{payload}\n</widget-state>"),
+                    }],
                 });
             }
 
@@ -526,6 +585,10 @@ impl SessionLoop {
                     break 'rounds;
                 }
             }
+
+            // MCP/LSP 回合边界投影:代数变化才重建目录,必须在取 spec 之前
+            // (本回合首次请求也要看见已连接的 server 工具)。
+            self.refresh_dynamic_projections();
 
             let spec = self.current_spec();
             let blocks = AttemptBlocks::new(&turn_id, &spec.provider.model);
@@ -1482,6 +1545,7 @@ impl SessionLoop {
                     content: ContentValue::Inline { text: reasoning },
                     model: blocks.model.clone(),
                     usage: None,
+                    generated_ms: None,
                     opaque: vec![],
                 })
                 .await
@@ -1495,6 +1559,7 @@ impl SessionLoop {
                 content: ContentValue::Inline { text: answer },
                 model: blocks.model.clone(),
                 usage: outcome.usage.clone(),
+                generated_ms: outcome.generated_ms,
                 opaque: outcome.opaque_items.clone(),
             })
             .await
@@ -1514,6 +1579,7 @@ impl SessionLoop {
                     content: ContentValue::Inline { text: reasoning },
                     model: blocks.model.clone(),
                     usage: None,
+                    generated_ms: None,
                     opaque: vec![],
                 })
                 .await
@@ -1528,6 +1594,7 @@ impl SessionLoop {
                     content: ContentValue::Inline { text: answer },
                     model: blocks.model.clone(),
                     usage: outcome.usage.clone(),
+                    generated_ms: outcome.generated_ms,
                     opaque: vec![],
                 })
                 .await
@@ -1771,6 +1838,55 @@ impl SessionLoop {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
     }
+
+    /// 回合边界 MCP/LSP 动态层投影(设计 §5.3;34e971cb 埋葬旧 agentloop 时
+    /// 丢失、此处复活的那根线)。代数游标各会话自持:代数变化才取批次重建,
+    /// 目录未动时 spec 逐字节不变。
+    fn refresh_dynamic_projections(&self) {
+        let generation = qaqh_mcp::projection_generation();
+        let mcp_changed = generation != self.mcp_projection_gen.load(Ordering::Relaxed);
+        // clear_dynamic 会连 `lsp` 聚合工具一起清掉,MCP 重建当轮必须带上 LSP 层。
+        let lsp_needed = mcp_changed || !self.lsp_projection_seeded.load(Ordering::Relaxed);
+        let lsp_batch = if lsp_needed {
+            qaqh_lsp::take_projection_batch()
+        } else {
+            None
+        };
+        if !mcp_changed && lsp_batch.is_none() {
+            // MCP 无新代数、LSP 未启用:目录不动,不产生任何重建(spec 稳定)。
+            return;
+        }
+        let mcp_batch = mcp_changed.then(qaqh_mcp::projection_batch);
+        let lsp_applied = lsp_batch.is_some();
+        let defs = self.port.apply_dynamic_projection(mcp_batch, lsp_batch);
+        if mcp_changed {
+            self.mcp_projection_gen.store(generation, Ordering::Relaxed);
+        }
+        if lsp_applied {
+            self.lsp_projection_seeded.store(true, Ordering::Relaxed);
+        }
+        self.rebuild_spec_tools(defs);
+    }
+
+    /// 用新目录重建 spec.tools 并补回控制面工具(与 [`Self::reload_runtime`]
+    /// 同款收口:allowlist 过滤产物不含 handoff/session_title,声明层补回)。
+    fn rebuild_spec_tools(&self, defs: Vec<qaqh_types::ToolDef>) {
+        let mut spec = self
+            .spec
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        spec.tools = (!defs.is_empty()).then_some(defs);
+        crate::handoff::ensure_declared(&mut spec.tools);
+        if matches!(
+            self.port.sandbox_mode(),
+            qaqh_workspace::tool_api::SandboxMode::Main
+        ) {
+            let (title, source) = self.owner.title_state();
+            if crate::session_title::should_declare(title.as_deref(), source.as_deref()) {
+                crate::session_title::ensure_declared(&mut spec.tools);
+            }
+        }
+    }
 }
 
 fn empty_assistant() -> Message {
@@ -1870,6 +1986,8 @@ impl ProgressSink for OwnerSink {
             update.args,
             update.lines_added,
             update.lines_removed,
+            update.target_files,
+            update.args_complete,
         );
     }
 

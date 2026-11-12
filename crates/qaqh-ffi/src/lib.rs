@@ -489,6 +489,7 @@ impl QaqhClient {
                 as_system: false,
                 inter_agent: None,
                 subagent_terminal: None,
+                widget_context: None,
             }))?,
         )
         .await

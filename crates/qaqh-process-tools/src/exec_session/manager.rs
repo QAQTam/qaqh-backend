@@ -758,6 +758,12 @@ fn result_from_core(
         .iter()
         .map(|chunk| chunk.text.as_str())
         .collect::<String>();
+    // tty 会话的模型侧出口必须剥控制序列（与 exec::pty_exec 的 strip_ansi
+    // 契约同形）：pwsh 在 ConPTY 下会注入 DEC 私有模式（?9001/?1004/?25）、
+    // OSC 标题与彩色表格帧，pipe 会话里原生程序也可能自发上色。前端
+    // progress/transcript 面保持原样 ANSI，渲染层自行消费；预算与偏移按
+    // 原始字节计，此处只净化文本。
+    let output = crate::exec::truncate::strip_ansi(&output);
     let exit_code = core.exit.as_ref().and_then(|exit| exit.code);
     let timed_out = matches!(core.terminal, Some(ExecSessionOutcome::TimedOut { .. }));
     let cancelled = matches!(core.terminal, Some(ExecSessionOutcome::Cancelled { .. }));
