@@ -60,7 +60,7 @@ pub fn ensure_profile(name: &str) -> Result<AppContainerProfile> {
         },
     };
     let sid = unsafe { psid_bytes(psid) };
-    let _ = unsafe { LocalFree(HLOCAL(psid.0)) };
+    let _ = unsafe { LocalFree(Some(HLOCAL(psid.0))) };
     Ok(AppContainerProfile {
         name: name.to_string(),
         sid_text: crate::sid::sid_to_string(&sid),

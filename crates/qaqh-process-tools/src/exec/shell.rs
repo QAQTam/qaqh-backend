@@ -305,6 +305,24 @@ impl Shell {
         command: &str,
         args: Option<&[String]>,
     ) -> Vec<String> {
+        // 生产路径：探测已装 uutils coreutils（Windows 安装器布局）再派生。
+        // 探测为每次 exec 两次 is_file（微秒级），不缓存，便于测试注入
+        // （见 [`Self::derive_exec_args_with_uutils`]）。决策见 docs/adr/0012。
+        self.derive_exec_args_with_uutils(
+            command,
+            args,
+            super::uutils::detect_coreutils_bin().as_deref(),
+        )
+    }
+
+    /// [`Self::derive_exec_args_with`] 的可注入形态：测试传 `None` 消除
+    /// 「机器是否装有 coreutils」的差异，两侧得到同一 argv。
+    pub(crate) fn derive_exec_args_with_uutils(
+        &self,
+        command: &str,
+        args: Option<&[String]>,
+        coreutils_bin: Option<&std::path::Path>,
+    ) -> Vec<String> {
         match self {
             Shell::Bash | Shell::Zsh | Shell::Sh => {
                 // POSIX `sh -c 'script' name arg...`：name 占 $0，arg 进 $1/$@。
@@ -322,8 +340,10 @@ impl Shell {
             }
             Shell::PowerShell | Shell::WindowsPowerShell => {
                 // 统一 UTF-8 preamble 进脚本正文（两条 argv 形态共用），
-                // 见 [`PS_UTF8_PREAMBLE`] 的实测依据。
-                let script = format!("{PS_UTF8_PREAMBLE}\n{command}");
+                // 见 [`PS_UTF8_PREAMBLE`] 的实测依据；已装 uutils coreutils 时
+                // 前缀追加 PATH 前插与最小冲突别名手术（docs/adr/0012）。
+                let script =
+                    format!("{}\n{command}", super::uutils::pwsh_script_prefix(coreutils_bin));
                 if let Some(a) = args.filter(|a| !a.is_empty()) {
                     // -CommandWithArgs：首参是脚本，后续空格分隔的 CommandParameters 原样进 $args
                     let mut v = vec![

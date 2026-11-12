@@ -55,10 +55,7 @@ pub use provider::{
     CredentialSource, EndpointCompat, ModelCapabilities, ModelSelection, ModelSelectionOptions,
     ResponsesToolLayout, RetrySpec, SettingValue, ThinkingParamMode, UserSendMode, Wire,
 };
-pub use session::{
-    SessionListEntry, SessionMeta, SessionRunStatus, SkillSessionEntry, SkillSessionEntryState,
-    SkillSessionStateV2,
-};
+pub use session::{SessionListEntry, SessionMeta, SessionRunStatus};
 pub use state::DebugLevel;
 pub use tool_def::{ToolDef, ToolFunction};
 pub use tool_result::{

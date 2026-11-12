@@ -26,6 +26,9 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
             .collect();
         prompt.push_str(&format!("tools: {}\n", names.join(", ")));
     }
+    // 技能目录 + 嵌入 bundled 正文：会话初始化注入（system 段），每回合
+    // 由确定性 prompt 重建携带；模型经 skill_list 列资源、read 直读文件。
+    prompt.push_str(&qaqh_skills::render_system_section(cwd));
     // 交接是控制面能力，与 allowlist 无关，所以这段说明无条件在场。
     prompt.push_str(
         "\n[Context handoff]\n\
@@ -34,6 +37,19 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
          本会话，并由客户端拿这份文档开新会话继续推进。\n\
          口头总结不算交接（新会话读不到它）；不要拖到请求被拒才动。\n",
     );
+    // 命名指令与工具声明同进同退：标题已定（工具被摘除）或子代理会话都不出现。
+    let can_name_session = spec
+        .tools
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|tool| tool.function.name == crate::session_title::TOOL_NAME));
+    if can_name_session {
+        prompt.push_str(
+            "\n[Session title]\n\
+             明确任务后，请在**本回合内**调用 `session_title` 给会话命名（名词短语、≤20 字、\n\
+             写意图不写结论）。命名成功即落库，客户端会话列表实时可见；不调用不算错误，\n\
+             列表会回退到目录名。\n",
+        );
+    }
     if let Some(agents) = read_agents_instructions(cwd) {
         prompt.push_str("\n[Project instructions]\n");
         prompt.push_str(&agents);

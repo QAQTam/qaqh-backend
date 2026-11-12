@@ -262,7 +262,6 @@ fn create_business_row(
         tool_mode: input.tool_mode,
         model_selection: Some(input.model_selection),
         custom_tools: input.custom_tools,
-        skills: None,
         frozen_annotation: None,
         ephemeral: false,
     };

@@ -18,6 +18,7 @@ pub mod redirect_guard;
 pub(crate) mod register;
 pub mod shell;
 pub mod truncate;
+pub mod uutils;
 
 /// Windows sbx 旁路(TokenPlane/RedirectPlane;仅显式 Windows 后端走此路径)。
 #[cfg(windows)]

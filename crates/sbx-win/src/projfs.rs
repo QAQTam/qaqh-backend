@@ -22,7 +22,7 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::core::{GUID, PCWSTR, HRESULT};
-use windows::Win32::Foundation::{BOOLEAN, FILETIME};
+use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Storage::ProjectedFileSystem::{
     PRJ_CALLBACK_DATA, PRJ_CALLBACKS, PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN,
     PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO, PRJ_FILE_STATE, PRJ_NOTIFICATION,
@@ -82,7 +82,7 @@ type PrjMarkDirectoryAsPlaceholderFn = unsafe extern "system" fn(
     virtualizationinstanceid: *const GUID,
 ) -> HRESULT;
 type PrjFileNameMatchFn =
-    unsafe extern "system" fn(filenametocheck: PCWSTR, pattern: PCWSTR) -> BOOLEAN;
+    unsafe extern "system" fn(filenametocheck: PCWSTR, pattern: PCWSTR) -> u8;
 type PrjFileNameCompareFn = unsafe extern "system" fn(filename1: PCWSTR, filename2: PCWSTR) -> i32;
 type PrjDeleteFileFn = unsafe extern "system" fn(
     ctx: PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT,
@@ -326,13 +326,13 @@ unsafe extern "system" fn cb_get_enum(
             // 必须按 searchExpression 过滤(字面名查询若全量返回,调用方会把
             // 整个目录当匹配集;ADR-0003 工程事实 4)
             let name_w: Vec<u16> = e.name.encode_utf16().chain([0]).collect();
-            if (p.prj.file_name_match)(PCWSTR(name_w.as_ptr()), search_expression) == BOOLEAN(0) {
+            if (p.prj.file_name_match)(PCWSTR(name_w.as_ptr()), search_expression) == 0 {
                 session.cursor += 1;
                 continue;
             }
             let ft = ft_parts(e.write_time);
             let info = PRJ_FILE_BASIC_INFO {
-                IsDirectory: BOOLEAN(if e.is_dir { 1 } else { 0 }),
+                IsDirectory: e.is_dir,
                 FileSize: e.size,
                 CreationTime: ft.dwLowDateTime as i64,
                 LastAccessTime: ft.dwLowDateTime as i64,
@@ -364,7 +364,7 @@ unsafe extern "system" fn cb_get_placeholder(cbdata: *const PRJ_CALLBACK_DATA) -
         let ft = ft_parts(mtime);
         let mut info: PRJ_PLACEHOLDER_INFO = std::mem::zeroed();
         info.FileBasicInfo = PRJ_FILE_BASIC_INFO {
-            IsDirectory: BOOLEAN(if md.is_dir() { 1 } else { 0 }),
+            IsDirectory: md.is_dir(),
             FileSize: md.len() as i64,
             CreationTime: ft.dwLowDateTime as i64,
             LastAccessTime: 0,
@@ -421,7 +421,7 @@ unsafe extern "system" fn cb_get_file_data(
 
 unsafe extern "system" fn cb_notification(
     cbdata: *const PRJ_CALLBACK_DATA,
-    _is_directory: BOOLEAN,
+    _is_directory: bool,
     notification: PRJ_NOTIFICATION,
     destination_filename: PCWSTR,
     _operation_parameters: *mut windows::Win32::Storage::ProjectedFileSystem::PRJ_NOTIFICATION_PARAMETERS,

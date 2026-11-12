@@ -275,7 +275,12 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
     let mut tool_manager = qaqh_workspace::registration::build_tool_manager(&[]);
     tool_manager.set_global_allowed(global_allowed_tools);
     tool_manager.apply_init(allowed_tools);
-    let provider = provider_spec(config, tool_defs(&tool_manager))?;
+    let mut provider = provider_spec(config, tool_defs(&tool_manager))?;
+    // `session_title` 是根会话的自命名工具：子代理不进会话列表，声明无意义；
+    // 业务行已有标题（客户端 create 带名 / rename 过）的会话不许模型覆盖。
+    if sandbox == qaqh_workspace::tool_api::SandboxMode::Main && owner.current_title().is_none() {
+        crate::session_title::ensure_declared(&mut provider.tools);
+    }
     let policy = tool_policy(
         workspace_root.clone(),
         permission_level,

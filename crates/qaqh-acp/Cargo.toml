@@ -6,7 +6,7 @@ license.workspace = true
 description = "QAQHarness Agent Client Protocol entry point"
 
 [dependencies]
-agent-client-protocol = { version = "=5.0.0", features = ["stdio"] }
+agent-client-protocol = { version = "=5.2.0", features = ["stdio"] }
 qaqh-client = { path = "../qaqh-client" }
 qaqh-profile = { path = "../qaqh-profile" }
 serde = "1"

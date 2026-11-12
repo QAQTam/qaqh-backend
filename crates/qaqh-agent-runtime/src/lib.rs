@@ -15,6 +15,7 @@ pub mod session_agent;
 pub mod session_loop;
 #[cfg(test)]
 mod session_loop_tests;
+pub mod session_title;
 pub mod tool_job;
 
 pub use progress::{AttemptBlocks, ProgressSink, ProgressStream};

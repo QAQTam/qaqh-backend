@@ -90,7 +90,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
 
 /// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 22] = [
+const TABLE: [(&str, ToolCapabilities); 19] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
@@ -100,17 +100,12 @@ const TABLE: [(&str, ToolCapabilities); 22] = [
     ("exec_command", EXEC),
     ("glob", READ_ONLY),
     ("grep", READ_ONLY),
-    ("write_stdin", EXEC),
     ("read", READ_ONLY),
     ("read_image", READ_ONLY),
     // search：官方 Search 端点（网络，不碰工作区）。与 `tool_search`（检索工具
     // 目录的元工具）不是一回事。
     ("search", READ_ONLY_UNBOUND),
-    // skill_activate：改写会话内技能激活集（不动工作区文件）。
-    ("skill_activate", SESSION_MUTATING),
     ("skill_list", READ_ONLY),
-    ("skill_release", SESSION_MUTATING),
-    ("skill_resource", READ_ONLY),
     // todo_list 已从模型工具面退役（write/update 双工具收敛：完整列表由
     // write 的全量文本覆写 + output.items 快照携带，只读面留给 HTTP
     // service）。capability 表只覆盖注册表内实际存在的工具。
@@ -119,6 +114,7 @@ const TABLE: [(&str, ToolCapabilities); 22] = [
     ("tool_search", READ_ONLY),
     ("web_fetch", READ_ONLY_UNBOUND),
     ("write", MUTATING),
+    ("write_stdin", EXEC),
 ];
 
 /// 查询内置工具的能力声明。
@@ -156,8 +152,6 @@ mod tests {
             vec![
                 "ask",
                 "search",
-                "skill_activate",
-                "skill_release",
                 "todo_update",
                 "todo_write",
                 "web_fetch"

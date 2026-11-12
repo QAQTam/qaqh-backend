@@ -206,9 +206,9 @@ pub fn spawn(
         let mut size = 0usize;
         // 探测所需字节数(必须用与真实调用相同的属性数,否则二次初始化报 0x7A)
         let _ = InitializeProcThreadAttributeList(
-            LPPROC_THREAD_ATTRIBUTE_LIST(std::ptr::null_mut()),
+            None,
             attr_count,
-            0,
+            Some(0),
             &mut size,
         );
         if size == 0 {
@@ -220,7 +220,7 @@ pub fn spawn(
         }
         let mut attr_buf = vec![0u8; size];
         let attr = LPPROC_THREAD_ATTRIBUTE_LIST(attr_buf.as_mut_ptr() as *mut core::ffi::c_void);
-        InitializeProcThreadAttributeList(attr, attr_count, 0, &mut size)?;
+        InitializeProcThreadAttributeList(Some(attr), attr_count, Some(0), &mut size)?;
         let inherit_handles: [HANDLE; 3] = [in_r, out_w, err_w];
         UpdateProcThreadAttribute(
             attr,
@@ -256,9 +256,9 @@ pub fn spawn(
             Isolation::RestrictedToken { token } | Isolation::AppContainer { token } => *token,
         };
         let created = CreateProcessAsUserW(
-            token,
+            Some(token),
             PCWSTR::null(),
-            PWSTR(cmd_w.as_mut_ptr()),
+            Some(PWSTR(cmd_w.as_mut_ptr())),
             None,
             None,
             true,

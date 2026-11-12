@@ -72,7 +72,6 @@ mod tests {
                 tool_mode: None,
                 model_selection: None,
                 custom_tools: None,
-                skills: None,
                 frozen_annotation: None,
                 ephemeral: false,
             })
@@ -508,6 +507,7 @@ mod handoff_tests {
     async fn harness(
         dir: &std::path::Path,
         script: Vec<(u16, String)>,
+        tools: Vec<qaqh_types::ToolDef>,
         window: u32,
         threshold: f64,
     ) -> Harness {
@@ -523,7 +523,6 @@ mod handoff_tests {
                 tool_mode: None,
                 model_selection: None,
                 custom_tools: None,
-                skills: None,
                 frozen_annotation: None,
                 ephemeral: false,
             })
@@ -584,7 +583,7 @@ mod handoff_tests {
         );
         let spec = ProviderRequestSpec::new(provider, 1024)
             .with_context(window, threshold)
-            .with_tools(vec![handoff::tool_def()]);
+            .with_tools(tools);
         let loop_ = SessionLoop::new("SES-HANDOFF", owner, port, spec, dir.to_path_buf());
         Harness {
             loop_,
@@ -663,6 +662,7 @@ mod handoff_tests {
         let h = harness(
             dir.path(),
             vec![(200, tool_call_body("handoff", &doc, "call-h1", &cache_usage()))],
+            vec![handoff::tool_def()],
             10_000,
             0.5,
         )
@@ -728,6 +728,7 @@ mod handoff_tests {
         let h = harness(
             dir.path(),
             vec![(200, bad), (200, text_body("明白，我不交空文档"))],
+            vec![handoff::tool_def()],
             10_000,
             0.95,
         )
@@ -748,6 +749,75 @@ mod handoff_tests {
                 .unwrap()
                 .contains("明白，我不交空文档"),
             "第二轮的回答要留在会话里"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_title_sets_business_row_and_prunes_the_surface() {
+        // 模型自命名:业务行落 title + title_source=auto,快照带新题,
+        // 工具在下一轮请求体里被摘除(handoff 同款控制面纹理,零契约新增)。
+        let dir = tempfile::tempdir().expect("tempdir");
+        let doc = serde_json::json!({ "title": "daemon 启动崩溃排查" });
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, tool_call_body("session_title", &doc, "call-t1", &cache_usage())),
+                (200, text_body("命名完成，继续干活")),
+            ],
+            vec![crate::session_title::tool_def()],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("排查 daemon 崩溃"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle" && value["title"] == "daemon 启动崩溃排查"
+        })
+        .await;
+        assert!(
+            timeline_tool_result(&state).contains("daemon 启动崩溃排查"),
+            "回执必须入库: {state}"
+        );
+        // title_source 是业务列不进快照:直读原始行验来源。
+        let source: String = h
+            .owners
+            .db()
+            .read_blocking(|conn| {
+                conn.query_row(
+                    "SELECT title_source FROM sessions WHERE session_id = 'SES-HANDOFF'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .expect("read title_source");
+        assert_eq!(source, "auto");
+        // 第二轮请求体的**声明面**不再含 session_title(摘面当回合生效);
+        // 消息历史里的 tool_call 回显是合法内容,不参与断言。
+        let requests = h.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 2);
+        let declared = |body: &str| -> Vec<String> {
+            serde_json::from_str::<serde_json::Value>(body)
+                .expect("request body json")
+                .get("tools")
+                .and_then(|tools| tools.as_array())
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .map(|tool| {
+                            tool["function"]["name"].as_str().unwrap_or("").to_string()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        assert!(declared(&requests[0]).contains(&"session_title".to_string()));
+        assert!(
+            !declared(&requests[1]).contains(&"session_title".to_string()),
+            "落笔后不得再向模型声明命名工具: {:?}",
+            declared(&requests[1])
         );
     }
 
@@ -774,6 +844,7 @@ mod handoff_tests {
                 ),
                 (200, text_body("收到，继续")),
             ],
+            vec![handoff::tool_def()],
             1000,
             0.0,
         )
@@ -808,7 +879,14 @@ mod handoff_tests {
             "This model's maximum context length is 1200 tokens. However, your request is too long.",
             "type":"invalid_request_error","code":"context_length_exceeded"}})
         .to_string();
-        let h = harness(dir.path(), vec![(400, overflow)], 2000, 0.5).await;
+        let h = harness(
+            dir.path(),
+            vec![(400, overflow)],
+            vec![handoff::tool_def()],
+            2000,
+            0.5,
+        )
+        .await;
         h.loop_.send_input(input("推超限")).expect("send input");
 
         let state = wait_until(&h.owners, idle_with_turns).await;
@@ -838,6 +916,7 @@ mod handoff_tests {
         let h = harness(
             dir.path(),
             vec![(200, bad), (200, text_body("收到，这就写文档"))],
+            vec![handoff::tool_def()],
             1000,
             0.5,
         )

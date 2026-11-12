@@ -44,7 +44,6 @@ pub enum ToolRisk {
 /// without widening the textual tool-result protocol.
 #[derive(Debug, Clone)]
 pub enum ToolEffect {
-    Skill(qaqh_skills::SkillEffect),
     /// A subagent actor has been created and is waiting for its canonical
     /// `SubagentSpawned` fact before the task is delivered.
     SubagentSpawned {

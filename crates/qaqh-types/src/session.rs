@@ -3,64 +3,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
-/// Activation state of a single skill within a session.
-///
-/// Tracks whether a skill is currently loaded and available in the
-/// agent's context window.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub enum SkillSessionEntryState {
-    /// Skill is loaded and active in the current session.
-    Active,
-    /// Skill was previously available but is now unavailable
-    /// (e.g. file deleted, scope changed).
-    Unavailable,
-}
-
-/// Runtime tracking for one skill in a session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct SkillSessionEntry {
-    /// Skill name matching SKILL.md metadata.
-    pub name: String,
-    /// Monotonic counter for determining activation order across sessions.
-    pub activation_order: u64,
-    /// Path or identifier of the skill source directory (project/user scope).
-    pub source: String,
-    /// Current activation state.
-    pub state: SkillSessionEntryState,
-}
-
-/// Snapshot of skill activation state for a session, persisted in meta.json.
-///
-/// Version 2 adds `context_epoch` and `operation_revision` for tracking
-/// skill activation/deactivation across context compaction cycles.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct SkillSessionStateV2 {
-    /// Schema version (always 2).
-    pub version: u8,
-    /// Epoch counter incremented on context compaction. Used to detect
-    /// whether stale skill contexts need refresh.
-    pub context_epoch: u64,
-    /// Monotonic revision counter for operation ordering across restarts.
-    pub operation_revision: u64,
-    /// Active skill entries in activation order.
-    pub entries: Vec<SkillSessionEntry>,
-}
-
-impl Default for SkillSessionStateV2 {
-    fn default() -> Self {
-        Self {
-            version: 2,
-            context_epoch: 0,
-            operation_revision: 0,
-            entries: Vec::new(),
-        }
-    }
-}
-
 /// Session metadata — unified persistence + runtime state.
 ///
 /// Fields marked `#[serde(skip)]` are runtime-only and not persisted to meta.json.
@@ -111,8 +53,6 @@ pub struct SessionMeta {
     /// 旧 meta.json 缺失该字段 = 非临时会话。
     #[serde(default)]
     pub ephemeral: bool,
-    #[serde(default)]
-    pub skills: SkillSessionStateV2,
     /// Frozen [Environment] annotation for the first user message (P0 cache
     /// fix). Generated once on the FIRST build_context() and reused for the
     /// lifetime of the session — persisting it keeps the provider prefix cache
@@ -307,7 +247,6 @@ mod tests {
             custom_tools: vec!["bash".into()],
             archived: true,
             ephemeral: true,
-            skills: SkillSessionStateV2::default(),
             frozen_annotation: Some("<today>2026-09-15</today>".into()),
             usage_totals: crate::UsageInfo::default(),
             usage_requests: 6,
@@ -355,7 +294,6 @@ mod tests {
             "model_selection",
             "requested_model_selection",
             "session_id",
-            "skills",
             "settings_revision",
             // ── 运行期附加字段 ──
             "status",
@@ -488,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_session_metadata_defaults_to_empty_skill_state_v2() {
+    fn legacy_session_metadata_defaults_cache_counters() {
         let meta: SessionMeta = serde_json::from_str(
             r#"{
             "session_id":"s","created_at":0,"updated_at":0,"model":"m",
@@ -496,8 +434,6 @@ mod tests {
         }"#,
         )
         .unwrap();
-        assert_eq!(meta.skills.version, 2);
-        assert!(meta.skills.entries.is_empty());
         assert_eq!(meta.cache_reported_requests, 0);
     }
 

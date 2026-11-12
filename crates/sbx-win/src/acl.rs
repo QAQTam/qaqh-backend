@@ -206,7 +206,7 @@ fn count_aces_obj(target: AceTarget, path: &Path, sid: &[u8], mode: AceMode) -> 
     })();
     unsafe {
         if !sd.0.is_null() {
-            LocalFree(HLOCAL(sd.0));
+            LocalFree(Some(HLOCAL(sd.0)));
         }
     }
     r
@@ -240,7 +240,7 @@ pub fn revoke_ace_for(path: &Path, target: AceTarget, sid: &[u8]) -> Result<bool
         unsafe {
             let Some(old) = old_dacl else { return Ok(false) };
             let mut ea = EXPLICIT_ACCESS_W::default();
-            BuildTrusteeWithSidW(&mut ea.Trustee, PSID(sid.as_ptr() as *mut core::ffi::c_void));
+            BuildTrusteeWithSidW(&mut ea.Trustee, Some(PSID(sid.as_ptr() as *mut core::ffi::c_void)));
             ea.grfAccessMode = windows::Win32::Security::Authorization::REVOKE_ACCESS;
             ea.grfAccessPermissions = 0;
             let mut new_dacl: *mut ACL = std::ptr::null_mut();
@@ -254,8 +254,8 @@ pub fn revoke_ace_for(path: &Path, target: AceTarget, sid: &[u8]) -> Result<bool
                 PCWSTR(name_w.as_ptr()),
                 se_obj(target),
                 DACL_SECURITY_INFORMATION,
-                PSID(std::ptr::null_mut()),
-                PSID(std::ptr::null_mut()),
+                None,
+                None,
                 Some(new_dacl),
                 None,
             );
@@ -265,14 +265,14 @@ pub fn revoke_ace_for(path: &Path, target: AceTarget, sid: &[u8]) -> Result<bool
                 Ok(true)
             };
             if !new_dacl.is_null() {
-                LocalFree(HLOCAL(new_dacl as *mut core::ffi::c_void));
+                LocalFree(Some(HLOCAL(new_dacl as *mut core::ffi::c_void)));
             }
             r
         }
     })();
     unsafe {
         if !sd.0.is_null() {
-            LocalFree(HLOCAL(sd.0));
+            LocalFree(Some(HLOCAL(sd.0)));
         }
     }
     r
@@ -356,7 +356,7 @@ fn add_ace_obj(
     let r = (|| {
         unsafe {
             let mut ea = EXPLICIT_ACCESS_W::default();
-            BuildTrusteeWithSidW(&mut ea.Trustee, PSID(sid.as_ptr() as *mut core::ffi::c_void));
+            BuildTrusteeWithSidW(&mut ea.Trustee, Some(PSID(sid.as_ptr() as *mut core::ffi::c_void)));
             ea.grfAccessPermissions = mask;
             ea.grfAccessMode = match mode {
                 AceMode::Allow | AceMode::Read => GRANT_ACCESS,
@@ -383,8 +383,8 @@ fn add_ace_obj(
                 PCWSTR(name_w.as_ptr()),
                 se_obj(target),
                 si,
-                PSID(std::ptr::null_mut()),
-                PSID(std::ptr::null_mut()),
+                None,
+                None,
                 Some(new_dacl),
                 None,
             );
@@ -394,14 +394,14 @@ fn add_ace_obj(
                 Ok(())
             };
             if !new_dacl.is_null() {
-                LocalFree(HLOCAL(new_dacl as *mut core::ffi::c_void));
+                LocalFree(Some(HLOCAL(new_dacl as *mut core::ffi::c_void)));
             }
             r
         }
     })();
     unsafe {
         if !sd.0.is_null() {
-            LocalFree(HLOCAL(sd.0));
+            LocalFree(Some(HLOCAL(sd.0)));
         }
     }
     r?;
@@ -474,12 +474,12 @@ pub fn sddl_for(target: AceTarget, path: &Path) -> Result<Option<String>> {
             end += 1;
         }
         let s = String::from_utf16_lossy(std::slice::from_raw_parts(pw.0, end));
-        let _ = LocalFree(HLOCAL(pw.0 as *mut core::ffi::c_void));
+        let _ = LocalFree(Some(HLOCAL(pw.0 as *mut core::ffi::c_void)));
         Ok(Some(s))
     })();
     unsafe {
         if !sd.0.is_null() {
-            LocalFree(HLOCAL(sd.0));
+            LocalFree(Some(HLOCAL(sd.0)));
         }
     }
     r
@@ -511,15 +511,15 @@ pub fn restore_sddl_for(target: AceTarget, path: &Path, sddl: &str) -> Result<()
             let mut grp_len = 0u32;
             let _ = MakeAbsoluteSD(
                 psd,
-                PSECURITY_DESCRIPTOR::default(),
+                None,
                 &mut abs_len,
                 None,
                 &mut dacl_len,
                 None,
                 &mut sacl_len,
-                PSID::default(),
+                None,
                 &mut own_len,
-                PSID::default(),
+                None,
                 &mut grp_len,
             );
             if abs_len == 0 || dacl_len == 0 {
@@ -534,15 +534,15 @@ pub fn restore_sddl_for(target: AceTarget, path: &Path, sddl: &str) -> Result<()
             let mut grp_buf = vec![0u8; grp_len as usize];
             MakeAbsoluteSD(
                 psd,
-                PSECURITY_DESCRIPTOR(abs_buf.as_mut_ptr() as *mut core::ffi::c_void),
+                Some(PSECURITY_DESCRIPTOR(abs_buf.as_mut_ptr() as *mut core::ffi::c_void)),
                 &mut abs_len,
                 Some(dacl_buf.as_mut_ptr() as *mut ACL),
                 &mut dacl_len,
                 Some(sacl_buf.as_mut_ptr() as *mut ACL),
                 &mut sacl_len,
-                PSID(own_buf.as_mut_ptr() as *mut core::ffi::c_void),
+                Some(PSID(own_buf.as_mut_ptr() as *mut core::ffi::c_void)),
                 &mut own_len,
-                PSID(grp_buf.as_mut_ptr() as *mut core::ffi::c_void),
+                Some(PSID(grp_buf.as_mut_ptr() as *mut core::ffi::c_void)),
                 &mut grp_len,
             )?;
             let name_w = security_name_w(target, path)?;
@@ -550,8 +550,8 @@ pub fn restore_sddl_for(target: AceTarget, path: &Path, sddl: &str) -> Result<()
                 PCWSTR(name_w.as_ptr()),
                 se_obj(target),
                 DACL_SECURITY_INFORMATION,
-                PSID::default(),
-                PSID::default(),
+                None,
+                None,
                 Some(dacl_buf.as_mut_ptr() as *mut ACL),
                 None,
             );
@@ -560,7 +560,7 @@ pub fn restore_sddl_for(target: AceTarget, path: &Path, sddl: &str) -> Result<()
             }
             Ok(())
         })();
-        LocalFree(HLOCAL(psd.0));
+        LocalFree(Some(HLOCAL(psd.0)));
         r
     }
 }
@@ -626,7 +626,7 @@ pub fn wellknown_write_grants(path: &Path) -> Result<Vec<&'static str>> {
     })();
     unsafe {
         if !sd.0.is_null() {
-            LocalFree(HLOCAL(sd.0));
+            LocalFree(Some(HLOCAL(sd.0)));
         }
     }
     r
@@ -763,7 +763,7 @@ fn ensure_registry_key(path: &Path, precreate: Precreate) -> io::Result<()> {
     unsafe {
         let mut hkey = HKEY::default();
         let code =
-            RegOpenKeyExW(hroot, PCWSTR(sub_w.as_ptr()), 0, KEY_READ, &mut hkey);
+            RegOpenKeyExW(hroot, PCWSTR(sub_w.as_ptr()), Some(0), KEY_READ, &mut hkey);
         if code == ERROR_SUCCESS {
             let _ = RegCloseKey(hkey);
             return Ok(());
@@ -777,7 +777,7 @@ fn ensure_registry_key(path: &Path, precreate: Precreate) -> io::Result<()> {
         let code = RegCreateKeyExW(
             hroot,
             PCWSTR(sub_w.as_ptr()),
-            0,
+            Some(0),
             PCWSTR::null(),
             REG_OPTION_NON_VOLATILE,
             KEY_READ | KEY_WRITE,

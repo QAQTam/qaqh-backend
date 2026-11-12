@@ -9,7 +9,6 @@ description = "QAQ-Harness file tool group: mutate/query/glob/grep/edit/apply_pa
 qaqh-types = { path = "../qaqh-types" }
 qaqh-permission = { path = "../qaqh-permission" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
-qaqh-skills = { path = "../qaqh-skills" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "1"
@@ -18,7 +17,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 sha2 = "0.11"
 similar = { version = "3.1", features = ["text"] }
 hex = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 globset = "0.4.20"
 ignore = "0.4.33"
 grep-regex = "0.1"
@@ -30,7 +29,7 @@ workspace = true
 
 [target.'cfg(windows)'.dependencies]
 # atomic_write 的 MoveFileExW 原子替换路径（随 file_shared 并入）。
-windows = { version = "0.58", features = ["Win32_Storage_FileSystem"] }
+windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = "3"

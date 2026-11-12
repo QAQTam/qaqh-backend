@@ -252,7 +252,7 @@ mod tests {
         assert!(result.model_text().len() < body.len());
         assert!(result.model_text().starts_with("line of output\n"));
         assert!(result.model_text().contains("[truncated:"));
-        assert!(result.model_text().contains("call exec again"));
+        assert!(result.model_text().contains("call exec_command again"));
         // 行对齐：头部到截断标记之间没有半行。
         assert!(result.model_text().contains("…\n[truncated:"));
     }

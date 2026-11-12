@@ -690,9 +690,6 @@ pub struct SessionMetadataPatch {
     pub tool_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_tools: Option<Vec<String>>,
-    /// Skills session state (prompt-prefix relevant, so it must survive a restart).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub skills: Option<qaqh_types::SkillSessionStateV2>,
     /// Frozen `[Environment]` annotation for the first user message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frozen_annotation: Option<String>,

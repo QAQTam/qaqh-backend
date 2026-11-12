@@ -840,7 +840,6 @@ fn validate_metadata_patch(patch: &SessionMetadataPatch) -> Result<(), Validatio
         && patch.requested_model_selection.is_none()
         && patch.tool_mode.is_none()
         && patch.custom_tools.is_none()
-        && patch.skills.is_none()
         && patch.frozen_annotation.is_none()
         && patch.ephemeral.is_none()
         && patch.usage.is_none();
