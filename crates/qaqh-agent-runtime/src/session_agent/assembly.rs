@@ -277,9 +277,13 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
     tool_manager.apply_init(allowed_tools);
     let mut provider = provider_spec(config, tool_defs(&tool_manager))?;
     // `session_title` 是根会话的自命名工具：子代理不进会话列表，声明无意义；
-    // 业务行已有标题（客户端 create 带名 / rename 过）的会话不许模型覆盖。
-    if sandbox == qaqh_workspace::tool_api::SandboxMode::Main && owner.current_title().is_none() {
-        crate::session_title::ensure_declared(&mut provider.tools);
+    // 用户命名（客户端 create 带名 / rename 过）的会话永不声明；auto 标题保留
+    // 修订能力（任务需求变化时模型可重新生成）。
+    if sandbox == qaqh_workspace::tool_api::SandboxMode::Main {
+        let (title, source) = owner.title_state();
+        if crate::session_title::should_declare(title.as_deref(), source.as_deref()) {
+            crate::session_title::ensure_declared(&mut provider.tools);
+        }
     }
     let policy = tool_policy(
         workspace_root.clone(),

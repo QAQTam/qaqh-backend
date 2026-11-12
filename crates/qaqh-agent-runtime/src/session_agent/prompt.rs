@@ -37,7 +37,8 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
          本会话，并由客户端拿这份文档开新会话继续推进。\n\
          口头总结不算交接（新会话读不到它）；不要拖到请求被拒才动。\n",
     );
-    // 命名指令与工具声明同进同退：标题已定（工具被摘除）或子代理会话都不出现。
+    // 命名指令与工具声明同进同退：用户命名或子代理会话都不出现；auto 标题
+    // 保留修订能力，指令随之常驻。
     let can_name_session = spec
         .tools
         .as_ref()
@@ -45,9 +46,9 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path) -> String {
     if can_name_session {
         prompt.push_str(
             "\n[Session title]\n\
-             明确任务后，请在**本回合内**调用 `session_title` 给会话命名（名词短语、≤20 字、\n\
-             写意图不写结论）。命名成功即落库，客户端会话列表实时可见；不调用不算错误，\n\
-             列表会回退到目录名。\n",
+             明确任务后，请调用 `session_title` 根据用户需求给会话命名（名词短语、≤20 字、\n\
+             写意图不写结论）；任务需求变化时可重新生成标题。命名成功即落库，客户端会话\n\
+             列表实时可见；不调用不算错误，列表会回退到目录名。\n",
         );
     }
     if let Some(agents) = read_agents_instructions(cwd) {
