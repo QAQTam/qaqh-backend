@@ -8,9 +8,10 @@ use crate::{ExecOutputStream, ExecProgressEvent};
 use super::*;
 
 impl Shell {
-    /// 测试专用便捷封装（生产路径走 `derive_exec_args_with(cmd, None)`）。
+    /// 测试专用便捷封装：固定不注入 uutils 前缀，消除机器差异
+    /// （生产路径走 `derive_exec_args_with`，其内部探测）。
     fn derive_exec_args(&self, command: &str) -> Vec<String> {
-        self.derive_exec_args_with(command, None)
+        self.derive_exec_args_with_uutils(command, None, None)
     }
 }
 
@@ -253,7 +254,8 @@ fn resolved_shell_paths_are_absolute_when_available() {
 #[test]
 fn command_with_args_contract_is_dollar_args_only() {
     let args = vec!["中文测试".to_string()];
-    let argv = Shell::PowerShell.derive_exec_args_with("Write-Output $args[0]", Some(&args));
+    let argv =
+        Shell::PowerShell.derive_exec_args_with_uutils("Write-Output $args[0]", Some(&args), None);
     // 派生：脚本 + 参数原样尾随，中间无 `-Command` 之类的再包装。
     // 脚本 token = UTF-8 preamble + `\n` + 原命令，按尾段定位。
     let script_at = argv
@@ -273,7 +275,11 @@ fn pwsh_command_with_args_uses_command_with_args() {
         "a\"b".to_string(),
     ];
     let pwsh = Shell::PowerShell
-        .derive_exec_args_with("Write-Output $args[0]; Write-Output $args[1]", Some(&args));
+        .derive_exec_args_with_uutils(
+            "Write-Output $args[0]; Write-Output $args[1]",
+            Some(&args),
+            None,
+        );
     // 审计 M2：argv[0] 为绝对路径，壳身份按尾段断言。
     assert!(
         pwsh[0].ends_with("pwsh.exe") || pwsh[0].ends_with("pwsh"),
@@ -303,9 +309,67 @@ fn pwsh_command_with_args_uses_command_with_args() {
     assert_eq!(&pwsh[12..], &args);
     assert_eq!(pwsh.len(), 15);
     // 空 args 应回退到 EncodedCommand
-    let pwsh2 = Shell::PowerShell.derive_exec_args_with("Get-ChildItem", Some(&[]));
+    let pwsh2 = Shell::PowerShell.derive_exec_args_with_uutils("Get-ChildItem", Some(&[]), None);
     assert!(pwsh2.contains(&"-EncodedCommand".to_string()));
     assert!(!pwsh2.contains(&"-CommandWithArgs".to_string()));
+}
+
+/// ADR-0012 前缀合成契约：未装 coreutils（注入 `None`）时逐字节等于历史
+/// preamble；已装（注入路径）时 = preamble + PATH 前插 + 最小冲突别名手术。
+/// 对象管道高频词（sort/tee/where/select）必须原样保留。
+#[test]
+fn uutils_pwsh_prefix_composition() {
+    assert_eq!(uutils::pwsh_script_prefix(None), PS_UTF8_PREAMBLE);
+
+    let prefix = uutils::pwsh_script_prefix(Some(std::path::Path::new(
+        "C:\\Program Files\\coreutils\\bin",
+    )));
+    assert!(
+        prefix.starts_with(&format!("{PS_UTF8_PREAMBLE}\n")),
+        "prefix: {prefix}"
+    );
+    assert!(
+        prefix.contains("$env:PATH = 'C:\\Program Files\\coreutils\\bin;' + $env:PATH"),
+        "prefix: {prefix}"
+    );
+    for alias in [
+        "Alias:ls", "Alias:cp", "Alias:mv", "Alias:rm", "Alias:cat", "Alias:echo", "Alias:pwd",
+        "Alias:sleep", "Alias:kill",
+    ] {
+        assert!(prefix.contains(alias), "{alias} missing: {prefix}");
+    }
+    assert!(prefix.contains("Function:mkdir"), "prefix: {prefix}");
+    for kept in ["Alias:sort", "Alias:tee", "Alias:where", "Alias:select"] {
+        assert!(!prefix.contains(kept), "{kept} must stay: {prefix}");
+    }
+}
+
+/// 生产派生与探测状态的两态不变量：装有 coreutils 的机器脚本以 PATH 前插
+/// 开头，没装的机器逐字节等于历史行为。CI（无安装）与本机（已装）都成立。
+#[test]
+fn pwsh_derive_matches_coreutils_detection_state() {
+    let detected = uutils::detect_coreutils_bin();
+    let argv = Shell::PowerShell.derive_exec_args_with("Get-ChildItem", None);
+    let script = {
+        let units: Vec<u16> = base64_decode(&argv[11])
+            .expect("valid base64")
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes(*c))
+            .collect();
+        String::from_utf16(&units).expect("valid utf16le")
+    };
+    match detected {
+        Some(dir) => assert!(
+            script.starts_with(&format!(
+                "{PS_UTF8_PREAMBLE}\n$env:PATH = '{};' + $env:PATH",
+                dir.display()
+            )),
+            "script: {script}"
+        ),
+        None => assert_eq!(script, format!("{PS_UTF8_PREAMBLE}\nGet-ChildItem")),
+    }
 }
 
 #[test]

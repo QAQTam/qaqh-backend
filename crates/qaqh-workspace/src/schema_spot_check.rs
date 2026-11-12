@@ -7,7 +7,7 @@ mod schema_spot_check {
     /// 必须是 object，且不得出现手写聚合 schema 残留的 oneOf/anyOf/allOf
     /// （类型生成路径从机制上不允许组合键）。
     ///
-    /// 本 crate 内置 22 工具；subagent 面（+18）无法在此以 dev-dep 注入
+    /// 本 crate 内置 19 工具；subagent 面（+18）无法在此以 dev-dep 注入
     /// （workspace→subagent→workspace 循环 dev-dep 会使 lib 双编译、类型
     /// 不统一），其形态验收在 qaqh-subagent 自身测试与 runtime 侧全量面
     /// （prompt_and_tool_defs_char_budget）覆盖。
@@ -15,7 +15,7 @@ mod schema_spot_check {
     fn all_defs_are_object_shaped_without_composition_keys() {
         let defs = build_tool_manager(&[]).all_defs();
         assert!(
-            defs.len() >= 22,
+            defs.len() >= 19,
             "builtin surface unexpectedly small: {}",
             defs.len()
         );
@@ -85,7 +85,7 @@ mod schema_spot_check {
     fn closed_args_generate_additional_properties_false() {
         let defs = build_tool_manager(&[]).all_defs();
         let by_name = |n: &str| defs.iter().find(|d| d.function.name == n).unwrap();
-        for name in ["edit", "skill_activate", "todo_write"] {
+        for name in ["edit", "skill_list", "todo_write"] {
             assert_eq!(
                 by_name(name).function.parameters["additionalProperties"],
                 serde_json::json!(false),
@@ -206,15 +206,8 @@ mod schema_spot_check {
             "todo_update title/status missing: {tu}"
         );
 
-        // skills 三件套已上线，聚合名/validate 退役。
-        for name in [
-            "skill_activate",
-            "skill_list",
-            "skill_release",
-            "skill_resource",
-        ] {
-            let _ = by_name(name);
-        }
+        // skills 收敛为单工具，聚合名/三件套/validate 全部退役。
+        let _ = by_name("skill_list");
         assert!(
             defs.iter()
                 .all(|d| !matches!(d.function.name.as_str(), "skills" | "skill_validate")),

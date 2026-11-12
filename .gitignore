@@ -41,3 +41,6 @@ __pycache__/
 /.codex/worktree/
 .DS_Store
 
+
+# tool-local agent state (not project content)
+.workbuddy/

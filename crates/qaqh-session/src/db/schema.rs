@@ -25,7 +25,6 @@ CREATE TABLE sessions (
     model             TEXT,
     tool_mode         TEXT,
     model_selection   TEXT,
-    skills_json       TEXT,
     custom_tools_json TEXT,
     frozen_annotation TEXT,
     settings_revision INTEGER NOT NULL DEFAULT 0,

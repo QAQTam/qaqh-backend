@@ -280,12 +280,12 @@ impl AgentRegistry {
                         &owned,
                         &qaqh_session::db::store::SessionColumnPatch {
                             title: None,
+                            title_source: None,
                             cwd: Some(cwd),
                             model: None,
                             tool_mode: None,
                             model_selection: child_selection,
                             custom_tools: None,
-                            skills: None,
                             frozen_annotation: None,
                             archived: None,
                             ephemeral: None,

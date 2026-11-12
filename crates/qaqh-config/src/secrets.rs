@@ -597,7 +597,7 @@ fn encrypt(plain: &[u8]) -> Result<String, String> {
         )
         .map_err(|e| format!("CryptProtectData failed: {e}"))?;
         let bytes = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
-        let _ = LocalFree(HLOCAL(out_blob.pbData as *mut _));
+        let _ = LocalFree(Some(HLOCAL(out_blob.pbData as *mut _)));
         Ok(format!("dpapi:{}", base64_encode(&bytes)))
     }
 }
@@ -623,7 +623,7 @@ fn decrypt(raw: &str) -> Result<String, String> {
         CryptUnprotectData(&in_blob, None, None, None, None, 0, &mut out_blob)
             .map_err(|e| format!("CryptUnprotectData failed: {e}"))?;
         let bytes = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
-        let _ = LocalFree(HLOCAL(out_blob.pbData as *mut _));
+        let _ = LocalFree(Some(HLOCAL(out_blob.pbData as *mut _)));
         String::from_utf8(bytes).map_err(|_| "decrypted secret is not utf-8".to_string())
     }
 }

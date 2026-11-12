@@ -865,17 +865,9 @@ fn run_metrics(run: &ToolRun) -> ToolMetrics {
 /// workspace 结构化效果 → 契约词表;SubagentSpawned 的执行面字段留在 runtime。
 fn effect_infos(result: &qaqh_workspace::execution::ToolExecResult) -> Vec<ToolEffectInfo> {
     result
-        .skill_effects
+        .effects
         .iter()
         .map(|effect| match effect {
-            qaqh_workspace::ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(activation)) => {
-                ToolEffectInfo::SkillActivated {
-                    name: activation.metadata.name.clone(),
-                }
-            }
-            qaqh_workspace::ToolEffect::Skill(qaqh_skills::SkillEffect::Release { name }) => {
-                ToolEffectInfo::SkillReleased { name: name.clone() }
-            }
             qaqh_workspace::ToolEffect::SubagentSpawned {
                 child_session_id,
                 name,

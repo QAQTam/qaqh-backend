@@ -17,7 +17,7 @@ pub struct ToolExecResult {
     pub result: crate::ToolResult,
     pub meta: crate::ToolExecMeta,
     pub code_delta: Option<qaqh_types::CodeDeltaRecord>,
-    pub skill_effects: Vec<crate::ToolEffect>,
+    pub effects: Vec<crate::ToolEffect>,
     /// 契约终态(spec §4.2):typed 执行器(执行会话类工具)直接给出
     /// completed/yielded/failed 等事实;None 时按 success/error 派生。
     /// 不再从模型正文 JSON 推断任何状态。
@@ -216,7 +216,7 @@ pub fn execute_authorized_with_context(
                 result: canonical,
                 meta: report.meta,
                 code_delta: None,
-                skill_effects: Vec::new(),
+                effects: Vec::new(),
             };
         }
         None => {
@@ -324,7 +324,7 @@ pub fn execute_authorized_with_context(
     let execution = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         prepared.executor.clone().execute(exec_ctx, args.clone())
     }));
-    let (mut tool_result, skill_effects, call_outcome) = {
+    let (mut tool_result, effects, call_outcome) = {
         match execution {
             Ok(Ok(outcome)) => {
                 let effects = outcome.effects.clone();
@@ -442,7 +442,7 @@ pub fn execute_authorized_with_context(
                 result: canonical,
                 meta: report.meta,
                 code_delta,
-                skill_effects,
+                effects,
                 outcome: call_outcome,
             };
             if let Err(e) = crate::audit::append_audit(&audit_entry) {
@@ -694,7 +694,7 @@ fn failure(name: &str, error: crate::ToolError) -> ToolExecResult {
             args_summary: String::new(),
         },
         code_delta: None,
-        skill_effects: Vec::new(),
+        effects: Vec::new(),
         outcome: None,
     }
 }
@@ -883,110 +883,39 @@ mod tests {
     }
 
     #[test]
-    fn skill_execution_returns_typed_activation() {
+    fn skill_list_execution_lists_catalog_and_resources() {
         let _test_guard = setup_test_manager();
         let definitions = crate::runtime::all_tools();
-        // v2：skills 聚合工具拆为三件套；聚合名与 validate 不在模型面。
-        let skill_names = [
-            "skill_activate",
-            "skill_list",
-            "skill_release",
-            "skill_resource",
-        ];
-        for name in skill_names {
-            assert_eq!(
-                definitions
-                    .iter()
-                    .filter(|definition| definition.function.name == name)
-                    .count(),
-                1,
-                "{name} 必须恰好注册一次"
-            );
-        }
+        // skills 收敛为单工具；聚合名/三件套/validate 不在模型面。
+        assert_eq!(
+            definitions
+                .iter()
+                .filter(|definition| definition.function.name == "skill_list")
+                .count(),
+            1,
+            "skill_list 必须恰好注册一次"
+        );
         assert!(!definitions.iter().any(|definition| matches!(
             definition.function.name.as_str(),
-            "skills" | "skill" | "skills_list" | "skill_validate"
+            "skills"
+                | "skill"
+                | "skills_list"
+                | "skill_validate"
+                | "skill_activate"
+                | "skill_release"
+                | "skill_resource"
         )));
         let temp = tempfile::tempdir().unwrap();
         let skill_dir = temp.path().join(".agents/skills/typed-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
-            "---\nname: typed-skill\ndescription: Use for typed activation tests.\n---\n\n# Typed instructions",
+            "---\nname: typed-skill\ndescription: Use for typed list tests.\n---\n\n# Typed instructions",
         ).unwrap();
         std::fs::create_dir_all(skill_dir.join("references")).unwrap();
         std::fs::write(skill_dir.join("references/info.md"), "complete reference").unwrap();
         crate::set_workspace(&temp.path().to_string_lossy());
         crate::runtime::set_context("test_session", 3);
-
-        let result = execute_with_context(
-            "skill_activate",
-            r#"{"name":"typed-skill"}"#,
-            "skill-call-1",
-            None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
-        );
-
-        assert!(result.success);
-        let activation = match result
-            .skill_effects
-            .into_iter()
-            .next()
-            .expect("typed activation")
-        {
-            // ToolEffect 现有 Skill/SubagentSpawned 两个变体（SkillEffect 仅
-            // Activate），此臂只覆盖 Skill；其余变体由下方 `other` 兜底 panic，
-            // 故新增变体不会编译失败，而是走到该 panic。
-            crate::ToolEffect::Skill(qaqh_skills::SkillEffect::Activate(activation)) => activation,
-            other => panic!("unexpected typed skill effect: {other:?}"),
-        };
-        assert_eq!(activation.metadata.name, "typed-skill");
-        assert!(activation.body.contains("Typed instructions"));
-
-        let resource = execute_with_context(
-            "skill_resource",
-            r#"{"name":"typed-skill","path":"references/info.md"}"#,
-            "resource-call-1",
-            None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
-        );
-        assert!(resource.success);
-        assert_eq!(resource.content, "complete reference");
-        assert!(resource.skill_effects.is_empty());
-
-        let generic_read = execute_with_context(
-            "read",
-            &serde_json::json!({"path": skill_dir.join("SKILL.md")}).to_string(),
-            "generic-skill-read",
-            None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
-        );
-        assert!(!generic_read.success);
-        assert_eq!(
-            generic_read
-                .result
-                .error
-                .as_ref()
-                .map(|error| error.code.as_str()),
-            Some("use_skills_tool")
-        );
-
-        let traversal = execute_with_context(
-            "skill_resource",
-            r#"{"name":"typed-skill","path":"../outside.md"}"#,
-            "resource-call-2",
-            None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
-        );
-        assert!(!traversal.success);
-        assert_eq!(
-            traversal
-                .result
-                .error
-                .as_ref()
-                .map(|error| error.code.as_str()),
-            Some("skill_resource_unavailable")
-        );
 
         let list = execute_with_context(
             "skill_list",
@@ -998,39 +927,36 @@ mod tests {
         assert!(list.success);
         assert!(list.content.contains("typed-skill"));
 
-        let release = execute_with_context(
-            "skill_release",
+        let resources = execute_with_context(
+            "skill_list",
             r#"{"name":"typed-skill"}"#,
-            "skill-release-1",
+            "skills-resources-1",
             None,
             &crate::runtime::ToolCtx::admitted("test_session"),
         );
-        assert!(release.success);
-        assert!(matches!(
-            release.skill_effects.first(),
-            Some(crate::ToolEffect::Skill(
-                qaqh_skills::SkillEffect::Release { .. }
-            ))
-        ));
+        assert!(resources.success);
+        assert!(resources.content.contains("SKILL.md"));
+        assert!(resources.content.contains("info.md"));
 
-        // v2：字段校验由 typed Args（deny_unknown_fields + 必填）承担，
-        // 缺 name 在反序列化层映射为 invalid_arguments。
-        let invalid = execute_with_context(
-            "skill_activate",
-            r#"{}"#,
-            "skills-invalid-1",
+        // 新设计：模型用 read 直读技能文件，use_skills_tool 闸门已拆除。
+        let generic_read = execute_with_context(
+            "read",
+            &serde_json::json!({"path": skill_dir.join("SKILL.md")}).to_string(),
+            "generic-skill-read",
             None,
             &crate::runtime::ToolCtx::admitted("test_session"),
         );
-        assert!(!invalid.success);
-        assert_eq!(
-            invalid
-                .result
-                .error
-                .as_ref()
-                .map(|error| error.code.as_str()),
-            Some("invalid_arguments")
+        assert!(generic_read.success, "read must serve skill files directly");
+        assert!(generic_read.content.contains("Typed instructions"));
+
+        let unknown = execute_with_context(
+            "skill_list",
+            r#"{"name":"nope"}"#,
+            "skills-unknown-1",
+            None,
+            &crate::runtime::ToolCtx::admitted("test_session"),
         );
+        assert!(!unknown.success);
         crate::set_workspace(".");
     }
 

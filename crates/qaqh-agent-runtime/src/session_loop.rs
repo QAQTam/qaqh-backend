@@ -323,6 +323,13 @@ impl SessionLoop {
         spec.tools = (!tools.is_empty()).then_some(tools);
         // 重载后的清单来自 allowlist 过滤，必须把控制面工具补回去。
         crate::handoff::ensure_declared(&mut spec.tools);
+        // `session_title` 只对根会话、且业务行尚无标题时在场（模型落笔后由
+        // `run_session_title` 摘除，客户端起过名的会话永不声明）。
+        if policy.sandbox == qaqh_workspace::tool_api::SandboxMode::Main
+            && self.owner.current_title().is_none()
+        {
+            crate::session_title::ensure_declared(&mut spec.tools);
+        }
         *self
             .cwd
             .write()
@@ -752,6 +759,10 @@ impl SessionLoop {
         // handoff 是控制面工具：不走 port，不经权限审批，自己收尾生命周期。
         if tool_name == crate::handoff::TOOL_NAME {
             return self.run_handoff(turn, call_id, input).await;
+        }
+        // session_title 同为控制面工具：直落 owner 唯一写口，命名后回合照常继续。
+        if tool_name == crate::session_title::TOOL_NAME {
+            return self.run_session_title(call_id, input).await;
         }
         let args = serde_json::to_vec(input).map_err(|error| {
             LoopError::Db(qaqh_session::db::DbError::Corrupt(error.to_string()))
@@ -1295,6 +1306,58 @@ impl SessionLoop {
         );
         self.settle_finished_text(call_id, crate::handoff::TOOL_NAME, &text);
         Ok((true, text))
+    }
+
+    /// 模型自命名:校验 → `owner::update_metadata`(title + title_source=auto,
+    /// 成功即发 `session_meta_changed`)→ 从请求面摘除本工具。不占用回合终态。
+    async fn run_session_title(
+        &self,
+        call_id: &str,
+        input: &serde_json::Value,
+    ) -> Result<(bool, String), LoopError> {
+        let args_json = serde_json::to_string(input).ok();
+        let title = match crate::session_title::parse_title(input) {
+            Ok(title) => title,
+            Err(error) => {
+                self.settle_failed(
+                    call_id,
+                    crate::session_title::TOOL_NAME,
+                    args_json,
+                    "session_title_invalid_args",
+                    &error,
+                );
+                return Ok((false, error));
+            }
+        };
+        let result = self.owner.update_metadata(qaqh_session::db::store::SessionColumnPatch {
+            title: Some(title.clone()),
+            title_source: Some("auto".to_string()),
+            ..Default::default()
+        });
+        match result {
+            Ok(_) => {
+                let mut spec = self
+                    .spec
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                crate::session_title::prune(&mut spec.tools);
+                drop(spec);
+                let text = crate::session_title::success_output(&title);
+                self.settle_finished_text(call_id, crate::session_title::TOOL_NAME, &text);
+                Ok((true, text))
+            }
+            Err(error) => {
+                let message = error.to_string();
+                self.settle_failed(
+                    call_id,
+                    crate::session_title::TOOL_NAME,
+                    args_json,
+                    "session_title_write_failed",
+                    &message,
+                );
+                Ok((false, message))
+            }
+        }
     }
 
     fn settle_failed(

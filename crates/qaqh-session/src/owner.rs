@@ -119,6 +119,24 @@ impl SessionOwner {
         &self.session_id
     }
 
+    /// 读 `sessions.title` 现值:空串/缺行归一为 `None`(与 `view::session_title`
+    /// 同口径)。读取失败同样返回 `None`:调用方只用它决定控制面工具是否声明,
+    /// 最坏后果是多声明一个工具,不是业务错误。
+    pub fn current_title(&self) -> Option<String> {
+        let session_id = self.session_id.clone();
+        self.db
+            .read_blocking(move |conn| {
+                conn.query_row(
+                    "SELECT title FROM sessions WHERE session_id = ?1",
+                    [session_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+            })
+            .ok()
+            .flatten()
+            .filter(|title| !title.is_empty())
+    }
+
     /// 执行路径侧句柄:工具生命周期上报从这里进入 owner。
     pub fn lifecycle(&self) -> ToolLifecycle {
         ToolLifecycle {
@@ -1334,12 +1352,12 @@ impl OwnerDirectory {
                 &owned,
                 &store::SessionColumnPatch {
                     title: None,
+                    title_source: None,
                     cwd: None,
                     model: None,
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
-                    skills: None,
                     frozen_annotation: None,
                     archived: None,
                     ephemeral: Some(ephemeral),

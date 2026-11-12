@@ -194,17 +194,6 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
             json!({}),
         ));
     }
-    let workspace = ctx.workspace_root.to_string_lossy().to_string();
-    if let Some(skill) =
-        qaqh_skills::managed_skill_for_path(Path::new(&workspace), Path::new(&path))
-    {
-        return Err(read_error(
-            "use_skills_tool",
-            format!("'{path}' is managed by skill '{skill}'"),
-            Some("Use skills(action=activate|resource, name=...) instead."),
-            json!({"path": path}),
-        ));
-    }
     if Path::new(&path).is_dir() {
         return Err(read_error(
             "is_directory",

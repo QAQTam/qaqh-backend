@@ -75,7 +75,7 @@ unsafe fn local_free_sd(psd: &PSECURITY_DESCRIPTOR) {
     unsafe {
         if !psd.0.is_null() {
             use windows::Win32::Foundation::{HLOCAL, LocalFree};
-            let _ = LocalFree(HLOCAL(psd.0));
+            let _ = LocalFree(Some(HLOCAL(psd.0)));
         }
     }
 }

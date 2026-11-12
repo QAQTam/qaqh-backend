@@ -92,7 +92,6 @@ mod tests {
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
-                    skills: None,
                     frozen_annotation: None,
                     ephemeral: false,
                 })
@@ -213,8 +212,10 @@ mod tests {
                         files_deleted: 0,
                         file: Some("src/main.rs".into()),
                     }),
-                    effects: vec![ToolEffectInfo::SkillActivated {
-                        name: "qaqh-core".into(),
+                    effects: vec![ToolEffectInfo::SubagentSpawned {
+                        child_session_id: "child-1".into(),
+                        name: "worker".into(),
+                        task_text: "task".into(),
                     }],
                 },
             );
@@ -241,8 +242,10 @@ mod tests {
                     assert_eq!(code_delta.expect("code delta").lines_added, 3);
                     assert_eq!(
                         effects,
-                        vec![ToolEffectInfo::SkillActivated {
-                            name: "qaqh-core".into(),
+                        vec![ToolEffectInfo::SubagentSpawned {
+                            child_session_id: "child-1".into(),
+                            name: "worker".into(),
+                            task_text: "task".into(),
                         }]
                     );
                 }
@@ -369,7 +372,6 @@ mod tests {
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
-                    skills: None,
                     frozen_annotation: None,
                     ephemeral: false,
                 })
@@ -442,7 +444,6 @@ mod tests {
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
-                    skills: None,
                     frozen_annotation: None,
                     ephemeral: false,
                 })
@@ -516,7 +517,6 @@ mod tests {
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
-                    skills: None,
                     frozen_annotation: None,
                     ephemeral: false,
                 })
@@ -561,7 +561,6 @@ mod tests {
                     tool_mode: None,
                     model_selection: None,
                     custom_tools: None,
-                    skills: None,
                     frozen_annotation: None,
                     ephemeral: false,
                 })

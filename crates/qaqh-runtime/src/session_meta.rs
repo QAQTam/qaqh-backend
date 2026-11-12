@@ -29,7 +29,6 @@ pub(crate) fn read(
         model_selection: row.model_selection,
         settings_revision: row.settings_revision,
         custom_tools: row.custom_tools,
-        skills: row.skills.unwrap_or_default(),
         frozen_annotation: row.frozen_annotation,
         archived: row.archived,
         ephemeral: row.ephemeral,
@@ -72,16 +71,15 @@ fn patch_columns(
         || patch.tool_mode.is_some()
         || patch.model_selection.is_some()
         || patch.custom_tools.is_some()
-        || patch.skills.is_some()
         || patch.frozen_annotation.is_some();
     let columns = qaqh_session::db::store::SessionColumnPatch {
         title: None,
+        title_source: None,
         cwd: patch.cwd.clone(),
         model: patch.model.clone(),
         tool_mode: patch.tool_mode.clone(),
         model_selection: patch.model_selection.clone(),
         custom_tools: patch.custom_tools.clone(),
-        skills: patch.skills.clone(),
         frozen_annotation: patch.frozen_annotation.clone(),
         archived: patch.archived,
         ephemeral: patch.ephemeral,
@@ -93,20 +91,25 @@ fn patch_columns(
 
 /// Commit a title change to the business row.
 ///
-/// `source` 目前只用于 `session.rename` 的落库语义（`TitleSource::User`）：
-/// `title_source` 是业务列，不进契约。`TitleSource::Auto`（LLM 自动生成）在 v3.0
-/// 冻结面上没有实现方——旧 `engine_title` / `qaqh-title` 已拆除，`chat_sync` 也
-/// 没有生产调用方，所以这里保留参数但不落笔，别把它当成「有自动标题」的证据。
+/// `title_source` 业务列落 snake_case 的 [`TitleSource`]：`session.rename` 写
+/// `user`，模型面 `session_title` 控制面工具（qaqh-agent-runtime）写 `auto`。
+/// 该列不进 v3.0 冻结契约，仅用于区分标题的来历。
 pub(crate) fn set_title(
     owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
     title: &str,
-    _source: TitleSource,
+    source: TitleSource,
 ) -> Result<(), String> {
+    let source_text = match source {
+        TitleSource::User => "user",
+        TitleSource::Auto => "auto",
+        TitleSource::Migration => "migration",
+    };
     owners
         .get_or_create(session_id)
         .update_metadata(qaqh_session::db::store::SessionColumnPatch {
             title: Some(title.to_string()),
+            title_source: Some(source_text.to_string()),
             ..Default::default()
         })
         .map(|_| ())
