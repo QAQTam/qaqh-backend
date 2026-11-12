@@ -287,6 +287,8 @@ pub struct AgentRegistry {
     /// ADR-0014：回合终态通知路由（service init 注入）。loop 报告终态 →
     /// registry 判定血缘回传；取代 per-child collector 线程与独立结果面。
     terminal_router: Option<qaqh_agent_runtime::session_loop::TurnTerminalPort>,
+    /// ADR-0014：spawn 名缓存（child id → name），首次子会话投影时懒加载。
+    spawn_names: Option<std::collections::HashMap<String, String>>,
 }
 
 impl AgentRegistry {
@@ -306,6 +308,7 @@ impl AgentRegistry {
             message_outbound_per_sender: 1024,
             outbound_attempts: HashMap::new(),
             terminal_router: None,
+            spawn_names: None,
         }
     }
 
