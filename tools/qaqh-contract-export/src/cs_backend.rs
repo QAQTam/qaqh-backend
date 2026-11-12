@@ -385,7 +385,25 @@ fn parse_body(c: &mut Cursor, generic: Option<String>) -> Result<Decl, String> {
             };
             match after {
                 // Decl terminator (`;`) or EOF: a plain record.
-                None | Some(';') => Ok(Decl::Object(first_fields)),
+                None | Some(';') => {
+                    // ts-rs degenerate case: a single-variant internally-tagged
+                    // enum is emitted as a plain object whose first field is the
+                    // literal discriminator (no `|` union). String literals are
+                    // only valid as discriminators (see TsType::Literal), so
+                    // normalize to a one-variant union — the C# polymorphic shape
+                    // then matches the multi-variant case exactly.
+                    if matches!(first_fields.first().map(|f| &f.ty), Some(TsType::Literal(_))) {
+                        let (tag_key, first) = split_variant(first_fields)?;
+                        let (tag, variants) = unify_tag(vec![(tag_key, first)], None)?;
+                        Ok(Decl::Union {
+                            generic,
+                            tag,
+                            variants,
+                        })
+                    } else {
+                        Ok(Decl::Object(first_fields))
+                    }
+                }
                 Some('|') => {
                     // The first variant was consumed as a plain object; the
                     // cursor sits on the `|` that precedes variant two.
