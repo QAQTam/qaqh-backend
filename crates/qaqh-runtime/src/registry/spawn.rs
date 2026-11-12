@@ -5,6 +5,14 @@ use super::*;
 
 use crate::error::{QaqhError, QaqhResult};
 
+/// ADR-0014 切片 D/E：会话工具面的单一事实源——agent 面（spawn/send/wait/
+/// list/cancel）+ 协作面（task_*/board_*）。`spawn_session_inprocess` 与表面
+/// 测试共用；增删会话工具必须经此，白名单天花板仍在 assemble 的 apply_init 生效。
+pub(crate) const SESSION_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
+    qaqh_subagent::register,
+    qaqh_subagent::register_collaboration_tools,
+];
+
 /// 会话绑定的 cwd(业务库 `sessions.cwd`),空串/`.` 视为未绑定。
 pub(crate) fn session_cwd(
     owners: &qaqh_session::owner::OwnerDirectory,
@@ -382,7 +390,10 @@ impl AgentRegistry {
             input.sandbox = qaqh_agent_runtime::session_agent::assembly::subagent_sandbox();
         }
         // ADR-0014：子代理工具面进入每个会话（spawn/send/wait/list/cancel）。
-        input.tool_registrars = &[qaqh_subagent::register];
+        // ADR-0014 切片E：协作工具面（task_*/board_*）同路进入每个会话——
+        // 宿主已由 daemon 安装（server.rs install_task_host/install_board_host），
+        // 板按根树键控，lead 与子级共用同一注册器；白名单天花板仍在 apply_init 生效。
+        input.tool_registrars = SESSION_TOOL_REGISTRARS;
         let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
         // ADR-0014：终态回传路由注入（loop 报告终态，registry 判定血缘）。
         if let Some(router) = &self.terminal_router {
@@ -421,5 +432,41 @@ impl AgentRegistry {
     #[doc(hidden)]
     pub fn subagent_children(&self, parent: &str) -> Vec<String> {
         self.children_of(parent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SESSION_TOOL_REGISTRARS;
+
+    /// 切片E 闸门：生产会话工具面 = agent 五件 + 协作十件，一个不少。
+    /// 注册器列表被削（回到悬置状态）时本测试必须红。
+    #[test]
+    fn session_surface_carries_agent_and_collaboration_tools() {
+        let manager = qaqh_workspace::registration::build_tool_manager(SESSION_TOOL_REGISTRARS);
+        let defs = manager.all_defs();
+        for name in [
+            "spawn_subagent",
+            "send_message",
+            "wait_agent",
+            "list_agents",
+            "interrupt_agent",
+            "task_create",
+            "task_claim",
+            "task_update",
+            "task_close",
+            "task_list",
+            "board_channel_create",
+            "board_thread_create",
+            "board_post",
+            "board_subscribe",
+            "board_list",
+        ] {
+            assert!(manager.lookup(name).is_some(), "{name} must be callable");
+            assert!(
+                defs.iter().any(|def| def.function.name == name),
+                "{name} must be advertised"
+            );
+        }
     }
 }

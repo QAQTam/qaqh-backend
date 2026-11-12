@@ -35,7 +35,9 @@ fn full_surface_schemas_are_object_shaped_without_composition_keys() {
 }
 
 #[test]
-fn production_registry_omits_subagent_and_collaboration_tools() {
+fn base_registry_omits_subagent_and_collaboration_tools() {
+    // 基础注册表（无外部注册器）不含子代理/协作工具；生产会话面经
+    // registry::spawn::SESSION_TOOL_REGISTRARS 注入，另有单元测试守门。
     let manager = build_tool_manager(&[]);
     let defs = manager.all_defs();
     for name in [
