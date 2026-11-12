@@ -141,6 +141,28 @@
 - [x] 工具面最小集（切片 D）——spawn/send/wait/list/cancel 五件；send 带
       mode（queue/trigger/steer/interject）；spawn 即投递任务；经
       `SpawnInput.tool_registrars` 进入每个会话；task/board 仍悬置。
-- [ ] 定向验证：`cargo test -p <涉及 crate>`；契约闸门
-      `check --against docs/api-surface/v3.0` 绿（wire 不变）
+- [x] 切片 E：任务板工具面复活（`5fe4b6ba`）——`SESSION_TOOL_REGISTRARS`
+      单一事实源（agent 五件 + 协作十件），task_*/board_* 经注册器进入每个
+      会话；宿主早已生产安装（`install_task_host`/`install_board_host`），
+      板按根树键控。表面闸门反证成立（削注册器→红）。
+- [x] 切片 F：team:policy 提示词（`4e50a19c`）——借鉴 dsh team:policy 适配
+      本仓工具名（claim_epoch CAS）；lead 与子级同一份静态文本（稳定前缀保
+      KV cache），与 task_create 声明同进同退。writeScopes 结构化字段属
+      v3.1 wire 实变，落地前 scope 以标题/验收 criteria 承载。
+- [x] 端到端冒烟（`scripts/smoke-subagent.ps1`）——隔离 daemon + 真实模型
+      工具链：父回合调 spawn_subagent → 子回合终态 → 父 bootstrap 含
+      `subagent_terminal`+child id → 答复 token 合流。**实测挖出两处 wire
+      缺陷**（`a99dcab3` 修复，工具路径不可见故单测全绿）：
+      ① `SubagentSpawn` 误列 `is_global_operation`，信封校验与 handler 的
+      target 要求互斥，wire 入口永拒；② 回落名 `sub_<id12>` 直截 ULID 大写
+      前段违反 path 段校验。回归闸门：
+      `subagent_spawn_envelope_targets_the_parent_session`。
+      子会话守卫实证：无 inter-agent 元数据的直接用户消息被拒（设计内）。
+- [x] 定向验证：`cargo test -j 2 -p <涉及 crate>` 绿（subagent/runtime/
+      agent-runtime/ringing）；子代理系列契约导出物零改动（wire 形状不变；
+      信封 target 分类属内核校验行为修正，非 DTO 形状变化）
 - [x] 并发排序拍板结果回填 §后果 4（2026-11-12：genui 先行提交 `2ef60928`）
+- [ ] 切片 G：真 fork（父已完成回合前缀种子化子日志；turns/blocks/tool_calls
+      复制 + id 重写，content 引用随迁）——委派原语，非 handoff 替代
+- [ ] writeScopes 提示字段 + 重叠警告（TeamTaskSnapshot 冻结 DTO → 搭 v3.1）
+- [ ] Team 根开关（任务工具按根会话条件注册，dsh 默认关；本轮先全量注册）
