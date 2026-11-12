@@ -240,27 +240,6 @@ impl AgentRegistry {
             .ok_or_else(|| format!("target agent not found: {target_path}").into())
     }
 
-    pub(super) fn ensure_root_metadata(&mut self, session_id: &str) -> QaqhResult<()> {
-        if session_id.is_empty()
-            || self.agent_catalog.get_by_id(session_id).is_some()
-            || self.supervisor.parent_of(session_id).is_some()
-        {
-            return Ok(());
-        }
-        // 血缘以业务库为准:sessions.parent_session_id 有值即子代理,
-        // 否则登记为根。
-        match self.owners.session_parent(session_id) {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                self.register_root_agent(session_id, unix_ms())?;
-            }
-            Err(error) => {
-                return Err(format!("business parent lookup for {session_id}: {error}").into());
-            }
-        }
-        Ok(())
-    }
-
     /// ADR-0014：懒投影——catalog 与 supervisor 边从会话行血缘派生，名字取
     /// `SubagentSpawned` effect（缺席回落 id 派生名）。平行权威退役：重启后
     /// 寻址 / T-1-4 取消传播 / 超时扫描都经此重建，不需要内存档案。

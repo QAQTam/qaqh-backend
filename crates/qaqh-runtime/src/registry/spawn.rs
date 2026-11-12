@@ -381,6 +381,8 @@ impl AgentRegistry {
         {
             input.sandbox = qaqh_agent_runtime::session_agent::assembly::subagent_sandbox();
         }
+        // ADR-0014：子代理工具面进入每个会话（spawn/send/wait/list/cancel）。
+        input.tool_registrars = &[qaqh_subagent::register];
         let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
         // ADR-0014：终态回传路由注入（loop 报告终态，registry 判定血缘）。
         if let Some(router) = &self.terminal_router {

@@ -17,7 +17,6 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use qaqh_ringing::RingingCommand;
-use qaqh_ringing_contract::commands::InterAgentEnvelope;
 use qaqh_ringing_contract::fact::InterAgentDelivery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

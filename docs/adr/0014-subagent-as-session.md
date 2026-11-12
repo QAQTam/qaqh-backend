@@ -136,9 +136,11 @@
       砍 `spawn_configs` / `AgentKind::Subagent` / reload 特权 / legacy bootstrap。
 - [x] 切片 B：collector 退役（`dd154bdb`）——终态端口 + canonical 回传 +
       config 驱动超时扫描；独立结果面/注入重试/subscribe 桥全退。
-- [ ] 切片 C：跨会话寻址——recipient 允许 session id；配额/自送禁止保留；
-      root 保护改 driver/lease 表达（`host_impl.rs`、`registry/queries.rs`）
-- [ ] 工具面最小集重注册（`qaqh-subagent`、`registration.rs`）
+- [x] 切片 C：跨会话寻址 + 懒投影（`5becc666`）——recipient 允许 session id；
+      catalog/supervisor 降格为血缘派生；消息面 root 特权退役。
+- [x] 工具面最小集（切片 D）——spawn/send/wait/list/cancel 五件；send 带
+      mode（queue/trigger/steer/interject）；spawn 即投递任务；经
+      `SpawnInput.tool_registrars` 进入每个会话；task/board 仍悬置。
 - [ ] 定向验证：`cargo test -p <涉及 crate>`；契约闸门
       `check --against docs/api-surface/v3.0` 绿（wire 不变）
 - [x] 并发排序拍板结果回填 §后果 4（2026-11-12：genui 先行提交 `2ef60928`）
