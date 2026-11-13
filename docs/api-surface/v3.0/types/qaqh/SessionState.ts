@@ -2,7 +2,6 @@
 import type { ActivityState } from "./ActivityState";
 import type { DriverState } from "./DriverState";
 import type { ExecSessionView } from "./ExecSessionView";
-import type { GoalView } from "./GoalView";
 import type { InteractionView } from "./InteractionView";
 import type { SessionId } from "./SessionId";
 import type { SubagentView } from "./SubagentView";
@@ -22,9 +21,4 @@ export type SessionState = { session_id: SessionId | null, seq: number, activity
  * 执行会话读模型:全部非终态会话 + 最近 32 个终态摘要;终态正文经
  * ContentValue 引用按需读取(spec §6.3)。
  */
-exec_sessions: Array<ExecSessionView>, driver?: DriverState | null, 
-/**
- * 会话持久目标(ADR-0015):每会话至多一个;缺席 = 无 goal。
- * additive:旧客户端读不到就忽略,新客户端把缺席当「无目标」。
- */
-goal?: GoalView | null, };
+exec_sessions: Array<ExecSessionView>, driver?: DriverState | null, };

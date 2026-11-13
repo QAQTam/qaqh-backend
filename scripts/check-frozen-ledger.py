@@ -5,7 +5,8 @@
 """锁内偏离必须留痕 —— 把 §1.5 从人工纪律迁成机器断言（B 方案）。
 
 判据只有一条：一次改动触碰了「前端可见的冻结面」文件，就必须在**同一次改动**里
-往 `docs/lts-v3.0-maintenance.md` §7 加一条登记（标题行 `### 7.<n> …`）。
+往 `docs/lts-v3.1-maintenance.md` §7 加一条登记（标题行 `### 7.<n> …`）。
+当前冻结线 = LTS-v3.1（2026-11-13 切线，ADR-0010）；v3.0 账本留作历史。
 
 为什么盯文件而不是盯 `contract_hash`：`contract_hash` 由导出物算出，连一句
 doc 注释都能让它漂移（见 §7.2 追认的那次）；把断言建在影子上是把 CI 变成导出
@@ -34,8 +35,8 @@ FROZEN_PREFIXES = (
     "tools/qaqh-contract-export/",          # 导出器 = 锁的度量仪本身
 )
 
-# 唯一允许写登记的文件与条目形状。
-LEDGER_FILE = "docs/lts-v3.0-maintenance.md"
+# 唯一允许写登记的文件与条目形状。当前冻结线的账本（切线时随指向一起改）。
+LEDGER_FILE = "docs/lts-v3.1-maintenance.md"
 LEDGER_ENTRY = re.compile(r"^\+### 7\.\d+ \S")
 
 
@@ -63,7 +64,7 @@ def verdict(touched_frozen: list[str], ledger_entries_added: list[str]) -> list[
         f"{head}\n"
         f"请在 {LEDGER_FILE} 的 §7 下新增一条 `### 7.<n> <一句话>`，写清变更、"
         "兼容性判定（additive / 破坏性）、是否 bump contract_revision、以及"
-        "为何机器闸门放行。破坏性偏离不属于本锁，必须开新 LTS 线（v3.1）。"
+        "为何机器闸门放行。破坏性偏离不属于本锁，必须开新 LTS 线（v3.2）。"
     ]
 
 
@@ -147,7 +148,7 @@ def self_test() -> int:
     for probe in [
         "crates/qaqh-file-tools/src/code_delta.rs",
         "crates/qaqh-agent-runtime/src/provider_job.rs",
-        "docs/lts-v3.0-maintenance.md",
+        "docs/lts-v3.1-maintenance.md",
     ]:
         check(f"非冻结面 {probe}", frozen_only([probe]), [])
 

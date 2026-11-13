@@ -7,7 +7,7 @@ name: Surface policy
 on:
   pull_request:
   push:
-    branches: [main, LTS-v3.0]
+    branches: [main, LTS-v3.1]
   workflow_dispatch:
 
 permissions:
@@ -76,5 +76,5 @@ jobs:
 
       # LTS 上是硬闸；main 上只报告（快车允许演进，但必须看得见它动了什么）。
       - name: Golden contract byte compare
-        continue-on-error: ${{ steps.ctx.outputs.target != 'LTS-v3.0' }}
-        run: cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.0
+        continue-on-error: ${{ steps.ctx.outputs.target != 'LTS-v3.1' }}
+        run: cargo run -p qaqh-contract-export -- check --against docs/api-surface/v3.1

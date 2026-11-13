@@ -9,6 +9,12 @@
     "compact_skip": 0,
     "archived": false,
     "ephemeral": false,
+    "skills": {
+      "version": 2,
+      "context_epoch": 0,
+      "operation_revision": 0,
+      "entries": []
+    },
     "usage_totals": {
       "prompt_tokens": 0,
       "completion_tokens": 0,

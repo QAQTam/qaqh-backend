@@ -68,9 +68,6 @@ public sealed record TimelineEntryAssistantBlockData
     public string Model { get; init; }
     [JsonPropertyName("usage")]
     public UsageInfo? Usage { get; init; }
-    [JsonPropertyName("generated_ms")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? GeneratedMs { get; init; }
     [JsonPropertyName("opaque")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public JsonElement[] Opaque { get; init; }

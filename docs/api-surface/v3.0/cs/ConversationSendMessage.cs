@@ -32,8 +32,5 @@ public sealed record ConversationSendMessage
     [JsonPropertyName("subagent_terminal")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SubagentTerminalNotification? SubagentTerminal { get; init; }
-    [JsonPropertyName("widget_context")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public WidgetContext? WidgetContext { get; init; }
 }
 

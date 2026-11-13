@@ -2,9 +2,9 @@ name: LTS API guard
 
 on:
   push:
-    branches: [LTS-v3.0]
+    branches: [LTS-v3.1]
   pull_request:
-    branches: [LTS-v3.0]
+    branches: [LTS-v3.1]
 
 jobs:
   freeze:

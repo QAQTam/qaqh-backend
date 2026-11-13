@@ -1,0 +1,2455 @@
+{
+  "format_version": 1,
+  "wire_version": 2,
+  "backend_version": "3.1.20261113-g94e719d",
+  "source_revision": "c3860992bcbcb30568ac917f852d702f7923c3a6",
+  "source_dirty": false,
+  "generator_version": "qaqh-contract-export/0.2.0",
+  "contract_hash": "bb37589a012124df38bcfeb9135c0bb25e6e2202c5b4508b55ac0eabeaa6d3b5",
+  "files": [
+    {
+      "path": "constants.ts",
+      "sha256": "33d538244ab29f2b9d802a81c2df93b59decd1d096f5703d250f1b48d445d638"
+    },
+    {
+      "path": "coverage.json",
+      "sha256": "b64d062203e8d0108df9577fbdf429c4748c3ae82152337ba88427c1b17dfa80"
+    },
+    {
+      "path": "cs/AccountsEmptyParams.cs",
+      "sha256": "33b5fc0af2c8c7793228aa8872cc571c2f5b85eb433a4feddae72c6ebbe1aaf5"
+    },
+    {
+      "path": "cs/ActivityState.cs",
+      "sha256": "b8d8e98cb11191a18005eb664ca0319e3582c74112b70088d9798cf06c2dbcbd"
+    },
+    {
+      "path": "cs/ActorKind.cs",
+      "sha256": "3eef61e4960eec8f76fcbd47cd4c9a7d06c0f22d2d2d9f11fceb037ab34ef0b9"
+    },
+    {
+      "path": "cs/ActorRef.cs",
+      "sha256": "ad371f198eff86e8a25f7feb923adebccb85fa17cddc4a2e870a14c8dbae5faa"
+    },
+    {
+      "path": "cs/ApplyPatchCustomGrammar.cs",
+      "sha256": "acf377062180dab330497eb8435588b0b8c3e2a2c39edb41d5485abfca7e14fd"
+    },
+    {
+      "path": "cs/ApplyPatchInputFormat.cs",
+      "sha256": "e1b81498329ef22fe999ba7b6359cdc9703e492618df2814d7107c6c64b96139"
+    },
+    {
+      "path": "cs/AskAnswer.cs",
+      "sha256": "814fa1dc1f807747541919b1103b3dee6c99efd14a5804d9e5049bc18eb46083"
+    },
+    {
+      "path": "cs/AssistantBlockKind.cs",
+      "sha256": "48496737dcf1e9fdb50d992fd49496f2f140ec5d419561dcf178d38a9bddacc5"
+    },
+    {
+      "path": "cs/CacheTokenField.cs",
+      "sha256": "75d84cf84a9f8bb3f69857e9813fa9cdbaeb4daf3c2451ffb61ece4a1b2f0b9b"
+    },
+    {
+      "path": "cs/CacheUsageSemantics.cs",
+      "sha256": "db43250b10adf3d6320948f0c6f0b42f2e2b13e2e43b8380ef8bb6cf5826f144"
+    },
+    {
+      "path": "cs/ClientsListParams.cs",
+      "sha256": "5c080e54f6279d87504b5cd8afde00383ad1ac0a3768981057357bc85c8ce736"
+    },
+    {
+      "path": "cs/CodeDelta.cs",
+      "sha256": "e0a9c7cbbc25d129ec7bb4ec3803fc50d5082bf2eedf04fce03e508a2570b711"
+    },
+    {
+      "path": "cs/CommandPrecondition.cs",
+      "sha256": "c85b24735b362f3c286e3874066d4199a7b7907cf88b19dbd0f43dc829c0d355"
+    },
+    {
+      "path": "cs/CommandTarget.cs",
+      "sha256": "3329307fdb003469ecb8de9ef3154cc7409640df362b8e9e3a863af858c88adc"
+    },
+    {
+      "path": "cs/ComponentGroup.cs",
+      "sha256": "f505ae4887b8b4ff10d0947cda38ce1518f2f4eec7f3bf2e654d2345783a6d63"
+    },
+    {
+      "path": "cs/ComponentMemory.cs",
+      "sha256": "942f0370948c94f155bfcfdb370e1d7de4c4b598c08c6cff5f55dc854538e7fb"
+    },
+    {
+      "path": "cs/ConfigDto.cs",
+      "sha256": "d568034324b0fda6062f91645697790b8d596156dca2a1a57b4dde8c4dc383de"
+    },
+    {
+      "path": "cs/ConfigLoadParams.cs",
+      "sha256": "22fdf901757ae8121930b60d48e3630017dfd9ab53c2bbd05e76f6dc81e3cdb3"
+    },
+    {
+      "path": "cs/ConfigPatch.cs",
+      "sha256": "0322c2e12ef54aaeaaa6e4640d4f56fa915babe999d652eb8000a5c07e290839"
+    },
+    {
+      "path": "cs/ContentUnavailable.cs",
+      "sha256": "e549578b0ceceeb4afaaa4564c69e3e54a44346a6a2c0368eeea4b2ddbc128d0"
+    },
+    {
+      "path": "cs/ContentUnavailableReason.cs",
+      "sha256": "8becf7f0634222b073cd04fc4664c436677999cc56b8adb9013bdc13729295c0"
+    },
+    {
+      "path": "cs/ContentValue.cs",
+      "sha256": "c2db62403f1844c769dce91df032ffef8d6aadc63258f611e88ca8c5766d182d"
+    },
+    {
+      "path": "cs/ContractConstants.cs",
+      "sha256": "76ba4f7ce718a9a0b95fb306fe67b9b49af1b21d75f127370218939d41493e55"
+    },
+    {
+      "path": "cs/ContractJson.cs",
+      "sha256": "6d61a4fb3161ba52500ad388b1111cfc45aa8750054fd04d4bd24f8312449ba2"
+    },
+    {
+      "path": "cs/ConversationSendMessage.cs",
+      "sha256": "2bd8c82e43a07539fea7f594fba2cf03cde698d01d564ebd5bd5fc1814e7eb45"
+    },
+    {
+      "path": "cs/CredentialSource.cs",
+      "sha256": "cf2c40b16847b8c110c10b83d098ad93d7fb69f43062ad64b0b9cb406e699a95"
+    },
+    {
+      "path": "cs/DaemonVersionParams.cs",
+      "sha256": "6a09a51ec6a34738473c6e3427f36239cca01039b7ca74b7fdc9d617fffe1b8c"
+    },
+    {
+      "path": "cs/DiagnosticsMemorySnapshotParams.cs",
+      "sha256": "af5f0778c6fb26de635fdf108ba2cad30703b8ed7d6ec5924105bd0c27366162"
+    },
+    {
+      "path": "cs/DriverState.cs",
+      "sha256": "2d66f1fc1ce7e400aae2d872a505ea31d5e56793af568a9dbe4076b95a7a7b1d"
+    },
+    {
+      "path": "cs/DsAccountAttemptParams.cs",
+      "sha256": "122eeab964287957857472436470d9d08e67dcd8901a9ebb12c2103740e9e0a0"
+    },
+    {
+      "path": "cs/DsAccountBalanceResult.cs",
+      "sha256": "0cf7507c0c6782ede4d669d855dd0ee5b303294a2336eb590680196c08f15bc4"
+    },
+    {
+      "path": "cs/DsAccountBonus.cs",
+      "sha256": "eec8d9666c891efe7c8499e956cba6ed23838cfed79d9c5b12053f96f676df5d"
+    },
+    {
+      "path": "cs/DsAccountBonusAckParams.cs",
+      "sha256": "bb930315c78796e4842146e870884b0824a4ef2930e8797c0935af44b7077f2a"
+    },
+    {
+      "path": "cs/DsAccountFlowState.cs",
+      "sha256": "4605e72f880bba6e0889d49398a29f4927f7307e03c73ebf973ad4ca87b4e18f"
+    },
+    {
+      "path": "cs/DsAccountModel.cs",
+      "sha256": "64819346e220807e157db1ae01ce00eef2392be5857f1bdf3bd86f89f0db9508"
+    },
+    {
+      "path": "cs/DsAccountPublicAccount.cs",
+      "sha256": "e17a300079afc55a6949ec0fb0d898263230a79928a43bcb24a3ae3f51b92c67"
+    },
+    {
+      "path": "cs/DsAccountRevoke.cs",
+      "sha256": "4521ea1e702f919d5fc0e7642e0543bd148f8ec58aa498a0e9e477fcdf76b0b5"
+    },
+    {
+      "path": "cs/DsAccountRevokeState.cs",
+      "sha256": "cbd4a085e89a3493a5818a2d5be63839f10ef118dda7187262fa65481c6d4d3a"
+    },
+    {
+      "path": "cs/DsAccountSignInStartParams.cs",
+      "sha256": "a014c981c83b4d1221d25f6be0eb12762c8b7e0d513aa4780c187399b0d3cdfc"
+    },
+    {
+      "path": "cs/DsAccountSignInStartResult.cs",
+      "sha256": "32bfb3f86c6fd4a61c16cb43583335b1617650a4b45058769c526579bcb2e08b"
+    },
+    {
+      "path": "cs/DsAccountSignInStatusResult.cs",
+      "sha256": "587929d22c0477cb4d6414afef08dd1e68ded022a212c6b635ca46e46c005572"
+    },
+    {
+      "path": "cs/DsAccountStatusFlow.cs",
+      "sha256": "c0476b69c68e2bd783ffd0b6480951b2369b90f2670c1e154dbe96a50ad87af7"
+    },
+    {
+      "path": "cs/DsAccountStatusResult.cs",
+      "sha256": "6d5a57a9784e9bb2db31965b85b7955ecd180ed53e27ba4de6f5ffbf05297b2e"
+    },
+    {
+      "path": "cs/DsAccountTotalCost.cs",
+      "sha256": "76c2af0acacc02cfda16025850d758b92b9df2b2ce00a40ca12014e0175a846f"
+    },
+    {
+      "path": "cs/DsAccountVerifyResult.cs",
+      "sha256": "16bf23803dc9700a743ffd5501f42aea1d25198f4d0f12bafd407d571b29d4c6"
+    },
+    {
+      "path": "cs/DsAccountWallet.cs",
+      "sha256": "4c5ca7e67943a5414c5632078b0a062d2807456e19d094634142208878a04986"
+    },
+    {
+      "path": "cs/EndpointCompat.cs",
+      "sha256": "79efa429e3fd3cf05d4b24c2223c9e5c26b824cc8674396cc18fa5e50040b6bb"
+    },
+    {
+      "path": "cs/ExecCancelReason.cs",
+      "sha256": "fbca832467eca4c212e688a0c2271f17d519d75d91c4bfee432b1b6fb98e184e"
+    },
+    {
+      "path": "cs/ExecDto.cs",
+      "sha256": "57308b3ef954f5bedebd4f5a2d0b3418e43c9bbb06c9a34f5dd3b6fbf5033bd4"
+    },
+    {
+      "path": "cs/ExecInterruptReason.cs",
+      "sha256": "947446d6b8ad7656d8b20c280255291c2670f7533df507bf2c4cfba54a6bad6a"
+    },
+    {
+      "path": "cs/ExecOutputSource.cs",
+      "sha256": "11cde5ee434fab098167659a906c8656f60f43e459a95d17df13332fd50d5779"
+    },
+    {
+      "path": "cs/ExecPatch.cs",
+      "sha256": "26172a2788b0e508fdf1aed58c78553633e909d1352d4234fe606e5f534a0f45"
+    },
+    {
+      "path": "cs/ExecSessionListParams.cs",
+      "sha256": "a689eca40c7be9d88246c2bcb2f77b629345fe09f022158e10f43fb811243e1d"
+    },
+    {
+      "path": "cs/ExecSessionListResult.cs",
+      "sha256": "b52e6ab6baee5115a13d61534740e5ede83df98e7bc9633d3f5c6f6d05b778f3"
+    },
+    {
+      "path": "cs/ExecSessionOutcome.cs",
+      "sha256": "d32a4767d9f00e08977e0b5edc02a2c8fbee833ffb0a9a94c4b4e33100b5892e"
+    },
+    {
+      "path": "cs/ExecSessionOutputParams.cs",
+      "sha256": "7d997e330c7659abd6c2e7c669283e2f925499fea79446913f2cc9b408764ac5"
+    },
+    {
+      "path": "cs/ExecSessionOutputResult.cs",
+      "sha256": "d57085d8bde7ced373b2585943ce86b31ddd92a3777c424c5d904ab9d1cbe282"
+    },
+    {
+      "path": "cs/ExecSessionState.cs",
+      "sha256": "13a1546315ff288689ea0b9e7dc577d5cf14db605c95f30aa235602e93f38567"
+    },
+    {
+      "path": "cs/ExecSessionView.cs",
+      "sha256": "1aa55ae5577ea4f39aabbca1bb56a5db2b9f1dfc1cbe46bd0ee4602559c15354"
+    },
+    {
+      "path": "cs/ExecStopReason.cs",
+      "sha256": "9bf7a779881370e573a5d3297736606f7f253201a26e3c44b10b0501367fa0a8"
+    },
+    {
+      "path": "cs/FsEntry.cs",
+      "sha256": "6671305fe5b8eba116adaf208524662370d2bfb806c7bf3b9a156fb2988c1863"
+    },
+    {
+      "path": "cs/FsListParams.cs",
+      "sha256": "da4720a9eb36ab99fead01edd9df117483b69c7d8b99ffdffbfb3aacc32c1902"
+    },
+    {
+      "path": "cs/FsReadParams.cs",
+      "sha256": "e3f3e8367cc81094a17593665d351dea4a236085d33dc8e83315483440539069"
+    },
+    {
+      "path": "cs/FsReadResult.cs",
+      "sha256": "646493090c3701f175bf42355d3dfa7a2914ca4a15b9f4a6e2a02ed84d5ec8f8"
+    },
+    {
+      "path": "cs/GoalStatus.cs",
+      "sha256": "a578cfc40f0d8fedb0a51c2f8bbb0e81a1985320bbedc40beca8af1f9aedee8c"
+    },
+    {
+      "path": "cs/GoalView.cs",
+      "sha256": "df9f123551ed51ed2c03c60f3fbed0b6bcca578f24278b270d804ee683d54c80"
+    },
+    {
+      "path": "cs/GoalsDto.cs",
+      "sha256": "07cf4a69a7ca1f2331101755b384f0192f0ea75184af6470c04cd3f256173501"
+    },
+    {
+      "path": "cs/GoalsPatch.cs",
+      "sha256": "711d22d20d26e4bb734d2efa7d527ac5468e9bb3a7176a67bbc579697e02f383"
+    },
+    {
+      "path": "cs/ImageBlock.cs",
+      "sha256": "890e87a0545dc993ad6e8309c0179cc5a5e6df87dd5d78eb33f315493852cd6a"
+    },
+    {
+      "path": "cs/InputPurpose.cs",
+      "sha256": "eb973bd799207034ab8fc3be1b4aca5e6d96b0c39a2d93a136e2952e2af91350"
+    },
+    {
+      "path": "cs/InterAgentActor.cs",
+      "sha256": "4d823f88fd3a9db32f7336527eac8e14318072c25c24114d5c48a081f476b871"
+    },
+    {
+      "path": "cs/InterAgentEnvelope.cs",
+      "sha256": "457806d27b86054d68d7d00a7f6a5b72831bce6c4dd8c89e7908d64d336412a6"
+    },
+    {
+      "path": "cs/InteractionChoice.cs",
+      "sha256": "d1bd9db184df07b3bbc3262ac895b0ff3992c77ccba95f4a4a061a841eddee20"
+    },
+    {
+      "path": "cs/InteractionChoiceTone.cs",
+      "sha256": "f75164a8e348f90e67e41f4a7e503a7789e1aacf52a6448e7e1608793444e429"
+    },
+    {
+      "path": "cs/InteractionDecision.cs",
+      "sha256": "9f02fba1b8d9fecb0f630b92e39cae8bd52733b9d0354d2f891e1cd60dadaac2"
+    },
+    {
+      "path": "cs/InteractionEndStatus.cs",
+      "sha256": "c50f4d2b7b4788add1d0dd905ed4d330459336ce23944f2d07ba8b020e192ca7"
+    },
+    {
+      "path": "cs/InteractionResolution.cs",
+      "sha256": "ae8f38511768d497c84f8769cc2217e1a37696eb27581cfc255dd3973d4e5c61"
+    },
+    {
+      "path": "cs/InteractionView.cs",
+      "sha256": "c1466f309343fde89d30494a28618308b0ad0dd6f42d72f37cce48e4a38358da"
+    },
+    {
+      "path": "cs/InterruptReason.cs",
+      "sha256": "7bede75bc6f4b2e43d01f268031c41649a11228aba438b20a355e1680a94a9c8"
+    },
+    {
+      "path": "cs/LspDto.cs",
+      "sha256": "a1521f23b4674a86e15f64108db1d316612d75782dcd15d5f97c000c452ef6ed"
+    },
+    {
+      "path": "cs/LspServerDto.cs",
+      "sha256": "e757740251b890e75d5f38ce4e5dc7bde12c545e688896d3103a47cc1540f2da"
+    },
+    {
+      "path": "cs/McpDto.cs",
+      "sha256": "20ecb1375c407613fc43ec919f0379d0366d48402b876cede9cde1344954a0ce"
+    },
+    {
+      "path": "cs/McpServerDto.cs",
+      "sha256": "3c881dbeb2076a37dd03faf833e2b029a97e6f72d50d330062b27e42aaf27aac"
+    },
+    {
+      "path": "cs/MemorySnapshot.cs",
+      "sha256": "4dc67fa4b8e5fd13c2634859ccd341a785ecf955c41ac613a16e4a6a009a44bc"
+    },
+    {
+      "path": "cs/ModelCapabilities.cs",
+      "sha256": "dbdfc476593424f7859d492a827682d70de0c714e3611fd29b51c56f8ce8b4cd"
+    },
+    {
+      "path": "cs/ModelDef.cs",
+      "sha256": "3762780392bfd5eeb63b554ef01981f3e2379d888412d99eecafbdb02476677f"
+    },
+    {
+      "path": "cs/ModelDefaults.cs",
+      "sha256": "f016680f230fca2d66411ecc59123734bc77ec3424ed702018d18a0595fc1f5c"
+    },
+    {
+      "path": "cs/ModelSelection.cs",
+      "sha256": "c967646bacfba2fe9d8a375877aefd502b0c696276273b009e71cf9dcc3e7d9a"
+    },
+    {
+      "path": "cs/ModelSelectionOptions.cs",
+      "sha256": "2fef45084c9cf0170dfa5e1a80a17dfc577f9697bd0d260a4ecc8963282e719c"
+    },
+    {
+      "path": "cs/OutputStream.cs",
+      "sha256": "bc64b0e095ea24ed9cf547d8348160b839285b97de85261200cf23bfdf58a566"
+    },
+    {
+      "path": "cs/PermissionRequestDetails.cs",
+      "sha256": "34d2167f73d9191f5bb7dc7f0e830282985d894f340df238f028183b078fe6e0"
+    },
+    {
+      "path": "cs/PhaseKind.cs",
+      "sha256": "6e18f38608679797e6cb008bc386b78e2b94d95fbb75a92d4a0b68d73f6c11b9"
+    },
+    {
+      "path": "cs/PhaseSample.cs",
+      "sha256": "7edd0a05c434b46df6bc94e1458c2a52a3e40f8f3606c188ff0a50517a8bf344"
+    },
+    {
+      "path": "cs/PlanItemStatusView.cs",
+      "sha256": "011e7f2c041ef4a97ba9adf9ae922177d5dadb36028e123d42f2097a1a7f3dd5"
+    },
+    {
+      "path": "cs/PlanReadItem.cs",
+      "sha256": "2c020507012f8e0cd2f1dff83edb51304b10ccffec181fbe60b0d79db5461586"
+    },
+    {
+      "path": "cs/PlanReadParams.cs",
+      "sha256": "01a9f0d69c254606d0b3bd09289d9a8820fbdafcc63a78132a7bb4ac77055595"
+    },
+    {
+      "path": "cs/ProcessMemory.cs",
+      "sha256": "a3db6c5bad82eb1d16f82f6bbc0b35f5da6bd3656817fd10d4c3a15f475ecd7b"
+    },
+    {
+      "path": "cs/ProfileStatus.cs",
+      "sha256": "b887603b9f054376352d887b8c7a0dbe6e37638182937e7eb7dfaa9d2fe3673b"
+    },
+    {
+      "path": "cs/ProviderUpsertDto.cs",
+      "sha256": "b260064955e7be6a9b6a3bbdd5d96ec7f43aa7d16d544d2f520c5c830ba737fd"
+    },
+    {
+      "path": "cs/ReasoningKind.cs",
+      "sha256": "5e9c2cdf65b8a43e03c90f19e27728b3ea55a9950f450f20399efe34821fe30b"
+    },
+    {
+      "path": "cs/ReceiptIdScope.cs",
+      "sha256": "98980b4a1556a2ceb159b4b52f1b3512551c05772830b97615d0853da36ea7a3"
+    },
+    {
+      "path": "cs/ReceiptOwnerScope.cs",
+      "sha256": "150c081e07cf3377c5a3e994b4856b6d805bff88cf5432d830515cdc482009e4"
+    },
+    {
+      "path": "cs/ReceiptPersistence.cs",
+      "sha256": "d5233a77963f0e1746439471246e85955daaf8a41db25d1b46688b4e77dce286"
+    },
+    {
+      "path": "cs/ReceiptPolicy.cs",
+      "sha256": "85c53a66ec251e611a489fba77da9bbfc8042ef26fe28d1c68b5039200220aac"
+    },
+    {
+      "path": "cs/ResponsesToolLayout.cs",
+      "sha256": "c0b9a8a451fb9a45416cf568a78999e4361964e5522278436f60a78ef1f37808"
+    },
+    {
+      "path": "cs/RetrySpec.cs",
+      "sha256": "12ff01d2d76c48eb54feb1a4a2de5b47f649e37b1797f280edf7c8a3aba7fd54"
+    },
+    {
+      "path": "cs/RingingCommand.cs",
+      "sha256": "6eaca617d91404b0918ed6683d6c483efaa1b37d01f1eeac393b436110f79f04"
+    },
+    {
+      "path": "cs/RingingCommandAck.cs",
+      "sha256": "0b78481f4126b167a98f13c41a02bcfc6035c5609dc250fba20c8aa42f963be1"
+    },
+    {
+      "path": "cs/RingingCommandAckStatus.cs",
+      "sha256": "d59db4dc1e3fa89f661737c58937ce9740010020ee857dac7ba694e7fffbcbeb"
+    },
+    {
+      "path": "cs/RingingCommandState.cs",
+      "sha256": "cf52235edcceb7f52766c6174e7ef40baab58ed273fca66238bc85ad7c2379cb"
+    },
+    {
+      "path": "cs/RingingCommandStatus.cs",
+      "sha256": "a6be2aab1cb0fdb8519c0e18c547e7b57c54e7aacdffd810fab2ca5dbfec52f1"
+    },
+    {
+      "path": "cs/RingingV2ApprovalRespondRequest.cs",
+      "sha256": "7b8d54357e5f4055de6092d55918834b147a2e3896e437aa19b0fccb883b3554"
+    },
+    {
+      "path": "cs/RingingV2AskOutcome.cs",
+      "sha256": "0294e62753cb4b57da37044280d6bbfd44305426fee4278c608d7919d60ec8aa"
+    },
+    {
+      "path": "cs/RingingV2Capabilities.cs",
+      "sha256": "1197f06e7bb9f6252ca0e913f8f7e5d4f3a7d9571dc8335b0bb4c754454045ff"
+    },
+    {
+      "path": "cs/RingingV2ClientKind.cs",
+      "sha256": "88b3264430e7062bbe05dcabb85c435cd4581f03e442e5746452f27d3f8f05a6"
+    },
+    {
+      "path": "cs/RingingV2ClientView.cs",
+      "sha256": "c15b22021e47c5116771d24b9eaafbccf25be1b9c71a233822898536f54ed11e"
+    },
+    {
+      "path": "cs/RingingV2CommandAck.cs",
+      "sha256": "3ea534c841680e8c4a81b4ea04e760753bbe5eb67551855526ac9ffe47c713c5"
+    },
+    {
+      "path": "cs/RingingV2CommandEnvelope.cs",
+      "sha256": "28033a56861f74aa9ef1f9d8e0309f93f49c7c56d85a5493ebae0ebca2d585b3"
+    },
+    {
+      "path": "cs/RingingV2CommandResult.cs",
+      "sha256": "614ecc3e451bf793b5c7dbc3c73bb3e3ab04018befd43687d88cd7683efef140"
+    },
+    {
+      "path": "cs/RingingV2CommandStatus.cs",
+      "sha256": "a4d6d2a79d5e236b4008e3a63066d943e5a3eb051225a649cbac9e556f447cc5"
+    },
+    {
+      "path": "cs/RingingV2ContentUploadResponse.cs",
+      "sha256": "075a962fa059c1f6d06d181e1ad018868cd6f45ea8dce3cbf77b6aa47466be1e"
+    },
+    {
+      "path": "cs/RingingV2DeviceApprovalKind.cs",
+      "sha256": "38ad79e0a3916906a07d07ea7d5d338a78348258dc1c8dd05ca61359f9d89a9e"
+    },
+    {
+      "path": "cs/RingingV2DeviceChallenge.cs",
+      "sha256": "0a9b619b919d02d1ad55b35034dc0700f53ee2642ba155a405601da1c46dbbdf"
+    },
+    {
+      "path": "cs/RingingV2DeviceChallenges.cs",
+      "sha256": "597d4778f0cc7f501ba939ffb983a584d282e3de66c91d6a342a7eabc9829da3"
+    },
+    {
+      "path": "cs/RingingV2DeviceWire.cs",
+      "sha256": "b316cfc9809f9ccd3d63798e988aa15d9b3043af18a09a46b3ede335aa78d3a9"
+    },
+    {
+      "path": "cs/RingingV2DevicesResponse.cs",
+      "sha256": "251c688256f88558214659190be920295a060b342af5d8142ce74fe3c0d8b2ff"
+    },
+    {
+      "path": "cs/RingingV2DriverClaimResponse.cs",
+      "sha256": "1aeb44d6e08e9e9df01db19f4ef17187e0b25074632015a4b9272cd23bfc6a39"
+    },
+    {
+      "path": "cs/RingingV2DriverReleaseResponse.cs",
+      "sha256": "d5f9924443b44c53b402283e8466dfea5efda0f381023c02a14efe63d6495dee"
+    },
+    {
+      "path": "cs/RingingV2ExistingResult.cs",
+      "sha256": "fe58e45acd95fa976871a942ce0d44125a19792d1aabbe2f624569eab95e1206"
+    },
+    {
+      "path": "cs/RingingV2LeaseRenewResponse.cs",
+      "sha256": "5de89988cb3b618d216b3169480bbbbea38f3d2bbd7156a952ab26ad9408540e"
+    },
+    {
+      "path": "cs/RingingV2OpenRequest.cs",
+      "sha256": "a38afd25f82ea25bba436afae4cc0679a88b7c66b938f7ab2d9d68d9000d43d1"
+    },
+    {
+      "path": "cs/RingingV2OpenResponse.cs",
+      "sha256": "d73afb7a2c13f97bd93cfce6bb3b576e533a785353efdb6dcd529e375fd917fd"
+    },
+    {
+      "path": "cs/RingingV2PairRequest.cs",
+      "sha256": "96fba01848403282490175dbedc6e44920d2bf77901d7c8e092b2e980f1ac7ff"
+    },
+    {
+      "path": "cs/RingingV2PairResponse.cs",
+      "sha256": "f0fadce9770128a2184f58abf635e41b76fb180ee24a54710e4a63ce03aef6e7"
+    },
+    {
+      "path": "cs/RingingV2PairTokenRequest.cs",
+      "sha256": "ede314c739035f2f94a179d1d92c37a3e3b1b9cd64a260daf442271cd1fd3729"
+    },
+    {
+      "path": "cs/RingingV2PairTokenResponse.cs",
+      "sha256": "b97904b24198a771f7672371fc7fd37ce4a14854b94329d684d6caa9953d758d"
+    },
+    {
+      "path": "cs/RingingV2PendingApprovals.cs",
+      "sha256": "076107e8bcdc8b376be0d07b7e51ab507d389946ba5493e6467c38d6eaeceab6"
+    },
+    {
+      "path": "cs/RingingV2PendingInteractionView.cs",
+      "sha256": "28182552a457bba9a87271272a6f25af4f3249406bb52425b2adaf8409a3368e"
+    },
+    {
+      "path": "cs/RingingV2PendingPermissionView.cs",
+      "sha256": "49c36da0326d3c7295ebc2645a80a644bdd792329db0456086c190921b97bfca"
+    },
+    {
+      "path": "cs/RingingV2ResyncRequired.cs",
+      "sha256": "3d8d0cd5321b4f5e18c5449b0c2dc03ae660523e30be9b65f11490f11fa7203f"
+    },
+    {
+      "path": "cs/RingingV2SyncResult.cs",
+      "sha256": "9202c1d5710885276942c718ed65f8c165f555615b873d6f0c2bde4ee69b750a"
+    },
+    {
+      "path": "cs/SandboxDto.cs",
+      "sha256": "cbc9ff43fdca38a8ac7a6c87569f3b030ea9be61c2650edaf1c33b1a95962634"
+    },
+    {
+      "path": "cs/SandboxPatch.cs",
+      "sha256": "e9d6c67b55c687e3f15a31781d63d75115e3b09323efcdafcd8feda765979129"
+    },
+    {
+      "path": "cs/SecretWrite.cs",
+      "sha256": "31aed98742c2433a0c32f1145e0fa4dea5e23e7628d23a1b8349a57a32312267"
+    },
+    {
+      "path": "cs/SessionActivity.cs",
+      "sha256": "060910ad8710d24e5f15cd4e2409e13ed3bf456fe6a9c9686fefc625616772ff"
+    },
+    {
+      "path": "cs/SessionActivityParams.cs",
+      "sha256": "d824749b9b012ba20f29e9381f050476e7a32a38b1dbd5540d95b0d5e931ebb1"
+    },
+    {
+      "path": "cs/SessionActivityState.cs",
+      "sha256": "cb9de9b2765a4b257691a4fc88787b9502712e5020f26dc2b4b8ea36ef3ee5ef"
+    },
+    {
+      "path": "cs/SessionBootstrap.cs",
+      "sha256": "8fcce7d2823f8730a4b5782656f5ff691436d0953880104f1bf12951da0a560f"
+    },
+    {
+      "path": "cs/SessionCreateResult.cs",
+      "sha256": "0557af530a53e204f1c5b846fb1f86fb6088e99c45d62820b21c68003b7816c9"
+    },
+    {
+      "path": "cs/SessionDashboard.cs",
+      "sha256": "d0122fced9c12ad39d65101585f9d7f1344768102f8e02177c1d6659f8ea1d83"
+    },
+    {
+      "path": "cs/SessionDashboardParams.cs",
+      "sha256": "172ded5bcbc25b89ca7e4d798171d0bb74ad5c579b9e1796883504a3604f4fee"
+    },
+    {
+      "path": "cs/SessionDashboardTask.cs",
+      "sha256": "5ed19e28be3e7c52d41de43246d5c03efb7cce699979bfbe98b1bc6a332e4245"
+    },
+    {
+      "path": "cs/SessionEvent.cs",
+      "sha256": "227f2dbbd9ba1f894972d0ebe1f4b601db5edd01199b75295791f3a127eedc66"
+    },
+    {
+      "path": "cs/SessionEventFrame.cs",
+      "sha256": "df19cb49ec9ca87115f8c0cb776c32e0c652f5fa2e2494d5589dc55def35f9c9"
+    },
+    {
+      "path": "cs/SessionGetActivityParams.cs",
+      "sha256": "d815b74d2973091904d47b16a4a2263238b5f50979bc96c4f0318ce18b7b1a56"
+    },
+    {
+      "path": "cs/SessionInterAgentDelivery.cs",
+      "sha256": "8405c2e50bd7bd45cab806fb7f714e4b8a718ead2b43cab6ca02f113d689987b"
+    },
+    {
+      "path": "cs/SessionInteractionKind.cs",
+      "sha256": "39d97685bf1c619526125dda7777eb61d0a71648f2f8de480ece282170916637"
+    },
+    {
+      "path": "cs/SessionListEntry.cs",
+      "sha256": "70663e1fd8f4e4f41b34822ff575efe6cf7aa8ff4a5f6240b4d60a4481e44f51"
+    },
+    {
+      "path": "cs/SessionListParams.cs",
+      "sha256": "7aceb4217879ebd23a928ba117ed0ca467bcc217c12269b224b0d06d0e26884a"
+    },
+    {
+      "path": "cs/SessionMemory.cs",
+      "sha256": "b105a75bfe7d147532908a369c6a84ce5b3b8995a4c5553347b5f06ce6d17e46"
+    },
+    {
+      "path": "cs/SessionMeta.cs",
+      "sha256": "779511dd2da13d43cb9e1ba201f42c3efb55f68e96f7ddf5917ebac18a970984"
+    },
+    {
+      "path": "cs/SessionMetaParams.cs",
+      "sha256": "b26c28d985569f1c864d639611d041fb9f0cabfe7e5fdec988b6b3f831ba665b"
+    },
+    {
+      "path": "cs/SessionRunStatus.cs",
+      "sha256": "20ddd34f4c3caa896f31f55eaa7a007479be1a2138ccccd809a7cca8e828cfc5"
+    },
+    {
+      "path": "cs/SessionSettingsPatch.cs",
+      "sha256": "5c285ea262910df658a998e41c1a5940be38d83067f66e9314f4e5f7afbb2fba"
+    },
+    {
+      "path": "cs/SessionState.cs",
+      "sha256": "b8654ce832e9941a156c238f9527d29e64f56cb835ebb5840e0439b9f9b91bc2"
+    },
+    {
+      "path": "cs/SessionToolActivity.cs",
+      "sha256": "a0e78246268fcd99cd228209be95ad286ad689b440d3db91230802353e4904a3"
+    },
+    {
+      "path": "cs/SessionToolError.cs",
+      "sha256": "4708af43df278ae1ee5dcb7f95bd8cfa3d2b9fd45c3808bbac94741a13178c07"
+    },
+    {
+      "path": "cs/SessionTurnParams.cs",
+      "sha256": "0aa75c398e5ba0cf538a5e121649249f7a240872dfe6416138119dc76a57cff9"
+    },
+    {
+      "path": "cs/SessionTurnSnapshot.cs",
+      "sha256": "37c43cc00fc7a05a26968c1830277042d7f29487f9f687baaa9861ba984e026e"
+    },
+    {
+      "path": "cs/SettingValue.cs",
+      "sha256": "fb9b030596c46a09ac76fc569aa3fbb26c8ae17059896218c2b1835bbb405f20"
+    },
+    {
+      "path": "cs/SiwcCode.cs",
+      "sha256": "a1920143a1c4e0625ae490daa2044a73737d5864511ca011afa87df88f5b8c34"
+    },
+    {
+      "path": "cs/SiwcConnectionStatus.cs",
+      "sha256": "21ce6fdcfbe11ccf702266be4830ec76c46cf63140b8ad53cf045740cf971930"
+    },
+    {
+      "path": "cs/SiwcFlowParams.cs",
+      "sha256": "1ad81cb01f86d718c99bac1828ecfd64ebe7e513473641c4953c76f8628044a0"
+    },
+    {
+      "path": "cs/SiwcModel.cs",
+      "sha256": "26cfa5491ee01603dff1a51e27f028d660b03b560f11e1c4e6e2a3a2e2007959"
+    },
+    {
+      "path": "cs/SiwcPendingProfile.cs",
+      "sha256": "a98d3beb39d076bddfbcfd1087b24d837748a375b658e5c4b5f4dbab5c55af8e"
+    },
+    {
+      "path": "cs/SiwcProfileParams.cs",
+      "sha256": "ab77099b6a45534e70f0fbadca4e42c64e70510331b752e757293217527253fc"
+    },
+    {
+      "path": "cs/SiwcProfileSelectParams.cs",
+      "sha256": "4cf5ab90e99e60e98e8dcc5a5ea617ca890260040cb95fbc54aa2bc8fc778617"
+    },
+    {
+      "path": "cs/SiwcProfilesResult.cs",
+      "sha256": "18b15522c39aa5f4474d98f6915ebab75d31cf81d77efd7a59ba27fae84cdbf9"
+    },
+    {
+      "path": "cs/SiwcPublicError.cs",
+      "sha256": "6834e7618da4cde8f631840d583c02a77a6f7d39029c5ddf295c861df262dea5"
+    },
+    {
+      "path": "cs/SiwcPublicProfile.cs",
+      "sha256": "702255c589f2ea900decadb93d27358d4a43792624ea0dd040e4e1ea7fadbe3e"
+    },
+    {
+      "path": "cs/SiwcSignInStartParams.cs",
+      "sha256": "dd1fe2bea1c8d89108b71c767d559ae09b64b74801bb47bac1efc4d13ddf2a2f"
+    },
+    {
+      "path": "cs/SiwcSignInStartResult.cs",
+      "sha256": "e71ee0b8a20303e4917ff90e37e9d49376a19d783553075a1fc2187035feb205"
+    },
+    {
+      "path": "cs/SiwcSignInStatusResult.cs",
+      "sha256": "74776f8d1d3b3badd91f21383e8a05399c54d7cd67866f8fcb3c403be3c5e182"
+    },
+    {
+      "path": "cs/SiwcSignOutResult.cs",
+      "sha256": "88b9265d7283e37f4061b6eaacc8930f9ae4c5eb96d2055467d0f160db2b09b6"
+    },
+    {
+      "path": "cs/SiwcStatusResult.cs",
+      "sha256": "20429243f2ab1a95a50f03d4fc6d167fb2e594b9fe17ffd485d01beff1421bd8"
+    },
+    {
+      "path": "cs/SkillCatalogDiagnostic.cs",
+      "sha256": "2478fc7501c5aa50b7c28aa7dd86e4986979f3f3ceba60e4a333a44c19fff041"
+    },
+    {
+      "path": "cs/SkillCatalogEntry.cs",
+      "sha256": "d3e98c23a16612f40420d11d2e99cfb893d7e510fa1b8fc756a16d562f46f181"
+    },
+    {
+      "path": "cs/SkillsCatalogParams.cs",
+      "sha256": "a353b7a394ae6c698ed012713fa9211e8f428490c869bae280a642b14336db99"
+    },
+    {
+      "path": "cs/SkillsCatalogResult.cs",
+      "sha256": "85f8781776e4910eb5952308bbd41e99cb551114f58bc0d7a13e7471ca8feb40"
+    },
+    {
+      "path": "cs/SkillsListToolsParams.cs",
+      "sha256": "a44781b374938a2e6fd39ea42abc612bf66b67be72429935a0a4f1c09c7e973d"
+    },
+    {
+      "path": "cs/SubagentTerminalKind.cs",
+      "sha256": "7b64274d1c6b92519f5920fe95811d4af20e008985f1f24f358e0713911dd744"
+    },
+    {
+      "path": "cs/SubagentTerminalNotification.cs",
+      "sha256": "a7604365566ccf16eefbfd3fda3f0fdeffb87b8d8545ba894a16d03073566086"
+    },
+    {
+      "path": "cs/SubagentTerminalStatus.cs",
+      "sha256": "ae033879c867d07dfb16360a385dbe9b833db1bf7424d88e9bee7607328fd6f2"
+    },
+    {
+      "path": "cs/SubagentView.cs",
+      "sha256": "27ff6f1e0d4687b82854edc62c1505792e3a800471acc636881bd794d7b5b416"
+    },
+    {
+      "path": "cs/TaskArtifact.cs",
+      "sha256": "49baf52ca3a65cb6bb7c63e10d42d790b3f8a3311907d5a68a8706266d8bd63d"
+    },
+    {
+      "path": "cs/TaskBoardSnapshot.cs",
+      "sha256": "6b910df18c6eaa4090a383dd962a93216cd748be3a80b34ee881e23d9e23a23b"
+    },
+    {
+      "path": "cs/TaskState.cs",
+      "sha256": "7d618fe9f2ae30012d4c396a6c29bf5bf21a928691dfae0c6ea55d237062488f"
+    },
+    {
+      "path": "cs/TaskView.cs",
+      "sha256": "5696492558d001597c0fa787496c03e4b85f0757cc5632824ef7ee6c77675dcf"
+    },
+    {
+      "path": "cs/TeamActor.cs",
+      "sha256": "7dcec2b11f652eb5a51da7a88b81ca009b2a281a0ced75b17355d5ec47defb7e"
+    },
+    {
+      "path": "cs/TeamAgentResidency.cs",
+      "sha256": "65a7c481cf99b238f572d3b8987cfb127f73eea74ad7eeaf866545aab2e42240"
+    },
+    {
+      "path": "cs/TeamAgentSnapshot.cs",
+      "sha256": "4993c9d9aafa783a81f2dcb739ab1fe8c2ac409f450867a2e5f7144e6602a635"
+    },
+    {
+      "path": "cs/TeamAgentStatus.cs",
+      "sha256": "4cec0397e23e01fc465abaec633f03f91e3d6c8d9eb02bc7715c63614fb322c1"
+    },
+    {
+      "path": "cs/TeamBoardChannel.cs",
+      "sha256": "aa6a997f39ca2436dd86fc43cf158bce7ffb8a4067233662b43948d77b0568d3"
+    },
+    {
+      "path": "cs/TeamBoardPost.cs",
+      "sha256": "820d0d57cd04c29f0d76859becf50bdf788ed99881bf514ab24b46f59d02e514"
+    },
+    {
+      "path": "cs/TeamBoardSnapshot.cs",
+      "sha256": "8e3ef1c935e771d2d31ed756bc6ff2f7e6b3858b22997127b6373a9e211d80fb"
+    },
+    {
+      "path": "cs/TeamBoardSubscription.cs",
+      "sha256": "9e6ea2151f0266996629a6b50e9b4aacb268f11ea6aeed4d49dc915c6b7ddfc6"
+    },
+    {
+      "path": "cs/TeamBoardSubscriptionTarget.cs",
+      "sha256": "3258cafee88f31110937c88d0e23f0033a5789b2eae1b2900132efcbf0bbfb67"
+    },
+    {
+      "path": "cs/TeamBoardThread.cs",
+      "sha256": "fa7464d464f3ab8470e3cb90dc776120ced97235ca677d1fa53671f532d98142"
+    },
+    {
+      "path": "cs/TeamInboxSummary.cs",
+      "sha256": "32c626e78fbc519e06a38b82c9e031e666141e092ec723686bef9f4d150fb50f"
+    },
+    {
+      "path": "cs/TeamResponse.cs",
+      "sha256": "1a87479dfb5cb7454cbc8393074c96c4b280e15067ca4fe13fc37b9a4252e491"
+    },
+    {
+      "path": "cs/TeamSnapshot.cs",
+      "sha256": "3a96cd2f9ce7788bdaae53b2815a8402de5c226df5484a5ec24ee3ce9bca3e08"
+    },
+    {
+      "path": "cs/ThinkingParamMode.cs",
+      "sha256": "4510182dfac441c0fc96f35d8257043d78a3e7158e65d81b4be14f0bd5cc3260"
+    },
+    {
+      "path": "cs/TimelineEntry.cs",
+      "sha256": "aaa359030205f21483e5ed3bc293da5fb061ff5bc2e3cbc7ad8effbff4117d4d"
+    },
+    {
+      "path": "cs/TodoCountsSnapshot.cs",
+      "sha256": "29f090e97488b310149e61925ed61e13d3820f96959d95ba9df2e981a2e85bab"
+    },
+    {
+      "path": "cs/TodoItemSnapshot.cs",
+      "sha256": "f4eea9c8faa74e6823c642fe7991113445ac81f9da813bf584c570ba8842b8f1"
+    },
+    {
+      "path": "cs/TodoListParams.cs",
+      "sha256": "c7911cb3cde9ccba0d827b5a9e7476cd1fb679b7fc329396759283b46aebe751"
+    },
+    {
+      "path": "cs/TodoListSnapshot.cs",
+      "sha256": "dea9f95c4b07a0a60cf7856acf7495f048d135b9ed329ba32bb1db203b99f8dc"
+    },
+    {
+      "path": "cs/TodoStatusParams.cs",
+      "sha256": "34200f72be43b3c996a5cf8b21626ef932f80533ba2bf31aa29747b1ed224c8f"
+    },
+    {
+      "path": "cs/TodoStatusSnapshot.cs",
+      "sha256": "5399e1ca562b2adf55c23b53e1dcdddc15ba2314c8853839ce49cbc7243bc885"
+    },
+    {
+      "path": "cs/ToolCallOutcome.cs",
+      "sha256": "8b10cbd15b354b1d290e6a2d20b762fd5a7f844875e6827fd2ea25f34aa35060"
+    },
+    {
+      "path": "cs/ToolCallState.cs",
+      "sha256": "72c8a63cfd1f813112b047b71ae6bceb0139f2ec2b9d588f00e151e4587acdab"
+    },
+    {
+      "path": "cs/ToolCallView.cs",
+      "sha256": "15bf468ecad57afde354e489a21c7615c4276cb3bafad5709efb0cc9c6a332dd"
+    },
+    {
+      "path": "cs/ToolCancellationReason.cs",
+      "sha256": "936d443264945de523acac2f6a21b86732acb897608eb8013bd19a2f7c91f613"
+    },
+    {
+      "path": "cs/ToolEffectInfo.cs",
+      "sha256": "73e592358e39ec5c1a759da46e1f2e40682c4613ebb7facc6fbbd8c7d851bc76"
+    },
+    {
+      "path": "cs/ToolInterruptionReason.cs",
+      "sha256": "9c4c4b0f818900a81a5a9289ca0f2b5ddddb9cfef5d357e17ac128c853082332"
+    },
+    {
+      "path": "cs/ToolMetrics.cs",
+      "sha256": "abf19b6ad3910463c7db2c2627b8a828210ca372e3547a97ddac3bba30ae4dd8"
+    },
+    {
+      "path": "cs/ToolStatus.cs",
+      "sha256": "870cbff629e54d1eec961ae225c1f47f787f67180ed8484581902bf1ba245314"
+    },
+    {
+      "path": "cs/ToolsSettingPatch.cs",
+      "sha256": "e45b86e70b98b0fbbb5a130be35599395115d27cfa88cb47be4b3483db69f03b"
+    },
+    {
+      "path": "cs/TurnError.cs",
+      "sha256": "36ce3cc8e16f5b73c1b344f8a77707f3353d6e5906ebcc456de5d37a1010f869"
+    },
+    {
+      "path": "cs/TurnOutcome.cs",
+      "sha256": "c339853644eb241459c784e90561be78e24930a03be12d7bcdad99835b565e94"
+    },
+    {
+      "path": "cs/TurnPhase.cs",
+      "sha256": "a4b6a8376dcb31d71939e1b17a0b549aeda5a5a7d9984a6cba019719e9727b2a"
+    },
+    {
+      "path": "cs/TurnTerminal.cs",
+      "sha256": "813b01b5f48606c72d260d19e93da35bc685d1c07353dca6af556e21d63b1def"
+    },
+    {
+      "path": "cs/TurnView.cs",
+      "sha256": "dea488e28ebe280ec4a2c283c3113cf4bb5adb7bc34e7bc9905ab0a0c2575987"
+    },
+    {
+      "path": "cs/UsageInfo.cs",
+      "sha256": "d4488c285fd15b1e860e04f9b5c63035d34d2079101d65b1f2d969d7226744ab"
+    },
+    {
+      "path": "cs/UserSendMode.cs",
+      "sha256": "14947f734768160dbab6e392e9dc47719135adea5159bdbae60089aeb126a8ba"
+    },
+    {
+      "path": "cs/WidgetContext.cs",
+      "sha256": "bbb988b7b69504caca99ba6a7929ed6f8f8977164f050f7f6c934814edcaf5a1"
+    },
+    {
+      "path": "cs/WidgetRef.cs",
+      "sha256": "16acc6d6f89f22419d2ca83fb0185213c442b730c704740f57e9028126e0179f"
+    },
+    {
+      "path": "cs/Wire.cs",
+      "sha256": "70b7b1bb456038b1fe6149497a7487b7f9c0ccba7e935dbd897337c5ddb6f4aa"
+    },
+    {
+      "path": "cs/WorkspaceEntry.cs",
+      "sha256": "020ac26e40499a5cfe8324ac1be90eea0dd91e1532b2673a873bb5686ac2ddcc"
+    },
+    {
+      "path": "cs/WorkspaceGetParams.cs",
+      "sha256": "dd5d015a1f7db506aab742d5dfdb11e1994d5d4e7843f8d15184037751ad0ad2"
+    },
+    {
+      "path": "cs/WorkspaceListParams.cs",
+      "sha256": "b5f71a643e29106dd24c8787afa27bf3c0b134212e060ef1401562bead58cb75"
+    },
+    {
+      "path": "cs/WorkspaceMeta.cs",
+      "sha256": "a11f6ed7a3bb05a3309591d7d0ca7eecd39600675192534fcfc97649c0b8778d"
+    },
+    {
+      "path": "fixtures/README.md",
+      "sha256": "ccf998d52354903c5bb1b750f7cc8be87caf7876ac3e9ac02032734a73e5e366"
+    },
+    {
+      "path": "fixtures/approval-respond-request.json",
+      "sha256": "fc7dc370cfdf3ee3bdba0ad7b6f67c5a20262f5948821296e8ab3d7535fa1dc5"
+    },
+    {
+      "path": "fixtures/approvals-empty.json",
+      "sha256": "165d09fa2b6b85e4a406602d67f9ab885ee5b6f04296d26335128c43e418cdb3"
+    },
+    {
+      "path": "fixtures/approvals-pending.json",
+      "sha256": "7d900c086c6416c1abda9e7dec3cd9f8e99e7a5ae4efbf0deaba7bc4811fc22d"
+    },
+    {
+      "path": "fixtures/bootstrap-response.json",
+      "sha256": "6a8e50abe75606b43ede9d42d776139128573d0bac4db44aa990c42436d44815"
+    },
+    {
+      "path": "fixtures/command-ack-accepted.json",
+      "sha256": "4264f453630f2eb7a727cb9b632d2e54291f9d88f3c23e79b9da1cf02bb3ab3c"
+    },
+    {
+      "path": "fixtures/command-ack-ask-existing.json",
+      "sha256": "edd7e929f7b60ba5ec41f1c26c515f70fd772b0bf329e9477fe3721905c83ff2"
+    },
+    {
+      "path": "fixtures/command-ack-permission-existing.json",
+      "sha256": "cc2bfd80124ed348be9824d4fa71b4e8cb5c80f7630ac8b908aacf66c35338cf"
+    },
+    {
+      "path": "fixtures/command-ack-sync-replay.json",
+      "sha256": "39d8d057c13f3e2210c1a8ffc36a4a6b6e90fa30eb055ae2ffb305d7174bc6d1"
+    },
+    {
+      "path": "fixtures/command-attach.json",
+      "sha256": "a5b5e2ce79ea74f3814cf5e2fb89bf8c914f45b9fd55eeedc3d2f30cc86ee193"
+    },
+    {
+      "path": "fixtures/command-status-accepted.json",
+      "sha256": "54a49056667955ed3c7834c4f9c399570912b8076c0836d743314970fb631fe3"
+    },
+    {
+      "path": "fixtures/command-status-ask-succeeded.json",
+      "sha256": "5b531c9c515acba71a753343f140609d50933fb424245070d2be8915cde3e247"
+    },
+    {
+      "path": "fixtures/command-status-permission-succeeded.json",
+      "sha256": "c0a9df01c6259043909bbd076461ab6484002e5c19da575a5c084435bf6c0dd6"
+    },
+    {
+      "path": "fixtures/command-status-sync-result.json",
+      "sha256": "d4cac58d91b25e3c9cb0a895d64a306d7eb3824bae9d43ea9e87a3a74ef3c4e7"
+    },
+    {
+      "path": "fixtures/content-upload-response.json",
+      "sha256": "9af78c70cebf7a2a1eb1c507a56bdbc52278b11fb278702e397bdc75f016c107"
+    },
+    {
+      "path": "fixtures/device-challenges.json",
+      "sha256": "f5a1e09874a2e326bc85fbf64f01f984f4c26ba61fe2bc139dd5e2dcf4aa3827"
+    },
+    {
+      "path": "fixtures/devices.json",
+      "sha256": "e49dd396a21fa97c5f90907f856ab448ea396fd070eab045d22dcdfa0389dbcd"
+    },
+    {
+      "path": "fixtures/driver-claim-busy.json",
+      "sha256": "e0d80266c4b9b4b2171d0c2289b611979383f470c06f8241929d18c600611fb2"
+    },
+    {
+      "path": "fixtures/driver-release.json",
+      "sha256": "45d4c57af6ffae48a57778901166322ab33b6eb33c8270bb22033bd9be058f95"
+    },
+    {
+      "path": "fixtures/event-frame-interaction.json",
+      "sha256": "284d1ca8bcc5bd8b6555d3f7c1380b4a7dcc846447b708025d4db5f208411657"
+    },
+    {
+      "path": "fixtures/lease-renew.json",
+      "sha256": "d9a076c7e879b153d3dde09b8b27ad0348520df7e2146864f8cab70e06ffe390"
+    },
+    {
+      "path": "fixtures/open-request.json",
+      "sha256": "c1c47af55db187e7ca9f420a4f8aa5b5c28f578c09b487a8e82f6e0a27a7cee2"
+    },
+    {
+      "path": "fixtures/open-response.json",
+      "sha256": "0721f7b648bd3c1f77e1791cf45c1fbb3085e73a20f8974c9ae28eef9e4a5971"
+    },
+    {
+      "path": "fixtures/pair-params.json",
+      "sha256": "8f3fef70a97cf921d1367ecd0368c55a4045663fec284aa79858f609f779a6b0"
+    },
+    {
+      "path": "fixtures/pair-result.json",
+      "sha256": "11d855991bd67641f59b3a43b4157c488db6a93bb49ba99183b33b20e12d5a30"
+    },
+    {
+      "path": "fixtures/pair-token-params.json",
+      "sha256": "a96dfbdec604ea030802cd4403bb2e7cb00e5992566941d4ada86b01ac81ae14"
+    },
+    {
+      "path": "fixtures/pair-token-result.json",
+      "sha256": "9976105fba200c6d4fd8abacfe7e2d045487662484b4078a32a0c4c51ff1836e"
+    },
+    {
+      "path": "fixtures/pending-permission-details.json",
+      "sha256": "2c9f1412a4450f1d63b55340b3a8b53b8b9d0c54b44f5778ae9ebb65440c01df"
+    },
+    {
+      "path": "fixtures/receipt-policy.json",
+      "sha256": "c4a02945bf117d927ab0a39d44a0b76c3ba7719d724a92431f77f10bb2b9da9f"
+    },
+    {
+      "path": "fixtures/service-clients-list-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-clients-list-result.json",
+      "sha256": "6666d4d685ba0fdafd577025ddfb77632ca7e0016b80835d5ab15c345d6acf13"
+    },
+    {
+      "path": "fixtures/service-config-load-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-config-load-result.json",
+      "sha256": "190e0cb2a0c7ff17acf82432be4ae298f34769af38e389a62e1443ab7d795829"
+    },
+    {
+      "path": "fixtures/service-daemon-version-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-daemon-version-result.json",
+      "sha256": "79cc27ef34242cd4cba24cc8bbe700ffec6849bbf40b394b58e9bff106f16b05"
+    },
+    {
+      "path": "fixtures/service-diagnostics-memory-snapshot-params.json",
+      "sha256": "d3bb6d9593ffc084425aea6ff3d275eefdb8c051e7997ed56674615efabef20c"
+    },
+    {
+      "path": "fixtures/service-diagnostics-memory-snapshot-result.json",
+      "sha256": "ae900705de09b5301c8ff2eabe38c128a539860a843187c147779e1894a31e14"
+    },
+    {
+      "path": "fixtures/service-dsaccount-balance-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-dsaccount-balance-result.json",
+      "sha256": "dcae671a43b403aac146ed4c125b4178f3e228bdfd0af973afebdb86d5653837"
+    },
+    {
+      "path": "fixtures/service-dsaccount-bonus-ack-params.json",
+      "sha256": "8e0bc12e79a8ca962478a679b8151d93b29bb719c83e676bf00e2826785fd64f"
+    },
+    {
+      "path": "fixtures/service-dsaccount-bonus-ack-result.json",
+      "sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+    },
+    {
+      "path": "fixtures/service-dsaccount-bonuses-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-dsaccount-bonuses-result.json",
+      "sha256": "be7bc63fd349958065d42097f555fe6df3f33947f11f1c5c50ac37b68954ba32"
+    },
+    {
+      "path": "fixtures/service-dsaccount-models-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-dsaccount-models-result.json",
+      "sha256": "f955b34158772e10910113eee7d9b8c8be2c02326d0c94f61948b5708c722c56"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_in-cancel-params.json",
+      "sha256": "898a2114909190412ba92671d5776d3ddbdf9ba3199a0a6a67c766ef2854bb2e"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_in-cancel-result.json",
+      "sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_in-start-params.json",
+      "sha256": "6b84c29f85c650c5f0d8ccfd7291eb0de12f1ff20c075a800c3134a01b6303ec"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_in-start-result.json",
+      "sha256": "8e12aeaaf4a88e495adc07e67774c2edb33748371b5b2214765715bbd9abfa73"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_in-status-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_in-status-result.json",
+      "sha256": "218883926a3c008c9ac49cc8015734367267579186bb151c122f016d632b1b6f"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_out-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-dsaccount-sign_out-result.json",
+      "sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+    },
+    {
+      "path": "fixtures/service-dsaccount-status-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-dsaccount-status-result.json",
+      "sha256": "bba03c19c441e7b4bd24d4cc78e71261df23d103468a6344b7b6632b5c83ed3c"
+    },
+    {
+      "path": "fixtures/service-dsaccount-verify-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-dsaccount-verify-result.json",
+      "sha256": "47e633b5c7ecac7ece67b75c136c76b582c969320c62633beababe6564aa5532"
+    },
+    {
+      "path": "fixtures/service-exec_session-list-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-exec_session-list-result.json",
+      "sha256": "655fa99a5156e03d194eedbb14b5beb839aaa9a95a9a4349a91bd384082aa37d"
+    },
+    {
+      "path": "fixtures/service-exec_session-output-params.json",
+      "sha256": "ba69c24d784be60226bd71b335eb847d456f42bfa3bafb92ae296a21e403591c"
+    },
+    {
+      "path": "fixtures/service-exec_session-output-result.json",
+      "sha256": "2743f3fbd9a792e545b65027cb437313106382be140744e1b1faa839bb8471a2"
+    },
+    {
+      "path": "fixtures/service-fs-list-params.json",
+      "sha256": "4fa1fbcb6d3a71f9a66911793399b26040b5911c71ec0e9b7f8ee5cb86fd07ee"
+    },
+    {
+      "path": "fixtures/service-fs-list-result.json",
+      "sha256": "77a94cd1618dd39febe27822195836cef95de2d59b0842d5075bc3bb1664e90b"
+    },
+    {
+      "path": "fixtures/service-fs-read-params.json",
+      "sha256": "001e1007022717d6613ac24e16b08559c7a244c2cc77fe52dd8d89f60d653167"
+    },
+    {
+      "path": "fixtures/service-fs-read-result.json",
+      "sha256": "f2656b94f205e159a3e38f8bdc822df05e04799596f7025727b19455375bb6fa"
+    },
+    {
+      "path": "fixtures/service-plan-read-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-plan-read-result.json",
+      "sha256": "7de4ca81ae34f57cdf28045209791eadfcd7b63a06e4a96790c7af0caec0c576"
+    },
+    {
+      "path": "fixtures/service-session-activity-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-session-activity-result.json",
+      "sha256": "46812bb42ff2766d063a4a7d9c64c42c6f68e5f43266a069639563519019dac7"
+    },
+    {
+      "path": "fixtures/service-session-dashboard-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-session-dashboard-result.json",
+      "sha256": "e85480c0644d4b4787ff9e3302539b397671ea8e0c3cd92bfb2d7fddeb56eec0"
+    },
+    {
+      "path": "fixtures/service-session-get_activity-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-session-get_activity-result.json",
+      "sha256": "d46e88b0792a785c97c5373d7e36874a9e7957ce92fdde945ba83f4b8ab59b3c"
+    },
+    {
+      "path": "fixtures/service-session-list-params.json",
+      "sha256": "d7d0cb05d618d6c756b193cf02c297a1faa1b1bbd56cee11caa421cd1cd3a45a"
+    },
+    {
+      "path": "fixtures/service-session-list-result.json",
+      "sha256": "73ec221f771e8dfdcc89255be08bca6b9f13bdf4386241a608d3fb8f1e332d78"
+    },
+    {
+      "path": "fixtures/service-session-meta-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-session-meta-result.json",
+      "sha256": "a2686fda925cc7d39e70b5d639f43cb096ba3e24a0997b3d4835dd7e3082a8ed"
+    },
+    {
+      "path": "fixtures/service-session-turn-params.json",
+      "sha256": "b65e952999f61737e573d3f2e75857109a1061e777aa48b3059379f53e1a75f4"
+    },
+    {
+      "path": "fixtures/service-session-turn-result.json",
+      "sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+    },
+    {
+      "path": "fixtures/service-siwc-models-params.json",
+      "sha256": "f89c727bb71cf0a58f9f8dfa8b10ec4d634652ed78c9781ce9ed430e8db43231"
+    },
+    {
+      "path": "fixtures/service-siwc-models-result.json",
+      "sha256": "878e8d9fefc37c648cb74d156fa5ad4ef53fb46de60b8b99439c244f619c8a0c"
+    },
+    {
+      "path": "fixtures/service-siwc-profile-select-params.json",
+      "sha256": "bbb7784b5a7d31a4b443e035837943b5d57f67de93a081c70a28c3ec5752fd3f"
+    },
+    {
+      "path": "fixtures/service-siwc-profile-select-result.json",
+      "sha256": "a2f66fcb7426f8f4b2f0e1d4fef27c020e2638d0bf4e34c5f3f5796e142ea605"
+    },
+    {
+      "path": "fixtures/service-siwc-profiles-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-siwc-profiles-result.json",
+      "sha256": "f27ef3a6567b7947dc383564639695f618787a0ea4f8ef42cf2cb629f11339b5"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_in-cancel-params.json",
+      "sha256": "3cd121d949ac0099c7e8cd5880c919c3df3ba03b65a01e8606690e050753fe8f"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_in-cancel-result.json",
+      "sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_in-start-params.json",
+      "sha256": "77ce4dd7461bf9b6fcb4b7396db2ac9ae414326f8b05cfff0601195057dc0988"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_in-start-result.json",
+      "sha256": "64f057e627a21f95643d35d79d8e7148deb86bbadf11a54a4ad236a406e722fc"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_in-status-params.json",
+      "sha256": "3cd121d949ac0099c7e8cd5880c919c3df3ba03b65a01e8606690e050753fe8f"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_in-status-result.json",
+      "sha256": "674e87935ab19cc6ac542840690f0034579b5c6c67a894fc42f3143e8d04e718"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_out-params.json",
+      "sha256": "bbb7784b5a7d31a4b443e035837943b5d57f67de93a081c70a28c3ec5752fd3f"
+    },
+    {
+      "path": "fixtures/service-siwc-sign_out-result.json",
+      "sha256": "97ca0b64102120ae9c37f7b361b58277d75dc82f0049364f09eae2a967c38220"
+    },
+    {
+      "path": "fixtures/service-siwc-status-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-siwc-status-result.json",
+      "sha256": "a2f66fcb7426f8f4b2f0e1d4fef27c020e2638d0bf4e34c5f3f5796e142ea605"
+    },
+    {
+      "path": "fixtures/service-skills-catalog-params.json",
+      "sha256": "f93bc88130b8a4094b6acd45d6805ad3d29aee65840de5f903ea35063aa12edc"
+    },
+    {
+      "path": "fixtures/service-skills-catalog-result.json",
+      "sha256": "3172cb36032bf6b3376d89584cfb121f99ab18934faab5ef33c1e2acc8410d0e"
+    },
+    {
+      "path": "fixtures/service-skills-list_tools-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-skills-list_tools-result.json",
+      "sha256": "9a5e8ffddade3702fa9efb2cbb8a02d2e27d5f0cfad09021871ad814c12b22ea"
+    },
+    {
+      "path": "fixtures/service-todo-list-params.json",
+      "sha256": "bd6b20b851ed74d61a7b5c649e4e69d498d6e793c5f023de7916f159124bb38d"
+    },
+    {
+      "path": "fixtures/service-todo-list-result.json",
+      "sha256": "5acb31c409ffaf6f091330ffc84a7ce6df1d0ddf99166ea3d9afc93cbd846d39"
+    },
+    {
+      "path": "fixtures/service-todo-status-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-todo-status-result.json",
+      "sha256": "130432fb9e915fec7a10d0cad1a68b9d4693a7456f3902bf9c802b4512647ad5"
+    },
+    {
+      "path": "fixtures/service-workspace-get-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-workspace-get-result.json",
+      "sha256": "17a40465eec20dc50dd810324ca14f4f5360dc96f984bafadd62da85736e66f4"
+    },
+    {
+      "path": "fixtures/service-workspace-list-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-workspace-list-result.json",
+      "sha256": "9d9dfadcbe88be1622a36a2d4ee22e17421d0be925d3b266f38953e8a8dd7e20"
+    },
+    {
+      "path": "fixtures/session-create-result.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/team-response.json",
+      "sha256": "8444c265e0a6689daead7b81ec2c398434aee8c7b2e90c2dd19b0bd8013f4503"
+    },
+    {
+      "path": "index.ts",
+      "sha256": "e0fa2f8b207e154ae37dd0843c844b3095eb13039497e6489f2a47fe913d51c1"
+    },
+    {
+      "path": "node.ts",
+      "sha256": "66fcdc7d41947c4315d1366fb588afc846281069b4eb581b64e7d4e0cfff7a23"
+    },
+    {
+      "path": "service-map.ts",
+      "sha256": "2a614508fd4b9fd112b602afe81d06b63c00079ab0b34d454d00f19addf5b2c9"
+    },
+    {
+      "path": "types/ReceiptIdScope.ts",
+      "sha256": "130ab6f11765a36503b1303a28bd122b15adeafe334cc416c988a2ac33838924"
+    },
+    {
+      "path": "types/ReceiptOwnerScope.ts",
+      "sha256": "e5a4650ed894361800b98f80f12d7369d86c8ae54eaddd3691832a0a67c89546"
+    },
+    {
+      "path": "types/ReceiptPersistence.ts",
+      "sha256": "ba964335cb758cc195b84fb0f19e4b48b13d34d193152fa64addf2f3d17b59b1"
+    },
+    {
+      "path": "types/ReceiptPolicy.ts",
+      "sha256": "8d9861400b767b315ea15b849a4d25f9901c6910637776d45015e8e2cac1cc86"
+    },
+    {
+      "path": "types/qaqh/AccountsEmptyParams.ts",
+      "sha256": "ea8438eefdec8571d8891c2f9862147f60d3c6e39ab062ebea117c9cb064dfa0"
+    },
+    {
+      "path": "types/qaqh/ActivityState.ts",
+      "sha256": "a03306d1f55fddb880d0853138ab06080f5101a6cd80ca3304d74f93ce0ddc7e"
+    },
+    {
+      "path": "types/qaqh/ActorKind.ts",
+      "sha256": "9b855b0219188f38e64e8ff1bc290ae772df8685ac7816df8a5af000549ae593"
+    },
+    {
+      "path": "types/qaqh/ActorRef.ts",
+      "sha256": "51223a82107d03b150b7298b8349bef3ab8a76ab025855a9e4a8cf77dab9ac24"
+    },
+    {
+      "path": "types/qaqh/AgentPath.ts",
+      "sha256": "d6467ff1599d39483d7e2b130202b970930e5858550fb8961837441186f21f15"
+    },
+    {
+      "path": "types/qaqh/ApplyPatchCustomGrammar.ts",
+      "sha256": "4adf5ec2f0d6ba60d94eb6da023f871c04e93d73eb3f418907a179f4be9dad11"
+    },
+    {
+      "path": "types/qaqh/ApplyPatchInputFormat.ts",
+      "sha256": "22140a4dafdabfad613c6934e47ddb5ee4ac3d601e055bdaaffd3fea90b521d8"
+    },
+    {
+      "path": "types/qaqh/AskAnswer.ts",
+      "sha256": "21cdcca73512ab8a00be3d6a69e4d304eccf8ac289e4c94762b76ca5969fd95d"
+    },
+    {
+      "path": "types/qaqh/AssistantBlockKind.ts",
+      "sha256": "185e34dab90b357b1629195064837a02616cfa7c438c992ea852f52f75a8f6d3"
+    },
+    {
+      "path": "types/qaqh/BlockId.ts",
+      "sha256": "319e405acba95ddde44e839112d91a8b47abef14ffdeac1d4155b0993345b099"
+    },
+    {
+      "path": "types/qaqh/CacheTokenField.ts",
+      "sha256": "df769480c9b30fa7ff22abbb6271384e06d53b4752c67943571b3ae989c125f1"
+    },
+    {
+      "path": "types/qaqh/CacheUsageSemantics.ts",
+      "sha256": "c9cabc8b92dc104cc5d08b39bb5af12bda614ee1b25a074d5376757605ff2033"
+    },
+    {
+      "path": "types/qaqh/ClientsListParams.ts",
+      "sha256": "ea88ea8af8bed4800cda28fbb745aaf700260ca5f1a12b23d7c1974a826abc88"
+    },
+    {
+      "path": "types/qaqh/CodeDelta.ts",
+      "sha256": "d59b9a2aad9fc4cd467cbfd8e45a436a77450ebc1d15e4c8018e15024421f40f"
+    },
+    {
+      "path": "types/qaqh/CommandPrecondition.ts",
+      "sha256": "cdaa1575f66f4441a79750d05db01e24eafb46ba312ba290060c23dccbe1a006"
+    },
+    {
+      "path": "types/qaqh/CommandTarget.ts",
+      "sha256": "f4e8064e20e87eac19e08c888b6464bd2a199918bd938f788e51f1afb7029ca7"
+    },
+    {
+      "path": "types/qaqh/ComponentGroup.ts",
+      "sha256": "0b47cf7062f9c9dc8946a3e69e3d2e5fb89259988116061506cdfda67a583476"
+    },
+    {
+      "path": "types/qaqh/ComponentMemory.ts",
+      "sha256": "7dc477cc6107df517eae1e1c510154499b79a9c7e7913e2b7eb31ceaeb15cef4"
+    },
+    {
+      "path": "types/qaqh/ConfigDto.ts",
+      "sha256": "ccadf215aa672c81fba09c606175bcf5be86714cfb233ff139749491b021628b"
+    },
+    {
+      "path": "types/qaqh/ConfigLoadParams.ts",
+      "sha256": "58fb494d04758ebf12fff3d55686b30e3977e09b06e6cc3aa03c1e14696eaff3"
+    },
+    {
+      "path": "types/qaqh/ConfigPatch.ts",
+      "sha256": "249cb4e0f4e17e031d626c09cb302060a6a6577bedfa77357cb6fb1dd42a6e68"
+    },
+    {
+      "path": "types/qaqh/ContentHash.ts",
+      "sha256": "599cc530a3df9bb099de765cba9347e45880c2c2a17e9191a8c6302082688bcf"
+    },
+    {
+      "path": "types/qaqh/ContentUnavailable.ts",
+      "sha256": "0937a5ee381ba5b4bbd0ba8d4e65b378b89db9d648d1b3eb8ab620f1742abc69"
+    },
+    {
+      "path": "types/qaqh/ContentUnavailableReason.ts",
+      "sha256": "1b15ec4153d3b25fd2815dd7024d4e672c7819a434f9448390b86ca75d9401de"
+    },
+    {
+      "path": "types/qaqh/ContentValue.ts",
+      "sha256": "9e7a51a7940cfeb99a3535621c43abdd25ad84763fb11e54cea6b23909ce790c"
+    },
+    {
+      "path": "types/qaqh/ConversationSendMessage.ts",
+      "sha256": "4e46e81e3aa9aea8c5b44fa84245cd51ef6d2654b99b3020e0433498eb12dc93"
+    },
+    {
+      "path": "types/qaqh/CredentialSource.ts",
+      "sha256": "91be374ec97379b0e96d521a2aedd96a16b2294a27c63c47d21bdda215cbbdd3"
+    },
+    {
+      "path": "types/qaqh/DaemonDiscovery.ts",
+      "sha256": "cb6dd5764baee6ff56c733c0425a7afe863275240cd3e1b211132bdbf09d9de3"
+    },
+    {
+      "path": "types/qaqh/DaemonVersionParams.ts",
+      "sha256": "becd4ee15086760deb37df38102de994374e844ec5b54084066a64a1c27527fc"
+    },
+    {
+      "path": "types/qaqh/DiagnosticsMemorySnapshotParams.ts",
+      "sha256": "2bbfc1f07c06a4480264b0fcbac3446be5e3953647dab4790259b53c0a3951fa"
+    },
+    {
+      "path": "types/qaqh/DriverState.ts",
+      "sha256": "7df697ec6c697fced24655c4110877516b19de98a60695ce12f1edabd06abc83"
+    },
+    {
+      "path": "types/qaqh/DsAccountAttemptParams.ts",
+      "sha256": "bd2eda8a76f0660f0dd44058afc2613207cec7316890c9c892d409f1896c9e82"
+    },
+    {
+      "path": "types/qaqh/DsAccountBalanceResult.ts",
+      "sha256": "ed6930bddcca791728516477376a251794ef09b6c47f616894455d39b549676c"
+    },
+    {
+      "path": "types/qaqh/DsAccountBonus.ts",
+      "sha256": "f5e6816a6a424d649df4cff33c78332fabee6cb4641b439866173bb379ed27be"
+    },
+    {
+      "path": "types/qaqh/DsAccountBonusAckParams.ts",
+      "sha256": "c06cb31484046375e8e652606391845ba8a4a9d16b0b122215d908564310e70a"
+    },
+    {
+      "path": "types/qaqh/DsAccountFlowState.ts",
+      "sha256": "31900d0cab9a3f4576b496a286b259b2d32c5e80c6fe48bbaa9204049edb6d7b"
+    },
+    {
+      "path": "types/qaqh/DsAccountModel.ts",
+      "sha256": "5444f8ce9e5cbdf4f7026e86d6f578668089ace51cbdb8f6b994183cb1e59e00"
+    },
+    {
+      "path": "types/qaqh/DsAccountPublicAccount.ts",
+      "sha256": "277c6a639ba1de482cec0f16c4d91275c14e1aaf690f0f3fc9d506214c2203a3"
+    },
+    {
+      "path": "types/qaqh/DsAccountRevoke.ts",
+      "sha256": "e69116791448b803ab22edd200cab401b73f4fcaf8a479a666820da30fb05682"
+    },
+    {
+      "path": "types/qaqh/DsAccountRevokeState.ts",
+      "sha256": "3291dec0d693b4501298a671c110be08bf6216e041d2d1ab7bd1f2ba6b8e1c6d"
+    },
+    {
+      "path": "types/qaqh/DsAccountSignInStartParams.ts",
+      "sha256": "c11d46a781cb8aab74df2905dd57a1fe80dd61b602094bc408134515a7f0f8c2"
+    },
+    {
+      "path": "types/qaqh/DsAccountSignInStartResult.ts",
+      "sha256": "ab31fb8b6d9b89c4b73ceaf6dd595ec29071588e95cf1d80f283898d10115e10"
+    },
+    {
+      "path": "types/qaqh/DsAccountSignInStatusResult.ts",
+      "sha256": "4203ea3f38a6744797fca2d83f356118efc9a595044aaa783fabaaf85e707dd9"
+    },
+    {
+      "path": "types/qaqh/DsAccountStatusFlow.ts",
+      "sha256": "16c09d50bf2b8804fa09dd28b91295354397a52402a334e8b00fafeb1bd17f73"
+    },
+    {
+      "path": "types/qaqh/DsAccountStatusResult.ts",
+      "sha256": "fbd0d4c0da5583ea31acaf6dbf3a0744b6e8943ff7db7570e92e0283c8dbe7e0"
+    },
+    {
+      "path": "types/qaqh/DsAccountTotalCost.ts",
+      "sha256": "b8d8b3cbf05db8c61d9c30a3ed28d8ea5d4568f1cb4d2f1e2c2b628456097c9b"
+    },
+    {
+      "path": "types/qaqh/DsAccountVerifyResult.ts",
+      "sha256": "ce0d51d2af41bbccf798f13fffe4d16aa326acc3ce9c145d5d1dd494d1f8f0a4"
+    },
+    {
+      "path": "types/qaqh/DsAccountWallet.ts",
+      "sha256": "658b739a1738272a77f241d7f4cd37f1ffa007734dda35d6b46e64c5e0da678a"
+    },
+    {
+      "path": "types/qaqh/EndpointCompat.ts",
+      "sha256": "07117e6744af5eca7abccebffb6a94564b59b9f5f4a0cebf06c399b79470e1d7"
+    },
+    {
+      "path": "types/qaqh/ExecCancelReason.ts",
+      "sha256": "c44e96d8b3be95215b187f858e114b91ebe0d519bb71a9b074abdfe975258b80"
+    },
+    {
+      "path": "types/qaqh/ExecDto.ts",
+      "sha256": "6a0b8a7d97cf1f7f1029dc4e97351f7ea304910d7f4d7cddf385c2446eceb1f0"
+    },
+    {
+      "path": "types/qaqh/ExecInterruptReason.ts",
+      "sha256": "848ff7dea51c695f2d59b81acd75a47d3053be6be53b2432bb142906c574f243"
+    },
+    {
+      "path": "types/qaqh/ExecOutputSource.ts",
+      "sha256": "632c8e4d821f07295addb619f4198216b2904aee502b98730f6d422c70555cb0"
+    },
+    {
+      "path": "types/qaqh/ExecPatch.ts",
+      "sha256": "1c911a88696e96fae8fdc5b6a6671156069683bc68c7474a85478541ba03ae25"
+    },
+    {
+      "path": "types/qaqh/ExecSessionId.ts",
+      "sha256": "fce82a255a27545f56726ba8393af45737ab59fffe1920212152079204f144e0"
+    },
+    {
+      "path": "types/qaqh/ExecSessionListParams.ts",
+      "sha256": "f055713349152c4d3f138317dd7a666b05c2e90cae09b79721ecc1546bdd19a2"
+    },
+    {
+      "path": "types/qaqh/ExecSessionListResult.ts",
+      "sha256": "63551e99e335263c8fce8ccb87cdbed531ad79633e285a131418344a06f34c7a"
+    },
+    {
+      "path": "types/qaqh/ExecSessionOutcome.ts",
+      "sha256": "4d096eed57f294d38da41d691e57dcb87646f9a9700e0ef0ac30dd601431a609"
+    },
+    {
+      "path": "types/qaqh/ExecSessionOutputParams.ts",
+      "sha256": "9ea20810a7d7a9d41e03621892b748b6d5375fb0adcebc81efd8241df5520076"
+    },
+    {
+      "path": "types/qaqh/ExecSessionOutputResult.ts",
+      "sha256": "5d3e1ec6c834c942fe278f84ca8586e4e1354dd6467763aa7a2e1d706afd80d9"
+    },
+    {
+      "path": "types/qaqh/ExecSessionState.ts",
+      "sha256": "596fdc67a073595ff2813efd10d4c6ff747bc5b05ad6414517860fe767622ecc"
+    },
+    {
+      "path": "types/qaqh/ExecSessionView.ts",
+      "sha256": "ee7fe7c1bdef9537df662c8c5a1efba374e47bc4b7df291742b9baf876010441"
+    },
+    {
+      "path": "types/qaqh/ExecStopReason.ts",
+      "sha256": "dc2973403fb9967f8dd6fff448f5bb1b4f7c524decef40959f480454aa387599"
+    },
+    {
+      "path": "types/qaqh/FsEntry.ts",
+      "sha256": "c8a439fb7b2ef1d4be42e8557160f6af75bfb38b92289190becf15bcfbae2166"
+    },
+    {
+      "path": "types/qaqh/FsListParams.ts",
+      "sha256": "5031a12fcfc6eec2a3555933d35f1160b4acd5bfd836803b8f71a1b821c2faea"
+    },
+    {
+      "path": "types/qaqh/FsReadParams.ts",
+      "sha256": "ef2b0f915dac7f07f0da519805aabbe4f3e439f278804b6e8b70f8b5590cb247"
+    },
+    {
+      "path": "types/qaqh/FsReadResult.ts",
+      "sha256": "5105632e922307b9a8ca5074aa770fff06ea5e32934561ab1b6e6d2596d27fe4"
+    },
+    {
+      "path": "types/qaqh/GoalStatus.ts",
+      "sha256": "179f41d5395595ce93c04da7eaed7f386c80288c5e28275354b2deeb7e8224bf"
+    },
+    {
+      "path": "types/qaqh/GoalView.ts",
+      "sha256": "b12a325960d0562079b6c4e072cd8fa9a6a4076ed0be3ccd232e3d16c6924afc"
+    },
+    {
+      "path": "types/qaqh/GoalsDto.ts",
+      "sha256": "3fe0e77f6f753447dc5bf1b5f6b6b7f0c2b2c4f68066262c0a9dfdfdf03314af"
+    },
+    {
+      "path": "types/qaqh/GoalsPatch.ts",
+      "sha256": "f1a9f6ec76b8bba685a1a24207e4a2fab7afe2637aba957cbe009e575f682907"
+    },
+    {
+      "path": "types/qaqh/ImageBlock.ts",
+      "sha256": "7d96331ca02783bd1e2ac2c504a50f3abe63ff472b536b56f856712a42f2fd1b"
+    },
+    {
+      "path": "types/qaqh/InputId.ts",
+      "sha256": "1fc363a21f40b0f718f27217dd38afd1a6d173893292d0c7293af2b3845effe3"
+    },
+    {
+      "path": "types/qaqh/InputPurpose.ts",
+      "sha256": "0b5a17c923d691e01be52659085a30759342bb3c040f74db1c6c7d3e12aeca5b"
+    },
+    {
+      "path": "types/qaqh/InterAgentActor.ts",
+      "sha256": "507a3c799c40f20b68056d9099fb6ac83637fa5040efb69e8ef8905377481aa4"
+    },
+    {
+      "path": "types/qaqh/InterAgentEnvelope.ts",
+      "sha256": "6fc65dbce81d71ecdf048067529512686fd4af9d2145f9fe67ed6bdddd21def1"
+    },
+    {
+      "path": "types/qaqh/InteractionChoice.ts",
+      "sha256": "d346f0dbcbc6842294c8d327e2df4c6a0865b8d28aa898a5742184c14c45cfc2"
+    },
+    {
+      "path": "types/qaqh/InteractionChoiceTone.ts",
+      "sha256": "5cbb006bb758e01b8b44cd095b889b3a9798922b8518fffdba4a02a34cc08a29"
+    },
+    {
+      "path": "types/qaqh/InteractionDecision.ts",
+      "sha256": "c14818883dddf9d136dbf84328199f710503ddf5bdc2ac1a873ecb4d878e3038"
+    },
+    {
+      "path": "types/qaqh/InteractionEndStatus.ts",
+      "sha256": "5302e48e8b177f8c5e2c0e46894b6cd62f504c9b0c0d614e6cce50a03e086483"
+    },
+    {
+      "path": "types/qaqh/InteractionId.ts",
+      "sha256": "a27f64f953dc505c2bf037da88421a14dcc582fc7884199fc568f677d41c489a"
+    },
+    {
+      "path": "types/qaqh/InteractionResolution.ts",
+      "sha256": "cf64d17faa2d774fd11d4f2d8614df1646a3768129bc5ba4e00de28d9a4c825e"
+    },
+    {
+      "path": "types/qaqh/InteractionView.ts",
+      "sha256": "96675fda60accb01f6c32755dce985fe627d9e594387c4434d46f7c89088cd9c"
+    },
+    {
+      "path": "types/qaqh/InterruptReason.ts",
+      "sha256": "29058e675f83816f8bcfad704433c6165fd4eaa7b90361438e819449942de81e"
+    },
+    {
+      "path": "types/qaqh/LspDto.ts",
+      "sha256": "9fc5da388a8a5457c64d2d8855a5e05cbd676f01833e0c11b527fb224af1f82d"
+    },
+    {
+      "path": "types/qaqh/LspServerDto.ts",
+      "sha256": "c9cb543a421a6975229212728208c16e8805bae79626ddc3b13799ea185c315d"
+    },
+    {
+      "path": "types/qaqh/McpDto.ts",
+      "sha256": "21b3433151cd8cfffd166f1832762b3bff219787926d08e436d926d393104ebd"
+    },
+    {
+      "path": "types/qaqh/McpServerDto.ts",
+      "sha256": "cff8280b41b1394592501961dfbca9d6090d4ca41f4ed3caef0637c0c213b447"
+    },
+    {
+      "path": "types/qaqh/MemorySnapshot.ts",
+      "sha256": "4f12ccd6942d26009555d5054916039ce0bc3656fb58fe66d09cdc9bad0cdf46"
+    },
+    {
+      "path": "types/qaqh/MessageId.ts",
+      "sha256": "4a29a606a955ab020e86746b5eb42596ace2101a9a1de7e4c189a5c27a84c8d7"
+    },
+    {
+      "path": "types/qaqh/ModelCapabilities.ts",
+      "sha256": "22558ef6f6300941095070769e141f3afe2050529f06e6eba69fb9f5ad516b75"
+    },
+    {
+      "path": "types/qaqh/ModelDef.ts",
+      "sha256": "38e5d152c09942db9b6e3f604943b582b96c5fa802f4343d5ceeee74336993d9"
+    },
+    {
+      "path": "types/qaqh/ModelDefaults.ts",
+      "sha256": "90c02d146e021b9e3b429c4f5ea69a6253b1abc37d78a6fbb1bb3f9475f06885"
+    },
+    {
+      "path": "types/qaqh/ModelSelection.ts",
+      "sha256": "4edd86ccbf3c68dac4724279a1fba5062891d4e6ab81c043f603f22b489a3eeb"
+    },
+    {
+      "path": "types/qaqh/ModelSelectionOptions.ts",
+      "sha256": "6a9ea1cce74f98c731633afbcb51b5e5c4e06f734594a19c78c8125ee6d1279c"
+    },
+    {
+      "path": "types/qaqh/OutputStream.ts",
+      "sha256": "9c542edb2aa232bba501329c21b74af3f80f2ee99d8bc192eadc605e8405b9d4"
+    },
+    {
+      "path": "types/qaqh/PermissionRequestDetails.ts",
+      "sha256": "8e93168bd41810d1abaf1cc6d09f7c5effe4b60108331981e65486737e3a709e"
+    },
+    {
+      "path": "types/qaqh/PhaseKind.ts",
+      "sha256": "ec92dc448f21571a008b2b6864ac016b61d393f8f07616ba6f83d8d8391f82dc"
+    },
+    {
+      "path": "types/qaqh/PhaseSample.ts",
+      "sha256": "93100b192ccc04ab8d43053dd3276d9ea1df3395fb871795ddb5d6a6281f604b"
+    },
+    {
+      "path": "types/qaqh/PlanItemStatusView.ts",
+      "sha256": "539ddb1e1ba06b1efd06286d051f0aaf0340a945ecf82e22b9103f9b4cbc54c1"
+    },
+    {
+      "path": "types/qaqh/PlanReadItem.ts",
+      "sha256": "abe522309bdaf3ba3483cb3fb9d56010a339a8739d35a42b445d961c023cbd04"
+    },
+    {
+      "path": "types/qaqh/PlanReadParams.ts",
+      "sha256": "53bbd0e97c89472f263ac54eb714f6c0845538c0bff7fe02c8dd42d50fc3d44b"
+    },
+    {
+      "path": "types/qaqh/ProcessMemory.ts",
+      "sha256": "15b2337b212577f38bf5dadcf478f48b954068007d29f534cc47ee3370d94628"
+    },
+    {
+      "path": "types/qaqh/ProfileStatus.ts",
+      "sha256": "87cb1fc109e5fb272b7523eb834c9dd29fd5dec131a299f978f33e90a71b2284"
+    },
+    {
+      "path": "types/qaqh/ProviderUpsertDto.ts",
+      "sha256": "8a117891d1cd5b97b9a732fb7a5863d366b8cc75cb99537e189abca0eb6f4bd9"
+    },
+    {
+      "path": "types/qaqh/ReasoningKind.ts",
+      "sha256": "daa8659f6825bea5205c8ef6149d20354b503543cdc57c5cd426a32b8167a41e"
+    },
+    {
+      "path": "types/qaqh/ResponsesToolLayout.ts",
+      "sha256": "3436e9b8fb26015a5fa5a453a8d04443c1cc80adb0f4243c845543b8642dfb2b"
+    },
+    {
+      "path": "types/qaqh/RetrySpec.ts",
+      "sha256": "9eac9e19136ffbe8d69e43f086246f9c26d289cfe573b316bbbb0e160aa089fd"
+    },
+    {
+      "path": "types/qaqh/RingingCommand.ts",
+      "sha256": "366b2291b295e37408964d1d43c38fc13d445e94d23948c119367d8bb9aa869d"
+    },
+    {
+      "path": "types/qaqh/RingingCommandAck.ts",
+      "sha256": "1cb82ad9e2eaa5b816a10ee890cf2e985985a8ca9661d6dcd59be3eb6fcb2ed6"
+    },
+    {
+      "path": "types/qaqh/RingingCommandAckStatus.ts",
+      "sha256": "0b6210119c3017dc69caf718b91ccd8b400e116ac29cec2e922687073023f8e6"
+    },
+    {
+      "path": "types/qaqh/RingingCommandState.ts",
+      "sha256": "64ab093e92d12f491afd9625c660c748e9eb64cf391dfb17215c075dc99ff032"
+    },
+    {
+      "path": "types/qaqh/RingingCommandStatus.ts",
+      "sha256": "f17a55e851d9a69d19071ec7b18f27692131ddcbd08744d963d071f4b91e444c"
+    },
+    {
+      "path": "types/qaqh/RingingV2ApprovalRespondRequest.ts",
+      "sha256": "6e289d8a49b415bda82bc6d82f142a27f1a12b34db8d876e1728fece28ce1b3b"
+    },
+    {
+      "path": "types/qaqh/RingingV2AskOutcome.ts",
+      "sha256": "b58ab267d5802b97149ec2d8a3e53aaa7745d1bda6e1226e4f1a16ab78c30d3f"
+    },
+    {
+      "path": "types/qaqh/RingingV2Capabilities.ts",
+      "sha256": "1152c04069fcc60781cf324c7d1cc2094578538c2bd12ec8883364c460bf6e15"
+    },
+    {
+      "path": "types/qaqh/RingingV2ClientKind.ts",
+      "sha256": "ea2d926fa54bcff3f018f553cb10dd1fb3e03041201b7045e87d6bf5ba5a6ad1"
+    },
+    {
+      "path": "types/qaqh/RingingV2ClientView.ts",
+      "sha256": "58e514c287c426031a0aed39a0c804695d3944789c10324eb666327204a37738"
+    },
+    {
+      "path": "types/qaqh/RingingV2CommandAck.ts",
+      "sha256": "11c39caa46b81ceb60dac34926822c97b580e0701c83d824d74c87678d52af99"
+    },
+    {
+      "path": "types/qaqh/RingingV2CommandEnvelope.ts",
+      "sha256": "69ccc42cb945c71cef19c07f36f6f0defc87eefa594dd9b541f85596a2045fd6"
+    },
+    {
+      "path": "types/qaqh/RingingV2CommandResult.ts",
+      "sha256": "000dfd26aca0e07f7da3236668e346ba99c6b1a8823615c007f9d053833fff50"
+    },
+    {
+      "path": "types/qaqh/RingingV2CommandStatus.ts",
+      "sha256": "746508f019c4d47891f7d7a3125f0f0bcd5eddf3198f096b2e7c39a0575425fe"
+    },
+    {
+      "path": "types/qaqh/RingingV2ContentUploadResponse.ts",
+      "sha256": "17bcd5a36a408be9462697c0d6cb76682fa746ec7c813ac0de2e74e9116c4c46"
+    },
+    {
+      "path": "types/qaqh/RingingV2DeviceApprovalKind.ts",
+      "sha256": "670b79824df59ad7a26eb4e6c89adf00f7eece62b1cceaddebc8aaece82deb7a"
+    },
+    {
+      "path": "types/qaqh/RingingV2DeviceChallenge.ts",
+      "sha256": "6a260c28578158af6d5beae85ca38df9c18d86353ad0065d2fa4862796c81768"
+    },
+    {
+      "path": "types/qaqh/RingingV2DeviceChallenges.ts",
+      "sha256": "e092599478c66f62a08ef53ca2ea6dd2078f991b3d2c46203f4383b41e6b55b6"
+    },
+    {
+      "path": "types/qaqh/RingingV2DeviceWire.ts",
+      "sha256": "743a5d2155423ccbb31003992f49ca1a87d87e5f25123831db288fc72cb74541"
+    },
+    {
+      "path": "types/qaqh/RingingV2DevicesResponse.ts",
+      "sha256": "51c08db279dc7194bf9f4a8b40bc45cdf89ef347b3272c303e7063afc2013a88"
+    },
+    {
+      "path": "types/qaqh/RingingV2DriverClaimResponse.ts",
+      "sha256": "c9b4ac716f9d63f0c65cb59436a7f307940798f006c159705bc31d3ae8feccac"
+    },
+    {
+      "path": "types/qaqh/RingingV2DriverReleaseResponse.ts",
+      "sha256": "342bb57cc510b042ac755e55c4093046ac720d8a63374c319ba385e63e7a8987"
+    },
+    {
+      "path": "types/qaqh/RingingV2ExistingResult.ts",
+      "sha256": "2b2b6e7cb518cea09283e0f9424dc1f559a30c677a36a98a286a5d7330ce68dd"
+    },
+    {
+      "path": "types/qaqh/RingingV2LeaseRenewResponse.ts",
+      "sha256": "3b09689aada38ca9a563173bd00d8b5095a7cd53c8cf4f107613d64e9fb8fd09"
+    },
+    {
+      "path": "types/qaqh/RingingV2OpenRequest.ts",
+      "sha256": "0b33c1b625e58570152fc7e69ad6aef7f30b64c77e53cad8104c5cf94d02d518"
+    },
+    {
+      "path": "types/qaqh/RingingV2OpenResponse.ts",
+      "sha256": "f2c7bdf363e697fa5e9c6cd36957a807f483fcc13d9229915e5da46e88d22947"
+    },
+    {
+      "path": "types/qaqh/RingingV2PairRequest.ts",
+      "sha256": "914a5e7bc4a63d47b828abdf27ec7b84afd021e233b47255e6b41277f89b8abd"
+    },
+    {
+      "path": "types/qaqh/RingingV2PairResponse.ts",
+      "sha256": "ca26db797c7d0dde31a8aaf26af738259acaeb89ccf037f05680fefcd6e7a18f"
+    },
+    {
+      "path": "types/qaqh/RingingV2PairTokenRequest.ts",
+      "sha256": "a6add5a1511d37dc7257af5594a4f0bbfe0aa38c0a916ff03df5f0f269b15555"
+    },
+    {
+      "path": "types/qaqh/RingingV2PairTokenResponse.ts",
+      "sha256": "034c4fb18e8f67dc4be79d197438c19e9afc989df60061fd9bfd4a83f676b1d9"
+    },
+    {
+      "path": "types/qaqh/RingingV2PendingApprovals.ts",
+      "sha256": "b5dfd7331a4e0f151e8bda08d288ee67a81afafc417c589affad1d2ef8b12058"
+    },
+    {
+      "path": "types/qaqh/RingingV2PendingInteractionView.ts",
+      "sha256": "ccc55bf4509358d1c908e1e272b65d8c91936bee6ceb6cbf0138a2e481b0f63e"
+    },
+    {
+      "path": "types/qaqh/RingingV2PendingPermissionView.ts",
+      "sha256": "538d8c09a7965ea18966c200c6ba60dfb9a97611f5c5c4cc761314cc9abb30ba"
+    },
+    {
+      "path": "types/qaqh/RingingV2ResyncRequired.ts",
+      "sha256": "717764e77291e2807dc6ad38bb87f12de44798ace3c94e12cc9b27ca7ac46df3"
+    },
+    {
+      "path": "types/qaqh/RingingV2SyncResult.ts",
+      "sha256": "06f1e7c694b38857bdcb804f4a7d26af8614c57fece051c1b187dcfb3be7c686"
+    },
+    {
+      "path": "types/qaqh/SandboxDto.ts",
+      "sha256": "0ee5476f358e986f97094d42dc6327321554f1213cfce56cddec469a2aea0875"
+    },
+    {
+      "path": "types/qaqh/SandboxPatch.ts",
+      "sha256": "4bafb2d75328d4c5fc160bf3f16322888d5e54aa4d1f2bb2638ea82826766af8"
+    },
+    {
+      "path": "types/qaqh/SecretWrite.ts",
+      "sha256": "dd5638225259fb3bea482c6735ff10d7e4d346236ef7254f6c1f7fe5255fc508"
+    },
+    {
+      "path": "types/qaqh/SessionActivity.ts",
+      "sha256": "9cbde4b04f300e1004f501c15a0234c16ec18dc1680035e437a8be649f878580"
+    },
+    {
+      "path": "types/qaqh/SessionActivityParams.ts",
+      "sha256": "e9ca12e445f9f4b41899d0036b77df3b2f9d5dfde5e702f373346e8da0a7b19a"
+    },
+    {
+      "path": "types/qaqh/SessionActivityState.ts",
+      "sha256": "b3da045eb5d66bde901616d64ffb6c1c09c3651aef345172ac866cfc85118369"
+    },
+    {
+      "path": "types/qaqh/SessionBootstrap.ts",
+      "sha256": "47b5d4bab87891ea2d61bd0b15c0d5dd323cee0bff20d86397bf2de60bdd975d"
+    },
+    {
+      "path": "types/qaqh/SessionContentRef.ts",
+      "sha256": "fae5f2f4b436661ceb6b623ca291b3102890b905b02c736dcdd7f4ebc5421de5"
+    },
+    {
+      "path": "types/qaqh/SessionCreateResult.ts",
+      "sha256": "52ae8ca38e3f6cd56093b8263198d989c5ba904a7f2531573389cbb0e563b18d"
+    },
+    {
+      "path": "types/qaqh/SessionDashboard.ts",
+      "sha256": "88e775a10417902f7f27a2ad23b8d732e80ec907e130e61943bda8f77c7eb51c"
+    },
+    {
+      "path": "types/qaqh/SessionDashboardParams.ts",
+      "sha256": "a6e9f2cdf7a3364a688c15bf1d9c5942cc3c6ebe759ce6a31fffe4da523fd79b"
+    },
+    {
+      "path": "types/qaqh/SessionDashboardTask.ts",
+      "sha256": "707255ff1970f1e38163c2ff0a89bf627c9b529135759931a2b24d899c0ac8c4"
+    },
+    {
+      "path": "types/qaqh/SessionEvent.ts",
+      "sha256": "98208607dd6685108f0638c973a97aa272b2464b33385aded5faaaed3ee55a2d"
+    },
+    {
+      "path": "types/qaqh/SessionEventFrame.ts",
+      "sha256": "ef3f10cb9bb2bb65516684b4d92ced25b614aa32c7a1879c3852ac951e8b011f"
+    },
+    {
+      "path": "types/qaqh/SessionGetActivityParams.ts",
+      "sha256": "89a611df80e5758560c8591c2aee9fced28c754561484d9298bbd6c0890404c6"
+    },
+    {
+      "path": "types/qaqh/SessionId.ts",
+      "sha256": "38d1247d1a049a81c79d5eaa655d0ff8a7df339375dfe5d0ef04d7b8e33fe0f2"
+    },
+    {
+      "path": "types/qaqh/SessionInterAgentDelivery.ts",
+      "sha256": "8e7628e12928f7517d90100956bd7eff5c8395fc9c1b75f7ba52dc3490949215"
+    },
+    {
+      "path": "types/qaqh/SessionInteractionKind.ts",
+      "sha256": "706a2f0a55eb751d47c479db1af5854a4e200dfaf70324c4147c751f6caaef39"
+    },
+    {
+      "path": "types/qaqh/SessionListEntry.ts",
+      "sha256": "b337c482bec50f0fd26a870deaeeb904a6654da9616e421bb784db222b60713e"
+    },
+    {
+      "path": "types/qaqh/SessionListParams.ts",
+      "sha256": "4147881efb43a41a2953383cdb87151bfbb0455fcc320df30338004d1d056855"
+    },
+    {
+      "path": "types/qaqh/SessionMemory.ts",
+      "sha256": "0a6a9d971da4f0209eb764b19b6a6dfb387ae0919285aaa9fe1f94f5fa949da7"
+    },
+    {
+      "path": "types/qaqh/SessionMeta.ts",
+      "sha256": "79b5e5b737c9181e251f3ee7b12ee539b152cca7b91db13394bd7ea6027f2435"
+    },
+    {
+      "path": "types/qaqh/SessionMetaParams.ts",
+      "sha256": "fb8351b83fe217f95c83333c1e9b17b78953fa93d7d94a825b8f5ef279365c81"
+    },
+    {
+      "path": "types/qaqh/SessionRunStatus.ts",
+      "sha256": "cadf43ffc7ab9ed564138fcb6ab70e13191b9901ba656423dbc6b5ce6d9b3c28"
+    },
+    {
+      "path": "types/qaqh/SessionSettingsPatch.ts",
+      "sha256": "f8e9a56e46ae3a89d79766b645ad5ff7d8e84a3b624296637ec62743bdb8c284"
+    },
+    {
+      "path": "types/qaqh/SessionState.ts",
+      "sha256": "a92f9fb76270e354dc14b674f0df7784f389f1ea5464ef0bb477b378d995a3de"
+    },
+    {
+      "path": "types/qaqh/SessionToolActivity.ts",
+      "sha256": "494d1fbb44c9500a25a8fd9310b1a96e057b8fe3c6d7bbcb4dcd70a2a943c26f"
+    },
+    {
+      "path": "types/qaqh/SessionToolError.ts",
+      "sha256": "7978f91378009b15ece850a1d489dee28aaa64af14ce7fd1b83c606284359df7"
+    },
+    {
+      "path": "types/qaqh/SessionTurnParams.ts",
+      "sha256": "eb97b6d6aa3bddb403f66b2c40117b7f52f8b7e6b781abb4bbbc9d5958439e24"
+    },
+    {
+      "path": "types/qaqh/SessionTurnSnapshot.ts",
+      "sha256": "660006f748029799972acb1fa6c596f648a8ed657af11ffd0ab8a0cdc688440a"
+    },
+    {
+      "path": "types/qaqh/SettingValue.ts",
+      "sha256": "e5ed593ea81b4af323d970515c2ee982dae9a72a5dfa090303c04c3687f303dd"
+    },
+    {
+      "path": "types/qaqh/SiwcCode.ts",
+      "sha256": "52202b223b506617ffd9c0261dbe263c6556fe2ebb0af5ada885369b60be77a2"
+    },
+    {
+      "path": "types/qaqh/SiwcConnectionStatus.ts",
+      "sha256": "7f482e5797f2a16ebbd6b91cfc2c997a50040047213c925140087a6c1a9f7877"
+    },
+    {
+      "path": "types/qaqh/SiwcFlowParams.ts",
+      "sha256": "2e2dd2d0ddaa650a35427f9fc16cb9d541c3c23beb157fa6279e5ea2fefe7afc"
+    },
+    {
+      "path": "types/qaqh/SiwcModel.ts",
+      "sha256": "570a294e5f063675a19c9eb2d8ca62368b3f4df8032735e118d87f96aafb9df5"
+    },
+    {
+      "path": "types/qaqh/SiwcPendingProfile.ts",
+      "sha256": "b6e05dc6095c8545e343fb601e9ab8a5d6cc72f1fcb5a72ff5a5995662000c57"
+    },
+    {
+      "path": "types/qaqh/SiwcProfileParams.ts",
+      "sha256": "32dae471c7069e9b833829bc8992ea0091d4a754526e0abb1a6d3b5045840788"
+    },
+    {
+      "path": "types/qaqh/SiwcProfileSelectParams.ts",
+      "sha256": "d256c08742e82a6f827107256e27564d2314cdd43582da9cf78aada28a48700e"
+    },
+    {
+      "path": "types/qaqh/SiwcProfilesResult.ts",
+      "sha256": "431067d465907c8fadc3de6a650a53cd83cfca2402e544d4f3bfd821573b6e80"
+    },
+    {
+      "path": "types/qaqh/SiwcPublicError.ts",
+      "sha256": "fe0f06e6e1987774ebfa65e9f87cd037775a95e263f0d5a78de550f7b735fa44"
+    },
+    {
+      "path": "types/qaqh/SiwcPublicProfile.ts",
+      "sha256": "0f8cd8065c14266655141953099031eff855e992530cbd468800f4c81acc6ab5"
+    },
+    {
+      "path": "types/qaqh/SiwcSignInStartParams.ts",
+      "sha256": "6f1dadf3e62ce930e13bf68c7f08605908ec17252ba10943c2ee278d274de237"
+    },
+    {
+      "path": "types/qaqh/SiwcSignInStartResult.ts",
+      "sha256": "fc143a9f242167b73c8a795dc13bac763388a7e5f8aeb5c7bfdf44a2c1caf0b6"
+    },
+    {
+      "path": "types/qaqh/SiwcSignInStatusResult.ts",
+      "sha256": "177e779ae4ed0e286ebf9489c7e03ce358d523de33a6ead2bf9ccc33f6fb4b7e"
+    },
+    {
+      "path": "types/qaqh/SiwcSignOutResult.ts",
+      "sha256": "2c0e9d4bbe92ec0ca76a29f0b0cbf43af97a61d5cc0f31efc820840ed3747ce5"
+    },
+    {
+      "path": "types/qaqh/SiwcStatusResult.ts",
+      "sha256": "aa2d1bc5539d413c31ce0c3490cf2a486e84fa42950e759cfefc49b77fe17681"
+    },
+    {
+      "path": "types/qaqh/SkillCatalogDiagnostic.ts",
+      "sha256": "a22490eb24213de30f092051c9b19f14fc94435220e71e9a8ae21881d3d88c27"
+    },
+    {
+      "path": "types/qaqh/SkillCatalogEntry.ts",
+      "sha256": "21d15b4384c9a28b45f2c459cb4119eb95462411bd2b1ef278e1fb8229883ab7"
+    },
+    {
+      "path": "types/qaqh/SkillsCatalogParams.ts",
+      "sha256": "1e590560dae455b950ac81ef777efdf9471081153fee43eeb82bfa99f5747bdf"
+    },
+    {
+      "path": "types/qaqh/SkillsCatalogResult.ts",
+      "sha256": "73f61a7090401e78fb4b2be2a43ae55a16f4cf0becb2e84f09c2caf7d1116ac4"
+    },
+    {
+      "path": "types/qaqh/SkillsListToolsParams.ts",
+      "sha256": "0c796fc7b6a958ec4a36dae192f43e51f3d7b03baeeab8f7d6e160b59d9b4bd5"
+    },
+    {
+      "path": "types/qaqh/SubagentTerminalKind.ts",
+      "sha256": "4d59fa6d18c721164e1cae372fe42b388e5bbfad4618414892ab542e83e13e49"
+    },
+    {
+      "path": "types/qaqh/SubagentTerminalNotification.ts",
+      "sha256": "1cb3a13e1f11fafe0c53e73c5fce773761ca6e4306520663ca12eb60c6ac6dd3"
+    },
+    {
+      "path": "types/qaqh/SubagentTerminalStatus.ts",
+      "sha256": "95653e6f6b14dc9eda9af151c437b24325cf40094f5dc4e4f3f71d80a68d45ff"
+    },
+    {
+      "path": "types/qaqh/SubagentView.ts",
+      "sha256": "9475c01e4e7dd01a688669d3fb754bd359147b173211658998877d7ecf07b5f0"
+    },
+    {
+      "path": "types/qaqh/TaskArtifact.ts",
+      "sha256": "f50d7605efa59df756175ae39bffec353032c54268b17fd4a0823e2174fa3d82"
+    },
+    {
+      "path": "types/qaqh/TaskBoardSnapshot.ts",
+      "sha256": "130495972488384da337f2fce96ef757eddc4a380bd3b3b7e7238e5736c889ae"
+    },
+    {
+      "path": "types/qaqh/TaskId.ts",
+      "sha256": "be3ab043ae56e1049832444555f20cba4a271aed3e9353d70ebfe1e77cf5284a"
+    },
+    {
+      "path": "types/qaqh/TaskState.ts",
+      "sha256": "a1dde1e5443e3dfb8a69bd123d659d2f9122deed61ab1c07e0ba10416875a7b3"
+    },
+    {
+      "path": "types/qaqh/TaskView.ts",
+      "sha256": "2db9adf71a697e75a511edb87388ba997fcc0589305d1ff55d2f00d84c84e24b"
+    },
+    {
+      "path": "types/qaqh/TeamActor.ts",
+      "sha256": "5fffae2e1c50e6c9e616ff35e98e8ad895b4441d3fdbf30cb42eeacbea6d5668"
+    },
+    {
+      "path": "types/qaqh/TeamAgentResidency.ts",
+      "sha256": "84033d00d8040127f1fe8447a8566dcef77055112871226ca095fab4e498ba45"
+    },
+    {
+      "path": "types/qaqh/TeamAgentSnapshot.ts",
+      "sha256": "009f40134135fde666b01ba3e6e4cb35e44bb7e41611a4af31200b90b0797d4c"
+    },
+    {
+      "path": "types/qaqh/TeamAgentStatus.ts",
+      "sha256": "c643d470e9808896ecbbb2fea121c974cdaa06551166310f53c75afc9cdeef01"
+    },
+    {
+      "path": "types/qaqh/TeamBoardChannel.ts",
+      "sha256": "31d0aa6e9264b70f5845a264bb0bc4f35bec8819061a4a2eed04a1192805e4f9"
+    },
+    {
+      "path": "types/qaqh/TeamBoardPost.ts",
+      "sha256": "1fc0c828a386c8dd303e6ddecb7abc19872603ec261aef0374bfad8788b1c67a"
+    },
+    {
+      "path": "types/qaqh/TeamBoardSnapshot.ts",
+      "sha256": "5fba5c92636f2b4c2ef723127e4a774d50387b9e15abdfc93556fcf00308363a"
+    },
+    {
+      "path": "types/qaqh/TeamBoardSubscription.ts",
+      "sha256": "0a23e0d75e57803185518963ad821d4a606660971895696c1f3b4f61479d82dc"
+    },
+    {
+      "path": "types/qaqh/TeamBoardSubscriptionTarget.ts",
+      "sha256": "1908bbb4a908cc3cf63a051db83fe812aa1c37a489e27630c451810ed03d6fa3"
+    },
+    {
+      "path": "types/qaqh/TeamBoardThread.ts",
+      "sha256": "c0ca129bdb16f6d7643a7567d640bd14e937895bfe446791b81772376c286c50"
+    },
+    {
+      "path": "types/qaqh/TeamId.ts",
+      "sha256": "f8478471c693e523739b8f2cbc6d7c6b11168defd9b36e943a9f263e546a2704"
+    },
+    {
+      "path": "types/qaqh/TeamInboxSummary.ts",
+      "sha256": "940008dc2a387410a47093e72388d3d42bf1e536aeff35fe15767239e11bcf8c"
+    },
+    {
+      "path": "types/qaqh/TeamResponse.ts",
+      "sha256": "4afb37ec99d70145347c22a56d3e191b4b19b6c3436cc9f00afd744b75634bfd"
+    },
+    {
+      "path": "types/qaqh/TeamSnapshot.ts",
+      "sha256": "8a30cd748990238a3979cfc0c0a06d17af51d8697b11b589c70f9be949bc34c4"
+    },
+    {
+      "path": "types/qaqh/ThinkingParamMode.ts",
+      "sha256": "6e420984aa740cbd2429fca3db244e5f75f5f972e2616215d9f50debb6415ad9"
+    },
+    {
+      "path": "types/qaqh/TimelineEntry.ts",
+      "sha256": "f8d3f48239ff9a1b34cfbb6c45774e2ee1afbd8f1f7b445f5f1b9675b9208d22"
+    },
+    {
+      "path": "types/qaqh/TodoCountsSnapshot.ts",
+      "sha256": "2e30fa6fe63be027ee55eb05ec22ef01481c095d465098a510c13ee875a6e900"
+    },
+    {
+      "path": "types/qaqh/TodoItemSnapshot.ts",
+      "sha256": "9607ca1bbecb6a1e4c6f254f31ac0e6c117e477bfcaa1ffcc1d32c06c2c9644b"
+    },
+    {
+      "path": "types/qaqh/TodoListParams.ts",
+      "sha256": "dbd559702594dbc16d30a763afb89d15a7a8b841b90655a2d3a939c17941d87d"
+    },
+    {
+      "path": "types/qaqh/TodoListSnapshot.ts",
+      "sha256": "e58a441d234dbd59d0856ce2394edd498107565cd997486ec46a6f85cd5ca031"
+    },
+    {
+      "path": "types/qaqh/TodoStatusParams.ts",
+      "sha256": "2a7e79451626a0e0d4ca78eb0094baae606d27e577a95d288437f17149365f10"
+    },
+    {
+      "path": "types/qaqh/TodoStatusSnapshot.ts",
+      "sha256": "88572d5058f85fc2a2bcbce9d31f4f7f76db4edd9c2a643f484bc83e4aa03189"
+    },
+    {
+      "path": "types/qaqh/ToolCallId.ts",
+      "sha256": "e1a96263707828bb81edf03420b9f6c7030eac76f01dc0200592549246935bfc"
+    },
+    {
+      "path": "types/qaqh/ToolCallOutcome.ts",
+      "sha256": "9c626ba4daaf5a62037325ae77a2053bc2d4d8d8a589898bcc0ba591a8696760"
+    },
+    {
+      "path": "types/qaqh/ToolCallState.ts",
+      "sha256": "b4a7e65007b185b3060b7589f0d08e6be582fd80325a420e5e302cc71a20997c"
+    },
+    {
+      "path": "types/qaqh/ToolCallView.ts",
+      "sha256": "68e08e40fbdf9f7d8d6dc1c813d536b2841ae4d85a726652174fd3ae9773caac"
+    },
+    {
+      "path": "types/qaqh/ToolCancellationReason.ts",
+      "sha256": "bc9d4a3f6f6be8b684a022b959fd110fe3bddc4458628fbbdfaf22876148bbb2"
+    },
+    {
+      "path": "types/qaqh/ToolEffectInfo.ts",
+      "sha256": "64fae10ba606ea8ae7d8e6ae9acddf8a846792f07da8fb390160e7fea32d799f"
+    },
+    {
+      "path": "types/qaqh/ToolInterruptionReason.ts",
+      "sha256": "3a3267b4c20dcabfc458038facfc4719df485aaf51c6811948a7731dd451e335"
+    },
+    {
+      "path": "types/qaqh/ToolMetrics.ts",
+      "sha256": "71860362bc65c0d9ae2996b20ba0500b065ff16043868b15dfc591a558128c1f"
+    },
+    {
+      "path": "types/qaqh/ToolStatus.ts",
+      "sha256": "29b9d8a93012e9c8df978853d26af64380551f6138eb7a58d9be4bf5b1e1318f"
+    },
+    {
+      "path": "types/qaqh/ToolsSettingPatch.ts",
+      "sha256": "7e91a7d9a9515c75c2c67e23addab5008cc90907441e74dc41d9390544fae15f"
+    },
+    {
+      "path": "types/qaqh/TurnError.ts",
+      "sha256": "829fc822d67275c79990d4534ff8ccdc7bf2083b345b0eda6a45cf493bdbd63f"
+    },
+    {
+      "path": "types/qaqh/TurnId.ts",
+      "sha256": "ffd0ec843a3dcbca646104aad1a16747970236838ab5d1641035264163995a80"
+    },
+    {
+      "path": "types/qaqh/TurnOutcome.ts",
+      "sha256": "e9b572247fcdd11c4d429cad58ab1732205234b3a745dfe3896e3b0aabbf91fc"
+    },
+    {
+      "path": "types/qaqh/TurnPhase.ts",
+      "sha256": "5d2e3e3c822c71e551fda4ab56ec06704e0adde0a3ee528ee25feefc094b2529"
+    },
+    {
+      "path": "types/qaqh/TurnTerminal.ts",
+      "sha256": "d59f176a5235fef1fe5b217f4017b3502b54435d83844b08a9ac43f41eb446ca"
+    },
+    {
+      "path": "types/qaqh/TurnView.ts",
+      "sha256": "a2d03e9daa5a966990263935065d333e2541d195ad43e21a94608d78062b7cca"
+    },
+    {
+      "path": "types/qaqh/UsageInfo.ts",
+      "sha256": "83cde898c234493f62f93c3208fa065dd2f5dd7454cc67fe58f426a1fd23ab19"
+    },
+    {
+      "path": "types/qaqh/UserSendMode.ts",
+      "sha256": "559009f9cf062faff51e4c59b8957057bfaefb2682290a6b72e473ff173b175f"
+    },
+    {
+      "path": "types/qaqh/WidgetContext.ts",
+      "sha256": "741ce0210119bf8953a6b97df8e122ea1a632b2e28a0f1ff077a7ba9f292a44f"
+    },
+    {
+      "path": "types/qaqh/WidgetRef.ts",
+      "sha256": "8abcb10f949eab1e0d0aa9cbfcdce17fe36a26e99fc7785fe980cbde087cf1c1"
+    },
+    {
+      "path": "types/qaqh/Wire.ts",
+      "sha256": "b27fda07665dcbdfe9dfaa1e86099b26818b7c7dfd20a824c0fef64a07dd9219"
+    },
+    {
+      "path": "types/qaqh/WorkspaceEntry.ts",
+      "sha256": "1ea4b2d389be2d322cb99f3b0b4696e6551439016978517654a16b698c2a1834"
+    },
+    {
+      "path": "types/qaqh/WorkspaceGetParams.ts",
+      "sha256": "57c4428d95cc81a6eca9ac2c7883a68d9a01cf84c85a138254674af8968fe3d6"
+    },
+    {
+      "path": "types/qaqh/WorkspaceListParams.ts",
+      "sha256": "fee8f09b5dbbda903846cb643b975884cdc34d941e2bd52560c2d928c31d268f"
+    },
+    {
+      "path": "types/qaqh/WorkspaceMeta.ts",
+      "sha256": "a5c5f57bb32c1c9fbcb23e017351328bf0bf7a6552e6cfe6fa8cfc008a51a20f"
+    },
+    {
+      "path": "types/serde_json/JsonValue.ts",
+      "sha256": "4071518d61d19509ae9109103d60833567f6f5878a451fd675b47076ea78c325"
+    }
+  ]
+}

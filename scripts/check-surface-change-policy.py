@@ -5,7 +5,7 @@
 
 - `contract-refreeze`：动了**导出物**（`manifest.json`、`types/`、`cs/`、`fixtures/`、
   `coverage.json` …）。即 `contract_hash` 会变 ⇒ 用户可见面变了 ⇒ 只允许进新 LTS 线，
-  **禁止合入 `LTS-v3.0`**，且必须附 ADR（手册 §1"换锁不是冻结"）。
+  **禁止合入已冻结线（`LTS-v3.0` / `LTS-v3.1`）**，且必须附 ADR（手册 §1"换锁不是冻结"）。
 - `guard-tightening`：**只**动 `snapshots/*`（route/facade 基线）而导出物逐字节不变。
   即冻得更紧、不是改约 ⇒ 允许进 LTS，走补丁发版。
 
@@ -32,8 +32,9 @@ SNAPSHOT_MARKER = "snapshots/"
 REFREEZE = "contract-refreeze"
 TIGHTEN = "guard-tightening"
 DOCONLY = "doc-only-refresh"
-# 这些分支已经是"冻结线"，refreeze 必须落到新线（v3.1…）。
-FROZEN_BRANCHES = ("LTS-v3.0",)
+# 这些分支已经是"冻结线"，refreeze 必须落到新线（v3.2…）。
+# 切线时把新线加进来（ADR-0010 §切线实施记录）；旧线保留至 EOL。
+FROZEN_BRANCHES = ("LTS-v3.0", "LTS-v3.1")
 # 只有字节记账作用的文件：它必然随任何产物变化而变化，不参与语义判断。
 BOOKKEEPING = ("manifest.json",)
 CODE_SUFFIXES = (".ts", ".cs")
@@ -181,7 +182,7 @@ def main() -> int:
     if required == REFREEZE and args.target in FROZEN_BRANCHES:
         problems.append(
             f"`{args.target}` 是已冻结线：contract-refreeze 只能进新 LTS 线"
-            "（如 LTS-v3.1），并按手册 §1 重切 tag + bump contract_revision。"
+            "（如 LTS-v3.2），并按手册 §1 重切 tag + bump contract_revision。"
         )
     # DOCONLY 允许进冻结线，但仍必须显式声明：谎报会被上面那份 wire 实变列表当场戳穿，
     # 所以这条不靠自觉，靠证据。

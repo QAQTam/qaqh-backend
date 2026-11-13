@@ -1,0 +1,12 @@
+{
+  "devices": [
+    {
+      "device_id": "device-fixture",
+      "name": "Synthetic device",
+      "platform": "fixture",
+      "scope": "view",
+      "created_at_ms": 1700000000000,
+      "last_seen_ms": 1700000000001
+    }
+  ]
+}

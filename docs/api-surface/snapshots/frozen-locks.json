@@ -5,5 +5,11 @@
     "generator_version": "qaqh-contract-export/0.2.0",
     "git_tree": "e0fc731c38973a114336681d82567c9fa3ab9ed9",
     "manifest_files": 598
+  },
+  "docs/api-surface/v3.1": {
+    "contract_hash": "bb37589a012124df38bcfeb9135c0bb25e6e2202c5b4508b55ac0eabeaa6d3b5",
+    "generator_version": "qaqh-contract-export/0.2.0",
+    "git_tree": "b0ac28ad1597caee128c4dbd4de1b7816251af0f",
+    "manifest_files": 611
   }
 }

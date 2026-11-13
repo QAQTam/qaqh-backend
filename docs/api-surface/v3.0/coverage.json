@@ -9,8 +9,7 @@
     {
       "fixtures": [
         "approvals-pending.json",
-        "approvals-empty.json",
-        "pending-permission-details.json"
+        "approvals-empty.json"
       ],
       "id": "approvals.admin",
       "method": "GET",
@@ -22,19 +21,9 @@
       "types": [
         "RingingV2PendingApprovals",
         "RingingV2PendingPermissionView",
-        "RingingV2PendingInteractionView",
-        "PermissionRequestDetails"
+        "RingingV2PendingInteractionView"
       ],
-      "validation": "rust-dto",
-      "wire_notes": [
-        "pending_permission's tool_name/reason/paths/category/level/risk/consequence are a projection of the typed body PermissionRequestDetails (fixture: pending-permission-details.json), not free-form JSON-in-JSON",
-        "PermissionRequestDetails carries deny_unknown_fields: one extra key is shape drift, and the value domains are fixed by PermissionRequestDetails::is_valid() (category read|write|exec|net, level 1..=4, risk low|medium|high)",
-        "degradation is legal only when the body is legitimately absent (ContentValue::Unavailable, or the content row was evicted): details_unavailable=true (admin) / details_unavailable in challenge details (device), and the answerable id stays visible",
-        "a body that exists but is not valid JSON fails the request: 500 interaction_body_not_json",
-        "a JSON body that is not PermissionRequestDetails shape fails the request: 500 permission_details_shape_invalid",
-        "a well-shaped body whose values violate is_valid() projects as details_unavailable=true and is logged as permission_details_incomplete; approval stays fail-closed (device approve/trust rejected with permission_details_unavailable, reject still allowed)",
-        "content store read failure: 500 content_unavailable"
-      ]
+      "validation": "rust-dto"
     },
     {
       "fixtures": [

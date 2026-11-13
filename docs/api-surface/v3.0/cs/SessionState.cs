@@ -37,8 +37,5 @@ public sealed record SessionState
     [JsonPropertyName("driver")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public DriverState? Driver { get; init; }
-    [JsonPropertyName("goal")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public GoalView? Goal { get; init; }
 }
 

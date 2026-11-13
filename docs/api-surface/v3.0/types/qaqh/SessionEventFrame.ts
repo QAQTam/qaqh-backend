@@ -9,7 +9,6 @@ import type { DriverState } from "./DriverState";
 import type { ExecOutputSource } from "./ExecOutputSource";
 import type { ExecSessionId } from "./ExecSessionId";
 import type { ExecSessionView } from "./ExecSessionView";
-import type { GoalView } from "./GoalView";
 import type { InputId } from "./InputId";
 import type { InteractionDecision } from "./InteractionDecision";
 import type { InteractionEndStatus } from "./InteractionEndStatus";
@@ -33,7 +32,7 @@ import type { TurnPhase } from "./TurnPhase";
  * `seq < state.seq` 的帧;客户端跳过 `seq < state.seq`,处理 `seq >= state.seq`
  * (相等边界必须处理)。与 `SessionState::seq` 的文档同源,不得单方改动。
  */
-export type SessionEventFrame = { seq: number, } & ({ "type": "activity_changed", activity: ActivityState, current_turn_id: TurnId | null, } | { "type": "turn_started", turn_id: TurnId, input_id: InputId | null, } | { "type": "turn_phase_changed", turn_id: TurnId, phase: TurnPhase, } | { "type": "turn_ended", turn_id: TurnId, outcome: TurnOutcome, } | { "type": "tool_arguments_delta", call_id: ToolCallId, turn_id: TurnId, tool_name: string, text: string, lines_added?: number | null, lines_removed?: number | null, target_files?: Array<string>, args_complete?: boolean, } | { "type": "tool_declared", call_id: ToolCallId, turn_id: TurnId, tool_name: string, args?: JsonValue | null, } | { "type": "tool_state_changed", call_id: ToolCallId, turn_id: TurnId, state: ToolCallState, } | { "type": "tool_output_delta", call_id: ToolCallId, stream: OutputStream, text: string, } | { "type": "tool_finished", call_id: ToolCallId, outcome: ToolCallOutcome, exec_session_id?: ExecSessionId | null, output: ContentValue | null, output_truncated: boolean, metrics: ToolMetrics | null, 
+export type SessionEventFrame = { seq: number, } & ({ "type": "activity_changed", activity: ActivityState, current_turn_id: TurnId | null, } | { "type": "turn_started", turn_id: TurnId, input_id: InputId | null, } | { "type": "turn_phase_changed", turn_id: TurnId, phase: TurnPhase, } | { "type": "turn_ended", turn_id: TurnId, outcome: TurnOutcome, } | { "type": "tool_arguments_delta", call_id: ToolCallId, turn_id: TurnId, tool_name: string, text: string, } | { "type": "tool_declared", call_id: ToolCallId, turn_id: TurnId, tool_name: string, args?: JsonValue | null, } | { "type": "tool_state_changed", call_id: ToolCallId, turn_id: TurnId, state: ToolCallState, } | { "type": "tool_output_delta", call_id: ToolCallId, stream: OutputStream, text: string, } | { "type": "tool_finished", call_id: ToolCallId, outcome: ToolCallOutcome, exec_session_id?: ExecSessionId | null, output: ContentValue | null, output_truncated: boolean, metrics: ToolMetrics | null, 
 /**
  * edit 类工具的结构化结果。
  */
@@ -41,28 +40,4 @@ code_delta?: CodeDelta | null,
 /**
  * 工具产生的结构化效果(owner 消费后随终态发布)。
  */
-effects?: Array<ToolEffectInfo>, } | { "type": "exec_session_started", session: ExecSessionView, } | { "type": "exec_session_state_changed", session: ExecSessionView, } | { "type": "exec_session_output_delta", exec_session_id: ExecSessionId, start_offset: number, end_offset: number, source: ExecOutputSource, text: string, } | { "type": "exec_session_finished", session: ExecSessionView, } | { "type": "timeline_appended", entry: TimelineEntry, } | { "type": "timeline_truncated", from_turn_id: TurnId, removed_turn_ids: Array<TurnId>, } | { "type": "message_delta", turn_id: TurnId, block_id: BlockId, block_kind: AssistantBlockKind, text: string, } | { "type": "interaction_requested", interaction: InteractionView, } | { "type": "interaction_resolved", interaction_id: InteractionId, decision: InteractionDecision | null, status: InteractionEndStatus, } | { "type": "subagent_updated", subagent: SubagentView, } | { "type": "session_meta_changed", title: string | null, } | { "type": "driver_changed", driver: DriverState | null, } | { "type": "goal_updated", goal: GoalView | null, } | { "type": "handoff_sealed", 
-/**
- * 封箱会话（链上本线，已被 handoff 终结）。
- */
-sealed_session_id: string, 
-/**
- * 链根 = handoff 工作链锚点（goal 挂靠点）。
- */
-chain_root: string, 
-/**
- * 内核 fork 出的后继会话 id。
- */
-successor_session_id: string, 
-/**
- * 产生交接的回合（封箱线上的那个回合）。
- */
-turn_id: TurnId, 
-/**
- * 模型的一句话工作简述（与后继会话标题同源）。
- */
-work_summary: string, 
-/**
- * fork 完成时刻（unix ms）。
- */
-at_ms: number, });
+effects?: Array<ToolEffectInfo>, } | { "type": "exec_session_started", session: ExecSessionView, } | { "type": "exec_session_state_changed", session: ExecSessionView, } | { "type": "exec_session_output_delta", exec_session_id: ExecSessionId, start_offset: number, end_offset: number, source: ExecOutputSource, text: string, } | { "type": "exec_session_finished", session: ExecSessionView, } | { "type": "timeline_appended", entry: TimelineEntry, } | { "type": "message_delta", turn_id: TurnId, block_id: BlockId, block_kind: AssistantBlockKind, text: string, } | { "type": "interaction_requested", interaction: InteractionView, } | { "type": "interaction_resolved", interaction_id: InteractionId, decision: InteractionDecision | null, status: InteractionEndStatus, } | { "type": "subagent_updated", subagent: SubagentView, } | { "type": "session_meta_changed", title: string | null, } | { "type": "driver_changed", driver: DriverState | null, });

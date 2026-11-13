@@ -23,10 +23,10 @@ public sealed record ConfigDto
     public string? Theme { get; init; }
     [JsonPropertyName("notificationsEnabled")]
     public bool NotificationsEnabled { get; init; }
+    [JsonPropertyName("complianceEnabled")]
+    public bool ComplianceEnabled { get; init; }
     [JsonPropertyName("subagent")]
     public SubagentDto Subagent { get; init; }
-    [JsonPropertyName("goals")]
-    public GoalsDto Goals { get; init; }
     [JsonPropertyName("mcp")]
     public McpDto Mcp { get; init; }
     [JsonPropertyName("lsp")]
