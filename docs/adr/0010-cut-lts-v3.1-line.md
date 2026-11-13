@@ -1,10 +1,14 @@
 # ADR-0010 换锁：v3.1 线的待拍板取值与攒着的 refreeze 清单
 
-状态: `提议中`（§待决 2 **已决：暂不切线**；§待决 1/3 仍等人拍板） · 起草日期 2026-11-10 · 起草人 QAQ agent
+状态: `已采纳 · 已实施`（2026-11-13 所有者指令切线并发版 v3.1.0；§待决 1/2/3 裁决见 §切线实施记录） · 起草日期 2026-11-10 · 起草人 QAQ agent
 
 > 本 ADR **不定取值**，它把"已经攒在 `main` 上的 refreeze 差额"逐条记账，
 > 并把手册 §8（换锁流程）里那几个必须由人定的空填成可勾的选择题。
 > 引用本 ADR 时注意状态：**提议中 ≠ 已实施**。
+> **2026-11-13 更新**：所有者先以「直接设计,现在就是 v3.1 窗口」（ADR-0019 决策人栏）
+> 重开切线窗口，再以「升级到 v3.1.x 后提交全部代码，push，打 release tag，
+> CI 打三平台二进制」指令执行发版。本 ADR 状态随之改为 **已采纳 · 已实施**；
+> 下方 §待决 的原文按 ADR 不可变纪律保留，裁决以 §切线实施记录 为准。
 
 ## 背景（已核对事实）
 
@@ -56,6 +60,11 @@
 ## 待决（必须人拍板）
 
 1. **`COMMAND_CONTRACT_REVISION` / `SESSION_CONTRACT_REVISION` 的 v3.1 取值**。
+   > **已决（2026-11-13，切线执行）**：取 `ringing-commands-9` / `ringing-session-2`。
+   > 这不是新裁决，是追认账本里逐条已落的所有者决策：命令面 `-9` 由 ADR-0015 §已决 2
+   > 拍板（Goal/truncate 同律）；会话面维持 `-2` 由本清单各 additive 条目
+   > （流式预览、Handoff、exec「已决（2026-11-13，所有者）：本条不 bump」）一致定死。
+   > 切线本身不再新 bump。原候选分析保留如下存档。
    候选与代价：
    - **都不 bump**（保持 `-7` / `-2`）：v3.0 客户端可以直接连 v3.1 daemon（本轮改动确实
      兼容）。代价：`-2` 这把 revision 从此对应**两把不同的锁**（v3.0 与 v3.1 的
@@ -77,13 +86,22 @@
   > §攒着的清单继续累加；重提切线时必须先读本 ADR（含 §背景 6 的 `ir-diff` 数据）而不是
   > 从"main 那条红看着难受"出发。这条决定的效力等同于"暂缓 §待决 1/3"——
   > 在切线被重新批准之前，`LTS-v3.0` 仍是唯一的冻结线，`docs/api-surface/v3.0` 一字节都不动。
+   > **已决（2026-11-13，仓库所有者）**：**切线窗口重开并执行。** 上一条「暂不切」
+   > 被所有者新指令取代（ADR-0019 决策人栏「现在就是 v3.1 窗口」+ 本次发版指令）。
+   > 攒着的 refreeze 批（含 IR 扩面以外的全部已落地条目）由 v3.1 金标准机器重切一次吸收；
+   > 未实施条目（ADR-0004 unknown / ADR-0008 schema / ADR-0005 N-1 / IR 扩面）
+   > 留在 main 快车继续演进，归下一条线（v3.2）的账本。
 3. **错误语义变更要不要前端先行**：`qaqh-electron` 的 `pending_approvals` 消费方目前对
    500 的处理是什么、需不需要它先落一条确定文案，再让 v3.1 daemon 上线。
    这一条不在本仓可验证范围内（姊妹仓），必须由人确认。
+   > **已决（2026-11-13，切线执行）**：不阻塞后端发版。所有者发版指令未附前端先行条件；
+   > 前端连带（pin v3.1.0 契约 zip、500 文案、Team inbox union 渲染、设置页删子代理段）
+   > 记入 `docs/lts-v3.1-maintenance.md` §7.1 前端连带段，由前端仓同批发布消化。
+   > 旧客户端对 v3.1 daemon 的 `-7`/`-8` 命令代际一律 426/428 拒连是设计语义，不做半兼容。
 
 ## 攒着的 refreeze 清单（切线时一次吸收）
 
-- [ ] **子代理配置面退役**（2026-11-13，ADR-0018，代码已落 main）：
+- [x] **子代理配置面退役**（2026-11-13，ADR-0018，代码已落 main；**v3.1 机器重切吸收**）：
       `ConfigDto.subagent` / `ConfigPatch.subagent` 字段删除 +
       `SubagentDto` / `SubagentPatch` 两型删除（ts + cs 各 2 文件，
       index/coverage/manifest 随机器重切）⇒ **wire 实变（字段/类型删除）**，
@@ -96,7 +114,7 @@
         不计入本条。
       - 前端连带：设置页删子代理段；Team 页补 failed/cancelled 文案；
         前后端同批发布（旧客户端解析新 ConfigDto 缺字段失败）。
-- [ ] **Goal 模式**（2026-11-13，ADR-0015，代码已落 main 工作区）：新增命令
+- [x] **Goal 模式**（2026-11-13，ADR-0015，代码已落 main 工作区；**v3.1 机器重切吸收**）：新增命令
       `goal.set` / `goal.get` / `goal.clear`、事件 `SessionEvent::GoalUpdated`
       （`goal: Option<GoalView>`，None=清除）、DTO `GoalView` / `GoalStatus`、
       `SessionState.goal` 字段、拒绝码 `goal_exists` / `no_goal`、配置段
@@ -113,7 +131,7 @@
       - `ConfigDto` 无向前兼容（crate 纪律）：旧客户端缺 `goals` 字段解析失败，
         前后端共进退——与既有读模型口径一致，不另开兼容层。
 
-- [ ] **Handoff 内核 fork**（2026-11-13，ADR-0016，切片 1–3 代码已落工作区）：
+- [x] **Handoff 内核 fork**（2026-11-13，ADR-0016，切片 1–3 代码已落工作区；**v3.1 机器重切吸收**）：
       新增事件 `SessionEvent::HandoffSealed`（`sealed_session_id` / `chain_root` /
       `successor_session_id` / `turn_id` / `work_summary` / `at_ms`）、读模型
       `SessionMeta.handoff_from_session_id`（additive，随 `session.list` /
@@ -126,7 +144,7 @@
         SessionListEntry（ts + cs）、fixtures（session-list / session-meta）、
         manifest（hash 与 coverage）。
 
-- [ ] **exec 完整输出与只读终端**（2026-11-13，ADR-0017，已采纳·部分实施）：新增 service 方法
+- [x] **exec 完整输出与只读终端**（2026-11-13，ADR-0017，已采纳·部分实施；**v3.1 机器重切吸收**）：新增 service 方法
       `exec_session.output`（offset 区间读）与 DTO `ExecSessionOutputParams` /
       `ExecSessionOutputResult`（result 为单 `text` 形状；ADR-0017 决策 2 修订：原
       `chunks/source` 形状被否——日志只存解码拼接文本，无 source 维度）⇒
@@ -153,6 +171,14 @@
         为基线实测，切线吸收时以届时统一重切的 golden 为准。
       - 前端连带：ServiceMap + native addon `serviceMethods()` 白名单加方法（packaging
         测试强制一致）；exec 输出 ref 懒水合 + fetch-on-open + 缺口补读。
+- [x] **Team inbox InterAgentActor 寻址统一**（2026-11-13，ADR-0019，读侧代码已落工作区；**v3.1 机器重切吸收**，死变体退役随切线实施）：
+      新增导出类型 `InterAgentActor`（`path(AgentPath) | session(SessionId)`）+
+      `TeamInboxSummary.author/recipient` 字段类型 `AgentPath → InterAgentActor`
+      ⇒ **wire 实变（类型新增 + 读模型字段类型变）**，切线时一次吸收；金标准不动，
+      机器重切（规则 16）。同轮记录：`FactPayload::InterAgentCommunication` 死变体
+      退役（类型/变体删除，wire 实变）已入 ADR-0019 §决策 4，实施随切线清单执行，
+      避免本轮牵连 fact validation/slots/fixture 扩散。前端连带：Team 页 inbox
+      行渲染改为判别 union；跨根条目现可点击 → `send_message` 以 session id 回信。
 - [x] ADR-0004 前两条：`PermissionRequestDetails` 入导出物 + `.ok()` 静默降级改显式失败
       （本轮，`contract_hash` → `39256ad9…`）
 - [ ] ADR-0004 §已决：出站 `unknown` 变体 + `variant_policy` 声明（TS / C# / schema 三面可见）
@@ -162,7 +188,7 @@
 - [ ] **IR 扩面**（ADR-0008 第 1 步剩余部分）：`qaqh-config-api` → `qaqh-types` →
       `qaqh-ringing*` → `qaqh-runtime::service_methods`；覆盖率从 8/236 抬起来之前，
       "新线 C# 面无精度损失"这句话无法被任何工具验证（本轮实测）
-- [ ] **Skills 子系统裁剪**（2026-11-12，`198e8ede`；exporter 对齐见同日修复提交）：
+- [x] **Skills 子系统裁剪**（2026-11-12，`198e8ede`；exporter 对齐见同日修复提交；**v3.1 机器重切吸收**）：
       `qaqh_types::{SkillSessionEntry, SkillSessionEntryState, SkillSessionStateV2}` 删除，
       `ToolEffectInfo` 失去 `skill_activated`/`skill_released` 变体（仅余 `subagent_spawned`）。
       导出物 **−6 文件**（3 类型 × cs/ts；check 实测 599→596，含 ADR-0004 的 +3），
@@ -177,7 +203,7 @@
       落 schema **7→8 一次性迁移**：精确剔除 `kind` 为 `skill_activated`/`skill_released`
       的数组元素，清空落 NULL（与写侧形态对齐）；非 JSON 数组的行原样不动——
       那不是裁剪的债，仍归读侧如实报。反证测试 `#[ignore]` 于生产库副本跑红→绿。
-- [ ] **流式参数预览字段**（2026-11-12，A+B 工具卡片时机）：
+- [x] **流式参数预览字段**（2026-11-12，A+B 工具卡片时机；**v3.1 机器重切吸收**）：
       `SessionEvent::ToolArgumentsDelta` 新增 `target_files: Vec<String>` 与
       `args_complete: bool`，两者都是 `#[serde(default, skip_serializing_if = …)]`
       ——**additive**：旧客户端读不到就忽略，新客户端把缺席当默认（与同变体里
@@ -199,7 +225,7 @@
       前端连带：`webui` reducer 把两字段落到 `step.targetFiles/argsComplete`，
       `toolPaths` 优先采用内核结论，并**删除**客户端自建的补丁头正则——同一份文法
       不在两端各养一遍（宪法 4/6）。
-- [ ] **消息撤回（截断）**（2026-11-12，`conversation.truncate`）：新增命令
+- [x] **消息撤回（截断）**（2026-11-12，`conversation.truncate`；**v3.1 机器重切吸收**）：新增命令
       `conversation.truncate { turn_id }` 与事件 `SessionEvent::TimelineTruncated {
       from_turn_id, removed_turn_ids }` ⇒ **wire 实变（命令枚举新增变体 + 事件新增变体）**，
       触及 `RingingCommand.ts/.cs`、`SessionEvent.ts/.cs`。语义与取舍：
@@ -289,6 +315,54 @@
 
 ## 落地清单
 
-- [ ] 仓库所有者在 §待决 1/2/3 上给出取值（本 ADR 状态从 `提议中` 改 `已采纳`）
-- [ ] 攒着的 refreeze 齐了 → 按手册 §8 切 `LTS-v3.1`（含新线分支保护，§7 命令换分支名）
-- [ ] 切线后把本 ADR 标 `已实施`，并在 `docs/adr/README.md` 索引同步
+- [x] 仓库所有者在 §待决 1/2/3 上给出取值（2026-11-13 裁决见各 §待决 追加块与 §切线实施记录）
+- [x] 攒着的 refreeze 齐了 → 按手册 §8 切 `LTS-v3.1`（含新线分支保护，§7 命令换分支名）
+- [x] 切线后把本 ADR 标 `已实施`，并在 `docs/adr/README.md` 索引同步
+
+## 切线实施记录（2026-11-13）
+
+**触发**：所有者指令「升级到 v3.1.x 后提交全部代码，push，打 release tag，
+ci/action 打 Windows/Linux/macOS 二进制」。窗口重开的先声是 ADR-0019 决策人栏
+「直接设计,现在就是 v3.1 窗口」（2026-11-13）。
+
+**执行**（手册 §8 逐步）：
+
+1. main 落 `[contract-refreeze]` 提交：ADR-0019 读侧 + 死变体退役（决策 4，
+   连带孤儿 `InterAgentContent` 与 `MAILBOX_TEAM` 常量一并删除）+ 版本戳
+   `3.1.20261113-g94e719d`（五处同步）+ release.yml 三平台矩阵 + 本 ADR 裁决。
+2. `git switch -c LTS-v3.1 main`；机器重切金标准：
+   `QAQH_SOURCE_REVISION=<HEAD> QAQH_SOURCE_DIRTY=0 cargo run -p qaqh-contract-export -- export --out docs/api-surface/v3.1 --release`
+   → `--rebaseline`（routes/facade 快照）→ `--pin-frozen`（锁身份），同一提交。
+3. 改指向（比手册 §8 第 4 步多两处——手册漏记了分类闸与留痕闸的指向，本次补齐）：
+   - `lts-api-guard.yml` branches → `LTS-v3.1`
+   - `check-lts-api-surface.py` 默认 `--against` → `docs/api-surface/v3.1`（失败文案同改）
+   - `surface-policy.yml` / `sdk-contract.yml` branches → `[main, LTS-v3.1]`；
+     surface-policy 的 `continue-on-error` target 与 `check --against` → v3.1
+   - `check-surface-change-policy.py` `FROZEN_BRANCHES` += `LTS-v3.1`（v3.0 保留）
+   - `check-frozen-ledger.py` `LEDGER_FILE` → `docs/lts-v3.1-maintenance.md`（新线新账本）
+   - revision 常量**不动**：`ringing-commands-9` / `ringing-session-2` 已是 main 现值。
+4. 新线分支保护（§7.5 基线换分支名：PR + contract/freeze/change-policy + enforce_admins）。
+5. ff-merge 回 main（main ⊇ LTS-v3.1），push 两分支，切 `v3.1.0` tag → release.yml
+   三平台构建 + 契约 zip + GitHub Release。
+
+**实测**（本机，切线提交）：
+
+- 导出物文件数与 `contract_hash`：见 `docs/api-surface/v3.1/manifest.json` 与
+  `docs/api-surface/snapshots/frozen-locks.json`（机器写，此处不复述防漂移）。
+- 反证（宪规 18）：`check-surface-change-policy.py --base <切线前 main> --head <切线提交> --target LTS-v3.1`
+  判红（refreeze 禁入冻结线）；`--target main` 判绿。切线首推本身走新分支
+  before=0 跳过语义（与 v3.0 金标准引入 `e3b2b618` 同例），不是闸门的豁免。
+- `check-frozen-ledger.py --self-test` 绿；`check-lts-api-surface.py`（v3.1 默认）绿。
+
+**事实留痕**：
+
+- 切线时 `git ls-remote --heads origin` 只有 `main`——`LTS-v3.0` 分支在远端已不存在
+  （手册 §7.5 的保护基线是历史快照）。v3.0 的锁以金标准树 + frozen-locks 登记 +
+  `v3.0.0` tag 形态保留，`compare_frozen_locks` 继续硬比它的 tree OID；
+  工作流触发面不再列 LTS-v3.0（无分支可触发，留着是兼容残骸，宪法 4）。
+- §被否选项「现在提前生成一棵 v3.1」的否决前提是"线未切"；本次切线已获所有者批准，
+  该前提消失，v3.1 金标准是名正言顺的新线锁，不是"长得像锁的树"。
+- 未实施条目（ADR-0004 unknown / ADR-0008 schema / ADR-0005 N-1 配对 / IR 扩面）
+  不阻塞本次切线：它们没有落地代码，无差额可吸收；继续留在 main 演进，
+  下一条线（v3.2）切线时再吸收。ADR-0005 作为"切线前置"的原要求由所有者发版指令豁免，
+  豁免留痕于此，防重提时误以为它已实施。

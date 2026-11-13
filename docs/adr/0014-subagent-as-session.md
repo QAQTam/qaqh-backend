@@ -193,3 +193,14 @@
       ADR-0015 落地，与本 ADR 落地清单的「Team 根开关」同构。
 - [ ] writeScopes 提示字段 + 重叠警告（TeamTaskSnapshot 冻结 DTO → 搭 v3.1）
 - [ ] Team 根开关（任务工具按根会话条件注册，dsh 默认关；本轮先全量注册）
+
+## 落地后增补
+
+- 2026-11-13：**Team inbox 投递监视接通事实源**。`GET …/team` 的
+  `TeamSnapshot.unread_messages` 此前硬编码空数组（假兼容，宪法第 9 条）；现由
+  `qaqh-session::db::view::inter_agent_deliveries` 从 canonical blocks
+  （`TimelineEntry::Input.inter_agent`，与 SSE 同源）投影。同日报道的
+  "跨根条目冻结形状表达不了 → 只收同根"限制已被 **ADR-0019**
+  （`InterAgentActor` 寻址统一，v3.1 实变）取代：跨根投递现在原样入 inbox。
+  闸门：`team_inbox_projection_extracts_inter_agent_envelopes_only`（存储层）+
+  `team_response_round_trips_the_daemon_wire_shape`（wire 形状锁，含跨根条目）。

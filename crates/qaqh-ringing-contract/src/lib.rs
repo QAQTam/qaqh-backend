@@ -76,11 +76,18 @@ mod tests {
                 "unread_messages": [
                     {
                         "message_id": "msg-1",
-                        "author": "/root/writer",
-                        "recipient": "/root",
+                        "author": {"kind": "path", "data": "/root/writer"},
+                        "recipient": {"kind": "path", "data": "/root"},
                         "task_id": "task-1",
                         "delivery": "queue",
                         "created_at_ms": 1_759_000_000_000i64
+                    },
+                    {
+                        "message_id": "msg-2",
+                        "author": {"kind": "session", "data": "0199a0f0-0000-7000-8000-000000000009"},
+                        "recipient": {"kind": "path", "data": "/root"},
+                        "delivery": "trigger",
+                        "created_at_ms": 1_759_000_000_001i64
                     }
                 ],
                 "revision": 7,

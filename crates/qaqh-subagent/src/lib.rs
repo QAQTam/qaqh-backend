@@ -201,7 +201,12 @@ impl TypedTool for ListAgentsTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "list_agents",
-            "List logical agents at or below a path prefix in the current root tree. Defaults to /root. Relative prefixes resolve below the caller.",
+            "List logical agents at or below a path prefix in the current root tree: status \
+             (pending_init/running/waiting_user/interrupted/completed/errored), residency \
+             and terminal outcome — check what a teammate is doing before steering it. \
+             Defaults to /root. Relative prefixes resolve below the caller. Parallel sessions \
+             in OTHER root trees are not enumerated here; reach them by session id \
+             (send_message; ids come from the journal tool's file attribution).",
             qaqh_workspace::permission::ToolCategory::Read,
             ToolRisk::ReadOnly,
             Duration::from_secs(30),
@@ -303,7 +308,13 @@ impl TypedTool for SendMessageTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "send_message",
-            "Send a canonical message to another conversation (agent path or session id; cross-session allowed). mode: queue (default, merged at the turn boundary), trigger (start a turn when idle), steer/interject (merge into the running turn).",
+            "Send a canonical message to another conversation. to: AgentPath in the current \
+             root tree, or a session id for cross-root delivery (discover ids via the journal \
+             tool's file attribution or from spawn/subagent results). mode: queue (default, \
+             merged at the turn boundary), trigger (start a turn when idle), steer/interject \
+             (merge into the running turn). The recipient sees your text as a plain user \
+             message without sender metadata — open with who you are (your session id/path) \
+             and what you ask, so it can answer or reply back to you.",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(30),

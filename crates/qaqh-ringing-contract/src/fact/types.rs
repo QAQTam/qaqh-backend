@@ -154,7 +154,6 @@ pub enum FactPayload {
     WorkspaceResourceChanged(WorkspaceResourceChanged),
     SubagentSpawned(SubagentSpawned),
     SubagentFinished(SubagentFinished),
-    InterAgentCommunication(InterAgentCommunication),
     DriverChanged(DriverChanged),
     ContextMessageCommitted(ContextMessageCommitted),
     ContextCheckpointCommitted(ContextCheckpointCommitted),
@@ -620,39 +619,34 @@ impl InterAgentDelivery {
     }
 }
 
+/// inter-agent 署名寻址（ADR-0019）：同根 = 绝对 AgentPath；跨根 = session id
+/// （path 的 namespace 是 root 相对的，跨 root 歧义——ADR-0014 决策 5）。
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-pub enum InterAgentContent {
-    Inline { text: String },
-    ContentRef { content_ref: ContentRef },
+pub enum InterAgentActor {
+    Path(AgentPath),
+    Session(SessionId),
 }
 
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct InterAgentCommunication {
-    pub message_id: MessageId,
-    pub root_session_id: SessionId,
-    pub author: AgentPath,
-    pub recipient: AgentPath,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub other_recipients: Vec<AgentPath>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id: Option<String>,
-    pub content: InterAgentContent,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_to: Option<MessageId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub causation_id: Option<EventId>,
-    pub delivery: InterAgentDelivery,
-    pub created_at_ms: i64,
-}
-
-impl InterAgentCommunication {
-    pub fn is_for(&self, recipient: &AgentPath) -> bool {
-        &self.recipient == recipient || self.other_recipients.contains(recipient)
+impl InterAgentActor {
+    /// ADR-0014 判别公理的类型的化：绝对路径以 `/` 开头，session id 含 `-`
+    /// 且不以 `/` 开头，两集不相交。`None` 只可能来自损坏的署名（信封由
+    /// 内核构造点产生），消费端必须把它当错误继续上报，不得静默跳过。
+    pub fn from_signature(signature: &str) -> Option<Self> {
+        if signature.starts_with('/') {
+            Some(Self::Path(AgentPath::parse_absolute(signature).ok()?))
+        } else if signature.contains('-') {
+            Some(Self::Session(SessionId::new(signature.to_string())))
+        } else {
+            None
+        }
     }
 }
+
+// ADR-0019 决策 4：FactPayload::InterAgentCommunication 死变体退役（切线清单执行）。
+// 它没有任何生产构造方——inter-agent 持久事实落在 blocks Input 信封（ADR-0014 决策 3），
+// 读模型投影走 InterAgentActor。连带孤儿 InterAgentContent 一并删除，不留悬置类型。
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
