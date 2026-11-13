@@ -184,6 +184,11 @@ pub enum TimelineEntry {
     AssistantBlock {
         block_id: BlockId,
         turn_id: TurnId,
+        /// 会话内落库单调序(`blocks.ord`,append 时分配)。客户端据此权威排序,
+        /// 不靠事件到达顺序——重连/重放会扭曲到达序(思考链落到答案之下的根因)。
+        /// additive:旧 payload 缺席即 0,读取/发射时由 `ord` 列权威回填。
+        #[serde(default)]
+        ord: i64,
         block_kind: AssistantBlockKind,
         content: ContentValue,
         model: String,

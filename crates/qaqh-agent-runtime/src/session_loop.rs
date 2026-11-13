@@ -1599,6 +1599,7 @@ impl SessionLoop {
                 .append_block(TimelineEntry::AssistantBlock {
                     block_id: BlockId::new(blocks.reasoning_block_id.clone()),
                     turn_id: turn.clone(),
+                    ord: 0,
                     block_kind: AssistantBlockKind::Reasoning,
                     content: ContentValue::Inline { text: reasoning },
                     model: blocks.model.clone(),
@@ -1613,6 +1614,7 @@ impl SessionLoop {
             .append_block(TimelineEntry::AssistantBlock {
                 block_id: BlockId::new(blocks.answer_block_id.clone()),
                 turn_id: turn.clone(),
+                ord: 0,
                 block_kind: AssistantBlockKind::Answer,
                 content: ContentValue::Inline { text: answer },
                 model: blocks.model.clone(),
@@ -1633,6 +1635,7 @@ impl SessionLoop {
                 .append_block(TimelineEntry::AssistantBlock {
                     block_id: BlockId::new(blocks.reasoning_block_id.clone()),
                     turn_id: turn.clone(),
+                    ord: 0,
                     block_kind: AssistantBlockKind::Reasoning,
                     content: ContentValue::Inline { text: reasoning },
                     model: blocks.model.clone(),
@@ -1648,6 +1651,7 @@ impl SessionLoop {
                 .append_block(TimelineEntry::AssistantBlock {
                     block_id: BlockId::new(blocks.answer_block_id.clone()),
                     turn_id: turn.clone(),
+                    ord: 0,
                     block_kind: AssistantBlockKind::Answer,
                     content: ContentValue::Inline { text: answer },
                     model: blocks.model.clone(),

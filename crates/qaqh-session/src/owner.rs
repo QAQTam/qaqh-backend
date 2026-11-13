@@ -426,8 +426,15 @@ impl SessionOwner {
     fn block_request(&self, entry: TimelineEntry) -> Result<OwnerRequest, DbError> {
         let block = timeline_block(&self.session_id, &entry)?;
         Ok(Box::new(move |pump| {
-            pump.db
+            let ord = pump
+                .db
                 .write_blocking(move |conn| store::append_block(conn, &block))?;
+            // 落库序号回填进 wire entry:live timeline_appended 与 bootstrap 同携 ord,
+            // 客户端按 ord 排序而非到达序(重连丢帧后迟到的 seal 不再插到答案之后)。
+            let mut entry = entry;
+            if let TimelineEntry::AssistantBlock { ord: slot, .. } = &mut entry {
+                *slot = ord;
+            }
             pump.emit(SessionEvent::TimelineAppended { entry });
             Ok(())
         }))
