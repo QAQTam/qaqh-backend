@@ -11,7 +11,6 @@ pub fn maybe_save_session(state: &mut AgentState) {
             &msgs,
             &state.config.model,
             state.config.effort.as_deref(),
-            None,
         );
     }
 }

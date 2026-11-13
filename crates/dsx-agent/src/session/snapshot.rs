@@ -1,6 +1,5 @@
 //! Live snapshot: crash recovery — save/load/delete real-time state.
 
-use crate::memory::SemanticMemory;
 use crate::router;
 use dsx_types::{Message, SessionFile, StreamState};
 
@@ -10,7 +9,6 @@ pub fn save_live_snapshot(
     model: &str,
     effort: Option<&str>,
     stream_state: Option<StreamState>,
-    semantic_memory: Option<SemanticMemory>,
 ) {
     let Some(lp) = super::live_path(seed) else { return };
     let _ = std::fs::create_dir_all(lp.parent().unwrap());
@@ -23,9 +21,6 @@ pub fn save_live_snapshot(
 
     let last_summary = super::extract_last_summary(messages);
 
-    // Serialize SemanticMemory to JSON for cross-crate SessionFile storage
-    let semantic_json = semantic_memory.and_then(|sm| serde_json::to_value(&sm).ok());
-
     let file = SessionFile {
         seed: seed.to_string(),
         created_at,
@@ -35,7 +30,7 @@ pub fn save_live_snapshot(
         messages: messages.to_vec(),
         last_summary,
         stream_state,
-        semantic_memory: semantic_json,
+        semantic_memory: None,
         task_phase: Some(router::read_phase()),
     };
 

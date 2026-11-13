@@ -25,57 +25,7 @@ pub(super) fn explore_def() -> ToolDef {
     }
 }
 
-pub(super) fn exec_explore(args: &str) -> String {
-    let path = parse_arg_or(args, "path", ".");
-    let max_depth = 3usize;
 
-    // Resolve to absolute path so the AI knows exactly where it's scanning
-    let abs = std::path::Path::new(&path);
-    let abs_path = if abs.is_absolute() {
-        abs.to_path_buf()
-    } else {
-        std::env::current_dir().unwrap_or_default().join(abs)
-    };
-    let abs_str = abs_path.to_string_lossy().to_string();
-
-    // Detect project root markers
-    let mut markers = Vec::new();
-    for m in ["Cargo.toml", "package.json", "go.mod", "pyproject.toml", "Makefile", ".git"] {
-        if abs_path.join(m).exists() { markers.push(m); }
-    }
-
-    let mut result = format!("[PROJECT_MAP]\n");
-    result.push_str(&format!("path: {}\n", abs_str));
-    if !markers.is_empty() {
-        result.push_str(&format!("project markers: {}\n", markers.join(", ")));
-    } else if path == "." {
-        result.push_str("[HINT] No project markers found. You may be in the wrong directory.\n");
-        result.push_str("[HINT] The user runs dsx from their terminal. The project root is where dsc was launched.\n");
-    }
-    result.push('\n');
-
-    if let Err(e) = walk_dir(&path, &mut result, 0, max_depth, "") {
-        return format!("[ERROR] Cannot explore {}: {}", path, e);
-    }
-
-    // Module graph: detect language and build cross-reference map
-    if markers.iter().any(|m| *m == "Cargo.toml") {
-        let graph = derive_rust_graph(&abs_str);
-        if !graph.is_empty() {
-            result.push_str(&format!("\n\n## Module Graph\n{}", graph));
-        }
-    } else if markers.iter().any(|m| *m == "go.mod") {
-        let graph = derive_go_graph(&abs_str);
-        if !graph.is_empty() {
-            result.push_str(&format!("\n\n## Module Graph\n{}", graph));
-        }
-    }
-    // Future: package.json (JS/TS), pom.xml (Java), pyproject.toml (Python)
-
-    result.push_str(&format!("\n── depth={}, {} chars ── Use read_file(path, start_line, end_line) for precise reading ──",
-        max_depth, result.len()));
-    result
-}
 
 pub(super) fn walk_dir(dir: &str, output: &mut String, depth: usize, max_depth: usize, _rel_prefix: &str) -> std::io::Result<()> {
     if depth >= max_depth || CANCEL.load(Ordering::Relaxed) { return Ok(()); }
@@ -132,7 +82,13 @@ pub(super) fn walk_dir(dir: &str, output: &mut String, depth: usize, max_depth: 
         let name = d.file_name().to_string_lossy().to_string();
         if name.starts_with('.') || name == "target" || name == "node_modules" { continue; }
         // Skip system virtual filesystems and standard irrelevant dirs
-        if depth == 0 && matches!(name.as_str(), "proc" | "sys" | "dev" | "run" | "tmp" | "lost+found") { continue; }
+        if depth == 0 && matches!(name.as_str(),
+            // Linux
+            "proc" | "sys" | "dev" | "run" | "tmp" | "lost+found" |
+            // Windows
+            "Windows" | "Program Files" | "Program Files (x86)" |
+            "System32" | "System" | "AppData" | "Recovery"
+        ) { continue; }
         if output.len() > 30_000 { return Ok(()); }
         output.push_str(&format!("{}{}/\n", indent, name));
         walk_dir(&d.path().to_string_lossy(), output, depth + 1, max_depth, "")?;
@@ -418,11 +374,3 @@ pub fn register(mgr: &mut crate::ToolManager) {
     });
 }
 
-// ── 参数解析（兼容垫片）──
-
-fn parse_arg_or(args: &str, key: &str, default: &str) -> String {
-    serde_json::from_str::<serde_json::Value>(args)
-        .ok()
-        .and_then(|v| v.get(key).and_then(|v| v.as_str()).map(String::from))
-        .unwrap_or_else(|| default.to_string())
-}

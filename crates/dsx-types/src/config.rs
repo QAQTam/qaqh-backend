@@ -60,6 +60,8 @@ pub struct PersistentConfig {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase_configs: Option<HashMap<String, PhasePerfConfig>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 // ── Profile / Preferences ──

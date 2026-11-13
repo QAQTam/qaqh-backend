@@ -19,9 +19,8 @@ fn main() {
 fn run_config() {
     use std::io::Write;
 
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let dir = std::path::PathBuf::from(&home).join(".dsx");
-    let cfg_path = dir.join("config.json");
+    let dir = dsx_types::platform::data_dir();
+    let cfg_path = dsx_types::platform::config_path();
     let _ = std::fs::create_dir_all(&dir);
 
     // Read existing values

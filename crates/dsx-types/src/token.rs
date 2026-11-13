@@ -74,8 +74,6 @@ pub fn count_tokens(text: &str) -> u32 {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TokenBreakdown {
     pub system: u32,
-    pub semantic: u32,
-    pub long_mem: u32,
     pub episodic: u32,
     pub total: u32,
 }

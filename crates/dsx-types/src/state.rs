@@ -51,7 +51,7 @@ impl DebugLevel {
 ///
 /// Used by the status tool and TUI to communicate phase changes
 /// across process boundaries without direct function calls.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RouterCommand {
     SetPhase {
         phase: TaskPhase,

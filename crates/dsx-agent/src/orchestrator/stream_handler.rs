@@ -37,9 +37,19 @@ pub fn handle_stream_event(
         }
         StreamEvent::ExecDone(id, result) => {
             state.decrement_exec_pending();
-            // Push result to context to prevent orphan tool_use
+            // Push result to context to prevent orphan tool_use.
+            // Use push_tool_result_for to search all turns, since async exec
+            // results may arrive after the context has advanced (though
+            // exec_pending gates prevent new API requests).
             let wrapped = crate::tools::wrap_tool_result("exec", &result);
-            let _ = state.ctx.push_tool_result(&id, &wrapped);
+            match state.ctx.push_tool_result(&id, &wrapped) {
+                Ok(()) => {}
+                Err(_) => {
+                    // If current step doesn't have this tool_call_id (e.g. turn
+                    // advanced due to edge case), search all turns.
+                    let _ = state.ctx.push_tool_result_for(&id, &wrapped);
+                }
+            }
             if state.exec_pending == 0 {
                 state.stream_content.clear();
                 state.stream_reasoning.clear();

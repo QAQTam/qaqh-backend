@@ -1,12 +1,12 @@
 //! dsx-hp — Health Platform daemon.
 //!
-//! A lightweight daemon that tracks process liveness, runs the health
-//! judgment pipeline, and exposes a `HealthProbe` service over TCP.
+//! Security boundary process that holds API keys, proxies LLM requests,
+//! tracks process liveness, and exposes a `HealthProbe` service over TCP.
 //!
 //! ## IPC protocol
 //!
 //! JSON-LP frames over TCP `localhost`. Port written to
-//! `$XDG_RUNTIME_DIR/dsx/hp.port`.
+//! `~/.dsx/hp.port`.
 //!
 //! ## Build
 //!
@@ -34,8 +34,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::ipc_traits::HealthProbe;
-use crate::monitor;
-use crate::pipeline::judge;
+use crate::liveness::LivenessResult;
 use crate::registry::ProcessRegistry;
 use crate::types::{HpError, ProcessKind, Verdict};
 use crate::StreamEvent;
@@ -81,8 +80,21 @@ impl HealthProbe for HealthService {
     }
 
     fn judge(&self) -> Vec<Verdict> {
-        let monitor_state = monitor::MonitorState::new();
-        judge(&self.registry, &monitor_state)
+        let mut verdicts = Vec::new();
+        for (pid, result) in self.registry.check_all() {
+            if let LivenessResult::Dead { reason } = &result {
+                if let Some(reg) = self.registry.query(pid) {
+                    let since = reg.liveness.last_activity.elapsed().as_secs();
+                    verdicts.push(Verdict::Dead {
+                        pid,
+                        name: reg.name.clone(),
+                        reason: reason.clone(),
+                        since_secs: since,
+                    });
+                }
+            }
+        }
+        verdicts
     }
 
     fn query(&self, pid: u32) -> Result<crate::types::ProcessHealth, HpError> {
@@ -96,27 +108,20 @@ impl HealthProbe for HealthService {
 
 // ── Main ──
 
-/// Load API config: ~/.dsx/config.json, with env var override.
+/// Load API config: config.json (priority) then env vars, then defaults.
 fn load_hp_config() -> Config {
     let mut protocol = std::env::var("DSX_PROTOCOL").unwrap_or_default();
     if protocol.is_empty() { protocol = "openai".into(); }
 
     // Config file first (highest priority)
-    let home = std::env::var("HOME").unwrap_or_default();
-    let cfg_dir = std::env::var("DSC_CONFIG_DIR")
-        .or_else(|_| std::env::var("XDG_CONFIG_HOME"))
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".config"));
-    let cfg_path = cfg_dir.join("dsx").join("config.json");
+    let cfg_path = dsx_types::platform::config_path();
 
     if let Ok(data) = std::fs::read_to_string(&cfg_path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&data) {
             let api_key = v.get("api_key").and_then(|k| k.as_str()).unwrap_or("").to_string();
             let base_url = v.get("base_url").and_then(|b| b.as_str()).unwrap_or("https://api.deepseek.com").to_string();
             let proto = v.get("protocol").and_then(|p| p.as_str()).unwrap_or(&protocol).to_string();
-            if !api_key.is_empty() {
-                return Config { base_url, api_key, protocol: proto };
-            }
+            return Config { base_url, api_key, protocol: proto };
         }
     }
 
@@ -125,8 +130,13 @@ fn load_hp_config() -> Config {
     let env_url = std::env::var("ANTHROPIC_BASE_URL").unwrap_or_default();
 
     if !env_key.is_empty() {
+        let default_url = if protocol == "anthropic" {
+            "https://api.anthropic.com"
+        } else {
+            "https://api.deepseek.com"
+        };
         return Config {
-            base_url: if env_url.is_empty() { "https://api.deepseek.com".into() } else { env_url },
+            base_url: if env_url.is_empty() { default_url.into() } else { env_url },
             api_key: env_key,
             protocol,
         };
@@ -138,11 +148,11 @@ fn load_hp_config() -> Config {
 pub fn run() {
     // 0. Load API config
     let hp_cfg = load_hp_config();
-    if hp_cfg.api_key.is_empty() {
+    let _ = HP_CONFIG.set(hp_cfg);
+    let _ = HP_RUNTIME.set(tokio::runtime::Runtime::new().expect("create tokio runtime"));
+    if HP_CONFIG.get().map_or(true, |c| c.api_key.is_empty()) {
         eprintln!("dsx-hp: WARNING — no API key configured, run 'dsx config' to set up");
     } else {
-        let _ = HP_CONFIG.set(hp_cfg);
-        let _ = HP_RUNTIME.set(tokio::runtime::Runtime::new().expect("create tokio runtime"));
         eprintln!("dsx-hp: API proxy configured");
     }
 
@@ -390,11 +400,26 @@ fn handle_api_chat_streaming(line: &str, writer: &mut impl Write) {
         let sys = system;
         let gw = gateway_cfg;
         let effort_o = effort.clone();
+        let proto = config.protocol.clone();
         tokio::spawn(async move {
-            let result = dsx_gateway::chat_stream_openai(
-                &gw, &model_o, sys, msgs, tools, None, max_tokens, effort_o.as_deref(), tx,
-            )
-            .await;
+            let result = if proto == "anthropic" {
+                // Map DeepSeek effort levels to Anthropic thinking budgets
+                let thinking_budget = effort_o.as_deref().and_then(|e| match e {
+                    "low" => Some(2048u32),
+                    "medium" => Some(4096),
+                    "high" => Some(8192),
+                    _ => None,
+                });
+                dsx_gateway::chat_stream_anthropic(
+                    &gw, &model_o, sys, msgs, tools, max_tokens, thinking_budget, tx,
+                )
+                .await
+            } else {
+                dsx_gateway::chat_stream_openai(
+                    &gw, &model_o, sys, msgs, tools, None, max_tokens, effort_o.as_deref(), tx,
+                )
+                .await
+            };
             if let Err(e) = result {
                 eprintln!("dsx-hp: gateway error: {e:?}");
             }
@@ -466,11 +491,11 @@ fn handle_api_chat_streaming(line: &str, writer: &mut impl Write) {
                         let _ = writer.flush();
                     }
                 }
-                StreamEvent::ToolCallProgress { name, args_so_far } => {
+                StreamEvent::ToolCallProgress { ref name, ref args_so_far } => {
                     let frame = serde_json::json!({
                         "type": "tool_progress",
-                        "id": "",
-                        "content": format!("{name}({args_so_far})"),
+                        "id": name,
+                        "content": args_so_far,
                         "stream_type": "progress",
                     });
                     if let Ok(s) = serde_json::to_string(&frame) {
@@ -524,6 +549,7 @@ fn handle_api_chat_streaming(line: &str, writer: &mut impl Write) {
                     return;
                 }
                 StreamEvent::Error(e) => {
+                    log::error!("hp: API error — {}", e);
                     let _ = writeln!(writer, "{}", json_response("error", &e));
                     let _ = writer.flush();
                     return;
@@ -555,8 +581,7 @@ fn extract_name(line: &str) -> Option<&str> {
 // ── Port file management ──
 
 fn port_file_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    std::path::PathBuf::from(home).join(".dsx").join("hp.port")
+    dsx_types::platform::hp_port_path()
 }
 
 fn write_port_file(port: u16) {

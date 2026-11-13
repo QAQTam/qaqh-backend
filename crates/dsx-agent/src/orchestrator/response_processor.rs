@@ -151,13 +151,13 @@ pub fn finalize_stream_response(
                         appender.state.intent_options = arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect();
                     }
                 }
-                // Cancel all tools (ask_user must be the only one)
+                // Cancel all other tools (ask_user must be the only one)
                 for (pending_tc, _, _) in &needs_confirm {
-                    appender.append(&tc.function.name, &pending_tc.id, &tc.function.arguments,
+                    appender.append(&pending_tc.function.name, &pending_tc.id, &pending_tc.function.arguments,
                         "[CANCELLED] ask_user must be the only tool call. Re-call in next turn.");
                 }
                 for remaining_tc in tool_calls.iter().skip(idx + 1) {
-                    appender.append(&tc.function.name, &remaining_tc.id, &tc.function.arguments,
+                    appender.append(&remaining_tc.function.name, &remaining_tc.id, &remaining_tc.function.arguments,
                         "[CANCELLED] ask_user must be the only tool call. Re-call in next turn.");
                 }
                 return LoopDecision::AwaitIntent;
@@ -213,8 +213,8 @@ pub fn finalize_stream_response(
     // ── Health escalation ──
     if let Some(escalation) = state.health.should_escalate() {
         log::warn!("health escalation: {}", escalation);
-        state.ctx.annotate("SYSTEM", &escalation);
-        state.ctx.flush_annotations();
+        state.turn_annotations.push(format!("[SYSTEM] {}", escalation));
+        state.flush_notes();
         session_persistence::maybe_save_session(state);
         return LoopDecision::ForceTextResponse(escalation);
     }
@@ -227,8 +227,8 @@ pub fn finalize_stream_response(
         state.tool_calls_this_turn = 0;
         let interrupt = "[System] Tool loop limit reached (100 calls in this turn). Respond with what you have, without calling more tools.";
         if state.exec_pending == 0 {
-            state.ctx.annotate("System", interrupt);
-            state.ctx.flush_annotations();
+            state.turn_annotations.push(interrupt.to_string());
+            state.flush_notes();
             session_persistence::maybe_save_session(state);
         } else {
             state.gate_message = Some(interrupt.into());
@@ -244,8 +244,8 @@ pub fn finalize_stream_response(
         state.tool_calls_this_turn = 0;
         let interrupt = "3 consecutive tool failures occurred. Respond with your analysis — do not call more tools.";
         if state.exec_pending == 0 {
-            state.ctx.annotate("System", interrupt);
-            state.ctx.flush_annotations();
+            state.turn_annotations.push(format!("[System] {}", interrupt));
+            state.flush_notes();
             session_persistence::maybe_save_session(state);
         } else {
             state.gate_message = Some(interrupt.into());
@@ -263,14 +263,14 @@ pub fn finalize_stream_response(
     if state.consecutive_tool_turns >= 30 {
         state.turn_scores.push(turn_scorer::score_current_turn(state));
         state.consecutive_tool_turns = 0;
-        state.ctx.annotate("SYSTEM", "30 consecutive tool-only turns. Tools may be broken or stuck. Stop calling tools and respond with your analysis.");
-        state.ctx.flush_annotations();
+        state.turn_annotations.push("[SYSTEM] 30 consecutive tool-only turns. Tools may be broken or stuck. Stop calling tools and respond with your analysis.".to_string());
+        state.flush_notes();
         session_persistence::maybe_save_session(state);
         return LoopDecision::ForceTextResponse("30 consecutive tool-only turns.".into());
     }
     if state.consecutive_tool_turns == 5 {
-        state.ctx.annotate("REMINDER", "5 consecutive tool-only turns. Are tools working correctly? Consider explaining what you're doing in text.");
-        state.ctx.flush_annotations();
+        state.turn_annotations.push("[REMINDER] 5 consecutive tool-only turns. Are tools working correctly? Consider explaining what you're doing in text.".to_string());
+        state.flush_notes();
     }
 
     // ── Sudo prompt gate ──

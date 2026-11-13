@@ -349,10 +349,18 @@ fn detect_language(path: &str) -> Option<String> {
 fn extract_symbols(code: &str, language: &Option<String>) -> Vec<String> {
     let lang = language.as_deref().unwrap_or("");
     let re = regex_for(lang);
-    let mut syms: Vec<String> = re.captures_iter(code)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .filter(|s| s.len() > 1 && s.len() < 64)
-        .collect();
+    let mut syms: Vec<String> = Vec::new();
+    for caps in re.captures_iter(code) {
+        // Iterate all capture groups (group 0 is the full match, skip it).
+        for i in 1..caps.len() {
+            if let Some(m) = caps.get(i) {
+                let s = m.as_str();
+                if s.len() > 1 && s.len() < 64 {
+                    syms.push(s.to_string());
+                }
+            }
+        }
+    }
     syms.sort();
     syms.dedup();
     syms.truncate(12);

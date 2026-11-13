@@ -79,24 +79,16 @@ pub(crate) fn chrono_date() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs();
-    let days = (secs / 86400) as u32;
-    let y = 1970 + days / 365;
-    let rem = days % 365;
-    let m = (rem / 30).min(11) + 1;
-    let d = (rem % 30).min(30) + 1;
-    format!("{:04}-{:02}-{:02}", y, m, d)
+        .as_secs() as i64;
+    chrono::DateTime::from_timestamp(secs, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
 }
 
 // ── Paths ──
 
 pub fn sessions_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::env::var("DSC_CONFIG_DIR").ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
-    Some(base.join("dsx").join("sessions"))
+    Some(dsx_types::platform::sessions_dir())
 }
 
 /// Directory for a single session's data.
@@ -155,12 +147,7 @@ pub fn pitfalls_path() -> Option<PathBuf> {
 // ── Plan paths ──
 
 pub fn plans_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::env::var("DSC_CONFIG_DIR").ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
-    Some(base.join("dsx").join("plans"))
+    Some(dsx_types::platform::plans_dir())
 }
 
 fn slugify(name: &str) -> String {

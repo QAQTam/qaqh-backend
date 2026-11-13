@@ -5,16 +5,14 @@
 //! 子模块通过 `pub fn register(mgr: &mut ToolManager)` 注册各自 handler。
 
 pub mod exec;
-pub use exec::{exec_command, exec_with_sudo, spawn_exec_async, spawn_exec_async_with_sudo, spawn_exec_pty};
+pub use exec::{exec_command, exec_with_sudo, spawn_exec_async, spawn_exec_async_with_sudo};
 pub mod explore;
 pub mod file;
 mod safety;
 mod web;
 
-// D03 modules — tool handlers for memory, plan, status, task
-pub mod memory;
+// D03 modules — tool handlers for plan, task
 pub mod plan;
-pub mod status;
 pub mod task;
 
 pub mod ipc;
@@ -212,6 +210,7 @@ impl ToolManager {
                 name: def.function.name,
                 description: def.function.description,
                 input_schema: def.function.parameters,
+                cache_control: None,
             });
         }
         tools
@@ -265,12 +264,6 @@ impl ToolManager {
             SafetyVerdict::Block(reason) => {
                 return ipc::OutboundFrame::ToolError {
                     id, error: reason, code: "BLOCKED".into(),
-                };
-            }
-            SafetyVerdict::Confirm(prompt) => {
-                return ipc::OutboundFrame::ToolConfirmReq {
-                    id, tool_name: name.into(), action: action.into(),
-                    danger_level: "confirm".into(), prompt,
                 };
             }
             SafetyVerdict::Allow => {}
@@ -330,4 +323,5 @@ impl ToolManager {
             }
         }
     }
+
 }

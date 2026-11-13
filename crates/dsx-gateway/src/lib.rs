@@ -1,6 +1,8 @@
 mod openai;
+mod anthropic;
 
 pub use openai::chat_stream_openai;
+pub use anthropic::chat_stream_anthropic;
 
 use dsx_types::{Message, UsageInfo};
 
@@ -9,13 +11,6 @@ use dsx_types::{Message, UsageInfo};
 pub struct GatewayConfig {
     pub base_url: String,
     pub api_key: String,
-}
-
-/// Internal accumulator for building tool calls from streaming deltas.
-struct AccumulatedToolCall {
-    id: String,
-    name: String,
-    arguments: String,
 }
 
 /// Events emitted during API streaming.

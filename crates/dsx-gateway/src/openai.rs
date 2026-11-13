@@ -1,6 +1,6 @@
 //! OpenAI-compatible chat completion streaming client.
 
-use crate::{AccumulatedToolCall, GatewayConfig, StreamEvent};
+use crate::{GatewayConfig, StreamEvent};
 use dsx_types::{Message, ToolCall, ToolDef, UsageInfo};
 use futures_util::StreamExt;
 use reqwest::Client as HttpClient;
@@ -96,6 +96,13 @@ struct OpenAIUsageInfo {
     prompt_cache_miss_tokens: Option<u32>,
 }
 
+/// Internal accumulator for building tool calls from streaming deltas.
+struct AccumulatedToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
 // ── Public function ──
 
 /// Streaming chat via OpenAI-compatible `/chat/completions` endpoint.
@@ -154,7 +161,7 @@ pub async fn chat_stream_openai(
                     let after_scheme = &raw[scheme_end + 3..];
                     match after_scheme.find('/') {
                         Some(slash_pos) => format!("{}/chat/completions", &raw[..scheme_end + 3 + slash_pos]),
-                        None => format!("{raw}/chat/completions"),
+                        None => format!("{raw}/v1/chat/completions"),
                     }
                 }
                 None => format!("{raw}/chat/completions"),
@@ -200,6 +207,12 @@ pub async fn chat_stream_openai(
             if !r.status().is_success() {
                 let status = r.status();
                 let text = r.text().await.unwrap_or_default();
+                // Log full request body on 400+ for diagnostics
+                log::error!(
+                    "openai api error {} — request: {}",
+                    status,
+                    serde_json::to_string_pretty(&body_json).unwrap_or_default()
+                );
                 let msg = format!("OpenAI API {}: {}", status, text);
                 let _ = tx.send(StreamEvent::Error(msg.clone())).await;
                 return Err(anyhow::anyhow!("{}", msg));
@@ -259,7 +272,10 @@ pub async fn chat_stream_openai(
 
             let chunk: OpenAIChatChunk = match serde_json::from_str(&data_str) {
                 Ok(c) => c,
-                Err(_) => continue,
+                Err(e) => {
+                    log::warn!("OpenAI SSE: failed to deserialize chunk: {} — data: {}", e, data_str);
+                    continue;
+                }
             };
 
             for choice in chunk.choices {

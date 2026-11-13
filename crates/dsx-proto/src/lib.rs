@@ -21,8 +21,9 @@ use serde::{Deserialize, Serialize};
 // ── TUI ↔ Agent ────────────────────────────────────────────────────────
 
 /// TUI → Agent frames (stdin pipe).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum TuiToAgent {
     #[serde(rename = "user_input")]
     UserInput { text: String },
@@ -49,8 +50,9 @@ pub enum TuiToAgent {
 }
 
 /// Agent → TUI frames (stdout pipe).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum AgentToTui {
     /// Streaming content delta (one token or small chunk).
     #[serde(rename = "content_delta")]
@@ -116,6 +118,10 @@ pub enum AgentToTui {
     #[serde(rename = "error")]
     Error { message: String },
 
+    /// Predicted KV cache hit rate (client-side estimate).
+    #[serde(rename = "cache_prediction")]
+    CachePrediction { hit_rate: f64 },
+
     /// Shutdown acknowledgement.
     #[serde(rename = "shutdown_ack")]
     ShutdownAck,
@@ -124,8 +130,9 @@ pub enum AgentToTui {
 // ── Agent ↔ Tools ──────────────────────────────────────────────────────
 
 /// Agent → Tools frames (stdin pipe).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum AgentToTools {
     #[serde(rename = "tools_init")]
     Init {
@@ -161,8 +168,9 @@ pub enum AgentToTools {
 }
 
 /// Tools → Agent frames (stdout pipe).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum ToolsToAgent {
     #[serde(rename = "tools_ready")]
     Ready {
@@ -217,8 +225,9 @@ pub enum ToolsToAgent {
 // ── Agent ↔ HP ─────────────────────────────────────────────────────────
 
 /// Agent → HP frames (TCP).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum AgentToHp {
     #[serde(rename = "register")]
     Register {
@@ -259,8 +268,9 @@ pub enum AgentToHp {
 }
 
 /// HP → Agent frames (TCP).
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[non_exhaustive]
 pub enum HpToAgent {
     #[serde(rename = "ok")]
     Ok { message: String },

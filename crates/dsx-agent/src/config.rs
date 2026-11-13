@@ -19,6 +19,7 @@ pub struct Config {
     pub max_tool_rounds: Option<u32>,
     pub provider: String,
     pub phase_configs: HashMap<String, dsx_types::PhasePerfConfig>,
+    pub protocol: String,
 }
 
 impl Default for Config {
@@ -38,6 +39,7 @@ impl Default for Config {
             max_tool_rounds: None,
             provider: "deepseek".into(),
             phase_configs: dsx_types::default_phase_configs(),
+            protocol: "openai".into(),
         }
     }
 }
@@ -77,6 +79,7 @@ impl Config {
                         if let Some(am) = pc.auto_mode { cfg.auto_mode = am; }
                         if let Some(p) = pc.provider { cfg.provider = p; }
                         if let Some(pc2) = pc.phase_configs { cfg.phase_configs = pc2; }
+                        if let Some(ref p) = pc.protocol { cfg.protocol = p.clone(); }
                     }
                 }
             }
@@ -128,6 +131,7 @@ impl Config {
                 auto_mode: Some(self.auto_mode),
                 provider: Some(self.provider.clone()),
                 phase_configs: Some(self.phase_configs.clone()),
+                protocol: if self.protocol == "openai" { None } else { Some(self.protocol.clone()) },
             };
             let _ = std::fs::write(&path, serde_json::to_string_pretty(&pc).unwrap_or_default());
         }
@@ -168,12 +172,7 @@ impl Config {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::env::var("DSC_CONFIG_DIR").ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
-    Some(base.join("dsx").join("config.json"))
+    Some(dsx_types::platform::config_path())
 }
 
 

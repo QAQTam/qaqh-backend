@@ -1,6 +1,5 @@
 //! Session file persistence: save and load conversation sessions.
 
-use crate::memory::SemanticMemory;
 use crate::router;
 use dsx_types::{Message, SessionFile};
 
@@ -40,7 +39,6 @@ fn save_session(
     messages: &[Message],
     model: &str,
     effort: Option<&str>,
-    semantic_memory: Option<SemanticMemory>,
 ) {
     let Some(sfile_path) = super::session_path(seed) else { return };
     let _ = std::fs::create_dir_all(sfile_path.parent().unwrap());
@@ -54,9 +52,6 @@ fn save_session(
 
     let last_summary = super::extract_last_summary(messages);
 
-    // Serialize SemanticMemory to JSON for cross-crate SessionFile storage
-    let semantic_json = semantic_memory.and_then(|sm| serde_json::to_value(&sm).ok());
-
     let file = SessionFile {
         seed: seed.to_string(),
         created_at,
@@ -66,7 +61,7 @@ fn save_session(
         messages: messages.to_vec(),
         last_summary,
         stream_state: None,
-        semantic_memory: semantic_json,
+        semantic_memory: None,
         task_phase: Some(router::read_phase()),
     };
 
@@ -79,10 +74,9 @@ pub fn finalize_session(
     messages: &[Message],
     model: &str,
     effort: Option<&str>,
-    semantic_memory: Option<SemanticMemory>,
 ) {
     // Save completed .json
-    save_session(seed, messages, model, effort, semantic_memory);
+    save_session(seed, messages, model, effort);
     // Clean up .live file
     super::snapshot::cleanup_live(seed);
 }

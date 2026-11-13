@@ -1,8 +1,8 @@
 //! Safety verdicts for tool invocation.
 //!
 //! Each tool's safety function returns a `SafetyVerdict` that the
-//! ToolManager/Agent uses to decide whether to auto-execute, ask for
-//! confirmation, or block outright.
+//! ToolManager/Agent uses to decide whether to auto-execute
+//! or block outright.
 //!
 //! Centralized classification logic from exec.rs (is_danger_command,
 //! is_safe_command) lives here.
@@ -10,10 +10,8 @@
 /// The result of a tool safety check.
 #[derive(Debug, Clone)]
 pub enum SafetyVerdict {
-    /// Automatically allow execution (e.g. read, list, search).
+    /// Automatically allow execution.
     Allow,
-    /// Ask the user for confirmation with the given prompt.
-    Confirm(String),
     /// Block execution with the given reason.
     Block(String),
 }
@@ -22,11 +20,6 @@ impl SafetyVerdict {
     /// Auto-allow shorthand.
     pub const fn allowed() -> Self {
         SafetyVerdict::Allow
-    }
-
-    /// Confirm with a default prompt.
-    pub fn confirm(name: &str) -> Self {
-        SafetyVerdict::Confirm(format!("Allow {}?", name))
     }
 
     /// Block with a reason.
@@ -45,17 +38,24 @@ pub fn is_danger_command(cmd: &str) -> bool {
         "chmod 777 /", "chmod -R 777 /", "chown -R",
         "> /dev/sda", "mv /", "rm -r /",
         "shutdown", "reboot", "halt", "poweroff",
+        // Windows destructive commands
+        "format ", "diskpart", "del /f /s", "rmdir /s /q",
+        "rd /s /q", "reg delete", "takeown /f",
     ];
     dangerous.iter().any(|d| cmd.contains(d))
 }
 
 pub fn is_safe_command(cmd: &str) -> bool {
     let safe_prefixes = [
+        // Unix
         "ls", "cat ", "grep ", "find ", "head ", "tail ", "wc ", "sort", "uniq",
         "echo ", "date", "pwd", "whoami", "uname", "which ", "type ", "env",
         "git status", "git diff", "git log", "git branch", "git show",
         "du ", "df ", "free", "uptime", "ps ", "pgrep",
         "cargo check", "cargo build --check",
+        // Windows
+        "dir", "type ", "help", "mkdir", "copy ", "move ", "del ",
+        "echo ", "cd ", "set ", "powershell -Command get-", "where ",
     ];
     safe_prefixes.iter().any(|p| cmd.starts_with(p))
 }
@@ -68,23 +68,8 @@ pub fn classify_execution(command: &str) -> SafetyVerdict {
     }
     if is_danger_command(&cmd) {
         SafetyVerdict::Block(format!("Potentially destructive command: {}", command))
-    } else if is_safe_command(&cmd) {
-        SafetyVerdict::Allow
     } else {
-        SafetyVerdict::Confirm(format!("Run: {}?", command))
+        SafetyVerdict::Allow
     }
 }
 
-/// Heuristic: is this command likely long-running?
-pub fn is_long_command(args: &serde_json::Value) -> bool {
-    let command = args.get("command")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_lowercase();
-    let long_indicators = [
-        "make", "cargo build", "cargo test", "npm install", "npm run build",
-        "pip install", "cmake", "gradle", "mvn", "docker build",
-        "sudo apt", "brew install", "rustup",
-    ];
-    long_indicators.iter().any(|i| command.contains(i))
-}

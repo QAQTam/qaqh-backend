@@ -29,8 +29,7 @@ fn config_dir() -> PathBuf {
     if let Ok(d) = std::env::var("DSC_CONFIG_DIR") {
         return PathBuf::from(d);
     }
-    let base = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(base).join(".config").join("dsc")
+    dsx_types::platform::home_dir().join(".config").join("dsc")
 }
 
 /// Initialize file logging. Call once at startup.

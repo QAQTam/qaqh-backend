@@ -1,5 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+// ── Cache control (for prompt caching) ──
+
+/// Anthropic prompt caching marker.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnthropicCacheControl {
+    #[serde(rename = "type")]
+    pub cache_type: String,
+}
+
+/// A text block inside the `system` parameter array.
+#[derive(Debug, Clone, Serialize)]
+pub struct AnthropicSystemBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<AnthropicCacheControl>,
+}
+
 // ── Anthropic API types ──
 
 /// Content block within an Anthropic message.
@@ -7,7 +26,11 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "type")]
 pub enum AnthropicContent {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
+    },
     #[serde(rename = "thinking")]
     Thinking {
         thinking: String,
@@ -18,6 +41,8 @@ pub enum AnthropicContent {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<AnthropicCacheControl>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -41,6 +66,8 @@ pub struct AnthropicTool {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<AnthropicCacheControl>,
 }
 
 /// Thinking configuration for Anthropic requests.
@@ -54,18 +81,16 @@ pub struct AnthropicThinking {
 
 /// Top-level Anthropic Messages API request body.
 ///
-/// Contains every field from the native Anthropic Messages API spec.
-/// Fields the provider doesn't support are omitted via `skip_serializing_if = None`.
+/// Every field from the native Anthropic Messages API spec.
+/// Fields omitted during serialization when `None`.
 #[derive(Debug, Serialize)]
 pub struct AnthropicRequest {
-    // ── Stable fields (cache prefix) ──
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<AnthropicTool>>,
+    /// System prompt as text block array (supports per-block `cache_control`).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Vec<AnthropicSystemBlock>>,
     pub messages: Vec<AnthropicMessage>,
-
-    // ── Variable fields ──
     pub model: String,
     pub max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -77,17 +102,10 @@ pub struct AnthropicRequest {
     pub temperature: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
-
-    // ── Extended fields (native Anthropic, may be ignored by providers) ──
-    /// Top-k sampling — only supported by some providers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_k: Option<u32>,
-
-    /// Custom stop sequences.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop_sequences: Option<Vec<String>>,
-
-    /// User metadata (forwarded to provider, useful for abuse tracking).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }

@@ -4,9 +4,8 @@ use crate::agent::AgentState;
 /// Phase gate: block destructive tools in Explore/Plan mode.
 pub fn phase_check_tool(state: &mut AgentState, tool_name: &str, tc_id: &str) -> bool {
     let is_readonly = state.current_task_phase == dsx_types::TaskPhase::Plan;
-        || state.current_task_phase == dsx_types::TaskPhase::Plan;
     if !is_readonly { return false; }
-    let blocked = ["file", "exec", "agent"];
+    let blocked = ["file", "exec"];
     if !blocked.contains(&tool_name) { return false; }
     let target = "coding";
     let msg = format!(
@@ -17,8 +16,9 @@ pub fn phase_check_tool(state: &mut AgentState, tool_name: &str, tc_id: &str) ->
 }
 
 /// Pre-tool health check: circuit breaker.
+/// Returns Some(error_msg) if tool should be blocked, None if allowed.
+/// Caller is responsible for recording tool call outcome.
 pub fn pre_tool_health_check(state: &mut AgentState, name: &str) -> Option<String> {
-    state.health.record_tool_call(name);
     if state.health.should_block(name).is_some() {
         return Some(format!("[ERROR] tool '{}' blocked by health platform", name));
     }
@@ -51,7 +51,7 @@ pub fn explore_gate(state: &mut AgentState, tool_name: &str, tc_id: &str, args: 
             if let Some(ref path) = parse_file_arg(args) {
                 let declared = last_assistant_mentions(state, path);
                 if !declared {
-                    state.ctx.annotate("intent", &format!("write to '{}' was NOT declared in assistant reasoning \u{2014} consider requiring declaration", path));
+                    state.turn_annotations.push(format!("[intent] write to '{}' was NOT declared in assistant reasoning \u{2014} consider requiring declaration", path));
                 }
             }
         }
@@ -67,10 +67,10 @@ pub fn explore_gate(state: &mut AgentState, tool_name: &str, tc_id: &str, args: 
         }
         let cmd = parse_cmd_arg(args).unwrap_or_else(|| "?".into());
         if last_assistant_content(state).is_empty() {
-            state.ctx.annotate("exec", &format!("'{}' — next time, say what you're running so the log captures it.", cmd.chars().take(60).collect::<String>()));
+            state.turn_annotations.push(format!("[exec] '{}' — next time, say what you're running so the log captures it.", cmd.chars().take(60).collect::<String>()));
         }
         if let Some((tool_match, cmd_summary)) = turn_scorer::detect_tool_equivalent(&cmd) {
-            state.ctx.annotate("exec", &format!("'{}' looks like {}() — if {}() is insufficient, tell us why.", cmd_summary, tool_match, tool_match));
+            state.turn_annotations.push(format!("[exec] '{}' looks like {}() — if {}() is insufficient, tell us why.", cmd_summary, tool_match, tool_match));
         }
         for written in &state.files_written_this_turn {
             let written_matches = cmd.contains(written)

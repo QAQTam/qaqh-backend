@@ -7,35 +7,54 @@ struct AgentState {
     stdin: Mutex<Option<Box<dyn Write + Send>>>,
 }
 
+fn data_dir() -> std::path::PathBuf {
+    dsx_types::platform::data_dir()
+}
+
 fn config_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".config").join("dsx").join("config.json")
+    dsx_types::platform::config_path()
 }
 
 fn find_dsx() -> Result<String, String> {
     if let Ok(path) = std::env::var("DSX_BIN") {
         if std::path::Path::new(&path).exists() { return Ok(path); }
     }
+
+    let exe = std::env::current_exe().ok();
+    if let Some(dir) = exe.as_ref().and_then(|e| e.parent()) {
+        let name = if cfg!(target_os = "windows") { "dsx.exe" } else { "dsx" };
+
+        // 1. Look alongside the current exe (same directory)
+        let candidate = dir.join(name);
+        if candidate.exists() { return Ok(candidate.to_string_lossy().to_string()); }
+
+        // 2. Look in the resources/ subdirectory (Tauri v2 bundled release)
+        let resource = dir.join("resources").join(name);
+        if resource.exists() { return Ok(resource.to_string_lossy().to_string()); }
+
+        // 3. Walk up to find workspace target/debug/dsx or target/release/dsx
+        for ancestor in dir.ancestors().take(6) {
+            for sub in &["debug", "release"] {
+                let c = ancestor.join("target").join(sub).join(name);
+                if c.exists() { return Ok(c.to_string_lossy().to_string()); }
+            }
+        }
+    }
+
+    // 4. Unix: try which command
+    #[cfg(unix)]
     if let Ok(out) = Command::new("sh").args(["which", "dsx"]).output() {
         if out.status.success() {
             let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !p.is_empty() { return Ok(p); }
         }
     }
-    let hard = std::path::PathBuf::from("/home/qaqtamsy/Desktop/dsx/target/release/dsx");
-    if hard.exists() { return Ok(hard.to_string_lossy().to_string()); }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let c = dir.join("dsx");
-            if c.exists() { return Ok(c.to_string_lossy().to_string()); }
-        }
-    }
+
     Err("dsx binary not found. Try: cargo build --release -p dsx".to_string())
 }
 
 fn ensure_hp(dsx_path: &str) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let port_path = std::path::PathBuf::from(&home).join(".dsx").join("hp.port");
+    let port_path = dsx_types::platform::hp_port_path();
 
     if let Ok(s) = std::fs::read_to_string(&port_path) {
         if let Ok(port) = s.trim().parse::<u16>() {
@@ -111,6 +130,8 @@ fn start_reader(reader: BufReader<Box<dyn Read + Send>>, app: AppHandle) {
                             "phase_changed" => { let _ = app.emit("phase-changed", v); }
                             "tool_state" => { let _ = app.emit("tool-state", v); }
                             "status" => { let _ = app.emit("status", v); }
+                            "exec_progress" => { let _ = app.emit("exec-progress", v); }
+                            "tool_result" => { let _ = app.emit("tool-result", v); }
                             "session_restored" => { let _ = app.emit("session-restored", v); }
                             _ => {}
                         }
@@ -177,6 +198,57 @@ fn reload_agent(app: AppHandle, state: tauri::State<AgentState>) -> Result<(), S
     Ok(())
 }
 
+/// Scan sessions/ dir for both flat *.json and subdirectory session.json files.
+fn scan_sessions() -> Vec<serde_json::Value> {
+    let dir = data_dir().join("sessions");
+    let mut sessions = Vec::new();
+    if !dir.is_dir() { return sessions; }
+    // Non-session files to skip
+    let skip = |name: &str| name == "index.json" || name == "pitfalls.json";
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let fname = entry.file_name().to_string_lossy().to_string();
+            if skip(&fname) { continue; }
+            // Old format: sessions/{seed}.json
+            if path.is_file() && path.extension().map(|e| e == "json").unwrap_or(false) {
+                if let Ok(data) = std::fs::read_to_string(&path) {
+                    if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&data) {
+                        // Compute message_count from messages array
+                        if meta.get("message_count").is_none() {
+                            let count = meta["messages"].as_array().map(|a| a.len()).unwrap_or(0);
+                            meta["message_count"] = serde_json::json!(count);
+                        }
+                        sessions.push(meta);
+                        continue;
+                    }
+                }
+            }
+            // New format: sessions/{seed}-{date}/session.json
+            if path.is_dir() {
+                let inner = path.join("session.json");
+                if inner.is_file() {
+                    if let Ok(data) = std::fs::read_to_string(&inner) {
+                        if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&data) {
+                            if meta.get("message_count").is_none() {
+                                let count = meta["messages"].as_array().map(|a| a.len()).unwrap_or(0);
+                                meta["message_count"] = serde_json::json!(count);
+                            }
+                            sessions.push(meta);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    sessions.sort_by(|a, b| {
+        let au = a["updated_at"].as_u64().unwrap_or(0);
+        let bu = b["updated_at"].as_u64().unwrap_or(0);
+        bu.cmp(&au)
+    });
+    sessions
+}
+
 #[tauri::command]
 fn start_agent(app: AppHandle, state: tauri::State<AgentState>) -> Result<serde_json::Value, String> {
     let dsx_path = find_dsx()?;
@@ -187,27 +259,7 @@ fn start_agent(app: AppHandle, state: tauri::State<AgentState>) -> Result<serde_
     start_reader(reader, app.clone());
     start_stderr_reader(stderr, app);
 
-    // Gather session info
-    let home = std::env::var("HOME").map_err(|_| "?".to_string())?;
-    let dir = std::path::PathBuf::from(&home).join(".config").join("dsx").join("sessions");
-    let mut sessions = Vec::new();
-    if dir.is_dir() {
-        for entry in std::fs::read_dir(&dir).map_err(|e| format!("read_dir: {e}"))?.flatten() {
-            if entry.path().extension().map(|e| e == "json").unwrap_or(false) {
-                if let Ok(data) = std::fs::read_to_string(entry.path()) {
-                    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&data) {
-                        sessions.push(meta);
-                    }
-                }
-            }
-        }
-        sessions.sort_by(|a, b| {
-            let au = a["updated_at"].as_u64().unwrap_or(0);
-            let bu = b["updated_at"].as_u64().unwrap_or(0);
-            bu.cmp(&au)
-        });
-    }
-
+    let sessions = scan_sessions();
     log::info!("agent connected");
     Ok(serde_json::json!({"ok": true, "sessions": sessions}))
 }
@@ -218,7 +270,10 @@ fn check_config() -> Result<bool, String> {
 }
 
 #[tauri::command]
-fn save_config(provider: String, api_key: String, base_url: String, model: String, context_limit: u32, max_tokens: u32, auto_mode: bool, prompt_lang: String, effort: String) -> Result<(), String> {
+fn save_config(provider: String, api_key: String, base_url: String, model: String, context_limit: u32, max_tokens: u32, auto_mode: bool, prompt_lang: String, effort: String, protocol: Option<String>) -> Result<(), String> {
+    let proto = protocol.unwrap_or_else(|| {
+        if provider == "anthropic" { "anthropic".into() } else { "openai".into() }
+    });
     let p = config_path();
     if let Some(dir) = p.parent() { std::fs::create_dir_all(dir).map_err(|e| format!("mkdir: {e}"))?; }
     // Load existing config to preserve fields we don't want to overwrite
@@ -232,11 +287,11 @@ fn save_config(provider: String, api_key: String, base_url: String, model: Strin
     } else { model };
     // Preserve auxiliary fields
     let mut extra = serde_json::json!({});
-    for key in &["phase_configs", "cached_models", "cached_models_deepseek", "cached_models_custom"] {
+    for key in &["phase_configs", "cached_models", "cached_models_deepseek", "cached_models_custom", "cached_models_anthropic", "profiles", "active_profile", "preferences"] {
         if let Some(v) = old_cfg.get(*key) { extra[*key] = v.clone(); }
     }
     let mut c = serde_json::json!({
-        "provider": provider, "api_key": api_key, "base_url": base_url,
+        "provider": provider, "protocol": proto, "api_key": api_key, "base_url": base_url,
         "model": final_model, "context_limit": context_limit, "max_tokens": max_tokens,
         "auto_mode": auto_mode, "prompt_lang": prompt_lang, "effort": effort,
     });
@@ -249,10 +304,6 @@ fn save_config(provider: String, api_key: String, base_url: String, model: Strin
 
 #[tauri::command]
 async fn fetch_models(api_key: String, base_url: String) -> Result<Vec<String>, String> {
-    let key = api_key.trim().trim_matches('"').to_string();
-    if key.is_empty() || key == "null" {
-        return Err("API Key 无效（收到空值），请在设置中重新输入完整的 sk-xxx 密钥".to_string());
-    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build().map_err(|e| format!("http client: {e}"))?;
@@ -264,9 +315,13 @@ async fn fetch_models(api_key: String, base_url: String) -> Result<Vec<String>, 
         .trim_end_matches("/v1");
     let url = format!("{}/models", stripped);
 
-    let resp = client.get(&url)
-        .header("Authorization", format!("Bearer {}", key))
-        .send().await.map_err(|e| format!("request failed: {e}"))?;
+    let mut req = client.get(&url);
+    let key = api_key.trim().trim_matches('"').to_string();
+    if !key.is_empty() && key != "null" {
+        req = req.header("Authorization", format!("Bearer {}", key));
+    }
+
+    let resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -339,34 +394,20 @@ fn update_config(field: String, value: String) -> Result<(), String> {
 #[tauri::command]
 // Session listing is included in start_agent return value
 fn cmd_sessions() -> Result<Vec<serde_json::Value>, String> {
-    let home = std::env::var("HOME").map_err(|_| "?".to_string())?;
-    let dir = std::path::PathBuf::from(&home).join(".config").join("dsx").join("sessions");
-    let mut sessions = Vec::new();
-    if !dir.is_dir() { return Ok(sessions); }
-    let read = std::fs::read_dir(&dir).map_err(|e| format!("read_dir: {e}"))?;
-    for entry in read.flatten() {
-        let path = entry.path();
-        if path.extension().map(|e| e == "json").unwrap_or(false) {
-            if let Ok(data) = std::fs::read_to_string(&path) {
-                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&data) {
-                    sessions.push(meta);
-                }
-            }
-        }
-    }
-    sessions.sort_by(|a, b| {
-        let au = a["updated_at"].as_u64().unwrap_or(0);
-        let bu = b["updated_at"].as_u64().unwrap_or(0);
-        bu.cmp(&au)
-    });
-    Ok(sessions)
+    Ok(scan_sessions())
 }
 
 fn restart_agent(app: &AppHandle, state: &AgentState, seed: Option<&str>) -> Result<(), String> {
-    let mut guard = state.stdin.lock().map_err(|e| format!("lock: {e}"))?;
-    *guard = None;
-    drop(guard);
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    // Politely ask the old agent to exit before dropping stdin
+    if let Ok(mut guard) = state.stdin.lock() {
+        if let Some(writer) = guard.as_mut() {
+            let frame = serde_json::json!({"type": "shutdown"});
+            let _ = writeln!(writer, "{}", serde_json::to_string(&frame).unwrap());
+            let _ = writer.flush();
+        }
+        *guard = None;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
     let dsx_path = find_dsx()?;
     ensure_hp(&dsx_path)?;
     let (stdin, reader, stderr) = spawn_agent(&dsx_path, seed)?;
@@ -391,15 +432,13 @@ fn set_workspace(path: String) -> Result<(), String> {
     if !std::path::Path::new(&path).exists() {
         return Err("Path does not exist".to_string());
     }
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let f = std::path::PathBuf::from(&home).join(".dsx").join("workspace.txt");
+    let f = dsx_types::platform::workspace_path();
     std::fs::write(&f, &path).map_err(|e| format!("write: {e}"))
 }
 
 #[tauri::command]
 fn get_workspace() -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let f = std::path::PathBuf::from(&home).join(".dsx").join("workspace.txt");
+    let f = dsx_types::platform::workspace_path();
     std::fs::read_to_string(&f).map_err(|_| "No workspace set".to_string())
 }
 
@@ -450,8 +489,7 @@ fn cancel_agent(state: tauri::State<AgentState>) -> Result<(), String> {
 
 #[tauri::command]
 fn delete_session(seed: String) -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let dir = std::path::PathBuf::from(&home).join(".config").join("dsx").join("sessions");
+    let dir = data_dir().join("sessions");
     if !dir.is_dir() { return Ok(()); }
     // Sessions are stored as {seed}-{date}/ directories or {seed}.live.json files
     for entry in std::fs::read_dir(&dir).map_err(|e| format!("read_dir: {e}"))?.flatten() {
@@ -468,25 +506,39 @@ fn delete_session(seed: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn delete_all_sessions() -> Result<(), String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let dir = std::path::PathBuf::from(&home).join(".config").join("dsx").join("sessions");
+fn delete_all_sessions(app: AppHandle, state: tauri::State<AgentState>) -> Result<(), String> {
+    let dir = data_dir().join("sessions");
     if !dir.is_dir() { return Ok(()); }
+    // Stop agent first so it doesn't re-create sessions while we delete
+    restart_agent(&app, &*state, None)?;
     for entry in std::fs::read_dir(&dir).map_err(|e| format!("read_dir: {e}"))?.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let _ = std::fs::remove_dir_all(&path);
+            std::fs::remove_dir_all(&path).map_err(|e| format!("rm_dir {}: {e}", path.display()))?;
         } else {
-            let _ = std::fs::remove_file(&path);
+            std::fs::remove_file(&path).map_err(|e| format!("rm_file {}: {e}", path.display()))?;
         }
     }
     Ok(())
 }
 
 #[tauri::command]
+fn create_plan(name: String, goal: String, steps: Vec<String>) -> Result<(), String> {
+    let dir = dsx_types::platform::plans_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
+    let content = format!(
+        "---\nstatus: draft\ncreated_at: {}\nupdated_at: {}\nsession: pipe\n---\n\n# Plan: {}\n\n## Goal\n{}\n\n## Steps\n\n{}\n",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs(),
+        name, goal,
+        steps.iter().enumerate().map(|(i, s)| format!("{}. [ ] {}", i+1, s)).collect::<Vec<_>>().join("\n")
+    );
+    std::fs::write(dir.join(format!("{}.md", name)), content).map_err(|e| format!("write: {e}"))
+}
+
+#[tauri::command]
 fn list_plans() -> Result<Vec<serde_json::Value>, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let plans_dir = std::path::PathBuf::from(&home).join(".config").join("dsx").join("plans");
+    let plans_dir = dsx_types::platform::plans_dir();
     if !plans_dir.is_dir() {
         return Ok(Vec::new());
     }
@@ -516,8 +568,7 @@ fn list_plans() -> Result<Vec<serde_json::Value>, String> {
 
 #[tauri::command]
 fn read_plan(name: String) -> Result<String, String> {
-    let home = std::env::var("HOME").map_err(|_| "HOME not set".to_string())?;
-    let path = std::path::PathBuf::from(&home).join(".config").join("dsx").join("plans")
+    let path = dsx_types::platform::plans_dir()
         .join(format!("{}.md", name));
     std::fs::read_to_string(&path).map_err(|e| format!("read: {e}"))
 }

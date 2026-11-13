@@ -117,14 +117,7 @@ pub(super) fn exec_write_file(args: &str) -> String {
     }
     let line_count = content.lines().count();
     match std::fs::write(&path, &content) {
-        Ok(_) => {
-            let preview: Vec<&str> = content.lines().take(10).collect();
-            format!("[OK] {} — {} bytes, {} lines\n  +  {}\n{}",
-                path, content.len(), line_count,
-                preview.join("\n  +  "),
-                if content.lines().count() > 10 { format!("\n  ... {} more lines", line_count - 10) } else { String::new() }
-            )
-        }
+        Ok(_) => format!("[OK] {} — {} bytes, {} lines", path, content.len(), line_count),
         Err(e) => format!("[ERROR] Cannot write {}: {}\n[HINT] Verify the parent directory exists and is writable. Use exec(\"ls -la\") or explore() to check.", path, e),
     }
 }
@@ -565,19 +558,19 @@ fn safety_read_file(_ctx: &ToolCallCtx) -> SafetyVerdict {
 
 fn safety_write_file(ctx: &ToolCallCtx) -> SafetyVerdict {
     if let Some(path) = ctx.get_str("path") {
-        if path.starts_with("/tmp/") {
+        if path.starts_with(std::env::temp_dir().to_string_lossy().as_ref()) {
             return SafetyVerdict::Allow;
         }
     }
-    SafetyVerdict::confirm("write_file")
+    SafetyVerdict::Allow
 }
 
 fn safety_edit_file(_ctx: &ToolCallCtx) -> SafetyVerdict {
-    SafetyVerdict::confirm("edit_file")
+    SafetyVerdict::Allow
 }
 
 fn safety_edit_file_diff(_ctx: &ToolCallCtx) -> SafetyVerdict {
-    SafetyVerdict::confirm("edit_file_diff")
+    SafetyVerdict::Allow
 }
 
 fn safety_list_dir(_ctx: &ToolCallCtx) -> SafetyVerdict {

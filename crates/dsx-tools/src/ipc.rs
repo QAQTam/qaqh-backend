@@ -2,8 +2,8 @@
 //!
 //! 协议：每行一个完整 JSON 对象（`\n` 分隔），称为一帧。
 //!
-//! Agent → Tools: tools_init, tool_call_req, tool_cancel, tools_shutdown, tool_confirm_resp
-//! Tools → Agent: tools_ready, tool_progress, tool_result, tool_result_message, tool_error, tool_confirm_req
+//! Agent → Tools: tools_init, tool_call_req, tool_cancel, tools_shutdown
+//! Tools → Agent: tools_ready, tool_progress, tool_result, tool_result_message, tool_error
 
 use serde::{Deserialize, Serialize};
 
@@ -33,13 +33,6 @@ pub enum InboundFrame {
     Cancel {
         /// None = 取消所有，Some(id) = 取消指定工具。
         id: Option<String>,
-    },
-
-    /// Agent 对 `tool_confirm_req` 的用户批准/拒绝回复。
-    #[serde(rename = "tool_confirm_resp")]
-    ConfirmResp {
-        id: String,
-        approved: bool,
     },
 
     #[serde(rename = "tools_shutdown")]
@@ -97,16 +90,6 @@ pub enum OutboundFrame {
         code: String,
     },
 
-    /// 请求用户确认（安全弹窗）。
-    #[serde(rename = "tool_confirm_req")]
-    ToolConfirmReq {
-        id: String,
-        tool_name: String,
-        action: String,
-        /// "confirm" | "danger"
-        danger_level: String,
-        prompt: String,
-    },
 }
 
 // ── 帧读写 ──
@@ -183,14 +166,6 @@ pub fn ipc_main_loop(manager: &mut ToolManager) {
 
             InboundFrame::Cancel { id } => {
                 manager.cancel_tool(id.as_deref());
-            }
-
-            InboundFrame::ConfirmResp { id, approved } => {
-                // 暂未实现同步等待 ConfirmResp 的机制。
-                // 当前版本：Confirm 级别工具直接返回 ToolConfirmReq 帧，
-                // Agent 回复 ConfirmResp 时由 ToolManager 查找等待队列。
-                // 简单实现：记录响应但不做处理（保持设计为未来扩展）。
-                let _ = (id, approved);
             }
 
             InboundFrame::Shutdown => break,

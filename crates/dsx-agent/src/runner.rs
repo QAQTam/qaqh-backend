@@ -16,19 +16,18 @@ use dsx_proto::{
 use crate::agent::{AgentState, ToolResultAppender};
 use crate::config::Config;
 use crate::dsc_log;
-use crate::memory;
 use crate::orchestrator::{gates, learning, phase_detector, tracker, turn_scorer, session_persistence};
 use crate::router;
 use crate::session;
 use crate::tokenizer;
 use crate::tools;
-use dsx_types::{Message, ToolCall, FunctionCall, ToolDef};
+use crate::tool_parser;
+use dsx_types::{Message, ToolCall, ToolDef};
 
 // ── HP connection ──
 
 fn hp_port() -> u16 {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-    let path = std::path::PathBuf::from(home).join(".dsx").join("hp.port");
+    let path = dsx_types::platform::hp_port_path();
     std::fs::read_to_string(&path).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
 }
 
@@ -72,7 +71,6 @@ fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) {
             let (ctx, repairs) = crate::assembly::ContextAssembler::from_legacy(file.messages);
             agent.ctx = ctx;
         
-            agent.short_mem = memory::ShortTermMemory::new(&agent.session_seed, &agent.config.model);
             dsc_log::set_session(&agent.session_seed);
             tools::set_current_session(&agent.session_seed);
             eprintln!("dsx-agent: restored session {} ({} msgs)", agent.session_seed, agent.ctx.message_count());
@@ -83,13 +81,11 @@ fn init_session(agent: &mut AgentState, restore_seed: Option<&str>) {
     }
     agent.session_seed = session::generate_seed();
     agent.session_start = session::now_epoch();
-    agent.short_mem = memory::ShortTermMemory::new(&agent.session_seed, &agent.config.model);
     dsc_log::set_session(&agent.session_seed);
     tools::set_current_session(&agent.session_seed);
     session::save_live_snapshot(
         &agent.session_seed, &agent.ctx.to_vec(),
-        &agent.config.model, agent.config.effort.as_deref(), None, None,
-    );
+        &agent.config.model, agent.config.effort.as_deref(), None);
     eprintln!("dsx-agent: new session {}", agent.session_seed);
 }
 
@@ -108,173 +104,35 @@ fn health_status(agent: &AgentState) -> String {
     )
 }
 
-// ── Message conversion ──
+// ── Helper: apply phase config with user overrides ──
 
-/// Parse DeepSeek v4 XML-style tool calls from text content.
-///
-/// Handles two formats:
-/// 1. Explicit `<tool_use><tool_name>N</tool_name>JSON</tool_use>`
-/// 2. Tool-specific tags: `<read>`, `<write>`, `<edit>`, `<exec>`, `<search>`, `<git>`, `<web>` etc.
-///    Maps tag name to tool name and child elements to JSON args.
-///
-/// Returns (cleaned_content_without_xml, parsed_tool_calls).
-fn parse_xml_tool_calls(content: &str, tool_names: &[String]) -> (String, Vec<ToolCall>) {
-    let mut cleaned = String::with_capacity(content.len());
-    let mut tool_calls = Vec::new();
-    let mut tc_index = 0u32;
-
-    // Build tag→name mapping dynamically from registered tool definitions.
-    // Each tool name becomes an XML tag the model can use as shorthand.
-    // Also add shorthand aliases: <read> → read_file, <write> → write_file, <edit> → edit_file
-    let mut tag_map: Vec<(String, String)> = tool_names.iter()
-        .map(|n| (n.clone(), n.clone()))
-        .collect();
-    for (alias, name) in &[("read", "read_file"), ("write", "write_file"), ("edit", "edit_file")] {
-        if tool_names.iter().any(|n| n == name) {
-            tag_map.push((alias.to_string(), name.to_string()));
-        }
+fn apply_phase_config(agent: &mut AgentState, phase: dsx_types::TaskPhase, level: dsx_types::DebugLevel) {
+    let phase_name = format!("{:?}", phase).to_lowercase();
+    if let Some(user_pc) = agent.config.phase_configs.get(&phase_name) {
+        agent.config.model = user_pc.model.clone();
+        agent.config.effort = user_pc.effort.clone().filter(|e| !e.is_empty());
+        agent.config.max_tokens = user_pc.max_tokens;
+        agent.config.context_limit = user_pc.context_limit;
+    } else {
+        let pc = router::phase_config(phase, level);
+        agent.config.model = pc.model.to_string();
+        agent.config.effort = pc.effort.map(|s| s.to_string());
+        agent.config.max_tokens = pc.max_tokens;
     }
-
-    let mut remaining = content;
-
-    'outer: while let Some(tc_start) = remaining.find('<') {
-        // Check for explicit <tool_use> format first
-        if remaining[tc_start..].starts_with("<tool_use>") {
-            if let Some((name, args_text, rest)) = parse_tool_use_block(&remaining[tc_start..]) {
-                cleaned.push_str(&remaining[..tc_start]);
-                let arguments = normalize_args(&args_text);
-                tool_calls.push(ToolCall {
-                    id: format!("xml_tc_{tc_index}"),
-                    call_type: "function".to_string(),
-                    function: FunctionCall { name, arguments },
-                });
-                tc_index += 1;
-                remaining = rest;
-                continue 'outer;
-            }
-        }
-
-        // Check for tool-specific tags
-        let after_lt = &remaining[tc_start..];
-        if let Some(end) = after_lt.find('>') {
-            let tag_name = &after_lt[1..end];
-            let closing = format!("</{tag_name}>");
-
-            // Only handle known tool tags
-            if let Some((_, tool_name)) = tag_map.iter().find(|(tag, _)| *tag == tag_name) {
-                if let Some(close_pos) = after_lt[end..].find(&closing) {
-                    let block_content = &after_lt[end + 1..end + close_pos];
-                    let full_xml_len = end + close_pos + closing.len();
-
-                    cleaned.push_str(&remaining[..tc_start]);
-
-                    // Extract child elements as JSON args
-                    let args = extract_child_args(block_content);
-                    let arguments = normalize_args(&args);
-
-                    tool_calls.push(ToolCall {
-                        id: format!("xml_tc_{tc_index}"),
-                        call_type: "function".to_string(),
-                        function: FunctionCall {
-                            name: tool_name.to_string(),
-                            arguments,
-                        },
-                    });
-                    tc_index += 1;
-                    remaining = &after_lt[full_xml_len..];
-                    continue 'outer;
-                }
-            }
-        }
-
-        // Not a tool tag — keep scanning
-        cleaned.push_str(&remaining[..tc_start + 1]);
-        remaining = &remaining[tc_start + 1..];
-    }
-
-    cleaned.push_str(remaining);
-    (cleaned.trim().to_string(), tool_calls)
 }
 
-/// Parse a `<tool_use>...</tool_use>` block. Returns (tool_name, args_text, rest).
-fn parse_tool_use_block(s: &str) -> Option<(String, String, &str)> {
-    let prefix = "<tool_use>";
-    let suffix = "</tool_use>";
-    let s = s.strip_prefix(prefix)?;
-    let end = s.find(suffix)?;
-    let block = &s[..end];
-    let rest = &s[end + suffix.len()..];
+// ── Helper: write a tool_result JSON-LP frame to TUI ──
 
-    let n_open = "<tool_name>";
-    let n_close = "</tool_name>";
-    let ns = block.find(n_open)?;
-    let after_ns = &block[ns + n_open.len()..];
-    let ne = after_ns.find(n_close)?;
-    let name = after_ns[..ne].trim().to_string();
-    let args_text = after_ns[ne + n_close.len()..].trim().to_string();
-    Some((name, args_text, rest))
-}
-
-/// Extract child XML elements as JSON key-value pairs.
-fn extract_child_args(xml: &str) -> String {
-    let mut map = serde_json::Map::new();
-    let mut s = xml.trim();
-    while let Some(lt) = s.find('<') {
-        if s[lt..].starts_with("</") || s[lt..].starts_with("<![") {
-            // Skip closing tags and CDATA
-            s = &s[lt + 1..];
-            continue;
-        }
-        if let Some(gt) = s[lt..].find('>') {
-            let tag = &s[lt + 1..lt + gt];
-            let closing = format!("</{tag}>");
-            if let Some(close) = s[lt + gt + 1..].find(&closing) {
-                let value = s[lt + gt + 1..lt + gt + 1 + close].trim();
-                map.insert(tag.to_string(), serde_json::json!(value));
-                s = &s[lt + gt + 1 + close + closing.len()..];
-            } else {
-                s = &s[lt + 1..];
-            }
-        } else {
-            break;
-        }
-    }
-    serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
-}
-
-/// Normalize args: if valid JSON object, keep it; otherwise wrap as {"query": ...}.
-fn normalize_args(args_text: &str) -> String {
-    let trimmed = args_text.trim();
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if v.is_object() {
-            return trimmed.to_string();
-        }
-    }
-    serde_json::json!({"query": trimmed}).to_string()
-}
-
-/// Convert HP tool_calls JSON (flat or nested) to ToolCall vec.
-fn parse_tool_calls(tcs: &serde_json::Value) -> Vec<ToolCall> {
-    let arr = match tcs.as_array() { Some(a) => a, None => return vec![] };
-    arr.iter().filter_map(|tc| {
-        let id = tc.get("id").and_then(|i| i.as_str()).unwrap_or("");
-        // Support both flat {name, arguments} and nested {function: {name, arguments}}
-        let (name, arguments) = if let Some(func) = tc.get("function") {
-            let n = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let a = func.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
-            (n, a)
-        } else {
-            let n = tc.get("name").and_then(|v| v.as_str()).unwrap_or("");
-            let a = tc.get("arguments").and_then(|v| v.as_str()).unwrap_or("{}");
-            (n, a)
-        };
-        if id.is_empty() || name.is_empty() { return None; }
-        Some(ToolCall {
-            id: id.to_string(),
-            call_type: "function".to_string(),
-            function: FunctionCall { name: name.to_string(), arguments: arguments.to_string() },
-        })
-    }).collect()
+fn emit_tool_result(w: &mut impl Write, id: &str, name: &str, content: &str, success: bool) {
+    let frame = serde_json::json!({
+        "type": "tool_result",
+        "id": id,
+        "name": name,
+        "content": content,
+        "success": success,
+    });
+    let _ = writeln!(w, "{}", serde_json::to_string(&frame).unwrap_or_default());
+    let _ = w.flush();
 }
 
 // ── User input handler (fully wired) ──
@@ -305,18 +163,21 @@ fn handle_user_input(
                     .and_then(|s| s.assistant.content.as_ref())
                     .map(|c| c.chars().take(100).collect::<String>())
                     .unwrap_or_default();
-                dsx_proto::write_line(tui_writer, &format!(r#"{{"type":"session_restored","seed":"{}","message_count":{},"summary":"{}"}}"#,
-                    agent.session_seed, msg_count, summary.replace('"', "\\\"").replace('\n', "\\n")));
+                let tokens_used = agent.token_estimate;
+                let cache_hit_pct = agent.cache_hit_pct;
+                dsx_proto::write_line(tui_writer, &format!(
+                    r#"{{"type":"session_restored","seed":"{}","message_count":{},"summary":"{}","tokens_used":{},"cache_hit_pct":{}}}"#,
+                    agent.session_seed, msg_count,
+                    summary.replace('"', "\\\"").replace('\n', "\\n"),
+                    tokens_used, cache_hit_pct,
+                ));
             }
             if agent.auto_mode {
                 let phase = router::detect_initial_phase(text);
                 let level = dsx_types::DebugLevel::Medium;
                 router::set_phase(phase, level);
                 agent.current_task_phase = phase;
-                let pc = router::phase_config(phase, level);
-                agent.config.model = pc.model.to_string();
-                if let Some(e) = pc.effort { agent.config.effort = Some(e.to_string()); }
-                agent.config.max_tokens = pc.max_tokens;
+                apply_phase_config(agent, phase, level);
                 let phase_name = format!("{:?}", phase).to_lowercase();
                 let _ = dsx_proto::write_line(tui_writer, &format!(r#"{{"type":"phase_changed","phase":"{}"}}"#, phase_name));
                 log::info!("auto initial phase: {:?} model={} effort={:?}", phase, agent.config.model, agent.config.effort);
@@ -351,8 +212,7 @@ fn handle_user_input(
     // Live snapshot after user message
     session::save_live_snapshot(
         &agent.session_seed, &agent.ctx.to_vec(),
-        &agent.config.model, agent.config.effort.as_deref(), None, None,
-    );
+        &agent.config.model, agent.config.effort.as_deref(), None);
 
     // ── Tool-calling loop ──
     for _round in 0..agent.max_tool_rounds {
@@ -364,15 +224,17 @@ fn handle_user_input(
 
         // Repair + compact context
         
-        let (system, _anthropic_msgs, breakdown) =
-            crate::assembly::prepare_and_compact(agent);
+        let (system, messages, breakdown) =
+            crate::assembly::build_context(agent);
+
+        // Send cache prediction to TUI
+        let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::CachePrediction { hit_rate: agent.predicted_cache_hit_pct });
 
         // Filter out system-role messages (sent as `system` field above)
-        let flat = agent.ctx.to_vec();
-        let msgs_no_system: Vec<&Message> = flat.iter().filter(|m| m.role != "system").collect();
+        let msgs_no_system: Vec<&Message> = messages.iter().filter(|m| m.role != "system").collect();
         let messages_json = serde_json::to_value(&msgs_no_system).unwrap_or_default();
-        let token_est = tokenizer::estimate_messages_tokens(&flat);
-        log::debug!("turn round={} messages={} tokens={}", _round, agent.ctx.message_count(), token_est);
+        let token_est = tokenizer::estimate_messages_tokens(&messages);
+        log::debug!("turn round={} messages={} tokens={}", _round, messages.len(), token_est);
 
         // Send api_chat to HP
         let chat = AgentToHp::ApiChat {
@@ -454,13 +316,13 @@ fn handle_user_input(
         agent.health.record_api_success(&agent.config.model);
 
         // Parse tool calls (native Anthropic tool_use blocks)
-        let mut parsed: Vec<ToolCall> = parse_tool_calls(&tcs_raw);
+        let mut parsed: Vec<ToolCall> = tool_parser::parse_tool_calls(&tcs_raw);
 
         // DeepSeek v4 outputs <tool_use> XML blocks in text content instead of
         // native Anthropic tool_use blocks. Parse them as fallback.
         if parsed.is_empty() && (content.contains("<tool_use>") || content.contains("<read>") || content.contains("<exec>") || content.contains("<write>") || content.contains("<search>")) {
             let tool_names: Vec<String> = agent.tool_defs.iter().map(|t| t.function.name.clone()).collect();
-            let (cleaned, xml_tcs) = parse_xml_tool_calls(&content, &tool_names);
+            let (cleaned, xml_tcs) = tool_parser::parse_xml_tool_calls(&content, &tool_names);
             content = cleaned;
             parsed = xml_tcs;
         }
@@ -488,10 +350,7 @@ fn handle_user_input(
                             router::set_phase(tp, router::read_debug_level());
                             // Apply phase-specific config
                             let level = dsx_types::DebugLevel::Medium;
-                            let pc = router::phase_config(tp, level);
-                            agent.config.model = pc.model.to_string();
-                            if let Some(e) = pc.effort { agent.config.effort = Some(e.to_string()); }
-                            agent.config.max_tokens = pc.max_tokens;
+                            apply_phase_config(agent, tp, level);
                             let phase_name = format!("{:?}", tp).to_lowercase();
                             let _ = dsx_proto::write_line(tui_writer, &format!(r#"{{"type":"phase_changed","phase":"{}"}}"#, phase_name));
                         }
@@ -517,11 +376,14 @@ fn handle_user_input(
 
                 if !has_tools {
                     // ── Final response ──
+                    let final_reasoning = (!agent.stream_reasoning.is_empty())
+                        .then(|| agent.stream_reasoning.clone())
+                        .or_else(|| reasoning_content.clone());
                     agent.turn_scores.push(turn_scorer::score_current_turn(agent));
                     agent.stream_content.clear();
                     agent.stream_reasoning.clear();
 
-                    agent.extract_reasoning_insights();
+                    // extract_reasoning_insights removed with memory module
                     learning::auto_extract_memory(agent, &assistant_msg);
 
                     agent.health.record_turn(false);
@@ -530,7 +392,7 @@ fn handle_user_input(
 
                     session::save_live_snapshot(
                         &agent.session_seed, &agent.ctx.to_vec(),
-                        &agent.config.model, agent.config.effort.as_deref(), None, None,
+                        &agent.config.model, agent.config.effort.as_deref(), None,
                     );
                     session_persistence::maybe_save_session(agent);
 
@@ -540,7 +402,7 @@ fn handle_user_input(
                         tool_calls: None,
                         stop_reason: None,
                         usage,
-                        reasoning_content: reasoning_content.clone(),
+                        reasoning_content: final_reasoning,
                     };
                     let _ = dsx_proto::write_frame(tui_writer, &tui_resp);
                     return;
@@ -552,7 +414,7 @@ fn handle_user_input(
 
                 session::save_live_snapshot(
                     &agent.session_seed, &agent.ctx.to_vec(),
-                    &agent.config.model, agent.config.effort.as_deref(), None, None,
+                    &agent.config.model, agent.config.effort.as_deref(), None,
                 );
 
                 for tc in &parsed {
@@ -561,12 +423,19 @@ fn handle_user_input(
                     let args = &tc.function.arguments;
 
                     // ── Gates ──
-                    if gates::phase_check_tool(agent, name, id) { continue; }
-                    if gates::explore_gate(agent, name, id, args) { continue; }
+                    if gates::phase_check_tool(agent, name, id) {
+                        emit_tool_result(tui_writer, id, name, "[BLOCKED] Phase gate prevented this tool.", false);
+                        continue;
+                    }
+                    if gates::explore_gate(agent, name, id, args) {
+                        emit_tool_result(tui_writer, id, name, "[BLOCKED] Explore gate prevented this tool.", false);
+                        continue;
+                    }
                     if let Some(err_msg) = gates::pre_tool_health_check(agent, name) {
                         let _ = agent.ctx.push_tool_result(id, &err_msg);
                         agent.health.record_error(name, &err_msg);
                         agent.tool_failures += 1;
+                        emit_tool_result(tui_writer, id, name, &err_msg, false);
                         continue;
                     }
 
@@ -578,7 +447,8 @@ fn handle_user_input(
                         if state == "explore" || state == "chat" {
                             let err = format!("[ERROR] Mode '{state}' no longer exists. Use: plan, coding, debug");
                             let _ = agent.ctx.push_tool_result(id, &err);
-                            agent.tool_results.push((id.to_string(), err));
+                            agent.tool_results.push((id.to_string(), err.clone()));
+                            emit_tool_result(tui_writer, id, name, &err, false);
                             continue;
                         }
                         let tp = match state {
@@ -591,16 +461,14 @@ fn handle_user_input(
                         agent.current_task_phase = tp;
                         router::set_phase(tp, level);
                         if agent.auto_mode {
-                            let pc = router::phase_config(tp, level);
-                            agent.config.model = pc.model.to_string();
-                            agent.config.effort = pc.effort.map(|s| s.to_string());
-                            agent.config.max_tokens = pc.max_tokens;
+                            apply_phase_config(agent, tp, level);
                         }
                         let phase_name = format!("{:?}", tp).to_lowercase();
                         let _ = dsx_proto::write_line(tui_writer, &format!(r#"{{"type":"phase_changed","phase":"{}"}}"#, phase_name));
                         let result = format!("[OK] Switched to {} mode", state);
                         let _ = agent.ctx.push_tool_result(id, &result);
-                        agent.tool_results.push((id.to_string(), result));
+                        agent.tool_results.push((id.to_string(), result.clone()));
+                        emit_tool_result(tui_writer, id, name, &result, true);
                         continue;
                     }
 
@@ -629,6 +497,7 @@ fn handle_user_input(
                         // Add placeholder result to ctx so the model sees it
                         let _ = agent.ctx.push_tool_result(id, "[ASK_USER] Awaiting your response in the Tauri interface.");
                         agent.tool_results.push((id.to_string(), "[ASK_USER] Awaiting your response in the Tauri interface.".to_string()));
+                        emit_tool_result(tui_writer, id, name, "[ASK_USER] Awaiting your response.", false);
                         continue; // Skip calling execute_tool
                     }
 
@@ -639,15 +508,17 @@ fn handle_user_input(
                         // Append a cancelled result so the turn isn't orphaned on session save/restore
                         let cancel_msg = "[CANCELLED] Tool execution cancelled by user.\n[HINT] This tool was not executed.";
                         let _ = agent.ctx.push_tool_result(&tc.id, cancel_msg);
+                        emit_tool_result(tui_writer, id, name, cancel_msg, false);
                         continue;
                     }
 
                     // ── Execute tool via IPC (tools.rs owns the pipe) ──
-                    let tr_content = crate::tools::execute_tool(name, "", args);
+                    let tr_content = crate::tools::execute_tool_with_id(name, "", args, id);
                     // If tools IPC is dead, append this error and stop — don't cascade
                     if tr_content.contains("tools IPC") || tr_content.contains("not initialised") {
                         let mut appender = ToolResultAppender::new(agent);
                         appender.append(name, &tc.id, args, &tr_content);
+                        emit_tool_result(tui_writer, id, name, &tr_content, false);
                         break;
                     }
                     let tr_success = !tr_content.starts_with("[ERROR]") && !tr_content.starts_with("[FAIL]");
@@ -667,6 +538,7 @@ fn handle_user_input(
                         let mut appender = ToolResultAppender::new(agent);
                         appender.append(name, &tc.id, args, &tr_content);
                     }
+                    emit_tool_result(tui_writer, id, name, &tr_content, tr_success);
 
                     // ── Tracker ──
                     tracker::track_tool_code(agent, name, args, &tr_content);
@@ -710,144 +582,273 @@ fn handle_user_input(
                 if agent.tool_failures >= 3 {
                     log::warn!("safety gate: 3 consecutive tool failures");
                     agent.turn_scores.push(turn_scorer::score_current_turn(agent));
-                    agent.ctx.annotate("System", "3 consecutive tool failures. Respond with analysis — do not call more tools.");
-                    agent.ctx.flush_annotations();
+                    agent.turn_annotations.push("[System] 3 consecutive tool failures. Respond with analysis — do not call more tools.".to_string());
                 
                     agent.tool_failures = 0;
                 }
         // Continue loop — next api_chat includes tool results
     }
 
-    // Max rounds reached — do a final no-tools API call so the model can summarise.
-    agent.ctx.annotate("System", &format!("Max tool rounds ({}) reached. Respond with what you have.", agent.max_tool_rounds));
-    agent.ctx.flush_annotations();
+    // ── Post-tool-loop: one more API call to let the model wrap up ──
+    // Even with tools:None, DeepSeek V4 may output DSML tool calls inline.
+    // We parse DSML/XML here so raw markup doesn't appear in the chat,
+    // and if valid tool calls are found, execute them in a mini-loop.
 
+    agent.turn_annotations.push(format!("[System] Max tool rounds ({}) reached. Respond with what you have.", agent.max_tool_rounds));
 
-    // Repair + compact context for the final response
-    
-    let (system, _anthropic_msgs, _breakdown) =
-        crate::assembly::prepare_and_compact(agent);
+    let max_post_rounds = 3u32;
+    for _post_round in 0..max_post_rounds {
+        let (system, messages, _breakdown) =
+            crate::assembly::build_context(agent);
 
-    let flat = agent.ctx.to_vec();
-    let msgs_no_system: Vec<&Message> = flat.iter().filter(|m| m.role != "system").collect();
-    let messages_json = serde_json::to_value(&msgs_no_system).unwrap_or_default();
+        // Send cache prediction to TUI
+        let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::CachePrediction { hit_rate: agent.predicted_cache_hit_pct });
 
-    // Send ONE MORE api_chat WITHOUT tools — the model can only respond in text
-    let chat = AgentToHp::ApiChat {
-        model: agent.config.model.clone(),
-        system: Some(system),
-        messages: messages_json,
-        effort: agent.config.effort.clone(),
-        max_tokens: Some(agent.config.max_tokens),
-        tools: None,
-    };
-    let _ = dsx_proto::write_frame(hp, &chat);
+        let messages_json = serde_json::to_value(&messages).unwrap_or_default();
 
-    // ── Read HP response (streaming loop) ──
-    let mut hp_reader = BufReader::new(&mut *hp);
-    let mut content = String::new();
-    let mut reasoning_content: Option<String> = None;
-    let mut thinking_signature: Option<String> = None;
-    let mut usage: Option<dsx_types::UsageInfo> = None;
+        let chat = AgentToHp::ApiChat {
+            model: agent.config.model.clone(),
+            system: Some(system),
+            messages: messages_json,
+            effort: agent.config.effort.clone(),
+            max_tokens: Some(agent.config.max_tokens),
+            tools: None,
+        };
+        let _ = dsx_proto::write_frame(hp, &chat);
 
-    loop {
-        let hp_resp: HpToAgent = match dsx_proto::read_frame(&mut hp_reader) {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                eprintln!("dsx-agent: HP connection closed (EOF)");
-                agent.health.record_api_error();
-                return;
+        let mut hp_reader = BufReader::new(&mut *hp);
+        let mut content = String::new();
+        let mut reasoning_content: Option<String> = None;
+        let mut thinking_signature: Option<String> = None;
+        let mut usage: Option<dsx_types::UsageInfo> = None;
+        let mut tcs_raw = serde_json::Value::Null;
+
+        loop {
+            let hp_resp: HpToAgent = match dsx_proto::read_frame(&mut hp_reader) {
+                Ok(Some(r)) => r,
+                Ok(None) => {
+                    eprintln!("dsx-agent: HP connection closed (EOF)");
+                    agent.health.record_api_error();
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("dsx-agent: HP parse error: {e}");
+                    agent.health.record_api_error();
+                    return;
+                }
+            };
+
+            match hp_resp {
+                HpToAgent::ContentDelta { delta, reasoning } => {
+                    if agent.stream_cancelled || crate::tools::CANCEL.load(std::sync::atomic::Ordering::SeqCst) { eprintln!("dsx-agent: streaming cancelled"); return; }
+                    let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::ContentDelta {
+                        delta: delta.clone(),
+                        reasoning: reasoning.clone(),
+                    });
+                    if let Some(ref r) = reasoning {
+                        agent.stream_reasoning.push_str(r);
+                    }
+                    agent.stream_content.push_str(&delta);
+                }
+                HpToAgent::ApiResponse {
+                    content: c, tool_calls,
+                    stop_reason: _,
+                    reasoning_content: rc, thinking_signature: ts, usage: u,
+                } => {
+                    content = c;
+                    tcs_raw = tool_calls.unwrap_or(serde_json::Value::Null);
+                    reasoning_content = rc;
+                    thinking_signature = ts;
+                    usage = u;
+                    break;
+                }
+                HpToAgent::Error { message } => {
+                    let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::Error { message: message.clone() });
+                    agent.health.record_api_error();
+                    return;
+                }
+                _ => { /* ignore non-stream frames */ }
             }
-            Err(e) => {
-                eprintln!("dsx-agent: HP parse error: {e}");
-                agent.health.record_api_error();
-                return;
+        }
+
+        agent.health.record_api_success(&agent.config.model);
+
+        // ── Parse DSML/XML tool calls from content ──
+        let mut parsed: Vec<ToolCall> = tool_parser::parse_tool_calls(&tcs_raw);
+        if content.contains("\u{ff5c}DSML\u{ff5c}tool_calls") {
+            let (cleaned, dsml_tcs) = tool_parser::parse_dsml_tool_calls(&content, &agent.tool_defs);
+            content = cleaned;
+            parsed = dsml_tcs;
+        }
+        if parsed.is_empty() && (content.contains("<tool_use>") || content.contains("<read>") || content.contains("<exec>") || content.contains("<write>") || content.contains("<search>")) {
+            let tool_names: Vec<String> = agent.tool_defs.iter().map(|t| t.function.name.clone()).collect();
+            let (cleaned, xml_tcs) = tool_parser::parse_xml_tool_calls(&content, &tool_names);
+            content = cleaned;
+            parsed = xml_tcs;
+        }
+
+        if parsed.is_empty() {
+            // No tool calls → this is the final answer
+            let assistant_msg = Message {
+                role: "assistant".into(),
+                content: if content.is_empty() { None } else { Some(content.clone()) },
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: reasoning_content.clone(),
+                thinking_signature,
+            };
+
+            let msg_for_learning = assistant_msg.clone();
+            if let Err(e) = agent.ctx.push_assistant(assistant_msg) {
+                log::error!("push_assistant failed: {:?} — repairing", e);
+                agent.ctx.push_assistant_restore(msg_for_learning.clone());
             }
+
+            let final_reasoning = (!agent.stream_reasoning.is_empty())
+                .then(|| agent.stream_reasoning.clone())
+                .or_else(|| reasoning_content.clone());
+            agent.turn_scores.push(turn_scorer::score_current_turn(agent));
+            agent.stream_content.clear();
+            agent.stream_reasoning.clear();
+
+            // extract_reasoning_insights removed with memory module
+            learning::auto_extract_memory(agent, &msg_for_learning);
+
+            agent.health.record_turn(false);
+
+            let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::ApiResponse {
+                content,
+                reasoning_content: final_reasoning,
+                tool_calls: None,
+                stop_reason: None,
+                usage,
+            });
+
+            break; // exit post-tool-loop
+        }
+
+        // ── DSML/XML tool calls found — execute them ──
+        // Do NOT send ApiResponse here — tools are still running.
+        // The TUI already sees streaming content via ContentDelta frames.
+        // ApiResponse is sent only when the model returns no more tools.
+
+        let assistant_msg = Message {
+            role: "assistant".into(),
+            content: if content.is_empty() && !parsed.is_empty() { None } else { Some(content.clone()) },
+            name: None,
+            tool_calls: Some(parsed.clone()),
+            tool_call_id: None,
+            reasoning_content: reasoning_content.clone(),
+            thinking_signature,
         };
 
+        let msg_for_learning = assistant_msg.clone();
+        if let Err(e) = agent.ctx.push_assistant(assistant_msg) {
+            log::error!("push_assistant failed: {:?} — repairing", e);
+            agent.ctx.push_assistant_restore(msg_for_learning.clone());
+        }
 
-        match hp_resp {
-            HpToAgent::ContentDelta { delta, reasoning } => {
-                    if agent.stream_cancelled || crate::tools::CANCEL.load(std::sync::atomic::Ordering::SeqCst) { eprintln!("dsx-agent: streaming cancelled"); return; }
-                let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::ContentDelta {
-                    delta: delta.clone(),
-                    reasoning: reasoning.clone(),
-                });
-                if let Some(ref r) = reasoning {
-                    agent.stream_reasoning.push_str(r);
-                }
-                agent.stream_content.push_str(&delta);
+        // Execute tools (same pattern as main loop)
+        for tc in &parsed {
+            let name = &tc.function.name;
+            let id = &tc.id;
+            let args = &tc.function.arguments;
+
+            if gates::phase_check_tool(agent, name, id) {
+                emit_tool_result(tui_writer, id, name, "[BLOCKED] Phase gate prevented this tool.", false);
+                continue;
             }
-            HpToAgent::ApiResponse {
-                content: c, tool_calls: _,
-                stop_reason: _,
-                reasoning_content: rc, thinking_signature: ts, usage: u,
-            } => {
-                content = c;
-                reasoning_content = rc;
-                thinking_signature = ts;
-                usage = u;
+            if gates::explore_gate(agent, name, id, args) {
+                emit_tool_result(tui_writer, id, name, "[BLOCKED] Explore gate prevented this tool.", false);
+                continue;
+            }
+            if let Some(err_msg) = gates::pre_tool_health_check(agent, name) {
+                let _ = agent.ctx.push_tool_result(id, &err_msg);
+                agent.health.record_error(name, &err_msg);
+                agent.tool_failures += 1;
+                emit_tool_result(tui_writer, id, name, &err_msg, false);
+                continue;
+            }
+
+            if name == "status" {
+                let args_val: serde_json::Value = serde_json::from_str(args).unwrap_or_default();
+                let state = args_val.get("state").and_then(|v| v.as_str()).unwrap_or("coding");
+                if state == "explore" || state == "chat" {
+                    let err = format!("[ERROR] Mode '{state}' no longer exists. Use: plan, coding, debug");
+                    let _ = agent.ctx.push_tool_result(id, &err);
+                    agent.tool_results.push((id.to_string(), err.clone()));
+                    emit_tool_result(tui_writer, id, name, &err, false);
+                    continue;
+                }
+                let tp = match state { "plan" => dsx_types::TaskPhase::Plan, "coding" => dsx_types::TaskPhase::Coding, "debug" => dsx_types::TaskPhase::Debug, _ => dsx_types::TaskPhase::Coding };
+                let level = dsx_types::DebugLevel::Medium;
+                agent.current_task_phase = tp;
+                router::set_phase(tp, level);
+                if agent.auto_mode {
+                    apply_phase_config(agent, tp, level);
+                }
+                let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::PhaseChanged { phase: format!("{:?}", tp).to_lowercase() });
+                let result = format!("[OK] Switched to {} mode", state);
+                let _ = agent.ctx.push_tool_result(id, &result);
+                agent.tool_results.push((id.to_string(), result.clone()));
+                emit_tool_result(tui_writer, id, name, &result, true);
+                continue;
+            }
+
+            if name == "ask_user" || name == "ask" {
+                let _ = agent.ctx.push_tool_result(id, "[ASK_USER] Awaiting your response in the Tauri interface.");
+                emit_tool_result(tui_writer, id, name, "[ASK_USER] Awaiting your response.", false);
+                continue;
+            }
+
+            if crate::tools::CANCEL.load(std::sync::atomic::Ordering::SeqCst) {
+                crate::tools::CANCEL.store(false, std::sync::atomic::Ordering::SeqCst);
+                let cancel_msg = "[CANCELLED] Tool execution cancelled by user.";
+                let _ = agent.ctx.push_tool_result(&tc.id, cancel_msg);
+                emit_tool_result(tui_writer, id, name, cancel_msg, false);
+                continue;
+            }
+
+            let tr_content = crate::tools::execute_tool_with_id(name, "", args, id);
+            if tr_content.contains("tools IPC") || tr_content.contains("not initialised") {
+                let mut appender = ToolResultAppender::new(agent);
+                appender.append(name, &tc.id, args, &tr_content);
+                emit_tool_result(tui_writer, id, name, &tr_content, false);
                 break;
             }
-            HpToAgent::Error { message } => {
-                let _ = dsx_proto::write_frame(tui_writer, &AgentToTui::Error { message: message.clone() });
-                agent.health.record_api_error();
-                return;
+            let tr_success = !tr_content.starts_with("[ERROR]") && !tr_content.starts_with("[FAIL]");
+            let failed = !tr_success;
+
+            agent.health.record_tool_call(name);
+            agent.monitor.tool_calls_this_turn += 1;
+            if failed {
+                agent.tool_failures += 1;
+                agent.health.record_error(name, &tr_content);
             }
-            _ => { /* ignore non-stream frames */ }
+            gates::post_tool_health_record(agent, name, !failed);
+
+            {
+                let mut appender = ToolResultAppender::new(agent);
+                appender.append(name, &tc.id, args, &tr_content);
+            }
+            emit_tool_result(tui_writer, id, name, &tr_content, tr_success);
+
+            tracker::track_tool_code(agent, name, args, &tr_content);
         }
+
+        // Loop back for another post-round (with updated context)
     }
 
-    agent.health.record_api_success(&agent.config.model);
-
-    // Build assistant message and push to context
-    let assistant_msg = Message {
-        role: "assistant".into(),
-        content: if content.is_empty() { None } else { Some(content.clone()) },
-        name: None,
-        tool_calls: None,
-        tool_call_id: None,
-        reasoning_content: reasoning_content.clone(),
-        thinking_signature,
-    };
-
-    // Clone before push in case we need it for restore + learning
-    let msg_for_learning = assistant_msg.clone();
-    if let Err(e) = agent.ctx.push_assistant(assistant_msg) {
-        log::error!("push_assistant failed: {:?} — repairing", e);
-                agent.ctx.push_assistant_restore(msg_for_learning.clone());
-    }
-
-
-    // Turn scoring, health, session save
-    agent.turn_scores.push(turn_scorer::score_current_turn(agent));
-    agent.stream_content.clear();
-    agent.stream_reasoning.clear();
-
-    agent.extract_reasoning_insights();
-    learning::auto_extract_memory(agent, &msg_for_learning);
-
-    agent.health.record_turn(false);
+    // End of post-tool-loop — finalize turn
     agent.health_status_line = health_status(agent);
     agent.health.reset_turn();
 
     session::save_live_snapshot(
         &agent.session_seed, &agent.ctx.to_vec(),
-        &agent.config.model, agent.config.effort.as_deref(), None, None,
-    );
+        &agent.config.model, agent.config.effort.as_deref(), None);
     session_persistence::maybe_save_session(agent);
-
-    // Send final ApiResponse to TUI (no tool_calls)
-    let tui_resp = AgentToTui::ApiResponse {
-        content,
-        reasoning_content: reasoning_content.clone(),
-        tool_calls: None,
-        stop_reason: None,
-        usage,
-    };
-    let _ = dsx_proto::write_frame(tui_writer, &tui_resp);
 }
-
 // ── Tools subprocess management ──
 
 /// Spawn the dsx-tools subprocess with piped stdin/stdout.
@@ -919,8 +920,7 @@ fn respawn_tools(child: &mut Option<std::process::Child>) -> bool {
 
 /// Try to (re)connect to HP daemon. If port file is stale, spawn a new HP.
 fn try_reconnect_hp() -> Option<std::net::TcpStream> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let port_path = std::path::PathBuf::from(&home).join(".dsx").join("hp.port");
+    let port_path = dsx_types::platform::hp_port_path();
 
     let port = std::fs::read_to_string(&port_path).ok()
         .and_then(|s| s.trim().parse::<u16>().ok());
@@ -1054,14 +1054,17 @@ pub fn run() {
                         eprintln!("dsx-agent: tools respawn FAILED");
                     }
                 }
-                // Process input — if HP fails, try reconnect once
+                // Process input — if HP not connected or fails, try reconnect once
                 let hp_failed = if let Some(ref mut hp) = hp_conn {
                     let hp_read = hp.get_mut();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
                         || handle_user_input(&mut agent, &text, hp_read, &mut tui_writer, &mut tui_reader)
                     ));
                     result.is_err()
-                } else { false };
+                } else {
+                    // HP was never connected — try reconnect now
+                    true
+                };
 
                 if hp_failed {
                     eprintln!("dsx-agent: HP failed, reconnecting...");
@@ -1109,8 +1112,8 @@ pub fn run() {
                 let _ = dsx_proto::write_line(&mut tui_writer, &format!(r#"{{"type":"phase_changed","phase":"{}"}}"#, phase));
             }
 
-            TuiToAgent::ToolConfirm { id, approved } => {
-                crate::tools::handle_tool_confirm(id, approved);
+            TuiToAgent::ToolConfirm { .. } => {
+                // Confirm flow removed — all tools auto-pass
             }
 
             TuiToAgent::Cancel => {
@@ -1125,6 +1128,8 @@ pub fn run() {
                 let _ = dsx_proto::write_frame(&mut tui_writer, &AgentToTui::ShutdownAck);
                 break;
             }
+
+            _ => {} // Future variants — silently ignored
         }
     }
 

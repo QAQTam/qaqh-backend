@@ -1,7 +1,6 @@
-//! Command execution: sync, async, sudo, PTY support.
+//! Command execution: sync, async, sudo support.
 //!
 //! 保留旧函数（exec_command, exec_with_sudo, spawn_exec_async 等）供向后兼容。
-//! 新增 handler 函数（handle_run, handle_sudo_run, handle_pty）适配新 IPC 框架。
 //! 安全检测逻辑已移至 safety.rs。
 
 use std::process::Command;
@@ -63,16 +62,12 @@ pub fn exec_command(args: &str) -> String {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let output = loop {
         if crate::CANCEL.load(Ordering::SeqCst) {
-            let _ = std::process::Command::new("kill").args([&pid.to_string()]).output();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+            dsx_types::platform::kill_process(pid);
             return "[CANCELLED] Command execution cancelled by user.".into();
         }
         let remaining = deadline.checked_duration_since(std::time::Instant::now()).unwrap_or_default();
         if remaining.is_zero() {
-            let _ = std::process::Command::new("kill").args([&pid.to_string()]).output();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+            dsx_types::platform::kill_process(pid);
             return format!("[ERROR] exec timed out after {}s\n[HINT] Increase timeout_secs or check if the command is stuck.", timeout_secs);
         }
         let poll = remaining.min(std::time::Duration::from_secs(1));
@@ -383,93 +378,6 @@ pub fn spawn_exec_async_with_sudo(
     });
 }
 
-pub fn spawn_exec_pty(
-    tool_call_id: &str,
-    args: &str,
-    tx: tokio::sync::mpsc::Sender<crate::stubs::StreamEvent>,
-) {
-    let command = parse_arg(args, "command");
-    let cwd = parse_opt(args, "cwd");
-    let timeout_secs = parse_opt_u64(args, "timeout_secs")
-        .filter(|&n| n > 0 && n <= 3600)
-        .unwrap_or(300);
-    let id = tool_call_id.to_string();
-
-    if command.contains("sudo ") {
-        return spawn_exec_async(tool_call_id, args, tx);
-    }
-
-    tokio::spawn(async move {
-        let (mut pty, pts) = match pty_process::open() {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = tx.send(crate::stubs::StreamEvent::ExecDone(
-                    id, format!("[ERROR] PTY unavailable: {}", e),
-                )).await;
-                return;
-            }
-        };
-        let _ = pty.resize(pty_process::Size::new(24, 80));
-
-        let mut pty_cmd = pty_process::Command::new(shell());
-        pty_cmd = pty_cmd.args(["-c", &command]);
-        if let Some(ref dir) = cwd {
-            pty_cmd = pty_cmd.current_dir(dir);
-        }
-
-        let mut child = match pty_cmd.spawn(pts) {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = tx.send(crate::stubs::StreamEvent::ExecDone(
-                    id, format!("[ERROR] Failed to spawn on PTY: {}", e),
-                )).await;
-                return;
-            }
-        };
-        if let Some(pid) = child.id() {
-            let _ = tx.send(crate::stubs::StreamEvent::ExecStarted(id.clone(), pid)).await;
-        }
-
-        use tokio::io::AsyncReadExt;
-        let mut buf = [0u8; 8192];
-        let mut output_buf = String::new();
-
-        let read_future = async {
-            loop {
-                match pty.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                        output_buf.push_str(&chunk);
-                        let _ = tx.send(crate::stubs::StreamEvent::ExecProgress(chunk.to_string())).await;
-                    }
-                    Err(_) => break,
-                }
-            }
-        };
-
-        tokio::select! {
-            _ = read_future => {}
-            _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs)) => {
-                let _ = tx.send(crate::stubs::StreamEvent::ExecDone(
-                    id,
-                    format!("[ERROR] exec timed out after {}s\n[HINT] Increase timeout_secs or check if the command is stuck.", timeout_secs),
-                )).await;
-                return;
-            }
-        }
-
-        let exit_code = child.wait().await
-            .map(|s| s.code().unwrap_or(-1))
-            .unwrap_or(-1);
-        let status_label = if exit_code == 0 { "OK" } else { "FAIL" };
-        let _ = tx.send(crate::stubs::StreamEvent::ExecDone(
-            id,
-            format!("[{}] exec: {} (exit {})\n{}", status_label, command, exit_code, output_buf.trim()),
-        )).await;
-    });
-}
-
 // ── Handler 函数（新 IPC 框架）──
 
 pub fn handle_run(ctx: ToolCallCtx) -> ToolResult {
@@ -537,16 +445,12 @@ pub fn handle_sudo_run(ctx: ToolCallCtx) -> ToolResult {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     let output = loop {
         if crate::CANCEL.load(Ordering::SeqCst) {
-            let _ = std::process::Command::new("kill").args([&pid.to_string()]).output();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+            dsx_types::platform::kill_process(pid);
             return ToolResult::err("sudo command cancelled by user");
         }
         let remaining = deadline.checked_duration_since(std::time::Instant::now()).unwrap_or_default();
         if remaining.is_zero() {
-            let _ = std::process::Command::new("kill").args([&pid.to_string()]).output();
-            std::thread::sleep(std::time::Duration::from_millis(200));
-            let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+            dsx_types::platform::kill_process(pid);
             return ToolResult::err(&format!("sudo timed out after {}s", timeout_secs));
         }
         let poll = remaining.min(std::time::Duration::from_secs(1));
@@ -607,94 +511,6 @@ fn extract_json_field(json: &str, field: &str) -> Option<String> {
         }
     }
     Some(val)
-}
-
-pub fn handle_pty(ctx: ToolCallCtx) -> ToolResult {
-    let command = ctx.get_str("command").unwrap_or("").to_string();
-    let cwd = ctx.get_str("cwd").map(|s| s.to_string());
-    let timeout_secs = ctx.get_u64("timeout_secs")
-        .filter(|&n| n > 0 && n <= 3600)
-        .unwrap_or(300);
-
-    if command.trim().is_empty() {
-        return ToolResult::err("pty: empty command");
-    }
-
-    // Try PTY, fall back to sync exec if unavailable
-    match sync_pty_exec(&command, cwd.as_deref(), timeout_secs) {
-        Ok(result) => return result,
-        Err(_) => { /* fall through to exec_command */ }
-    }
-
-    let args = serde_json::json!({
-        "command": command,
-        "cwd": cwd,
-        "timeout_secs": timeout_secs,
-    });
-    let result = exec_command(&args.to_string());
-    let success = result.starts_with("[OK]");
-    ToolResult { success, content: result }
-}
-
-/// Synchronous PTY execution with cancel checking.
-/// Returns Err(()) if PTY is unavailable.
-fn sync_pty_exec(command: &str, cwd: Option<&str>, timeout_secs: u64) -> Result<ToolResult, ()> {
-    // Use a one-shot tokio runtime for async PTY I/O (pty-process 0.5 only has async traits)
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_io()
-        .build()
-        .map_err(|_| ())?;
-
-    rt.block_on(async {
-        use tokio::io::AsyncReadExt;
-        let (mut pty, pts) = pty_process::open().map_err(|_| ())?;
-        let _ = pty.resize(pty_process::Size::new(24, 80));
-
-        let mut cmd = pty_process::Command::new(shell()).args(["-c", command]);
-        if let Some(dir) = cwd { cmd = cmd.current_dir(dir); }
-
-        let mut child = cmd.spawn(pts).map_err(|_| ())?;
-        let pid = child.id().unwrap_or(0);
-
-        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
-        tokio::spawn(async move {
-            let mut buf = [0u8; 8192];
-            let mut output = Vec::new();
-            loop {
-                match pty.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => output.extend_from_slice(&buf[..n]),
-                    Err(_) => break,
-                }
-            }
-            let _ = tx.send(output);
-        });
-
-        // Poll with cancel checking (1s intervals)
-        use std::sync::atomic::Ordering;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-        let output = loop {
-            if crate::CANCEL.load(Ordering::SeqCst) {
-                let _ = std::process::Command::new("kill").args([&pid.to_string()]).output();
-                return Err(());
-            }
-            let remaining = deadline.checked_duration_since(std::time::Instant::now()).unwrap_or_default();
-            if remaining.is_zero() {
-                let _ = std::process::Command::new("kill").args([&pid.to_string()]).output();
-                return Ok(ToolResult::err(&format!("pty timed out after {}s", timeout_secs)));
-            }
-            let poll = remaining.min(std::time::Duration::from_secs(1));
-            match rx.recv_timeout(poll) {
-                Ok(output) => break output,
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                Err(_) => return Ok(ToolResult::err("pty read failed")),
-            }
-        };
-
-        let _ = child.wait();
-        let text = String::from_utf8_lossy(&output);
-        Ok(ToolResult::ok(format!("[OK] pty: {}\n{}", command, text.trim())))
-    })
 }
 
 // ── 辅助函数 ──
@@ -822,26 +638,8 @@ pub fn register(mgr: &mut crate::ToolManager) {
             "additionalProperties": false
         }),
         handler: handle_sudo_run,
-        safety: |_| SafetyVerdict::confirm("sudo_exec"),
+        safety: |_| SafetyVerdict::Allow,
         default_timeout: Duration::from_secs(300),
     });
 
-    // exec/pty
-    mgr.register(ToolHandler {
-        key: ToolKey::new("exec", "pty"),
-        description: "Execute a command in a PTY (pseudo-terminal) for interactive programs.",
-        input_schema: serde_json::json!({
-            "type": "object",
-            "properties": {
-                "command": {"type": "string"},
-                "cwd": {"type": "string"},
-                "timeout_secs": {"type": "integer"}
-            },
-            "required": ["command"],
-            "additionalProperties": false
-        }),
-        handler: handle_pty,
-        safety: |_| SafetyVerdict::confirm("pty_exec"),
-        default_timeout: Duration::from_secs(300),
-    });
 }

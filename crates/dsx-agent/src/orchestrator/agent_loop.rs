@@ -66,7 +66,11 @@ pub fn handle_start_agent_loop(state: &mut AgentState, stream_tx: mpsc::Sender<S
     let uid = state.session_seed.clone();
 
     // ── Build context (returns OpenAI-format messages) ──
-    let (mut system, messages, _breakdown) = crate::assembly::prepare_and_compact(state);
+    let (system, messages, _breakdown) = crate::assembly::build_context(state);
+    debug_assert!(
+        crate::health::gate::validate_anthropic_messages(&messages).is_ok(),
+        "prepare_and_compact produced invalid message sequence — would cause API 400",
+    );
     log::debug!("handle_start_agent_loop auto_mode={}", state.auto_mode);
 
     // Auto mode: override model/effort/tools/max_tokens based on AI-declared phase
@@ -76,30 +80,21 @@ pub fn handle_start_agent_loop(state: &mut AgentState, stream_tx: mpsc::Sender<S
         state.current_task_phase = phase;
         let pc = crate::router::phase_config(phase, level);
 
-        // Check for user-configured phase overrides
+        // User-configured phase overrides take precedence over hardcoded defaults
         let phase_name = format!("{:?}", phase).to_lowercase();
-        if let Some(user_pc) = state.config.phase_configs.get(&phase_name) {
-            state.config.model = user_pc.model.clone();
+        let (model, effort, max_tokens) = if let Some(user_pc) = state.config.phase_configs.get(&phase_name) {
             state.config.context_limit = user_pc.context_limit;
-            state.config.max_tokens = user_pc.max_tokens;
-            if user_pc.effort.is_some() { state.config.effort = user_pc.effort.clone(); }
-        }
-
-        // Inject phase prompt suffix into the system string
-        if let Some(suffix) = crate::router::phase_prompt_suffix(phase, &state.config.prompt_lang) {
-            system.push('\n');
-            system.push_str(suffix);
-        }
-
-        let model = pc.model.to_string();
-        let effort = pc.effort.map(|s| s.to_string());
+            (user_pc.model.clone(), user_pc.effort.clone().filter(|e| !e.is_empty()), user_pc.max_tokens)
+        } else {
+            (pc.model.to_string(), pc.effort.map(|s| s.to_string()), pc.max_tokens)
+        };
         // Sync to config for top bar display (don't persist — auto-only)
         state.config.model = model.clone();
         state.config.effort = effort.clone();
+        state.config.max_tokens = max_tokens;
         let tools = Some(tools::tools_for_phase(phase));
-        let max_tokens = pc.max_tokens;
         log::info!("auto mode: {:?} {} {} {}K", phase, model, effort.as_deref().unwrap_or("?"), max_tokens / 1000);
-        (model, effort, tools, max_tokens)
+        (model, effort.clone(), tools, max_tokens)
     } else {
         let model = state.config.model.clone();
         let effort = state.config.effort.as_deref().map(|s| s.to_string());
@@ -143,9 +138,48 @@ pub fn handle_send_message(state: &mut AgentState, input: &str, tx: mpsc::Sender
     log::info!("user: {} ({} chars)", input.chars().take(80).collect::<String>(), input.len());
 
     if config::is_command(input) {
-        // Slash commands are handled by the TUI side in the new architecture.
-        // The TUI intercepts them before calling agent_loop.
-        log::warn!("handle_send_message: slash command slipped through — ignoring");
+        let result = match input.trim().split(' ').next().unwrap_or(input.trim()) {
+            "/model" => config::handle_model_command(input, &mut state.config),
+            "/effort" => config::handle_effort_command(input, &mut state.config),
+            "/lang" | "/prompt" => config::handle_lang_command(input, &mut state.config),
+            "/profile" => config::handle_profile_command(input, &mut state.config),
+            "/reset" => config::handle_reset_command(input, &mut state.config),
+            "/re-config" => config::handle_reconfig_command(input, &mut state.config),
+            "/fix" => {
+                state.health.has_orphan_tool_uses = false;
+                let removed = state.ctx.remove_last_step_if_incomplete();
+                let mut repairs: Vec<String> = Vec::new();
+                if removed { repairs.push("removed incomplete step".into()); }
+                if let Err(e) = state.ctx.validate() { repairs.push(e); }
+                state.tool_failures = 0;
+                state.tool_calls_this_turn = 0;
+                Some(if repairs.is_empty() { "Context OK — no repair needed.".into() }
+                    else { format!("Context repaired: {}", repairs.join("; ")) })
+            }
+            "/clear" => {
+                state.ctx = crate::assembly::ContextAssembler::new();
+                Some("Conversation cleared.".into())
+            }
+            "/tools" => {
+                state.tools_enabled = !state.tools_enabled;
+                Some(format!("Tools: {}", if state.tools_enabled { "enabled" } else { "disabled" }))
+            }
+            "/auto" => {
+                state.config.auto_mode = !state.config.auto_mode;
+                state.auto_mode = state.config.auto_mode;
+                crate::tools::AUTO_MODE.store(state.auto_mode, std::sync::atomic::Ordering::Relaxed);
+                state.config.save();
+                Some(format!("Auto mode: {}", if state.auto_mode { "on" } else { "off" }))
+            }
+            "/dev" => {
+                state.dev_mode = !state.dev_mode;
+                Some(format!("Dev mode: {}", if state.dev_mode { "on" } else { "off" }))
+            }
+            _ => Some(format!("Unknown command: '{}'", input.trim())),
+        };
+        if let Some(msg) = result {
+            let _ = tx.blocking_send(StreamEvent::ContentDelta(msg));
+        }
         return;
     }
 
@@ -154,7 +188,7 @@ pub fn handle_send_message(state: &mut AgentState, input: &str, tx: mpsc::Sender
         state.session_seed = session::generate_seed();
         crate::dsc_log::set_session(&state.session_seed);
         crate::tools::set_current_session(&state.session_seed);
-        state.short_mem = crate::memory::ShortTermMemory::new(&state.session_seed, &state.config.model);
+
         state.session_start = session::now_epoch();
         // Auto mode: detect initial phase from first user message
         if state.auto_mode {
@@ -165,7 +199,6 @@ pub fn handle_send_message(state: &mut AgentState, input: &str, tx: mpsc::Sender
         session::save_live_snapshot(
             &state.session_seed, &state.ctx.to_vec(),
             &state.config.model, state.config.effort.as_deref(), None,
-            None,
         );
     }
 

@@ -1,9 +1,10 @@
 [package]
 name = "dsx"
-version = "4.0.0-alpha1"
+version = "4.0.0"
 edition = "2021"
 
 [dependencies]
+dsx-types = { path = "../dsx-types" }
 dsx-hp = { path = "../dsx-hp" }
 dsx-agent = { path = "../dsx-agent" }
 dsx-tools = { path = "../dsx-tools" }

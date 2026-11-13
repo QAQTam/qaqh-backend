@@ -9,9 +9,17 @@ pub fn find_live_sessions() -> Vec<SessionMeta> {
     let mut metas = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !fname.ends_with(".live.json") { continue; }
-        if let Ok(data) = std::fs::read_to_string(&path) {
+        // Old format: sessions/{seed}.live.json
+        // New format: sessions/{seed}-{date}/session.live.json
+        let live_path = if path.is_dir() {
+            path.join("session.live.json")
+        } else if path.extension().map(|e| e == "json").unwrap_or(false) && path.file_name().and_then(|n| n.to_str()).map_or(false, |n| n.ends_with(".live.json")) {
+            path
+        } else {
+            continue;
+        };
+        if !live_path.exists() { continue; }
+        if let Ok(data) = std::fs::read_to_string(&live_path) {
             if let Ok(file) = serde_json::from_str::<SessionFile>(&data) {
                 let is_live = file.stream_state.is_some();
                 metas.push(SessionMeta {

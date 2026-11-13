@@ -9,8 +9,7 @@ use super::web;
 use super::file;
 use super::task;
 use super::plan;
-use super::memory;
-use super::status;
+
 
 /// 构造并注册全部工具 handler，返回初始化后的 ToolManager。
 pub fn build_tool_manager() -> ToolManager {
@@ -24,11 +23,10 @@ pub fn build_tool_manager() -> ToolManager {
     // ── Team D02: 文件操作 ──
     file::register(&mut mgr);
 
-    // ── Team D03: 任务/计划/记忆/状态 ──
+    // ── Team D03: 任务/计划 ──
     task::register(&mut mgr);
     plan::register(&mut mgr);
-    memory::register(&mut mgr);
-    status::register(&mut mgr);
+
 
     mgr
 }

@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "DSX",
-  "version": "4.0.0-alpha1",
+  "version": "4.0.0",
   "identifier": "com.dsx.app",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "cargo build -p dsx && pnpm dev",
+    "beforeBuildCommand": "cargo build --release -p dsx && pnpm build"
   },
   "app": {
     "windows": [
@@ -34,6 +34,9 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "resources": {
+      "resources/dsx.exe": "dsx.exe"
+    }
   }
 }

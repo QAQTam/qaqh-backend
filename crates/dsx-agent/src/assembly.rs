@@ -3,13 +3,6 @@ use crate::tokenizer;
 use crate::tokenizer::TokenBreakdown;
 use dsx_types::Message;
 
-/// CompactLevel: simplified — only None and L1 (output truncation).
-#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
-pub enum CompactLevel {
-    None = 0,
-    L1 = 1,
-}
-
 /// Errors the assembler can surface when invariants would be violated.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssemblerError {
@@ -67,23 +60,26 @@ impl Step {
             .collect()
     }
 
-    fn has_pending_tools(&self) -> bool {
-        self.assistant.tool_calls.as_ref()
-            .map(|tcs| !tcs.is_empty())
-            .unwrap_or(false)
-    }
 }
 
 /// A single conversation turn: one user message + a chain of assistant steps.
 #[derive(Debug, Clone)]
 pub(crate) struct Turn {
     pub(crate) user: Message,
+    /// Accumulated annotations for this turn (tagged notes like [health] ...).
+    /// Rendered as part of the trailing context note in prepare_and_compact
+    /// so they never mutate the stored user message.
+    pub(crate) annotations: Vec<String>,
     pub(crate) steps: Vec<Step>,
 }
 
 impl Turn {
     fn new(user: Message) -> Self {
-        Self { user, steps: Vec::new() }
+        Self {
+            user,
+            annotations: Vec::new(),
+            steps: Vec::new(),
+        }
     }
 
     /// The current step (last in the chain).
@@ -105,11 +101,6 @@ impl Turn {
         self.steps.iter().map(|s| s.missing_tool_count()).sum()
     }
 
-    /// Find a step that owns a specific tool_call_id.
-    fn find_step_for(&self, tool_call_id: &str) -> Option<&Step> {
-        self.steps.iter().find(|s| s.has_tool_call(tool_call_id))
-    }
-
     fn find_step_for_mut(&mut self, tool_call_id: &str) -> Option<&mut Step> {
         self.steps.iter_mut().find(|s| s.has_tool_call(tool_call_id))
     }
@@ -125,7 +116,6 @@ impl Turn {
 pub struct ContextAssembler {
     system_messages: Vec<Message>,
     turns: Vec<Turn>,
-    pending_annotations: Vec<String>,
     dirty: bool,
 }
 
@@ -136,7 +126,6 @@ impl ContextAssembler {
         Self {
             system_messages: Vec::new(),
             turns: Vec::new(),
-            pending_annotations: Vec::new(),
             dirty: false,
         }
     }
@@ -271,31 +260,23 @@ impl ContextAssembler {
 
     // ── Annotations ──
 
+    /// Record a per-turn annotation. Stored on the current turn and rendered in the
+    /// trailing context note during prepare_and_compact(). Does NOT mutate user messages.
+    /// If no turn exists yet, the annotation is silently dropped.
     pub fn annotate(&mut self, tag: &str, msg: &str) {
-        self.pending_annotations.push(format!("[{}] {}", tag, msg));
+        if let Some(turn) = self.turns.last_mut() {
+            turn.annotations.push(format!("[{}] {}", tag, msg));
+            self.dirty = true;
+        }
     }
 
-    pub fn flush_annotations(&mut self) {
-        if self.pending_annotations.is_empty() { return; }
-        let block = self.pending_annotations.join("\n");
-        self.pending_annotations.clear();
-        let text = format!("\n\n[System Notes]\n{}", block);
+    /// No-op — annotations are read from the Turn and rendered in the trailing
+    /// context note during prepare_and_compact().
+    pub fn flush_annotations(&mut self) {}
 
-        // Append to last assistant's content, or last user if no assistant
-        if let Some(turn) = self.turns.last_mut() {
-            if let Some(step) = turn.steps.last_mut() {
-                step.assistant.content = match step.assistant.content.take() {
-                    Some(mut c) => { c.push_str(&text); Some(c) }
-                    None => Some(text),
-                };
-            } else {
-                turn.user.content = match turn.user.content.take() {
-                    Some(mut c) => { c.push_str(&text); Some(c) }
-                    None => Some(text),
-                };
-            }
-        }
-        self.dirty = true;
+    /// Returns true if the current turn has any annotations.
+    pub fn has_pending_annotations(&self) -> bool {
+        self.turns.last().map_or(false, |t| !t.annotations.is_empty())
     }
 
     // ── Validation ──
@@ -527,52 +508,13 @@ impl ContextAssembler {
         }
     }
 
-    // ── Build: layered context assembly ──
+    // ── Build: conversation messages with truncation ──
 
-    /// Build the final Anthropic-formatted output with token tracking.
-    /// Layer order: 0=system_prompt, 1=long_mem, 2=semantic, 3=episodic (compacted L1).
-    pub fn build(&self, system_prompt: &str, long_mem_block: &str, semantic_block: &str, _context_limit: u32) -> (String, Vec<Message>, TokenBreakdown) {
-        let mut bd = TokenBreakdown::default();
-        bd.system = tokenizer::count_tokens(system_prompt);
-        bd.long_mem = if long_mem_block.is_empty() { 0 } else { tokenizer::count_tokens(long_mem_block) };
-        bd.semantic = if semantic_block.is_empty() { 0 } else { tokenizer::count_tokens(semantic_block) };
-        let mut episodic_msgs = self.to_openai_messages();
-        episodic_msgs.retain(|m| m.role != "system");
-        let _episodic_tokens = estimate_message_tokens(&episodic_msgs);
-        if !episodic_msgs.is_empty() {
-            apply_l1_truncation(&mut episodic_msgs);
-        }
-        bd.episodic = estimate_message_tokens(&episodic_msgs);
-        let mut system_parts: Vec<&str> = Vec::with_capacity(4);
-        if !system_prompt.is_empty() { system_parts.push(system_prompt); }
-        if !long_mem_block.is_empty() { system_parts.push(long_mem_block); }
-        if !semantic_block.is_empty() { system_parts.push(semantic_block); }
-        let system = system_parts.join("\n\n");
-        bd.total = bd.system + bd.long_mem + bd.semantic + bd.episodic;
-        (system, episodic_msgs, bd)
-    }
-}
-
-/// Apply L1 truncation to OpenAI-format messages (truncate long "tool" role outputs).
-fn apply_l1_truncation(msgs: &mut [Message]) {
-    for msg in msgs.iter_mut() {
-        if msg.role != "tool" { continue; }
-        if let Some(ref mut content) = msg.content {
-            let line_count = content.lines().count();
-            if line_count > 100 {
-                let lines: Vec<&str> = content.lines().collect();
-                let head = lines[..50].join("\n");
-                let tail = lines[lines.len().saturating_sub(50)..].join("\n");
-                *content = format!("{}\n... ({} lines trimmed) ...\n{}", head, line_count - 100, tail);
-            }
-            if content.len() > 15000 {
-                let head_end = char_boundary(content, 5000);
-                let tail_start = char_boundary(content, content.len().saturating_sub(2000));
-                let head = content[..head_end].to_string();
-                let tail = content[tail_start..].to_string();
-                *content = format!("{}\n\n... ({} chars trimmed) ...\n\n{}", head, content.len() - 7000, tail);
-            }
-        }
+    /// Return conversation messages (user/assistant/tool), system messages stripped.
+    pub fn build(&self, _context_limit: u32) -> Vec<Message> {
+        let mut msgs = self.to_openai_messages();
+        msgs.retain(|m| m.role != "system");
+        msgs
     }
 }
 
@@ -598,80 +540,133 @@ fn estimate_message_tokens(msgs: &[Message]) -> u32 {
     t
 }
 
-// ── Helpers ──
+// ── build_context ──
 
-fn char_boundary(s: &str, pos: usize) -> usize {
-    if pos >= s.len() { return s.len(); }
-    let mut p = pos;
-    while p > 0 && !s.is_char_boundary(p) { p -= 1; }
-    p
-}
-
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max { return s.to_string(); }
-    let mut end = max;
-    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
-    format!("{}…", &s[..end])
-}
-
-// ── prepare_and_compact ──
-
-/// Build the compacted+prepped Anthropic-formatted context for next API request.
-pub fn prepare_and_compact(state: &mut AgentState) -> (String, Vec<Message>, TokenBreakdown) {
-    let prompt = crate::config::system_prompt(&state.config.prompt_lang);
-
-    // Prepend tool definitions to system prompt (stable prefix for caching)
-    let mut prompt_with_tools = prompt;
-    if !state.tool_defs.is_empty() {
-        prompt_with_tools.push_str("\n\n## Available Tools\n");
-        for td in &state.tool_defs {
-            prompt_with_tools.push_str(&format!("- {}: {}\n", td.function.name, td.function.description));
-        }
-        prompt_with_tools.push_str("Use these tools by their exact name.");
-    }
-
-    let semantic_block = state.semantic_memory.render();
-    let long_mem_block = state.long_mem.render();
-
-    let (mut system, messages, breakdown) = state.ctx.build(
-        &prompt_with_tools,
-        &semantic_block,
-        &long_mem_block,
-        state.config.context_limit,
+/// Build context for the next API request.
+///
+/// # Cache-friendly design for DeepSeek KV cache
+///
+/// DeepSeek caches complete prefix units. Common prefixes across requests
+/// are auto-detected and cached independently. We exploit this by layering
+/// the system prompt: STABLE content first, DYNAMIC content last.
+///
+/// ```
+/// System prompt layers (in order):
+///   1. Base prompt          ← static (changes only when language switches)
+///   2. Tool definitions     ← stable per session
+///   3. Phase prompt         ← stable per phase (changes occasionally)
+///   4. Active skills        ← dynamic (per user input)
+///   5. Turn annotations     ← dynamic (per round)
+///
+/// Messages: pure conversation — user/assistant/tool only, no injected suffix.
+/// ```
+///
+/// DeepSeek's common-prefix detection will independently cache layers 1-3
+/// (which are identical across consecutive requests), so only layers 4-5
+/// and new conversation messages miss cache.
+pub fn build_context(state: &mut AgentState) -> (String, Vec<Message>, TokenBreakdown) {
+    debug_assert_eq!(
+        state.exec_pending, 0,
+        "build_context called with {} exec(s) still pending",
+        state.exec_pending,
     );
 
-    state.token_estimate = breakdown.total;
-    state.token_breakdown = Some(breakdown);
+    let base_prompt = crate::config::system_prompt(&state.config.prompt_lang);
+    let base_tokens = tokenizer::count_tokens(&base_prompt);
+
+    // === System prompt: layered, stable→dynamic ===
+    let mut system = base_prompt;
+
+    // Layer 2: Tool definitions (stable per session)
+    let tool_help = tool_help_text(&state.tool_defs);
+    let tool_help_tokens = if tool_help.is_empty() { 0 } else {
+        system.push_str("\n\n## Available Tools\n");
+        system.push_str(&tool_help);
+        tokenizer::count_tokens(&tool_help)
+    };
+
+    // Layer 3: Phase prompt (stable per phase)
+    let phase = crate::router::read_phase();
+    let phase_tokens = if let Some(suffix) = crate::router::phase_prompt_suffix(phase, &state.config.prompt_lang) {
+        system.push_str("\n\n");
+        system.push_str(suffix);
+        tokenizer::count_tokens(suffix)
+    } else { 0 };
+
+    // Layer 4: Active skills (dynamic, per user input)
+    let mut skill_tokens = 0u32;
+    if !state.active_skill_bodies.is_empty() {
+        let mut text = String::new();
+        for (name, body) in &state.active_skill_bodies {
+            let s = format!("### {}\n{}---\n", name, body);
+            skill_tokens += tokenizer::count_tokens(&s);
+            text.push_str(&s);
+        }
+        system.push_str("\n\n## Active Skills\n");
+        system.push_str(&text);
+    }
+
+    // Layer 5: Turn annotations (dynamic, per round — health/gate/system notes)
+    let mut annotation_tokens = 0u32;
+    if !state.turn_annotations.is_empty() {
+        let ann = state.turn_annotations.join("\n");
+        annotation_tokens = tokenizer::count_tokens(&ann);
+        system.push_str("\n\n## Notes\n");
+        system.push_str(&ann);
+    }
+    // Always append the static reminder (stable, small)
+    system.push_str("\n\n注意：status 工具只支持 plan/coding/debug 三种模式，explore/chat 已移除。");
+
+    // Clear per-turn annotations for next round
+    state.turn_annotations.clear();
+
+    // === Messages: pure conversation, no suffix ===
+    let messages = state.ctx.build(state.config.context_limit);
+
+    // === Token breakdown ===
+    let mut bd = TokenBreakdown::default();
+    bd.system = base_tokens + tool_help_tokens;
+    bd.episodic = estimate_message_tokens(&messages);
+    bd.total = bd.system + bd.episodic;
+
+    state.token_estimate = bd.total;
+    state.token_breakdown = Some(bd);
     state.health.context_tokens = state.tokens_used();
     state.health.context_tier = crate::health::ContextTier::from_tokens(
         state.health.context_tokens, state.config.context_limit,
     );
 
-    // Insert pitfall guide as a system-prompt suffix block
-    let pitfall_block = state.pitfall_guide.render(3);
-    if !pitfall_block.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&pitfall_block);
-    }
+    // Predict KV cache hit rate
+    let report = state.cache_analyzer.record(&system, &messages);
+    state.predicted_cache_hit_pct = report.hit_rate;
 
-    // Append skill bodies to system prompt
-    if !state.active_skill_bodies.is_empty() {
-        system.push_str("\n\n## Active Skills\n");
-        for (name, body) in &state.active_skill_bodies {
-            system.push_str(&format!("### {}\n{}\n---\n", name, body));
+    log::info!(
+        "context (tokens): base={} tools={} phase={} skills={} annotations={} messages={} total={}",
+        base_tokens, tool_help_tokens, phase_tokens,
+        skill_tokens, annotation_tokens, bd.episodic, bd.total,
+    );
+
+    (system, messages, bd)
+}
+
+/// Render tool definitions as a stable system-prompt help block for the model.
+/// Stable within a session — only changes when tools are reloaded.
+fn tool_help_text(defs: &[dsx_types::ToolDef]) -> String {
+    if defs.is_empty() { return String::new(); }
+    let mut out = String::new();
+    for td in defs {
+        out.push_str(&format!("- `{}`", td.function.name));
+        if !td.function.description.is_empty() {
+            out.push_str(&format!(": {}", td.function.description));
         }
+        // Include parameter names from schema
+        if let Some(params) = td.function.parameters.get("properties").and_then(|p| p.as_object()) {
+            if !params.is_empty() {
+                let names: Vec<&str> = params.keys().map(|k| k.as_str()).collect();
+                out.push_str(&format!(" ({})", names.join(", ")));
+            }
+        }
+        out.push('\n');
     }
-
-    // Phase prompt suffix (model info + mode description)
-    let phase = crate::router::read_phase();
-    if let Some(suffix) = crate::router::phase_prompt_suffix(phase, &state.config.prompt_lang) {
-        system.push_str(suffix);
-    }
-
-    // Notify on first turn that modes have changed (for backward compat)
-    if state.ctx.turn_count() == 0 {
-        system.push_str("\n\n注意：status 工具只支持 plan/coding/debug 三种模式，explore/chat 已移除。");
-    }
-
-    (system, messages, breakdown)
+    out
 }

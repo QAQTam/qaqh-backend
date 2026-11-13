@@ -134,13 +134,7 @@ fn discover_skills() -> Vec<SkillMeta> {
 }
 
 fn skills_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::env::var("DSC_CONFIG_DIR")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
-    Some(base.join("dsx").join("skills"))
+    Some(dsx_types::platform::skills_dir())
 }
 
 // ── Frontmatter parsing (no YAML dependency) ──

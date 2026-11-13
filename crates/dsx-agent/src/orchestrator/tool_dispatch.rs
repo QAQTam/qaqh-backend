@@ -137,9 +137,9 @@ pub fn handle_cancel_stream(state: &mut AgentState) {
             partial.reasoning_content = Some(state.stream_reasoning.clone());
         }
         let _ = state.ctx.push_assistant_restore(partial);
-        state.ctx.annotate("health", "User interrupted the AI during output");
+        state.turn_annotations.push("[health] User interrupted the AI during output".to_string());
     } else if !state.stream_reasoning.is_empty() {
-        state.ctx.annotate("health", "User interrupted the AI during thinking");
+        state.turn_annotations.push("[health] User interrupted the AI during thinking".to_string());
     }
 
 
@@ -151,11 +151,11 @@ pub fn handle_cancel_stream(state: &mut AgentState) {
 /// Cancel running exec child processes.
 pub fn handle_cancel_exec(state: &mut AgentState) {
     for &pid in &state.exec_child_pids {
-        let _ = std::process::Command::new("kill").args([&pid.to_string()]).output();
+        dsx_types::platform::terminate_process(pid);
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
     for &pid in &state.exec_child_pids {
-        let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+        dsx_types::platform::kill_process(pid);
     }
     state.exec_child_pids.clear();
     state.exec_pending = 0;

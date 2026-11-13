@@ -23,8 +23,10 @@ fn encode(phase: TaskPhase, level: DebugLevel) -> u8 {
 pub fn read_phase() -> TaskPhase {
     let v = CURRENT_PHASE.load(Ordering::Relaxed) & 0x07;
     match v {
+        0 => TaskPhase::Plan,
+        1 => TaskPhase::Coding,
         2 => TaskPhase::Debug,
-        _ => TaskPhase::Coding, // 0=Plan, 1=Coding, default Coding
+        _ => TaskPhase::Coding,
     }
 }
 

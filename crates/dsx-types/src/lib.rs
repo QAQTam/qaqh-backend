@@ -19,6 +19,9 @@ pub mod api_types;
 // Unified arg parsing (shared across dsx-agent, dsx-tools)
 pub mod arg;
 
+// Platform-specific utilities
+pub mod platform;
+
 // Crates contributed by A03 (shared utilities)
 pub mod error;
 pub mod serde;
@@ -32,7 +35,12 @@ pub use tool_def::{ToolDef, ToolFunction};
 pub use state::{TaskPhase, DebugLevel, RouterCommand};
 pub use config::{PersistentConfig, PhasePerfConfig, ProfileConfig, UserPreferences, default_phase_configs};
 pub use session::{SessionFile, SessionMeta, StreamState};
-pub use anthropic::{AnthropicTool, AnthropicUsage};
+pub use anthropic::{
+    AnthropicCacheControl, AnthropicSystemBlock,
+    AnthropicContent, AnthropicMessage, AnthropicTool, AnthropicThinking, AnthropicRequest,
+    AnthropicEventMessage, AnthropicContentBlockStart, AnthropicDelta, AnthropicMessageDelta,
+    AnthropicUsage, AnthropicStreamEvent,
+};
 pub use api_types::{UsageInfo, TokenDetails, ModelInfo, ModelList, BalanceInfo, BalanceEntry};
 
 // ── Unified arg parsers ──

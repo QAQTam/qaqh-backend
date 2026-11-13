@@ -13,7 +13,7 @@ use crate::config;
 use crate::assembly::ContextAssembler;
 use crate::health::monitor::MonitorState;
 use crate::health::DsAgentsHealthPlatform;
-use crate::memory::{LongTermMemory, PitfallGuide, SemanticMemory, ShortTermMemory};
+// memory module removed — will be redesigned later
 use crate::session;
 use crate::skills::SkillIndex;
 use crate::tokenizer;
@@ -86,10 +86,6 @@ pub struct AgentState {
 
     // ── Project knowledge ──
     pub project_map: String,
-    pub semantic_memory: SemanticMemory,
-    pub long_mem: LongTermMemory,
-    pub short_mem: ShortTermMemory,
-    pub pitfall_guide: PitfallGuide,
 
     // ── Mode flags ──
     pub auto_mode: bool,
@@ -111,6 +107,11 @@ pub struct AgentState {
     pub health_status_line: String,
     pub pending_notes: Vec<String>,
 
+    /// Per-turn annotations (health messages, gate notes, system alerts).
+    /// Collected during tool execution, rendered into the system prompt tail,
+    /// then cleared after each call to build_context().
+    pub turn_annotations: Vec<String>,
+
     // ── Tool round limits ──
     pub max_tool_rounds: u32,
 
@@ -120,6 +121,21 @@ pub struct AgentState {
     pub stream_tool_progress: Vec<(String, String)>,
     pub stream_cancelled: bool,
     pub last_activity: Instant,
+
+    // ── KV cache prediction (client-side, per-round) ──
+    pub predicted_cache_hit_pct: f64,
+    pub cache_analyzer: crate::cache_analyzer::CacheAnalyzer,
+
+    // ── API error salvage ──
+    /// Partial assistant response saved on error, to be re-injected on next user input.
+    pub salvaged: Option<SalvagedResponse>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SalvagedResponse {
+    pub content: String,
+    pub reasoning_content: Option<String>,
+    pub usage: Option<dsx_types::UsageInfo>,
 }
 
 impl AgentState {
@@ -170,10 +186,6 @@ impl AgentState {
             sudo_pending: Vec::new(),
             sudo_password: String::new(),
             project_map: String::new(),
-            semantic_memory: SemanticMemory::new(),
-            long_mem: LongTermMemory::default(),
-            short_mem: ShortTermMemory::new("", ""),
-            pitfall_guide: session::load_pitfalls(),
             auto_mode,
             current_task_phase: TaskPhase::Coding,
             dev_mode: false,
@@ -188,20 +200,17 @@ impl AgentState {
             gate_message: None,
             health_status_line: String::new(),
             pending_notes: Vec::new(),
+            turn_annotations: Vec::new(),
             stream_content: String::new(),
             stream_reasoning: String::new(),
             stream_tool_progress: Vec::new(),
             max_tool_rounds,
             stream_cancelled: false,
             last_activity: Instant::now(),
+            predicted_cache_hit_pct: 0.0,
+            cache_analyzer: crate::cache_analyzer::CacheAnalyzer::new(),
+            salvaged: None,
         };
-
-        // Seed invariants if fresh
-        if state.long_mem.architecture.is_empty() {
-            state.long_mem.add_invariant("tool_use/tool_result MUST be adjacent in messages — API 400 if interleaved");
-            state.long_mem.add_invariant("Sudo password via stdin pipe, NEVER in command string");
-            state.long_mem.add_invariant("exec_pending gates agent loop to prevent double-request race");
-        }
 
         crate::tools::AUTO_MODE.store(auto_mode, std::sync::atomic::Ordering::Relaxed);
         state
@@ -219,15 +228,14 @@ impl AgentState {
 
     // ── Context helpers ──
 
-    /// Unified system note entry. Delegates to ContextAssembler.
+    /// Unified system note entry. Stored in turn_annotations for inclusion
+    /// in the system prompt tail by build_context().
     pub fn system_note(&mut self, tag: &str, msg: String) {
-        self.ctx.annotate(tag, &msg);
+        self.turn_annotations.push(format!("[{}] {}", tag, msg));
     }
 
-    /// Flush pending annotations.
-    pub fn flush_notes(&mut self) {
-        self.ctx.flush_annotations();
-    }
+    /// Flush pending annotations (no-op — annotations cleared by build_context).
+    pub fn flush_notes(&mut self) {}
 
     // ── Exec tracking ──
 
@@ -251,47 +259,12 @@ impl AgentState {
                 &msgs,
                 &self.config.model,
                 self.config.effort.as_deref(),
-                None,
             );
         }
     }
 
     // ── Learning / memory extraction ──
-
-    /// Scan all assistant messages for architecture decisions and error patterns.
-    pub fn extract_reasoning_insights(&mut self) {
-        for msg in self.ctx.to_vec() {
-            if msg.role != "assistant" { continue; }
-            let Some(ref reasoning) = msg.reasoning_content else { continue };
-            if reasoning.len() < 20 { continue; }
-
-            let arch_keywords = [
-                "I'll use", "I will use", "Let's use", "改用", "采用",
-                "approach", "design", "pattern", "方案", "架构",
-                "decided to", "better to", "recommend",
-            ];
-            for kw in &arch_keywords {
-                if let Some(pos) = reasoning.find(kw) {
-                    let start = pos.saturating_sub(30);
-                    let end = reasoning.len().min(pos + kw.len() + 80);
-                    let snippet = &reasoning[start..end];
-                    self.semantic_memory.add_arch_decision(kw, snippet);
-                    break;
-                }
-            }
-
-            let error_keywords = ["Error:", "error[", "panic:", "bug:", "fixed by", "原因是", "修复"];
-            for kw in &error_keywords {
-                if let Some(pos) = reasoning.find(kw) {
-                    let start = pos.saturating_sub(20);
-                    let end = reasoning.len().min(pos + kw.len() + 100);
-                    let snippet = &reasoning[start..end];
-                    self.semantic_memory.add_error_pattern(kw, snippet, None);
-                    break;
-                }
-            }
-        }
-    }
+    // (extract_reasoning_insights removed — memory system will be redesigned later)
 
 }
 

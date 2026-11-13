@@ -21,3 +21,6 @@ pub mod tools;
 pub mod memory;
 pub mod orchestrator;
 pub mod session;
+pub mod tool_parser;
+pub mod cache_analyzer;
+pub mod hp;

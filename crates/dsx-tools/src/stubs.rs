@@ -4,7 +4,7 @@
 //! the session filesystem directly (same paths as dsx-agent), avoiding IPC round-trips
 //! for simple read/write operations.
 
-use dsx_types::{DebugLevel, TaskPhase};
+use dsx_types;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -33,40 +33,6 @@ pub enum ErrorKind {
     ToolParameter, FileAccess, ExecFailure, NetworkFailure, ApiError,
     SudoFailure, Panic, SessionMissing, ToolNotFound,
     Unknown, Permission, Config, Io, Timeout,
-}
-
-// ── Router stubs (used by status tool) ──
-// Phase 4 note: These control the agent's model selection. In standalone tools mode,
-// phase_config returns reasonable defaults but actual model selection happens in the agent.
-
-#[derive(Debug, Clone)]
-pub enum RouterCommand {
-    SetPhase { phase: TaskPhase, level: DebugLevel },
-}
-
-#[derive(Debug, Clone)]
-pub struct PhaseConfig {
-    pub model: &'static str,
-    pub effort: Option<&'static str>,
-    pub max_tokens: u32,
-}
-
-pub fn parse_status_args(_args: &str) -> (TaskPhase, DebugLevel) {
-    (TaskPhase::Coding, DebugLevel::Medium)
-}
-
-pub fn set_phase(_phase: TaskPhase, _level: DebugLevel) {}
-
-pub fn phase_config(phase: TaskPhase, level: DebugLevel) -> PhaseConfig {
-    let (model, max_tokens) = match phase {
-        TaskPhase::Plan => ("deepseek-v4-pro", 300_000),
-        TaskPhase::Coding => ("deepseek-v4-flash", 96_000),
-        TaskPhase::Debug => ("deepseek-v4-pro", match level {
-            DebugLevel::High => 128_000,
-            _ => 96_000,
-        }),
-    };
-    PhaseConfig { model, effort: Some("high"), max_tokens }
 }
 
 // ── Pitfall types ──
@@ -170,12 +136,7 @@ fn chrono_date() -> String {
 }
 
 fn sessions_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::env::var("DSC_CONFIG_DIR").ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
-    Some(base.join("dsx").join("sessions"))
+    Some(dsx_types::platform::sessions_dir())
 }
 
 fn session_dir(seed: &str) -> Option<PathBuf> {
@@ -194,12 +155,7 @@ fn pitfalls_path() -> Option<PathBuf> {
 }
 
 fn plans_dir() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let base = std::env::var("DSC_CONFIG_DIR").ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("XDG_CONFIG_HOME").ok().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(&home).join(".config"));
-    Some(base.join("dsx").join("plans"))
+    Some(dsx_types::platform::plans_dir())
 }
 
 fn plan_path(seed: &str, name: &str) -> Option<PathBuf> {
