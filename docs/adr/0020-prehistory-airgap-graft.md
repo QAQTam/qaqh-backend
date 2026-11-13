@@ -34,7 +34,7 @@ C(June2→0726) 内容连续提交全失；D(0726→qaqh) 真实已 graft。
 | ToolCall 字段存活 | 100%（id/name/action/args 原样） | founding→deepx |
 | DebugSnapshot→Dashboard 字段逐字 | 87.5%（7/8） | founding→deepx |
 | 核心子系统存活 June2→当前 | **100%**（8/8：agent loop/proto/session/config/gate/tools/types/message 均有 qaqh-* 后裔） | founding→当前 |
-| 根同一 | **100%**（当前产品根提交即 0726 deepx Initial commit 同一对象） | 血缘 |
+| deepx 根内容同一 | **100%**（0726 Initial commit 树 `911d22c0` 逐字节保留于祖先链；graft 后产品根上溯至 May14 DSX `b5e92c61`） | 血缘 |
 | 单调 superset 链 | Ui2Agent 6→11→20，死变体不复活 | 线性演化 |
 
 跨三代示踪符号：`AgentState`、`dsml_compat_count`（DeepSeek 指纹，0726 后退役）、
@@ -45,7 +45,8 @@ AskUser/AskQuestion、PermissionRequest、Dashboard、UsageInfo、SessionMeta、
 **诚实边界（必须同时声明）**：原始**代码行**层面的继承 **< 50%**。当前 39 crate 中
 ringing/sandbox/ptc/mcp/lsp/acp/ffi/harmony-napi 等大量是六个月**新长出来的**——这是
 生产力证明，不是减分。**不得声称「今天 50% 的代码是继承的」**；可声称「founding 架构与
-协议设计 80% 存活、核心子系统 100% 延续、产品根提交即 deepx Initial commit」。
+协议设计 80% 存活、核心子系统 100% 延续、0726 deepx Initial commit 逐字节保留在祖先链、
+产品根上溯至 May14 DSX 开工」。
 
 ## 决策：空气-gap graft（所有者设计）
 
