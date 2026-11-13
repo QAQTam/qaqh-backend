@@ -1,0 +1,7 @@
+{
+  "flowId": "flow-fixture",
+  "authorizeUrl": "https://example.invalid/auth",
+  "redirectUri": "http://127.0.0.1:1234/callback",
+  "expiresAtMs": 123,
+  "usageUrl": "https://example.invalid/usage"
+}

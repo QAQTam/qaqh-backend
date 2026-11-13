@@ -5,16 +5,13 @@
   "fontFamily": "",
   "theme": null,
   "notificationsEnabled": false,
+  "complianceEnabled": false,
   "subagent": {
     "timeoutSecs": 0,
     "defaultTools": [],
     "maxDepth": 0,
     "messageInFlightPerPair": 0,
     "messageOutboundPerSender": 0
-  },
-  "goals": {
-    "enabled": false,
-    "maxTokenBudget": null
   },
   "mcp": {
     "enabled": false,

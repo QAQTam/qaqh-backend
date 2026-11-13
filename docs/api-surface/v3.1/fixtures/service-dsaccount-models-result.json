@@ -1,0 +1,10 @@
+[
+  {
+    "id": "model-fixture",
+    "effort": {
+      "supported_levels": [
+        "high"
+      ]
+    }
+  }
+]

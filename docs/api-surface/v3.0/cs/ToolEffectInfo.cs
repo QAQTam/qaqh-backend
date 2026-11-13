@@ -10,8 +10,22 @@ using System.Text.Json.Serialization;
 namespace Qaqh.Sdk.Contract;
 
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "kind")]
+[JsonDerivedType(typeof(ToolEffectInfoSkillActivated), "skill_activated")]
+[JsonDerivedType(typeof(ToolEffectInfoSkillReleased), "skill_released")]
 [JsonDerivedType(typeof(ToolEffectInfoSubagentSpawned), "subagent_spawned")]
 public abstract record ToolEffectInfo;
+
+public sealed record ToolEffectInfoSkillActivated : ToolEffectInfo
+{
+    [JsonPropertyName("name")]
+    public string Name { get; init; }
+}
+
+public sealed record ToolEffectInfoSkillReleased : ToolEffectInfo
+{
+    [JsonPropertyName("name")]
+    public string Name { get; init; }
+}
 
 public sealed record ToolEffectInfoSubagentSpawned : ToolEffectInfo
 {

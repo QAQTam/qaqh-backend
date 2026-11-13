@@ -44,6 +44,8 @@ public sealed record SessionMeta
     public bool Archived { get; init; }
     [JsonPropertyName("ephemeral")]
     public bool Ephemeral { get; init; }
+    [JsonPropertyName("skills")]
+    public SkillSessionStateV2 Skills { get; init; }
     [JsonPropertyName("frozen_annotation")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? FrozenAnnotation { get; init; }
@@ -53,9 +55,6 @@ public sealed record SessionMeta
     public long UsageRequests { get; init; }
     [JsonPropertyName("cache_reported_requests")]
     public long CacheReportedRequests { get; init; }
-    [JsonPropertyName("handoff_from_session_id")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? HandoffFromSessionId { get; init; }
     [JsonPropertyName("title")]
     public string? Title { get; init; }
     [JsonPropertyName("cwd")]

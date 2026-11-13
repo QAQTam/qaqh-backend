@@ -24,15 +24,12 @@ namespace Qaqh.Sdk.Contract;
 [JsonDerivedType(typeof(SessionEventFrameExecSessionOutputDelta), "exec_session_output_delta")]
 [JsonDerivedType(typeof(SessionEventFrameExecSessionFinished), "exec_session_finished")]
 [JsonDerivedType(typeof(SessionEventFrameTimelineAppended), "timeline_appended")]
-[JsonDerivedType(typeof(SessionEventFrameTimelineTruncated), "timeline_truncated")]
 [JsonDerivedType(typeof(SessionEventFrameMessageDelta), "message_delta")]
 [JsonDerivedType(typeof(SessionEventFrameInteractionRequested), "interaction_requested")]
 [JsonDerivedType(typeof(SessionEventFrameInteractionResolved), "interaction_resolved")]
 [JsonDerivedType(typeof(SessionEventFrameSubagentUpdated), "subagent_updated")]
 [JsonDerivedType(typeof(SessionEventFrameSessionMetaChanged), "session_meta_changed")]
 [JsonDerivedType(typeof(SessionEventFrameDriverChanged), "driver_changed")]
-[JsonDerivedType(typeof(SessionEventFrameGoalUpdated), "goal_updated")]
-[JsonDerivedType(typeof(SessionEventFrameHandoffSealed), "handoff_sealed")]
 public abstract record SessionEventFrame
 {
     [JsonPropertyName("seq")]
@@ -81,18 +78,6 @@ public sealed record SessionEventFrameToolArgumentsDelta : SessionEventFrame
     public string ToolName { get; init; }
     [JsonPropertyName("text")]
     public string Text { get; init; }
-    [JsonPropertyName("lines_added")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? LinesAdded { get; init; }
-    [JsonPropertyName("lines_removed")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? LinesRemoved { get; init; }
-    [JsonPropertyName("target_files")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string[] TargetFiles { get; init; }
-    [JsonPropertyName("args_complete")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public bool ArgsComplete { get; init; }
 }
 
 public sealed record SessionEventFrameToolDeclared : SessionEventFrame
@@ -189,14 +174,6 @@ public sealed record SessionEventFrameTimelineAppended : SessionEventFrame
     public TimelineEntry Entry { get; init; }
 }
 
-public sealed record SessionEventFrameTimelineTruncated : SessionEventFrame
-{
-    [JsonPropertyName("from_turn_id")]
-    public string FromTurnId { get; init; }
-    [JsonPropertyName("removed_turn_ids")]
-    public string[] RemovedTurnIds { get; init; }
-}
-
 public sealed record SessionEventFrameMessageDelta : SessionEventFrame
 {
     [JsonPropertyName("turn_id")]
@@ -241,27 +218,5 @@ public sealed record SessionEventFrameDriverChanged : SessionEventFrame
 {
     [JsonPropertyName("driver")]
     public DriverState? Driver { get; init; }
-}
-
-public sealed record SessionEventFrameGoalUpdated : SessionEventFrame
-{
-    [JsonPropertyName("goal")]
-    public GoalView? Goal { get; init; }
-}
-
-public sealed record SessionEventFrameHandoffSealed : SessionEventFrame
-{
-    [JsonPropertyName("sealed_session_id")]
-    public string SealedSessionId { get; init; }
-    [JsonPropertyName("chain_root")]
-    public string ChainRoot { get; init; }
-    [JsonPropertyName("successor_session_id")]
-    public string SuccessorSessionId { get; init; }
-    [JsonPropertyName("turn_id")]
-    public string TurnId { get; init; }
-    [JsonPropertyName("work_summary")]
-    public string WorkSummary { get; init; }
-    [JsonPropertyName("at_ms")]
-    public long AtMs { get; init; }
 }
 

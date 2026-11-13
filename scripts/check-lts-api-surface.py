@@ -321,7 +321,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--against",
-        default="docs/api-surface/v3.0",
+        default="docs/api-surface/v3.1",
         help="golden snapshot directory relative to the repository root",
     )
     parser.add_argument(
@@ -392,7 +392,7 @@ def main() -> int:
         print("LTS API-surface guard: FAILED — reject this change on the LTS branch.", file=sys.stderr)
         for problem in problems:
             print(f"  - {problem}", file=sys.stderr)
-        print("Freeze policy: docs/lts-v3.0-maintenance.md §1. Revert the implementation, never the snapshot.")
+        print("Freeze policy: docs/lts-v3.1-maintenance.md §1. Revert the implementation, never the snapshot.")
         print("Snapshots are machine-written: --rebaseline (on LTS that means a refreeze).")
         return 1
     print(f"LTS API surface unchanged (baseline {options.against}, {len(routes)} routes).")

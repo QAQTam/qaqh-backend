@@ -1,0 +1,23 @@
+{
+  "pending_permission": {
+    "tool_call_id": "call_fixture",
+    "tool_name": "fs.write",
+    "action_summary": "write synthetic file",
+    "reason": "synthetic reason",
+    "paths": [
+      "/synthetic/workspace/README.md"
+    ],
+    "category": "write",
+    "level": 2,
+    "risk": "medium",
+    "consequence": "overwrites the file",
+    "details_unavailable": false
+  },
+  "pending_interaction": {
+    "id": "int_fixture",
+    "kind": "ask",
+    "details": {
+      "question": "synthetic question"
+    }
+  }
+}

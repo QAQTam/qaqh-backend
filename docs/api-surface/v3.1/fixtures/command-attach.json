@@ -1,0 +1,15 @@
+{
+  "schema": "qaqh.Ringing",
+  "version": 2,
+  "contract_revision": "ringing-commands-9",
+  "command_id": "cmd-fixture-1",
+  "client_instance_id": "fixture-client",
+  "client_session_id": "client-session-fixture",
+  "target": {
+    "kind": "session",
+    "session_id": "session-fixture"
+  },
+  "command": {
+    "type": "session.attach"
+  }
+}

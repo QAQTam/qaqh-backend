@@ -1,0 +1,29 @@
+{
+  "challenges": [
+    {
+      "challenge_id": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+      "kind": "tool_permission",
+      "expires_in": 300,
+      "details": {
+        "action_summary": "write synthetic file",
+        "category": "filesystem",
+        "consequence": "overwrites the file",
+        "level": "tier-2",
+        "paths": [
+          "/synthetic/workspace/README.md"
+        ],
+        "reason": "synthetic reason",
+        "risk": "medium",
+        "tool_name": "fs.write"
+      }
+    },
+    {
+      "challenge_id": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+      "kind": "plan",
+      "expires_in": 300,
+      "details": {
+        "plan": "synthetic plan"
+      }
+    }
+  ]
+}
