@@ -1,0 +1,21 @@
+[package]
+name = "dsx-agent"
+version.workspace = true
+edition.workspace = true
+description = "DSX agent core — orchestrator, memory, session, context"
+
+[dependencies]
+dsx-types = { path = "../dsx-types" }
+dsx-proto = { path = "../dsx-proto" }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokenizers = "0.23"
+regex = "1"
+chrono = "0.4"
+log = "0.4"
+simplelog = "0.12"
+anyhow = "1"
+thiserror = "2"

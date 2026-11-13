@@ -1,0 +1,10 @@
+[package]
+name = "dsx-proto"
+version.workspace = true
+edition.workspace = true
+description = "DSX IPC message protocol definitions"
+
+[dependencies]
+dsx-types = { path = "../dsx-types" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

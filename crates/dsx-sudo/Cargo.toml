@@ -1,0 +1,12 @@
+[package]
+name = "dsx-sudo"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "dsx-sudo"
+path = "src/main.rs"
+
+# Only std — no external deps.
+# This keeps the binary tiny, fast to compile, and low-risk for setuid.
+[dependencies]

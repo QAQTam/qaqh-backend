@@ -1,0 +1,17 @@
+[package]
+name = "dsx-hp"
+version.workspace = true
+edition.workspace = true
+description = "DSX health platform daemon + API proxy gateway"
+
+[dependencies]
+dsx-types = { path = "../dsx-types" }
+dsx-proto = { path = "../dsx-proto" }
+dsx-gateway = { path = "../dsx-gateway" }
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+futures-util = "0.3"
+anyhow = "1"
