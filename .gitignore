@@ -44,3 +44,6 @@ __pycache__/
 
 # tool-local agent state (not project content)
 .workbuddy/
+
+# 冒烟探针的运行日志（非源码，脚本与结果留 probes/ 子目录）
+probes/*.log

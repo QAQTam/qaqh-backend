@@ -325,6 +325,54 @@ pub fn spawn_names(
     Ok(names)
 }
 
+/// Team inbox 投递监视：从集合内会话的 canonical blocks 提取 inter-agent 信封。
+///
+/// 持久事实源唯一 —— `TimelineEntry::Input.inter_agent`（`blocks.payload_json`）。
+/// 内核 mailbox 是运行内存态（loop 队列/steer），回合边界合流即落此块，故快照
+/// 读块而不猜运行时。署名寻址（同根 path / 跨根 session id）由消费端按
+/// ADR-0014 判别公理升格为 `InterAgentActor`（ADR-0019），本投影原样透传
+/// 信封、不做字符串分类——分类失败在消费端显式报错，不在这里咽掉。
+pub fn inter_agent_deliveries(
+    conn: &Connection,
+    session_ids: &[String],
+    limit: i64,
+) -> Result<Vec<qaqh_ringing_contract::commands::InterAgentEnvelope>, DbError> {
+    if session_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let marks: Vec<String> = session_ids.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT payload_json FROM blocks
+         WHERE kind = 'input' AND payload_json LIKE '%\"inter_agent\"%'
+           AND session_id IN ({})
+         ORDER BY created_at_ms DESC, ord DESC
+         LIMIT ?",
+        marks.join(",")
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut binds: Vec<&dyn rusqlite::types::ToSql> = session_ids
+        .iter()
+        .map(|id| id as &dyn rusqlite::types::ToSql)
+        .collect();
+    binds.push(&limit);
+    let rows = stmt.query_map(rusqlite::params_from_iter(binds.iter()), |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut envelopes = Vec::new();
+    for row in rows {
+        let payload = row?;
+        let entry = parse_typed::<TimelineEntry>("block", "inter-agent input payload", &payload)?;
+        if let TimelineEntry::Input {
+            inter_agent: Some(envelope),
+            ..
+        } = entry
+        {
+            envelopes.push(envelope);
+        }
+    }
+    Ok(envelopes)
+}
+
 fn load_turns(conn: &Connection, session_id: &str) -> Result<Vec<TurnView>, DbError> {
     let mut stmt = conn.prepare(
         "SELECT turn_id, input_id, phase, status, outcome_json FROM turns

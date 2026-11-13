@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
     defaults:
       run:
         working-directory: qaqh-backend
@@ -45,13 +45,17 @@ jobs:
           out="$RUNNER_TEMP/dist"
           mkdir -p "$out"
           if [ "$RUNNER_OS" = "Windows" ]; then
+            plat="windows-x64"
             cp target/release/qaqh-daemon.exe "$out/"
-            cp version.txt qaqh-backend.lock.json "$out/"
-            7z a "$RUNNER_TEMP/qaqh-daemon-$TAG-windows-x64.zip" "$out/*" >/dev/null
           else
+            plat="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')-$(echo "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
             cp target/release/qaqh-daemon "$out/"
-            cp version.txt qaqh-backend.lock.json "$out/"
-            tar -czf "$RUNNER_TEMP/qaqh-daemon-$TAG-linux-x64.tar.gz" -C "$out" .
+          fi
+          cp version.txt qaqh-backend.lock.json "$out/"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            7z a "$RUNNER_TEMP/qaqh-daemon-$TAG-$plat.zip" "$out/*" >/dev/null
+          else
+            tar -czf "$RUNNER_TEMP/qaqh-daemon-$TAG-$plat.tar.gz" -C "$out" .
           fi
       - name: Export version-locked SDK contract (linux only)
         if: runner.os == 'Linux'
@@ -69,6 +73,7 @@ jobs:
           path: |
             ${{ runner.temp }}/qaqh-daemon-*-windows-x64.zip
             ${{ runner.temp }}/qaqh-daemon-*-linux-x64.tar.gz
+            ${{ runner.temp }}/qaqh-daemon-*-macos-*.tar.gz
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
@@ -96,7 +101,7 @@ jobs:
             QAQ-Harness LTS 发布 — 从 v3.0 起正式启用 GitHub 更新体系。
 
             资产说明:
-            - `qaqh-daemon-*-x64.{zip,tar.gz}` — 后端守护进程(release 构建)+ 版本戳 + 后端版本锁
+            - `qaqh-daemon-*-windows-x64.zip` / `qaqh-daemon-*-linux-x64.tar.gz` / `qaqh-daemon-*-macos-arm64.tar.gz` — 后端守护进程(release 构建)+ 版本戳 + 后端版本锁
             - `qaqh-sdk-contract-*.zip` — 版本锁定 SDK 契约导出(供 qaqh-sdk / qaqh-electron 消费)
           files: dist/*
           fail_on_unmatched_files: true

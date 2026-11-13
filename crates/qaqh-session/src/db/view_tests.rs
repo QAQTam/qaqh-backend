@@ -597,4 +597,85 @@ mod tests {
         })
         .expect("content id normalization");
     }
+
+    #[test]
+    fn team_inbox_projection_extracts_inter_agent_envelopes_only() {
+        let db = test_db();
+        let envelope = qaqh_ringing_contract::commands::InterAgentEnvelope {
+            message_id: "msg_1".into(),
+            root_session_id: "SES-ROOT".into(),
+            author: "/root/explore_task".into(),
+            recipient: "/root".into(),
+            other_recipients: vec![],
+            task_id: Some("task_1".into()),
+            reply_to: None,
+            causation_id: None,
+            delivery: qaqh_ringing_contract::fact::InterAgentDelivery::Queue,
+            created_at_ms: 1,
+        };
+        let input = |id: &str, inter: Option<qaqh_ringing_contract::commands::InterAgentEnvelope>| {
+            TimelineEntry::Input {
+                block_id: qaqh_ringing_contract::fact::BlockId::new(id),
+                turn_id: None,
+                purpose: Default::default(),
+                content: ContentValue::Inline { text: "hi".into() },
+                attachments: vec![],
+                images: vec![],
+                inter_agent: inter,
+                subagent_terminal: None,
+                actor: qaqh_ringing_contract::fact::ActorRef {
+                    kind: qaqh_ringing_contract::fact::ActorKind::User,
+                    id: "user".into(),
+                    display_name: None,
+                },
+            }
+        };
+        db.write_blocking(move |conn| {
+            store::create_session(
+                conn,
+                &store::NewSession {
+                    session_id: "SES-ROOT".into(),
+                    parent_session_id: None,
+                    title: "root".into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                },
+            )?;
+            for (id, inter) in [("B-IA", Some(envelope.clone())), ("B-PLAIN", None)] {
+                store::append_block(
+                    conn,
+                    &store::NewBlock {
+                        block_id: id.into(),
+                        session_id: "SES-ROOT".into(),
+                        turn_id: None,
+                        kind: "input",
+                        text: Some("hi".into()),
+                        call_id: None,
+                        payload_json: serde_json::to_string(&input(id, inter)).expect("serialize"),
+                    },
+                )?;
+            }
+            Ok::<(), crate::db::DbError>(())
+        })
+        .expect("seed");
+
+        let hits = db
+            .read_blocking(|conn| {
+                view::inter_agent_deliveries(
+                    conn,
+                    &["SES-ROOT".to_string()],
+                    10,
+                )
+            })
+            .expect("projection");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "msg_1");
+        assert_eq!(hits[0].recipient, "/root");
+    }
 }

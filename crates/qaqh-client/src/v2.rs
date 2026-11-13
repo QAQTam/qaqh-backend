@@ -517,11 +517,18 @@ mod tests {
                 "unread_messages": [
                     {
                         "message_id": "msg-1",
-                        "author": "/root/writer",
-                        "recipient": "/root",
+                        "author": {"kind": "path", "data": "/root/writer"},
+                        "recipient": {"kind": "path", "data": "/root"},
                         "task_id": "task-1",
                         "delivery": "queue",
                         "created_at_ms": 1_759_000_000_000i64
+                    },
+                    {
+                        "message_id": "msg-2",
+                        "author": {"kind": "session", "data": "0199a0f0-0000-7000-8000-000000000009"},
+                        "recipient": {"kind": "path", "data": "/root"},
+                        "delivery": "trigger",
+                        "created_at_ms": 1_759_000_000_001i64
                     }
                 ],
                 "revision": 7,
@@ -568,14 +575,27 @@ mod tests {
             qaqh_ringing_contract::team::TeamAgentStatus::Completed
         );
 
-        // inbox 必须带 author / recipient / task / delivery 四要素。
+        // inbox 必须带 author / recipient / task / delivery 四要素；
+        // 署名是 InterAgentActor union（ADR-0019）：同根 path、跨根 session id。
         let inbox = &response.team.unread_messages[0];
-        assert_eq!(inbox.author.as_str(), "/root/writer");
-        assert_eq!(inbox.recipient.as_str(), "/root");
+        assert_eq!(
+            inbox.author,
+            qaqh_ringing_contract::fact::InterAgentActor::Path(
+                qaqh_ringing_contract::fact::AgentPath::parse_absolute("/root/writer").unwrap()
+            )
+        );
         assert_eq!(inbox.task_id.as_deref(), Some("task-1"));
         assert_eq!(
             inbox.delivery,
             qaqh_ringing_contract::fact::InterAgentDelivery::Queue
+        );
+        assert_eq!(
+            response.team.unread_messages[1].author,
+            qaqh_ringing_contract::fact::InterAgentActor::Session(
+                qaqh_ringing_contract::fact::SessionId::new(
+                    "0199a0f0-0000-7000-8000-000000000009"
+                )
+            )
         );
     }
 

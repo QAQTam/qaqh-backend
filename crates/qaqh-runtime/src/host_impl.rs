@@ -55,7 +55,7 @@ impl QaqhService {
     /// canonical mailbox.
     ///
     /// This is the authoritative in-flight signal for the Phase 3 message
-    /// quota: an `InterAgentCommunication` is in-flight until the matching
+    /// quota: an inter-agent envelope is in-flight until the matching
     /// `InputAccepted` is committed. The target log is read on demand because
     /// sends are a tool-call path, not a hot loop.
     fn count_in_flight_messages(

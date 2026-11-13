@@ -279,12 +279,51 @@ pub(crate) async fn handle_team_snapshot_v2(
             current_task_id: None,
         });
     }
+    // 投递监视:inter-agent 信封从 canonical blocks 投影进 inbox 摘要
+    // (事实源=TimelineEntry::Input.inter_agent,与 SSE 同源)。署名按
+    // ADR-0014 判别公理升格为 InterAgentActor(ADR-0019):同根 path /
+    // 跨根 session id;解析失败=数据损坏,显式报错不静默丢条目。
+    let mut tree_ids = vec![session_id.clone()];
+    tree_ids.extend(children.iter().cloned());
+    let envelopes = match owners.db().read_blocking(move |conn| {
+        qaqh_session::db::view::inter_agent_deliveries(conn, &tree_ids, 64)
+    }) {
+        Ok(envelopes) => envelopes,
+        Err(error) => {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "team_unavailable",
+                &format!("inter-agent deliveries for {session_id}: {error}"),
+            );
+        }
+    };
+    let mut unread_messages = Vec::new();
+    for envelope in envelopes {
+        let (Some(author), Some(recipient)) = (
+            qaqh_ringing_contract::fact::InterAgentActor::from_signature(&envelope.author),
+            qaqh_ringing_contract::fact::InterAgentActor::from_signature(&envelope.recipient),
+        ) else {
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "team_inbox_corrupt_signature",
+                &format!("inter-agent envelope {} has a non-addressable signature", envelope.message_id),
+            );
+        };
+        unread_messages.push(qaqh_ringing_contract::team::TeamInboxSummary {
+            message_id: qaqh_ringing_contract::fact::MessageId::new(envelope.message_id),
+            author,
+            recipient,
+            task_id: envelope.task_id,
+            delivery: envelope.delivery,
+            created_at_ms: envelope.created_at_ms,
+        });
+    }
     let team = qaqh_ringing_contract::team::TeamSnapshot {
         root_session_id: Some(qaqh_ringing_contract::fact::SessionId::new(
             session_id.clone(),
         )),
         agents,
-        unread_messages: Vec::new(),
+        unread_messages,
         revision: 0,
         last_fact_seq: 0,
     };

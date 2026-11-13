@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 
 use super::board_types::{BoardId, BoardSubscriptionTarget, ChannelId, PostId, ThreadId};
 use super::task_types::{TaskArtifact, TaskCreated, TaskId, TaskState, TeamActor, TeamId};
-use crate::fact::{AgentPath, ContentRef, InterAgentDelivery, MessageId, SessionId};
+use crate::fact::{
+    AgentPath, ContentRef, InterAgentActor, InterAgentDelivery, MessageId, SessionId,
+};
 
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,8 +53,8 @@ pub struct TeamAgentSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamInboxSummary {
     pub message_id: MessageId,
-    pub author: AgentPath,
-    pub recipient: AgentPath,
+    pub author: InterAgentActor,
+    pub recipient: InterAgentActor,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     pub delivery: InterAgentDelivery,

@@ -44,7 +44,7 @@
 | [0007](0007-refreeze-governance.md) | 换锁治理：CODEOWNERS + refreeze/tightening 标签 + 守卫自保护 | **已落地于 main** + **LTS 分支保护已开**（缺口表见手册 §7） |
 | [0008](0008-neutral-ir-per-language-projection.md) | 中立 ContractIR + 每语言投影，退役 ts→cs 解析链 | **第 1 步 + 第 2 步的量尺已落地**（`schema-preview` + `ir-diff`）· 替换投影与删解析机未实施 · §第 2 步（量）记着实测：ts-rs 无结构化 IR ⇒ 原计划"双跑逐字节 diff"改为属性级对账 |
 | [0009](0009-wire-view-vs-artifact-bytes.md) | 冻结粒度区分 wire 语义与产物字节：分类从两类改三类 | **已落地于 main**（`wire_view` + `doc-only-refresh`）· 由真实误判触发 |
-| [0010](0010-cut-lts-v3.1-line.md) | 换锁：v3.1 线的待拍板取值与攒着的 refreeze 清单 | `提议中` · §待决 2 **已决：暂不切线**（所有者 2026-11-10）· revision 取值与前端先行仍待拍板 |
+| [0010](0010-cut-lts-v3.1-line.md) | 换锁：v3.1 线的待拍板取值与攒着的 refreeze 清单 | 已采纳 · 已实施（2026-11-13 所有者指令切线 LTS-v3.1 + v3.1.0 发版；revision 取 commands-9/session-2，裁决与实测见 §切线实施记录；未实施条目留 main 演进归 v3.2 账本） |
 | [0011](0011-frozen-lock-identity.md) | 冻结线的锁必须有登记身份：main 上「改金标准让它变绿」这条路从此被封死 | **已采纳（agent 落地于 main，待 owner 复核）** · 反证已做 |
 | [0012](0012-exec-pwsh-uutils-preamble.md) | exec 的 pwsh 壳集成 uutils coreutils：探测式 preamble 注入 + 最小别名手术 | **已采纳（代码已落地）** · vendor 分发与引导下载延后（另行 ADR） |
 | [0013](0013-legacy-history-graft.md) | 旧史嫁接：QAQ-Harness 298 提交并入 qaqh-backend（1387 连续历史） | 已采纳 · 已执行并 force-push · commit-map 与 gpgsig 陷阱见正文 |
@@ -53,6 +53,7 @@
 | [0016](0016-handoff-kernel-fork.md) | Handoff 内核 fork：封箱续推归内核，前端退化为纯投影（翻转 0015 切片F「内核不代建会话」的机器续推部分） | 已采纳 · 切片 0–4 已实施（封箱闭门/内核 fork 引擎/HandoffSealed+血缘导出/daemon sweep/前端纯投影化,证据见落地清单）；运行半边未跑；wire 实变（HandoffSealed + 血缘导出）已记 ADR-0010；决策 3 经所有者 2026-11-13 复核确认,决策 6 [立即继续] 口径统一中 |
 | [0017](0017-exec-full-output-terminal-lifecycle.md) | exec 完整输出与只读终端生命周期：持久化 offset 日志 + 区间读（不引 WebSocket）；附加决策：移除 exec 终态唤醒注入链（已实施）、revision 不 bump | 已采纳（部分实施） · 切片 0 后端半 + 切片 1 已实施（append-only 日志、`exec_session.output` 区间读、DTO 导出，证据见落地清单）；切片 0 前端半随前端仓切片 2、切片 2/3 未实施；决策 2 result 形状修订为单 `text`（实施时定夺）；wire 实变（`exec_session.output` + 2 DTO）已记 ADR-0010 |
 | [0018](0018-subagent-terminal-truth.md) | 子代理终态说真话：掐流=失败、预算与父同律、配置面退役（取代 0014 决策 4） | 已采纳 · 投影/gate/清扫/配置面/迁移已落地；wire 实变（ConfigDto/ConfigPatch 删 subagent 段 + 两型）已记 ADR-0010 |
+| [0019](0019-team-inbox-inter-agent-actor.md) | Team inbox 跨根署名：`InterAgentActor` 寻址统一（path/session union），跨根投递入 inbox | 已采纳 · 已实施（2026-11-13 随 LTS-v3.1 切线：读侧 + 死变体退役，含孤儿 InterAgentContent/MAILBOX_TEAM）；wire 实变由 v3.1 金标准机器重切吸收 |
 
 ## 阅读顺序
 

@@ -2818,7 +2818,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qaqh-acp"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "agent-client-protocol",
  "qaqh-client",
@@ -2831,7 +2831,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-agent-runtime"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2860,7 +2860,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-client"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-config-api",
@@ -2901,7 +2901,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config-api"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "serde",
  "serde_json",
@@ -2910,7 +2910,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-contract-export"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "hex",
  "qaqh-config-api",
@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-daemon"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "axum",
  "futures-util",
@@ -2972,7 +2972,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-dsaccount"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2988,7 +2988,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ffi"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "android_logger",
  "log",
@@ -3003,7 +3003,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-file-tools"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3030,7 +3030,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-gate"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "anyhow",
  "futures",
@@ -3048,7 +3048,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-goal"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-ringing-contract",
@@ -3061,7 +3061,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-harmony-napi"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "napi-build-ohos",
  "napi-derive-ohos",
@@ -3074,7 +3074,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-lsp"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "async-lsp",
  "futures",
@@ -3096,7 +3096,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-mcp"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "axum",
  "libc",
@@ -3115,7 +3115,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-memwatch"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-permission"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-policy",
@@ -3137,14 +3137,14 @@ dependencies = [
 
 [[package]]
 name = "qaqh-policy"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qaqh-process-tools"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "anyhow",
  "libc",
@@ -3168,7 +3168,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-profile"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-types",
@@ -3182,7 +3182,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-bun"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3191,7 +3191,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-core"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "serde",
  "serde_json",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-sdk"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3208,7 +3208,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-tools"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "qaqh-policy",
  "qaqh-ptc-core",
@@ -3221,7 +3221,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-pty"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "anyhow",
  "libc",
@@ -3231,7 +3231,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "qaqh-profile",
  "qaqh-ringing-contract",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-contract"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "qaqh-types",
  "schemars 1.2.3",
@@ -3257,7 +3257,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-runtime"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-memwatch",
@@ -3274,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-runtime"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "libc",
  "log",
@@ -3314,7 +3314,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-sandbox"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "landlock",
  "libc",
@@ -3330,7 +3330,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-session"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "hex",
  "log",
@@ -3352,7 +3352,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-siwc"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3368,7 +3368,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-skills"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "include_dir",
  "serde",
@@ -3378,7 +3378,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-subagent"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3394,7 +3394,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-tool-core"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "anyhow",
  "log",
@@ -3409,7 +3409,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-types"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "serde",
  "serde_json",
@@ -3421,7 +3421,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-workspace"
-version = "3.0.20261110-g1842986"
+version = "3.1.20261113-g94e719d"
 dependencies = [
  "anyhow",
  "chrono",

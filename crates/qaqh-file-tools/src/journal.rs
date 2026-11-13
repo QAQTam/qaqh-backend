@@ -500,7 +500,13 @@ impl TypedTool for JournalTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "journal",
-            "Query/replay session journal (SMJ): query list, export dump, replay restore.",
+            "Query/replay the Session Modification Journal (SMJ). action=query with file= \
+             attributes recent changes: each step carries the owning session id, tool, ts \
+             and before/after hashes — use it to find WHICH parallel session last modified a \
+             file, then consult that session via send_message (session id addressing). \
+             session=/since= further filter; only in-harness tool mutations are journalled \
+             (external edits are not — fall back to git). action=export dumps re-appliable \
+             patches; action=replay restores a file to seq=at.",
             crate::permission::ToolCategory::Write,
             crate::ToolRisk::Write,
             Duration::from_secs(30),

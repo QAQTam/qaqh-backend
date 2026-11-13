@@ -20,7 +20,6 @@ const CONVERSATION_MAILBOX_TEAM: &[ProjectionSlot] = &[
     ProjectionSlot::Mailbox,
     ProjectionSlot::Team,
 ];
-const MAILBOX_TEAM: &[ProjectionSlot] = &[ProjectionSlot::Mailbox, ProjectionSlot::Team];
 const CONVERSATION_CONTROL_TEAM: &[ProjectionSlot] = &[
     ProjectionSlot::Conversation,
     ProjectionSlot::Control,
@@ -71,7 +70,6 @@ pub fn projection_slots(payload: &FactPayload) -> &'static [ProjectionSlot] {
         FactPayload::WorkspaceResourceChanged(_) => RESOURCES_ONLY,
         FactPayload::SubagentSpawned(_) => CONTROL_RESOURCES_TEAM,
         FactPayload::SubagentFinished(_) => CONTROL_RESOURCES_TEAM,
-        FactPayload::InterAgentCommunication(_) => MAILBOX_TEAM,
         FactPayload::ContextMessageCommitted(_)
         | FactPayload::ContextCheckpointCommitted(_)
         // A committed response is context for the next request, not a new

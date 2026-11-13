@@ -12,8 +12,8 @@ use qaqh_ringing::{
     RingingV2PendingInteractionView, RingingV2PendingPermissionView,
 };
 use qaqh_ringing_contract::fact::{
-    ActivityState, AgentPath, ContentValue, InterAgentDelivery, InteractionKind, MessageId,
-    SessionId,
+    ActivityState, AgentPath, ContentValue, InterAgentActor, InterAgentDelivery, InteractionKind,
+    MessageId, SessionId,
 };
 use qaqh_ringing_contract::state::{DriverState, InteractionView, PermissionRequestDetails};
 use qaqh_ringing_contract::team::{
@@ -112,14 +112,26 @@ fn write_team(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                     current_task_id: None,
                 },
             ],
-            unread_messages: vec![TeamInboxSummary {
-                message_id: MessageId::new("msg-fixture"),
-                author: agent_path("/root/writer"),
-                recipient: agent_path("/root"),
-                task_id: Some("task-fixture".into()),
-                delivery: InterAgentDelivery::Queue,
-                created_at_ms: 1_759_000_000_000,
-            }],
+            // ADR-0019：署名是 InterAgentActor union——同根 path、跨根 session id，
+            // 夹具两种都钉住，前端拿到的是可判别形状而非字符串猜测。
+            unread_messages: vec![
+                TeamInboxSummary {
+                    message_id: MessageId::new("msg-fixture"),
+                    author: InterAgentActor::Path(agent_path("/root/writer")),
+                    recipient: InterAgentActor::Path(agent_path("/root")),
+                    task_id: Some("task-fixture".into()),
+                    delivery: InterAgentDelivery::Queue,
+                    created_at_ms: 1_759_000_000_000,
+                },
+                TeamInboxSummary {
+                    message_id: MessageId::new("msg-fixture-cross-root"),
+                    author: InterAgentActor::Session(child_session_id()),
+                    recipient: InterAgentActor::Path(agent_path("/root")),
+                    task_id: None,
+                    delivery: InterAgentDelivery::Trigger,
+                    created_at_ms: 1_759_000_000_001,
+                },
+            ],
             revision: 7,
             last_fact_seq: 42,
         },

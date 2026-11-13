@@ -78,7 +78,9 @@ fn session_event_interaction_branches_are_matchable_from_the_client_root() {
         "interaction": {
             "interaction_id": "int_1",
             "call_id": "call_1",
-            "kind": "plan",
+            // InteractionKind 已演进为 ask/permission（plan 变体退役）；
+            // 本测试钉的是壳层可命名/match 事件分支，kind 取现存值即可。
+            "kind": "permission",
             "request": { "kind": "inline", "data": { "text": "approve?" } },
             "expires_at_ms": null
         }
