@@ -80,6 +80,57 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
                 crate::ringing::service_methods::ExecSessionListResult { sessions },
             )
         }
+        SessionCommand::ExecSessionOutput(args) => {
+            // ringing 层只校验 params.session_id 的 lease 归属;exec 会话与该
+            // 会话的绑定在这里判定——别人的会话拿不到别人的 exec 日志。
+            let exec_session_id = args.exec_session_id.clone();
+            let row = service
+                .owners
+                .db()
+                .read_blocking(move |conn| {
+                    qaqh_session::db::store::exec_session_by_id(conn, &exec_session_id)
+                })
+                .map_err(QaqhError::message)?
+                .ok_or_else(|| {
+                    QaqhError::message(format!(
+                        "exec session not found: {}",
+                        args.exec_session_id
+                    ))
+                })?;
+            if row.session_id != args.session_id {
+                return Err(QaqhError::Forbidden {
+                    message: format!(
+                        "exec session {} does not belong to session {}",
+                        args.exec_session_id, args.session_id
+                    ),
+                });
+            }
+            let max_bytes = args
+                .max_bytes
+                .unwrap_or(crate::ringing::service_methods::EXEC_OUTPUT_DEFAULT_MAX_BYTES)
+                .min(crate::ringing::service_methods::EXEC_OUTPUT_MAX_BYTES);
+            if max_bytes == 0 {
+                return Err(QaqhError::message("max_bytes must be positive"));
+            }
+            let (next_offset, text) = qaqh_session::owner::read_exec_output_log_range(
+                service.owners.db(),
+                &args.session_id,
+                &args.exec_session_id,
+                row.next_offset,
+                args.from_offset,
+                max_bytes,
+            )
+            .map_err(QaqhError::message)?;
+            QaqhError::to_value(
+                "exec session output",
+                crate::ringing::service_methods::ExecSessionOutputResult {
+                    exec_session_id: args.exec_session_id,
+                    next_offset,
+                    output_complete: row.output_complete,
+                    text,
+                },
+            )
+        }
         SessionCommand::SessionTurn(args) => {
             let turn_id = args.turn_id;
             let missing_turn_id = turn_id.clone();
@@ -161,6 +212,8 @@ struct CreateSessionInput {
     tool_mode: Option<String>,
     custom_tools: Option<Vec<String>>,
     model_selection: Option<qaqh_types::ModelSelection>,
+    /// ADR-0015 切片F：handoff fork 血缘(客户端 fork 时传 from_session_id)。
+    handoff_from: Option<String>,
 }
 
 fn create_session(
@@ -196,6 +249,7 @@ fn create_session(
             tool_mode,
             custom_tools,
             model_selection,
+            handoff_from: input.handoff_from.as_deref(),
         },
     )
     .inspect_err(|_| {
@@ -221,6 +275,7 @@ impl QaqhService {
         model_selection: Option<qaqh_types::ModelSelection>,
         tool_mode: Option<String>,
         custom_tools: Option<Vec<String>>,
+        handoff_from: Option<String>,
     ) -> QaqhResult<SessionCreateResult> {
         create_session(
             self,
@@ -230,6 +285,7 @@ impl QaqhService {
                 tool_mode,
                 custom_tools,
                 model_selection,
+                handoff_from,
             },
         )
     }
@@ -242,6 +298,7 @@ struct CreateRowInput<'a> {
     tool_mode: Option<String>,
     custom_tools: Option<Vec<String>>,
     model_selection: qaqh_types::ModelSelection,
+    handoff_from: Option<&'a str>,
 }
 
 /// 会话创建的第一站:一次性落 SQLite 业务行(cwd/model/tool_mode/
@@ -266,11 +323,18 @@ fn create_business_row(
         ephemeral: false,
     };
     let error_session_id = session_id.to_string();
+    let handoff_from = input.handoff_from.map(str::to_string);
     service
         .owners
         .db()
-        .write_blocking(move |conn| qaqh_session::db::store::create_session(conn, &row))
-        .map(|_| ())
+        .write_blocking(move |conn| {
+            qaqh_session::db::store::create_session(conn, &row)?;
+            // ADR-0015 切片F：handoff 血缘与建行同事务——要么都有,要么都没有。
+            if let Some(from) = handoff_from {
+                qaqh_session::db::store::set_handoff_from(conn, &row.session_id, &from)?;
+            }
+            Ok::<_, qaqh_session::db::DbError>(())
+        })
         .map_err(|error| format!("create business row for {error_session_id}: {error}"))
 }
 

@@ -19,6 +19,4 @@ pub mod session_title;
 pub mod tool_job;
 
 pub use progress::{AttemptBlocks, ProgressSink, ProgressStream};
-pub use qaqh_process_tools::exec_session::{
-    ExecSessionManager, StopResult as ExecSessionStopResult,
-};
+pub use qaqh_process_tools::exec_session::{ExecSessionManager, StopResult as ExecSessionStopResult};

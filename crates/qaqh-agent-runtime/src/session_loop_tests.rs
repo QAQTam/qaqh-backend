@@ -475,6 +475,10 @@ mod handoff_tests {
     use crate::session_loop::SessionLoop;
     use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
 
+    /// 改写 `QAQH_DATA_DIR` 的用例都要拿这把锁：镜像落点是进程级环境变量，
+    /// 并行跑时串行化，防止互相把镜像写进对方的 tempdir。
+    static QAQH_DATA_DIR_LOCK: Mutex<()> = Mutex::new(());
+
     struct Harness {
         loop_: Arc<SessionLoop>,
         owners: Arc<OwnerDirectory>,
@@ -666,11 +670,14 @@ mod handoff_tests {
     /// 交接 = 终局：一次请求、completed 终态、结果入库、镜像落盘。
     #[tokio::test]
     async fn handoff_ends_the_turn_and_persists_the_durable_fact() {
+        let _env_guard = QAQH_DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
         let previous = std::env::var_os("QAQH_DATA_DIR");
         // 镜像落点由 data_dir() 决定，把根指到临时目录才能断言文件真的写出来。
-        // SAFETY: 本用例独占 QAQH_DATA_DIR 的改写并在断言后还原；同 crate 内只有
-        // 这一个用例碰它，tempdir 路径互不重叠。
+        // SAFETY: 本用例在锁内独占 QAQH_DATA_DIR 的改写并在断言后还原
+        // （与幽灵回合反证用例共享同一把锁），tempdir 路径互不重叠。
         unsafe { std::env::set_var("QAQH_DATA_DIR", dir.path().join("root")) };
 
         let doc = serde_json::json!({
@@ -768,6 +775,81 @@ mod handoff_tests {
                 .contains("明白，我不交空文档"),
             "第二轮的回答要留在会话里"
         );
+    }
+
+    /// 反证（规则 18）：封箱前排队的输入不得在封箱后的死线上开幽灵回合。
+    /// QueueOnly 在空闲时入队不出回合（`send_input` 的 QueueOnly 分支），
+    /// 给出确定性的「封箱前已在队内」窗口，不靠时序赛跑。
+    /// 修复前该用例必红：`finish_active` 排水会让幽灵回合吃掉脚本第 2 条。
+    #[tokio::test]
+    async fn handoff_seal_drops_queued_inputs_instead_of_spawning_ghost_turns() {
+        let _env_guard = QAQH_DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("QAQH_DATA_DIR");
+        // SAFETY: 锁内独占改写并在断言后还原（与镜像落点用例共享同一把锁）。
+        unsafe { std::env::set_var("QAQH_DATA_DIR", dir.path().join("root")) };
+
+        let doc = serde_json::json!({
+            "handoff_doc": "## 待决\n- 幽灵回合反证",
+            "work_summary": "封箱闭门"
+        });
+        // 脚本第 2 条只有幽灵回合会请求到：修复后 provider 请求数恒为 1。
+        let h = harness(
+            dir.path(),
+            vec![
+                (
+                    200,
+                    tool_call_body("handoff", &doc, "call-ghost", &cache_usage()),
+                ),
+                (200, text_body("幽灵回合不该跑到我")),
+            ],
+            vec![handoff::tool_def()],
+            10_000,
+            0.5,
+        )
+        .await;
+        // 空闲态 QueueOnly：只入队，不触发回合。
+        h.loop_
+            .send_input(ConversationSendMessage {
+                text: "封箱前排队的输入".into(),
+                images: vec![],
+                attachments: None,
+                message_id: Some("in-queued-before-seal".into()),
+                input_purpose: InputPurpose::QueueOnly,
+                as_system: false,
+                inter_agent: None,
+                subagent_terminal: None,
+                widget_context: None,
+            })
+            .expect("queue before first turn");
+        h.loop_.send_input(input("触发交接")).expect("send input");
+
+        let _ = wait_until(&h.owners, idle_with_turns).await;
+        // 幽灵回合（若存在）在 Idle 事件后的同一任务里同步 spawn，再跑一整轮
+        // SSE——留出余量让它现形，再冻结快照断言。
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let owner = h.owners.get_or_create("SES-HANDOFF");
+        let state = serde_json::to_value(owner.snapshot().await.expect("snapshot"))
+            .expect("serialize snapshot");
+        assert_eq!(
+            state["turns"].as_array().map(Vec::len),
+            Some(1),
+            "封箱后不得在死线开幽灵回合: {state}"
+        );
+        assert_eq!(
+            h.requests.lock().unwrap().len(),
+            1,
+            "封箱闭门后不得再向模型发请求"
+        );
+
+        match previous {
+            // SAFETY: 与用例开头的 set_var 配对，锁内独占。
+            Some(value) => unsafe { std::env::set_var("QAQH_DATA_DIR", value) },
+            // SAFETY: 该变量原本未设置，移除即还原环境。
+            None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
+        }
     }
 
     #[tokio::test]

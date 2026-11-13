@@ -456,6 +456,13 @@ pub fn needs_permission(
         return PermissionDecision::AutoApprove;
     }
 
+    // visualize 是会话级 widget 渲染指令（args 仅 path/title/mode）：不碰工作区
+    // 文件、不跑代码、不访问外部资源，渲染由前端沙箱完成。逐次授权只会递归
+    // 打断 Ring 投递，与 todo/ask 同理自批。
+    if tool_name == "visualize" {
+        return PermissionDecision::AutoApprove;
+    }
+
     // daemon 自身管理面（config/profiles/secrets/daemon.json）永不自批：
     // skip-permissions 下模型可改写 `permission_tier` 或 `base_url`，
     // 把后续请求连同 api_key 导向别的端点。会话数据不再保护（见

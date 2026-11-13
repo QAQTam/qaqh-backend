@@ -13,6 +13,14 @@ pub(crate) const SESSION_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRe
     qaqh_subagent::register_collaboration_tools,
 ];
 
+/// ADR-0015：根会话工具面 = 会话工具面 + goal 三件套。子会话是派生瞬时体,
+/// goal 语义只挂根(Codex 对 review 子代理禁用 goals 同律)。
+pub(crate) const ROOT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
+    qaqh_subagent::register,
+    qaqh_subagent::register_collaboration_tools,
+    qaqh_goal::register,
+];
+
 /// 会话绑定的 cwd(业务库 `sessions.cwd`),空串/`.` 视为未绑定。
 pub(crate) fn session_cwd(
     owners: &qaqh_session::owner::OwnerDirectory,
@@ -396,19 +404,22 @@ impl AgentRegistry {
             self.exec_sessions(),
         )?;
         // ADR-0014：sandbox 角色由血缘派生——会话行有父即子代理 sandbox。
-        if self
+        // ADR-0015：goal 工具面仅根会话注入。
+        let is_child = self
             .owners
             .session_parent(session_id)
             .map_err(QaqhError::message)?
-            .is_some()
-        {
+            .is_some();
+        if is_child {
             input.sandbox = qaqh_agent_runtime::session_agent::assembly::subagent_sandbox();
+            input.tool_registrars = SESSION_TOOL_REGISTRARS;
+        } else {
+            input.tool_registrars = ROOT_TOOL_REGISTRARS;
         }
         // ADR-0014：子代理工具面进入每个会话（spawn/send/wait/list/cancel）。
         // ADR-0014 切片E：协作工具面（task_*/board_*）同路进入每个会话——
         // 宿主已由 daemon 安装（server.rs install_task_host/install_board_host），
         // 板按根树键控，lead 与子级共用同一注册器；白名单天花板仍在 apply_init 生效。
-        input.tool_registrars = SESSION_TOOL_REGISTRARS;
         let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
         // ADR-0014：终态回传路由注入（loop 报告终态，registry 判定血缘）。
         if let Some(router) = &self.terminal_router {

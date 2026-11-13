@@ -18,9 +18,11 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
          what you actually observed and never claim work you did not perform.\n",
     );
     prompt.push_str(&format!("\n[Environment]\nworkspace: {}\n", cwd.display()));
+    // widgets_dir 以正斜杠形态注入（Windows 亦然）：marker 的 JSON payload 里
+    // 路径零反斜杠转义，模型可原样复制（widget-directive §5 合规最大故障源）。
     prompt.push_str(&format!(
         "widgets_dir: {}\n",
-        cwd.join(".qaqh").join("widgets").join(session_id).display()
+        cwd.join(".qaqh").join("widgets").join(session_id).to_string_lossy().replace('\\', "/")
     ));
     prompt.push_str(&format!("model: {}\n", spec.provider.model));
     if let Some(tools) = &spec.tools {

@@ -3,4 +3,4 @@
 /**
  * 工具产生的结构化效果的契约词表。
  */
-export type ToolEffectInfo = { "kind": "skill_activated", name: string, } | { "kind": "skill_released", name: string, } | { "kind": "subagent_spawned", child_session_id: string, name: string, task_text: string, };
+export type ToolEffectInfo = { "kind": "subagent_spawned", child_session_id: string, name: string, task_text: string, };

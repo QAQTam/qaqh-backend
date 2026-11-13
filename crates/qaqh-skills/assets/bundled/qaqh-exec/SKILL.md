@@ -19,6 +19,10 @@ Use `exec_command` to run shell commands.
   stdout and stderr as separate streams.
 - A command that outlives its initial wait returns an `exec_session_id`. Use
   `write_stdin` with that ID to read new output or provide terminal input.
+- When a backgrounded session exits without its terminal state having been
+  read, the runtime injects a system message naming the session; answer it by
+  calling `write_stdin` with that `exec_session_id` to collect the final
+  output.
 - Set `timeout_ms` only when the process needs a hard deadline. Reaching the
   deadline stops the command and reports a timed out outcome.
 - Use the Ringing commands `exec_session.interrupt` and

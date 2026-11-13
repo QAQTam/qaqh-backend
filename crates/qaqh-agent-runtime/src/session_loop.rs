@@ -1415,6 +1415,31 @@ impl SessionLoop {
             &files,
             context,
         );
+        // ADR-0015 切片F / ADR-0016 切片0：先封箱后回执——客户端看到
+        // ToolFinished(handoff) 时 DB 权威已是"已封箱"，"回执先于封箱"的
+        // 竞态窗不复存在。封箱写库失败 = 交接失败：释放回合级幂等标记让模型
+        // 重试，绝不"看起来交接成功"（宪法 5）。
+        if let Err(error) = self.owner.mark_handoff_sealed().await {
+            self.release_handoff(turn.as_str());
+            let message = format!("交接封箱落库失败: {error}");
+            self.settle_failed(
+                call_id,
+                crate::handoff::TOOL_NAME,
+                args_json,
+                "handoff_write_failed",
+                &message,
+            );
+            return Ok((false, message));
+        }
+        // 封箱即闭门（ADR-0016 切片0）：封箱前入队的输入（goal 续跑/exec 唤醒/
+        // 用户消息）一律不再在死线上开回合——余量路由到后继线。send_input 与
+        // spawn_turn 的 closed 检查从此拒绝一切新输入，finish_active 的排水
+        // 因此天然为空。
+        {
+            let mut inner = self.lock();
+            inner.closed = true;
+            inner.queue.clear();
+        }
         self.settle_finished_text(call_id, crate::handoff::TOOL_NAME, &text);
         Ok((true, text))
     }

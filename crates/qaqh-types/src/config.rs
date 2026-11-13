@@ -46,6 +46,10 @@ pub struct PersistentConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<PersistentSubagentConfig>,
 
+    // ── Goal 模式(ADR-0015)──
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goals: Option<PersistentGoalsConfig>,
+
     // ── Permission ──
     /// Agent permission tier(2026-10-03 三档制): 1=read-only, 2=workspace-write,
     /// 3=skip-permissions (explicit dangerous bypass; all ordinary tools auto).
@@ -122,6 +126,20 @@ pub struct PersistentSubagentConfig {
     /// Max cumulative outbound message attempts per sender. `None` = default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_outbound_per_sender: Option<u64>,
+}
+
+/// Persistence-friendly goal-mode config(ADR-0015)。全 Option 字段,
+/// `None` = 继承缺省(enabled=true,无预算上限)。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PersistentGoalsConfig {
+    /// goal 模式总开关。`None` = 开启(缺省 true,Codex Stable 同律)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 单 goal token 预算上限;同时是 create_goal 未显式给预算时的默认值。
+    /// `None` = 无上限/无默认预算。必须 > 0(越界即错,不静默 clamp)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_token_budget: Option<u64>,
 }
 
 /// MCP 客户端配置持久层。

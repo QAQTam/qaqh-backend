@@ -2,6 +2,6 @@
   "schema": "qaqh.Ringing",
   "version": 2,
   "client_instance_id": "fixture-client",
-  "command_contract_revision": "ringing-commands-7",
+  "command_contract_revision": "ringing-commands-9",
   "session_contract_revision": "ringing-session-2"
 }

@@ -1,0 +1,18 @@
+[package]
+name = "qaqh-goal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QAQ-Harness goal tools — persistent session goals (ADR-0015, Codex goal semantics)"
+
+[dependencies]
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract", features = ["schema"] }
+qaqh-workspace = { path = "../qaqh-workspace" }
+qaqh-tool-core = { path = "../qaqh-tool-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+log = "0.4"
+
+[lints]
+workspace = true

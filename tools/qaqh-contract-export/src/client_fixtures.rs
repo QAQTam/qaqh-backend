@@ -77,6 +77,8 @@ fn write_bootstrap(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                 holder: None,
                 epoch: 4,
             }),
+            // ADR-0015：夹具会话无 goal（缺席 = 无目标,默认态）。
+            goal: None,
         },
     };
     super::write_fixture(stage, "bootstrap-response.json", &bootstrap)

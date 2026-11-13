@@ -23,6 +23,10 @@ namespace Qaqh.Sdk.Contract;
 [JsonDerivedType(typeof(RingingCommandAgentReloadConfig), "agent.reload_config")]
 [JsonDerivedType(typeof(RingingCommandConversationSendMessage), "conversation.send_message")]
 [JsonDerivedType(typeof(RingingCommandConversationCancel), "conversation.cancel")]
+[JsonDerivedType(typeof(RingingCommandConversationTruncate), "conversation.truncate")]
+[JsonDerivedType(typeof(RingingCommandGoalSet), "goal.set")]
+[JsonDerivedType(typeof(RingingCommandGoalGet), "goal.get")]
+[JsonDerivedType(typeof(RingingCommandGoalClear), "goal.clear")]
 [JsonDerivedType(typeof(RingingCommandInteractionAskRespond), "interaction.ask.respond")]
 [JsonDerivedType(typeof(RingingCommandInteractionAskDismiss), "interaction.ask.dismiss")]
 [JsonDerivedType(typeof(RingingCommandDriverClaim), "driver.claim")]
@@ -70,6 +74,9 @@ public sealed record RingingCommandSessionCreate : RingingCommand
     [JsonPropertyName("custom_tools")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string[]? CustomTools { get; init; }
+    [JsonPropertyName("handoff_from")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? HandoffFrom { get; init; }
 }
 
 public sealed record RingingCommandSessionSettingsPatch : RingingCommand
@@ -123,6 +130,9 @@ public sealed record RingingCommandConversationSendMessage : RingingCommand
     [JsonPropertyName("subagent_terminal")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public SubagentTerminalNotification? SubagentTerminal { get; init; }
+    [JsonPropertyName("widget_context")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WidgetContext? WidgetContext { get; init; }
 }
 
 public sealed record RingingCommandConversationCancel : RingingCommand
@@ -131,6 +141,29 @@ public sealed record RingingCommandConversationCancel : RingingCommand
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? TurnId { get; init; }
 }
+
+public sealed record RingingCommandConversationTruncate : RingingCommand
+{
+    [JsonPropertyName("turn_id")]
+    public string TurnId { get; init; }
+}
+
+public sealed record RingingCommandGoalSet : RingingCommand
+{
+    [JsonPropertyName("objective")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Objective { get; init; }
+    [JsonPropertyName("status")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public GoalStatus? Status { get; init; }
+    [JsonPropertyName("token_budget")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long?? TokenBudget { get; init; }
+}
+
+public sealed record RingingCommandGoalGet : RingingCommand;
+
+public sealed record RingingCommandGoalClear : RingingCommand;
 
 public sealed record RingingCommandInteractionAskRespond : RingingCommand
 {

@@ -69,6 +69,9 @@ pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<Session
     // 权威来源:sessions.title(rename 唯一写口是 owner::set_title)。
     let title = session_title(conn, session_id)?;
     let subagents = load_subagents(conn, session_id)?;
+    let goal = super::goals::resolve_goal(conn, session_id)?
+        .as_ref()
+        .map(super::goals::goal_view);
 
     Ok(SessionState {
         session_id: Some(SessionId::new(session_id)),
@@ -83,6 +86,7 @@ pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<Session
         subagents,
         exec_sessions,
         driver: None,
+        goal,
     })
 }
 
@@ -150,14 +154,13 @@ fn load_subagents(conn: &Connection, session_id: &str) -> Result<Vec<SubagentVie
             &effects_json,
         )?;
         for effect in effects {
+            // `ToolEffectInfo` 当前只有 SubagentSpawned 一个变体(let-else 的 else
+            // 不可达,cargo 警告);直接解构,将来加变体时编译器会逼着补处理分支。
             let qaqh_ringing_contract::state::ToolEffectInfo::SubagentSpawned {
                 child_session_id,
                 name,
                 ..
-            } = effect
-            else {
-                continue;
-            };
+            } = effect;
             let status = child_terminal_status(conn, &child_session_id)?;
             subagents.push(SubagentView {
                 child_session_id: SessionId::new(child_session_id),
@@ -231,6 +234,36 @@ pub fn turn_answer_text(
         }
     }
     Ok(answer)
+}
+
+/// ADR-0015:触发回合的输入块正文(首块)。goal 续跑引擎用它识别自动续跑轮
+/// (续跑消息携带 `<qaqh_goal_continuation>` 标记);无输入块返回空串。
+pub fn turn_input_text(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<String, DbError> {
+    let payload: Option<String> = conn
+        .query_row(
+            "SELECT payload_json FROM blocks
+             WHERE session_id = ?1 AND turn_id = ?2 AND kind = 'input'
+             ORDER BY ord LIMIT 1",
+            rusqlite::params![session_id, turn_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(rusqlite_error)?;
+    let Some(payload) = payload else {
+        return Ok(String::new());
+    };
+    if let Ok(TimelineEntry::Input {
+        content: qaqh_ringing_contract::fact::ContentValue::Inline { text },
+        ..
+    }) = serde_json::from_str::<TimelineEntry>(&payload)
+    {
+        return Ok(text);
+    }
+    Ok(String::new())
 }
 
 /// ADR-0014：子会话 id → spawn 名（`SubagentSpawned` effect 是血缘命名权威）。

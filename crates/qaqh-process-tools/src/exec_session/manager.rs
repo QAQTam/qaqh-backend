@@ -554,7 +554,11 @@ impl ExecSessionManager {
         Ok(())
     }
 
-    fn stop_and_wait(&self, sessions: &[Arc<ManagedSession>], reason: ExecStopReason) {
+    fn stop_and_wait(
+        &self,
+        sessions: &[Arc<ManagedSession>],
+        reason: ExecStopReason,
+    ) {
         for session in sessions {
             self.request_stop(session, reason);
         }
@@ -778,7 +782,10 @@ fn result_from_core(
             ExecSessionOutcome::Exited { exit_code: 0 } => ToolCallOutcome::Completed,
             ExecSessionOutcome::Exited { exit_code } => failed_outcome(
                 "exit_nonzero",
-                format!("command exited with code {exit_code}{}", status_suffix(*exit_code)),
+                format!(
+                    "command exited with code {exit_code}{}",
+                    status_suffix(*exit_code)
+                ),
             ),
             ExecSessionOutcome::TimedOut { .. } => {
                 failed_outcome("timed_out", "command exceeded timeout_ms".into())

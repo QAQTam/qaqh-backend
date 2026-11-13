@@ -13,8 +13,8 @@
 
 use crate::config::Config;
 use qaqh_config_api::{
-    ConfigDto, ConfigPatch, ExecDto, LspDto, LspServerDto, McpDto, McpServerDto, SandboxDto,
-    SubagentDto,
+    ConfigDto, ConfigPatch, ExecDto, GoalsDto, LspDto, LspServerDto, McpDto, McpServerDto,
+    SandboxDto, SubagentDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
@@ -32,6 +32,10 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
             max_depth: u64::from(cfg.subagent.max_depth),
             message_in_flight_per_pair: cfg.subagent.message_in_flight_per_pair,
             message_outbound_per_sender: cfg.subagent.message_outbound_per_sender,
+        },
+        goals: GoalsDto {
+            enabled: cfg.goals.enabled,
+            max_token_budget: cfg.goals.max_token_budget,
         },
         mcp: McpDto {
             enabled: cfg.mcp.enabled,
@@ -141,6 +145,15 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
         }
         if let Some(v) = sub.message_outbound_per_sender {
             cfg.subagent.message_outbound_per_sender = v;
+        }
+    }
+    if let Some(goals) = &patch.goals {
+        if let Some(enabled) = goals.enabled {
+            cfg.goals.enabled = enabled;
+        }
+        if let Some(budget) = goals.max_token_budget {
+            // validate() 已保证 Some(Some(v)) 的 v > 0;Some(None) = 清除上限。
+            cfg.goals.max_token_budget = budget;
         }
     }
     Ok(())

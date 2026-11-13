@@ -26,7 +26,7 @@
   - 只写 **HTML fragment**：无 `<!doctype>/<html>/<head>/<body>`；根节点带唯一 id，`document.getElementById` 选取，禁 `document.currentScript`；
   - 字面 markup（禁转义地狱）；CSS/JS 内联仅在基础类不够时；禁 `fetch/XHR/WebSocket`；单文件 ≤1MB；
   - 文件名 ASCII 小写连字符 `<title>.html`；更新=重写同一路径 + 同一 turn 重发 marker。
-- 前端读取：daemon `FsRead` 放行 `.qaqh/widgets/**`（工作区外仍拒绝）。Electron 侧注册特权协议 `qqh-widget://<session>/<basename>` → serve 文件内容（详见前端仓 spec：qaqh-electron/docs/widget-directive-frontend-2026-11-12.md）。
+- 前端读取：daemon `FsRead` 放行 `.qaqh/widgets/**`（工作区外仍拒绝）。**实施裁定（2026-11-12 会话2）：`qqh-widget://` 特权协议裁撤**——宿主本来就要拿到 fragment 文本做状态占位注入（§3 srcdoc 装配），通道直接用 daemon `fs.read`（scope_session 锁会话工作区，天然白名单）；再注册一条协议是同一目标两条路，属冗余攻击面。Electron 侧零新增 scheme。
 
 ## 3. 宿主桥 `window.qqh`（iframe 内注入）
 
@@ -49,7 +49,7 @@
   ```
   widget_context: { session_id, widget: {path, title}, model_content: Json } | null
   ```
-- 语义：前端在用户点击 `sendFollowUpMessage` 确认时携带**当下最新** `modelContent` 快照；daemon 把它作为结构化 input metadata 注入 agentloop（渲染进 system/reminder 块），**绝不拼进用户可见文本**；`privateContent` 永不出前端存储（Electron userData，按 `workspace|session|path` 键）。
+- 语义：前端在用户点击 `sendFollowUpMessage` 确认时携带**当下最新** `modelContent` 快照；daemon 把它作为结构化 input metadata 注入 agentloop（渲染进 system/reminder 块），**绝不拼进用户可见文本**；`privateContent` 永不出前端存储（Electron userData，按 fragment 绝对路径键——**实施裁定：`workspace|session|path` 三段键收缩为 path**，绝对路径唯一编码 workspace+session，语义等价且渲染层少一个易变句柄）。
 - best-effort：注入失败（字段缺失/版本不匹配）→ 回合照常，仅少上下文。
 - 此为 LTS 用户空间小破坏（新增可选字段），符合宪法 15。
 
@@ -60,7 +60,12 @@
 - 第 2 节文件契约全文；
 - marker 只在**最终回复**发射、每 turn 对新建/更新的每个 widget 各一行、绝不宣告实现细节（不出现 HTML/文件/iframe 字样）、静默工作；
 - 主题变量表（前端提供的 CSS token）与排版底线（后续可扩 charts/）；
-- 冒烟门（本仓 probes/）：qwen 当前配置 10 轮，marker 合规率 <80% 时收紧措辞（示例先行 + 反例列举）。
+- 冒烟门（本仓 `probes/widget-marker-smoke.mjs`，DPAPI 读当前配置凭据、带真
+  write 工具回路）：qwen 当前配置 10 轮，marker 合规率 <80% 时收紧措辞（示例先行 + 反例列举）。
+- **实施修订（2026-11-12 冒烟实证）**：qwen3.8-flash 对 Windows 路径的 JSON 转义
+  三连败（单反斜杠非法 JSON → 过度转义 `\\\\`），反斜杠文法不可收敛。裁定
+  **marker path 一律正斜杠形态**（全链消费方天然接受），且 system 环境块的
+  `widgets_dir` 直接以正斜杠注入（模型零转换原样复制）。skill 全文已零反斜杠。
 
 ## 6. A2UI 移除清单（即时执行，不留兼容）
 

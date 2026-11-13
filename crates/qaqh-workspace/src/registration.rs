@@ -20,6 +20,8 @@ use super::todo;
 
 use super::skill;
 
+use super::visualize;
+
 /// 工具注册器函数签名。
 pub type ToolRegistrar = fn(&mut ToolManager);
 
@@ -73,6 +75,9 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // ── Agent Skills ──
     skill::register(&mut mgr);
 
+    // ── Widget 渲染指令（C2 结构化，无 PUA）──
+    visualize::register(&mut mgr);
+
     // ── P3-1：工具搜索元工具（首轮 defs 携带；Deferred 工具经它按需检索）──
     mgr.register_tool_search();
 
@@ -114,6 +119,7 @@ mod tests {
                 "todo_update",
                 "todo_write",
                 "tool_search",
+                "visualize",
                 "web_fetch",
                 "write",
                 "write_stdin",

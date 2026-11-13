@@ -36,6 +36,8 @@ pub struct ConfigDto {
     /// `unwrap_or(true)`。读侧不再兜底——见 `dto_rejects_a_partial_payload`。
     pub notifications_enabled: bool,
     pub subagent: SubagentDto,
+    /// Goal 模式配置段(ADR-0015)。
+    pub goals: GoalsDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
     pub mcp: McpDto,
     /// LSP 客户端配置（M1 只读；写模型另立）。
@@ -91,6 +93,18 @@ fn default_subagent_message_in_flight() -> u64 {
 
 fn default_subagent_message_outbound() -> u64 {
     1024
+}
+
+/// Goal 模式配置段(读模型,ADR-0015)。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalsDto {
+    /// goal 模式总开关;语义缺省 true 由产出侧决定。
+    pub enabled: bool,
+    /// 单 goal token 预算上限,兼作 create_goal 的默认预算。
+    /// `null` = 无上限/无默认预算。
+    pub max_token_budget: Option<u64>,
 }
 
 /// exec 工具默认执行配置（读模型）。
@@ -213,6 +227,9 @@ pub struct ConfigPatch {
     pub tool_allowlist: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub subagent: Option<SubagentPatch>,
+    /// Goal 模式配置(ADR-0015)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goals: Option<GoalsPatch>,
 }
 
 /// 沙箱执行配置（写模型），嵌套于 [`ConfigPatch::sandbox`]。
@@ -240,6 +257,20 @@ pub struct SubagentPatch {
     pub message_in_flight_per_pair: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_outbound_per_sender: Option<u64>,
+}
+
+/// Goal 模式配置段(写模型,ADR-0015),嵌套于 [`ConfigPatch::goals`]。
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GoalsPatch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// 双层 Option:外层缺席 = 不动;`null` = 清除预算上限;数值 = 设置(必须 > 0)。
+    /// 这是 K3「wire 永不出现 null」纪律的**有意例外**:清除是显式语义,
+    /// 不是缺省兜底。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_token_budget: Option<Option<u64>>,
 }
 
 /// exec 工具默认执行配置（写模型），嵌套于 [`ConfigPatch::exec`]。
@@ -283,6 +314,12 @@ impl ConfigPatch {
             {
                 return Err(format!("subagent.maxDepth 仅允许 1..=16，收到 {v}"));
             }
+        }
+        if let Some(goals) = &self.goals
+            && let Some(Some(v)) = goals.max_token_budget
+            && v == 0
+        {
+            return Err("goals.maxTokenBudget 必须大于 0（null = 清除上限）".to_string());
         }
         Ok(())
     }
@@ -338,6 +375,7 @@ mod tests {
                 "timeoutSecs": 120,
                 "defaultTools": ["read"]
             },
+            "goals": { "enabled": true, "maxTokenBudget": null },
             "mcp": { "enabled": false, "idleShutdownSecs": 300, "servers": [] },
             "lsp": { "enabled": false, "idleShutdownSecs": 600, "servers": [] },
             "tokenizerPath": null,
@@ -352,6 +390,8 @@ mod tests {
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
         assert_eq!(dto.subagent.timeout_secs, 120);
         assert_eq!(dto.subagent.default_tools, vec!["read".to_string()]);
+        assert!(dto.goals.enabled);
+        assert_eq!(dto.goals.max_token_budget, None);
         assert_eq!(dto.exec.default_shell.as_deref(), Some("bash"));
         assert!(dto.sandbox.enabled);
         assert_eq!(dto.session_idle_unload_secs, 900);

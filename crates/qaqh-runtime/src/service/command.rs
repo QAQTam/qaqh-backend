@@ -140,6 +140,8 @@ pub enum SessionCommand {
     SessionDashboard(SessionDashboardArgs),
     #[serde(rename = "exec_session.list")]
     ExecSessionList(ExecSessionListArgs),
+    #[serde(rename = "exec_session.output")]
+    ExecSessionOutput(ExecSessionOutputArgs),
     #[serde(rename = "session.turn")]
     SessionTurn(SessionTurnArgs),
     #[serde(rename = "skills.catalog")]
@@ -153,6 +155,7 @@ pub type SessionMetaArgs = crate::ringing::service_methods::SessionMetaParams;
 pub type SessionActivityArgs = crate::ringing::service_methods::SessionActivityParams;
 pub type SessionGetActivityArgs = crate::ringing::service_methods::SessionGetActivityParams;
 pub type ExecSessionListArgs = crate::ringing::service_methods::ExecSessionListParams;
+pub type ExecSessionOutputArgs = crate::ringing::service_methods::ExecSessionOutputParams;
 pub type SessionTurnArgs = crate::ringing::service_methods::SessionTurnParams;
 
 #[derive(Debug, Deserialize)]

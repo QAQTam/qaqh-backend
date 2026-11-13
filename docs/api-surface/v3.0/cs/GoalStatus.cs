@@ -9,11 +9,19 @@ using System.Text.Json.Serialization;
 
 namespace Qaqh.Sdk.Contract;
 
-public enum SkillSessionEntryState
+public enum GoalStatus
 {
     [JsonStringEnumMemberName("active")]
     Active,
-    [JsonStringEnumMemberName("unavailable")]
-    Unavailable,
+    [JsonStringEnumMemberName("paused")]
+    Paused,
+    [JsonStringEnumMemberName("blocked")]
+    Blocked,
+    [JsonStringEnumMemberName("usage_limited")]
+    UsageLimited,
+    [JsonStringEnumMemberName("budget_limited")]
+    BudgetLimited,
+    [JsonStringEnumMemberName("complete")]
+    Complete,
 }
 

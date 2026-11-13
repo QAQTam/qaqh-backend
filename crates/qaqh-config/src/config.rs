@@ -1,7 +1,7 @@
 use crate::error::{ConfigError, ConfigResult};
 use crate::secrets::SecretStore;
 use qaqh_types::{
-    ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
+    ConfigStore, PersistentConfig, PersistentExecConfig, PersistentGoalsConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
     PersistentSandboxConfig, PersistentSubagentConfig,
 };
@@ -64,6 +64,24 @@ pub struct ExecConfig {
     pub default_shell: Option<String>,
 }
 
+/// Goal 模式配置(ADR-0015)。`enabled` 缺省 true(Codex Stable 同律);
+/// `max_token_budget` 既是单 goal 预算上限,也是 create_goal 未显式给预算时
+/// 的默认值;`None` = 无上限/无默认预算。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GoalsConfig {
+    pub enabled: bool,
+    pub max_token_budget: Option<u64>,
+}
+
+impl Default for GoalsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_token_budget: None,
+        }
+    }
+}
+
 /// 沙箱执行配置。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SandboxConfig {
@@ -122,6 +140,8 @@ pub struct Config {
     pub notifications_enabled: Option<bool>,
     /// Default configuration for sub-agent spawning.
     pub subagent: SubagentConfig,
+    /// Goal 模式(ADR-0015):持久目标 + 空闲自动续跑 + 预算熔断。
+    pub goals: GoalsConfig,
     /// exec tool default shell selection.
     pub exec: ExecConfig,
     /// Agent permission tier (裸 u8,wire 兼容;2026-10-03 三档制取代 L1–L4):
@@ -658,6 +678,7 @@ impl Default for Config {
             theme: None,
             notifications_enabled: None,
             subagent: SubagentConfig::default(),
+            goals: GoalsConfig::default(),
             exec: ExecConfig::default(),
             permission_level: 2, // workspace-write — safe autonomous default
             tokenizer_path: None,
@@ -793,6 +814,21 @@ impl Config {
                 }
                 if let Some(limit) = s.message_outbound_per_sender {
                     cfg.subagent.message_outbound_per_sender = limit;
+                }
+            }
+
+            // ── Goal 模式(ADR-0015)──
+            if let Some(ref g) = pc.goals {
+                if let Some(enabled) = g.enabled {
+                    cfg.goals.enabled = enabled;
+                }
+                if let Some(budget) = g.max_token_budget {
+                    if budget == 0 {
+                        return Err(ConfigError::Invalid(
+                            "[goals] max_token_budget 必须 > 0（得到 0）".to_string(),
+                        ));
+                    }
+                    cfg.goals.max_token_budget = Some(budget);
                 }
             }
 
@@ -947,6 +983,10 @@ falling back to 1 (read-only)"
                 max_depth: Some(self.subagent.max_depth),
                 message_in_flight_per_pair: Some(self.subagent.message_in_flight_per_pair),
                 message_outbound_per_sender: Some(self.subagent.message_outbound_per_sender),
+            }),
+            goals: Some(PersistentGoalsConfig {
+                enabled: Some(self.goals.enabled),
+                max_token_budget: self.goals.max_token_budget,
             }),
             exec: Some(PersistentExecConfig {
                 default_shell: self

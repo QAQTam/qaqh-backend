@@ -4,6 +4,7 @@ import type { InputPurpose } from "./InputPurpose";
 import type { InterAgentEnvelope } from "./InterAgentEnvelope";
 import type { SessionContentRef } from "./SessionContentRef";
 import type { SubagentTerminalNotification } from "./SubagentTerminalNotification";
+import type { WidgetContext } from "./WidgetContext";
 
 /**
  * 完整会话输入 payload。会话 owner 和 SDK 消费同一个值，不再投影成内部
@@ -34,4 +35,9 @@ inter_agent?: InterAgentEnvelope | null,
 /**
  * Set by trusted runtime invocation context, never accepted from public JSON.
  */
-subagent_terminal?: SubagentTerminalNotification | null, };
+subagent_terminal?: SubagentTerminalNotification | null, 
+/**
+ * widget-directive §4：用户确认 widget follow-up 时携带的 modelContent 快照。
+ * 直进回合 reminder（`<widget-state>`），绝不拼进用户可见文本、永不落盘。
+ */
+widget_context?: WidgetContext | null, };

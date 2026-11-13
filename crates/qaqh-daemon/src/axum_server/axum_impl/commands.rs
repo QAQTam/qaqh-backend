@@ -361,6 +361,7 @@ async fn dispatch(
             model_selection,
             tool_mode,
             custom_tools,
+            handoff_from,
         } => {
             let created = match service.create_session_command(
                 cwd.clone(),
@@ -368,6 +369,7 @@ async fn dispatch(
                 model_selection.clone(),
                 tool_mode.clone(),
                 custom_tools.clone(),
+                handoff_from.clone(),
             ) {
                 Ok(created) => created,
                 Err(error) => {
@@ -572,6 +574,9 @@ async fn dispatch(
         | RingingCommand::WorkspaceMoveSession { .. }
         | RingingCommand::WorkspaceDetach {}
         | RingingCommand::SubagentSpawn { .. }
+        | RingingCommand::GoalSet { .. }
+        | RingingCommand::GoalGet {}
+        | RingingCommand::GoalClear {}
         | RingingCommand::TodoSet { .. }
         | RingingCommand::TodoCancel { .. }
         | RingingCommand::PlanAction { .. }

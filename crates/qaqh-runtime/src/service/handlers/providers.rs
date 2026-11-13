@@ -253,7 +253,10 @@ impl QaqhService {
         patch: SessionSettingsPatch,
         expected_revision: u64,
     ) -> QaqhResult<u64> {
-        let SessionSettingsPatch { model_selection, tools } = &patch;
+        let SessionSettingsPatch {
+            model_selection,
+            tools,
+        } = &patch;
         if model_selection.is_none() && tools.is_none() {
             return Err(QaqhError::invalid(
                 "session.settings.patch: at least one setting is required",

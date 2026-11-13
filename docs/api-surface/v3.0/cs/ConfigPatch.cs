@@ -13,8 +13,6 @@ public sealed record ConfigPatch
 {
     [JsonPropertyName("autoCompactThreshold")]
     public double? AutoCompactThreshold { get; init; }
-    [JsonPropertyName("complianceEnabled")]
-    public bool? ComplianceEnabled { get; init; }
     [JsonPropertyName("permissionLevel")]
     public long? PermissionLevel { get; init; }
     [JsonPropertyName("tokenizerPath")]
@@ -31,5 +29,7 @@ public sealed record ConfigPatch
     public string[]? ToolAllowlist { get; init; }
     [JsonPropertyName("subagent")]
     public SubagentPatch? Subagent { get; init; }
+    [JsonPropertyName("goals")]
+    public GoalsPatch? Goals { get; init; }
 }
 

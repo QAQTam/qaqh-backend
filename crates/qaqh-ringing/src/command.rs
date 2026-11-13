@@ -61,6 +61,11 @@ pub enum RingingCommand {
         tool_mode: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         custom_tools: Option<Vec<String>>,
+        /// ADR-0015 切片F：handoff fork 的来源会话 id(工具输出里的
+        /// `from_session_id`)。内核据此建立工作链血缘,goal 沿链解析;
+        /// 普通新建会话缺席。additive:旧客户端不传即无血缘。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handoff_from: Option<String>,
     },
     #[serde(rename = "session.settings.patch")]
     SessionSettingsPatch { patch: SessionSettingsPatch },
@@ -93,6 +98,25 @@ pub enum RingingCommand {
     /// 与活动回合冲突时当场拒(不允许冲突撤回);先 cancel,后 truncate。
     #[serde(rename = "conversation.truncate")]
     ConversationTruncate { turn_id: String },
+    /// 设置会话目标(ADR-0015)。`objective` 给出 = 创建/改目标(无 goal 时
+    /// 创建为 active);`status` 给出 = 状态迁移(resume=active,用户主权);
+    /// `token_budget` 双层 Option:缺席=不动,null=清除,数值=设置(>0)。
+    /// 已有未完成 goal 时创建被拒(`goal_exists`);仅改状态而无 goal 拒(`no_goal`)。
+    #[serde(rename = "goal.set")]
+    GoalSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<qaqh_ringing_contract::state::GoalStatus>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_budget: Option<Option<u64>>,
+    },
+    /// 读会话目标(ADR-0015);无 goal 时 result 为 null。
+    #[serde(rename = "goal.get")]
+    GoalGet {},
+    /// 清除会话目标(ADR-0015);幂等,无 goal 也成功(cleared=false)。
+    #[serde(rename = "goal.clear")]
+    GoalClear {},
     #[serde(rename = "interaction.ask.respond")]
     InteractionAskRespond {
         interaction_id: String,
@@ -216,6 +240,9 @@ impl RingingCommand {
             Self::ConversationSendMessage(_) => "conversation.send_message",
             Self::ConversationCancel { .. } => "conversation.cancel",
             Self::ConversationTruncate { .. } => "conversation.truncate",
+            Self::GoalSet { .. } => "goal.set",
+            Self::GoalGet {} => "goal.get",
+            Self::GoalClear {} => "goal.clear",
             Self::InteractionAskRespond { .. } => "interaction.ask.respond",
             Self::InteractionAskDismiss { .. } => "interaction.ask.dismiss",
             Self::DriverClaim { .. } => "driver.claim",

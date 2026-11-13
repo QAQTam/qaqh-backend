@@ -7,8 +7,8 @@
     "paths": [
       "/synthetic/workspace/README.md"
     ],
-    "category": "filesystem",
-    "level": "tier-2",
+    "category": "write",
+    "level": 2,
     "risk": "medium",
     "consequence": "overwrites the file",
     "details_unavailable": false
