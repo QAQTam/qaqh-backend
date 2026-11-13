@@ -46,6 +46,10 @@ pub enum CommandRejection {
     TurnActive,
     /// 目标回合不存在(从未存在,或已被撤回过)。
     TurnNotFound,
+    /// 会话已有未完成 goal:创建被拒(先 complete/clear,再创建)。ADR-0015。
+    GoalExists,
+    /// 会话没有 goal:仅改状态/预算的请求被拒。ADR-0015。
+    NoGoal,
 }
 
 impl CommandRejection {
@@ -53,6 +57,8 @@ impl CommandRejection {
         match self {
             Self::TurnActive => "turn_active",
             Self::TurnNotFound => "turn_not_found",
+            Self::GoalExists => "goal_exists",
+            Self::NoGoal => "no_goal",
         }
     }
 }
@@ -73,7 +79,11 @@ impl CommandRejection {
 ///   `fixtures/{open-request,open-response,command-attach}.json`）的值都由本常量
 ///   机器生成（exporter `main.rs`/`cs_backend.rs`），所以**只能由机器重切**，
 ///   手改金标准等于作弊（规则 16）。
-pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-8";
+///
+/// `-9`（2026-11-13，ADR-0015 §已决 2，所有者拍板）：新增 `goal.set` / `goal.get` /
+/// `goal.clear` 命令 + `goal_exists` / `no_goal` 拒绝码 ⇒ 与 `-8` 同律 bump。
+/// 代价与 `-8` 相同（未重编旧客户端 open 即拒），账记 ADR-0010 攒着的清单。
+pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-9";
 
 /// 会话读模型/事件词表契约代际(spec §11)。管理事件与读模型的破坏性变化;
 /// open 与 bootstrap 均携带,客户端必须严格校验。首个显式修订 = ringing-session-2,
@@ -231,6 +241,9 @@ impl RingingCommand {
                 | Self::ConversationSendMessage(_)
                 | Self::ConversationCancel { .. }
                 | Self::ConversationTruncate { .. }
+                | Self::GoalSet { .. }
+                | Self::GoalGet {}
+                | Self::GoalClear {}
                 | Self::InteractionAskRespond { .. }
                 | Self::InteractionAskDismiss { .. }
                 | Self::DriverClaim { .. }
@@ -822,6 +835,9 @@ mod tests {
     fn truncate_rejection_codes_are_stable() {
         assert_eq!(CommandRejection::TurnActive.code(), "turn_active");
         assert_eq!(CommandRejection::TurnNotFound.code(), "turn_not_found");
+        // ADR-0015：goal 拒绝码同属命令面词汇表,改名 = 破坏用户空间契约。
+        assert_eq!(CommandRejection::GoalExists.code(), "goal_exists");
+        assert_eq!(CommandRejection::NoGoal.code(), "no_goal");
     }
 
     #[test]
@@ -834,6 +850,40 @@ mod tests {
         assert_eq!(value["turn_id"], "t2");
     }
 
+    /// ADR-0015：goal 三命令的 wire 名与形状钉住(客户端按 type 分支)。
+    #[test]
+    fn goal_commands_round_trip_by_name() {
+        let set = serde_json::to_value(RingingCommand::GoalSet {
+            objective: Some("ship it".into()),
+            status: Some(qaqh_ringing_contract::state::GoalStatus::Active),
+            token_budget: Some(Some(1000)),
+        })
+        .expect("serialize goal.set");
+        assert_eq!(set["type"], "goal.set");
+        assert_eq!(set["objective"], "ship it");
+        assert_eq!(set["status"], "active");
+        assert_eq!(set["token_budget"], 1000);
+        let decoded: RingingCommand = serde_json::from_value(set).expect("deserialize goal.set");
+        assert!(matches!(decoded, RingingCommand::GoalSet { .. }));
+
+        let get = serde_json::to_value(RingingCommand::GoalGet {}).expect("serialize goal.get");
+        assert_eq!(get["type"], "goal.get");
+        let clear =
+            serde_json::to_value(RingingCommand::GoalClear {}).expect("serialize goal.clear");
+        assert_eq!(clear["type"], "goal.clear");
+
+        // 缺席字段不上 wire;null 预算 = 清除(双层 Option 语义)。
+        let minimal = serde_json::to_value(RingingCommand::GoalSet {
+            objective: None,
+            status: None,
+            token_budget: Some(None),
+        })
+        .expect("serialize minimal goal.set");
+        assert!(minimal.get("objective").is_none());
+        assert!(minimal.get("status").is_none());
+        assert_eq!(minimal["token_budget"], serde_json::Value::Null);
+    }
+
     #[test]
     fn session_create_round_trips_model_selection() {
         let command = RingingCommand::SessionCreate {
@@ -842,6 +892,7 @@ mod tests {
             model_selection: Some(qaqh_types::ModelSelection::default()),
             tool_mode: None,
             custom_tools: None,
+            handoff_from: None,
         };
         let value = serde_json::to_value(command).expect("serialize command");
         assert!(value["model_selection"].is_object(), "{value}");

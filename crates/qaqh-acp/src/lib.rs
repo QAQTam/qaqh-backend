@@ -107,6 +107,7 @@ impl AcpAgent {
                     model_selection: Some(selection),
                     tool_mode: None,
                     custom_tools: None,
+                    handoff_from: None,
                 },
             )
             .await?,

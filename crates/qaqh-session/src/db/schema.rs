@@ -13,7 +13,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use super::DbError;
 use super::store::now_ms;
 
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -30,6 +30,10 @@ CREATE TABLE sessions (
     settings_revision INTEGER NOT NULL DEFAULT 0,
     archived          INTEGER NOT NULL DEFAULT 0,
     ephemeral         INTEGER NOT NULL DEFAULT 0,
+    -- ADR-0015 切片F：handoff 工作链。from = 封箱来源会话(客户端 fork 时传);
+    -- sealed = 内核在 handoff 成功时刻写的封箱标记(续跑引擎据此跳过死线)。
+    handoff_from_session_id TEXT,
+    handoff_sealed_at_ms    INTEGER,
     created_at_ms     INTEGER NOT NULL,
     updated_at_ms     INTEGER NOT NULL
 );
@@ -143,6 +147,22 @@ CREATE TABLE workspace_sessions (
     workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE
 );
 CREATE INDEX idx_workspace_sessions_workspace ON workspace_sessions(workspace_id);
+
+-- ADR-0015:会话持久目标。每会话至多一个(UNIQUE),状态与用量是唯一权威;
+-- empty_turns 是续跑空回复审计计数(落库,跨 idle 卸载/重启存活)。
+CREATE TABLE session_goals (
+    goal_id       TEXT PRIMARY KEY,
+    session_id    TEXT NOT NULL UNIQUE REFERENCES sessions(session_id) ON DELETE CASCADE,
+    objective     TEXT NOT NULL,
+    status        TEXT NOT NULL,
+    token_budget  INTEGER,
+    tokens_used   INTEGER NOT NULL DEFAULT 0,
+    time_used_ms  INTEGER NOT NULL DEFAULT 0,
+    empty_turns   INTEGER NOT NULL DEFAULT 0,
+    created_at_ms INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL
+);
+CREATE INDEX idx_session_goals_status ON session_goals(status);
 "#;
 
 const DDL_TEAM: &str = r#"
@@ -255,22 +275,29 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
                 supported: SCHEMA_VERSION,
             });
         }
-        // schema 5 → 6(spec-exec-session-lifecycle §9.3)后接 6→7、7→8:
+        // schema 5 → 6(spec-exec-session-lifecycle §9.3)后接 6→7、7→8、8→9:
         // 链式执行,否则旧代库会跳过后续的数据归一。
         Some(5) => {
             upgrade_5_to_6(&tx)?;
             upgrade_6_to_7(&tx)?;
             upgrade_7_to_8(&tx)?;
+            upgrade_8_to_9(&tx)?;
         }
         // schema 6 → 7:content id 形态收口(裸 hex),数据归一在新 daemon
-        // 对外服务前完成;随后接 7→8 存量 effects 归一。
+        // 对外服务前完成;随后接 7→8 存量 effects 归一、8→9 goal 表。
         Some(6) => {
             upgrade_6_to_7(&tx)?;
             upgrade_7_to_8(&tx)?;
+            upgrade_8_to_9(&tx)?;
         }
         // schema 7 → 8:skills 裁剪的存量 effects 归一(ADR-0010)。
         Some(7) => {
             upgrade_7_to_8(&tx)?;
+            upgrade_8_to_9(&tx)?;
+        }
+        // schema 8 → 9:goal 表纯增量(ADR-0015)。
+        Some(8) => {
+            upgrade_8_to_9(&tx)?;
         }
         Some(found) if found < SCHEMA_VERSION => {
             return Err(DbError::SchemaTooOld {
@@ -595,6 +622,31 @@ fn upgrade_7_to_8(tx: &Transaction<'_>) -> Result<(), DbError> {
     Ok(())
 }
 
+/// schema 8 → 9(ADR-0015):goal 表纯增量 + handoff 工作链两列,无存量数据归一。
+fn upgrade_8_to_9(tx: &Transaction<'_>) -> Result<(), DbError> {
+    tx.execute_batch(
+        r#"
+        ALTER TABLE sessions ADD COLUMN handoff_from_session_id TEXT;
+        ALTER TABLE sessions ADD COLUMN handoff_sealed_at_ms INTEGER;
+        CREATE TABLE IF NOT EXISTS session_goals (
+            goal_id       TEXT PRIMARY KEY,
+            session_id    TEXT NOT NULL UNIQUE REFERENCES sessions(session_id) ON DELETE CASCADE,
+            objective     TEXT NOT NULL,
+            status        TEXT NOT NULL,
+            token_budget  INTEGER,
+            tokens_used   INTEGER NOT NULL DEFAULT 0,
+            time_used_ms  INTEGER NOT NULL DEFAULT 0,
+            empty_turns   INTEGER NOT NULL DEFAULT 0,
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_session_goals_status ON session_goals(status);
+        "#,
+    )
+    .map_err(|error| DbError::Corrupt(format!("upgrade 8→9 ddl: {error}")))?;
+    Ok(())
+}
+
 fn corrupt(field: &'static str) -> impl Fn(rusqlite::Error) -> DbError {
     move |error| DbError::Corrupt(format!("upgrade 5→6 {field}: {error}"))
 }
@@ -864,11 +916,16 @@ mod tests {
         for _ in 0..3 {
             initialize(&mut conn).expect("fresh/repeated initialize");
         }
-        // 还原真实故障:已是 v6 的业务表,但版本历史仍以 v5 开头。
+        // 还原真实故障:业务表停在旧代,但版本历史混着更旧的值。
+        // schema 9 后「旧代」= v8:先把 9 的增量(两列 + goal 表)退掉,
+        // 再伪造混合历史,让 8→9 链在真正的 v8 表上重放。
         conn.execute_batch(
             "DROP INDEX idx_schema_version_singleton;
              DELETE FROM schema_version;
-             INSERT INTO schema_version VALUES (5), (5), (6);",
+             INSERT INTO schema_version VALUES (5), (5), (8);
+             ALTER TABLE sessions DROP COLUMN handoff_from_session_id;
+             ALTER TABLE sessions DROP COLUMN handoff_sealed_at_ms;
+             DROP TABLE session_goals;",
         )
         .expect("legacy metadata");
         conn.execute(
@@ -1119,11 +1176,18 @@ mod tests {
         assert_eq!(chain_effects, None);
     }
 
-    // v7 形态最小 fixture:仅 7→8 所触碰的表与版本行。tool_calls 列形态取
-    // 6 代重建后的权威形状。
+    // v7 形态最小 fixture:7→8 所触碰的表 + sessions(8→9 ALTER 需要)与版本行。
+    // tool_calls 列形态取 6 代重建后的权威形状。
     const V7: &str = r#"
         CREATE TABLE schema_version (version INTEGER NOT NULL);
         INSERT INTO schema_version VALUES (7);
+        -- 真实 v7 库必含 sessions(8→9 的 handoff 两列 ALTER 在其上执行)。
+        CREATE TABLE sessions (
+            session_id TEXT PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            created_at_ms INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL
+        );
         CREATE TABLE tool_calls (
             call_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT,
             tool_name TEXT NOT NULL, args_json TEXT, state_json TEXT NOT NULL,

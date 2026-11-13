@@ -2,18 +2,18 @@
   "format_version": 1,
   "wire_version": 2,
   "backend_version": "3.0.20261110-g1842986",
-  "source_revision": "cdaf6dbdd02fad85192395b70ee9cb69d380dfe2",
-  "source_dirty": false,
+  "source_revision": "development",
+  "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "1a0db0e0a22bdca154c4eeaa18b1fa7461732dbd7727fad45aa038f8488a7fb0",
+  "contract_hash": "1ae84972a3a0ccd1759b575c63eadd4330bc26881bc9e14d9cf391218e5111f0",
   "files": [
     {
       "path": "constants.ts",
-      "sha256": "91898f1555c6133cd2fba4c77a8732e20c9b44e18276a39290ab701608e89d95"
+      "sha256": "33d538244ab29f2b9d802a81c2df93b59decd1d096f5703d250f1b48d445d638"
     },
     {
       "path": "coverage.json",
-      "sha256": "edfe2ec1c5d649b5231ff2bcce7797c23b5ed71e8318f8aaeb9eac1dc6b81da6"
+      "sha256": "b7e6c7139a99ddd437a9cad66ca8125c23882f43b8b446dda0d62be16c758e68"
     },
     {
       "path": "cs/AccountsEmptyParams.cs",
@@ -81,7 +81,7 @@
     },
     {
       "path": "cs/ConfigDto.cs",
-      "sha256": "710b3ef1f628941a4e39fe439d628479dd74120fd8d34e979a3037ecb4d58d41"
+      "sha256": "eb7b728cc9ee3c3f5c4316ae65c9d56f65fc2f85cc9dcf9373c2f6b5a0b13954"
     },
     {
       "path": "cs/ConfigLoadParams.cs",
@@ -89,7 +89,7 @@
     },
     {
       "path": "cs/ConfigPatch.cs",
-      "sha256": "715218280f02b597baf6ad094a932848c12db863dfd73025738b3cd8e175b9d7"
+      "sha256": "ad6ecd759f7a51dd629d4aab3caa7a7a73d4f6628229059f6f8e106aa6830771"
     },
     {
       "path": "cs/ContentUnavailable.cs",
@@ -105,7 +105,7 @@
     },
     {
       "path": "cs/ContractConstants.cs",
-      "sha256": "461e16c1c43385937a8ccd0a1b31a76beb517b349df3ab8684adcabaafc404a4"
+      "sha256": "76ba4f7ce718a9a0b95fb306fe67b9b49af1b21d75f127370218939d41493e55"
     },
     {
       "path": "cs/ContractJson.cs",
@@ -113,7 +113,7 @@
     },
     {
       "path": "cs/ConversationSendMessage.cs",
-      "sha256": "0d3c6c02e5cb6375027d249c3052dd11906faccd8e6947cd016aaadc9e091d08"
+      "sha256": "2bd8c82e43a07539fea7f594fba2cf03cde698d01d564ebd5bd5fc1814e7eb45"
     },
     {
       "path": "cs/CredentialSource.cs",
@@ -264,6 +264,22 @@
       "sha256": "646493090c3701f175bf42355d3dfa7a2914ca4a15b9f4a6e2a02ed84d5ec8f8"
     },
     {
+      "path": "cs/GoalStatus.cs",
+      "sha256": "a578cfc40f0d8fedb0a51c2f8bbb0e81a1985320bbedc40beca8af1f9aedee8c"
+    },
+    {
+      "path": "cs/GoalView.cs",
+      "sha256": "df9f123551ed51ed2c03c60f3fbed0b6bcca578f24278b270d804ee683d54c80"
+    },
+    {
+      "path": "cs/GoalsDto.cs",
+      "sha256": "07cf4a69a7ca1f2331101755b384f0192f0ea75184af6470c04cd3f256173501"
+    },
+    {
+      "path": "cs/GoalsPatch.cs",
+      "sha256": "711d22d20d26e4bb734d2efa7d527ac5468e9bb3a7176a67bbc579697e02f383"
+    },
+    {
       "path": "cs/ImageBlock.cs",
       "sha256": "890e87a0545dc993ad6e8309c0179cc5a5e6df87dd5d78eb33f315493852cd6a"
     },
@@ -348,6 +364,10 @@
       "sha256": "bc64b0e095ea24ed9cf547d8348160b839285b97de85261200cf23bfdf58a566"
     },
     {
+      "path": "cs/PermissionRequestDetails.cs",
+      "sha256": "34d2167f73d9191f5bb7dc7f0e830282985d894f340df238f028183b078fe6e0"
+    },
+    {
       "path": "cs/PhaseKind.cs",
       "sha256": "6e18f38608679797e6cb008bc386b78e2b94d95fbb75a92d4a0b68d73f6c11b9"
     },
@@ -409,7 +429,7 @@
     },
     {
       "path": "cs/RingingCommand.cs",
-      "sha256": "9b1f640b11ba2cb07bc5aa4dae75f61ed40146926b5c06e3359bb8443a768169"
+      "sha256": "6eaca617d91404b0918ed6683d6c483efaa1b37d01f1eeac393b436110f79f04"
     },
     {
       "path": "cs/RingingCommandAck.cs",
@@ -593,11 +613,11 @@
     },
     {
       "path": "cs/SessionEvent.cs",
-      "sha256": "74ab345d506163eede215fa911a66c37be16d054104799c66e6185b37961cbda"
+      "sha256": "227f2dbbd9ba1f894972d0ebe1f4b601db5edd01199b75295791f3a127eedc66"
     },
     {
       "path": "cs/SessionEventFrame.cs",
-      "sha256": "f7405df7d21145b49b637a69696b78c1abc40b220ec5d1b5266b887afacd0aa1"
+      "sha256": "df19cb49ec9ca87115f8c0cb776c32e0c652f5fa2e2494d5589dc55def35f9c9"
     },
     {
       "path": "cs/SessionGetActivityParams.cs",
@@ -613,7 +633,7 @@
     },
     {
       "path": "cs/SessionListEntry.cs",
-      "sha256": "d56d657af534ba310d364b5e56020d3e1157abd49e55969b0a673004ca134496"
+      "sha256": "70663e1fd8f4e4f41b34822ff575efe6cf7aa8ff4a5f6240b4d60a4481e44f51"
     },
     {
       "path": "cs/SessionListParams.cs",
@@ -625,7 +645,7 @@
     },
     {
       "path": "cs/SessionMeta.cs",
-      "sha256": "ac218e109761f11477ada81cc3ffe0d625af232993f71c54b7b55b3f6f0625de"
+      "sha256": "779511dd2da13d43cb9e1ba201f42c3efb55f68e96f7ddf5917ebac18a970984"
     },
     {
       "path": "cs/SessionMetaParams.cs",
@@ -641,7 +661,7 @@
     },
     {
       "path": "cs/SessionState.cs",
-      "sha256": "781f75e96dc9097a13cfdbe74101f7cfa189c4567fa1bcbd0aa74f583e88ec5e"
+      "sha256": "b8654ce832e9941a156c238f9527d29e64f56cb835ebb5840e0439b9f9b91bc2"
     },
     {
       "path": "cs/SessionToolActivity.cs",
@@ -730,18 +750,6 @@
     {
       "path": "cs/SkillCatalogEntry.cs",
       "sha256": "d3e98c23a16612f40420d11d2e99cfb893d7e510fa1b8fc756a16d562f46f181"
-    },
-    {
-      "path": "cs/SkillSessionEntry.cs",
-      "sha256": "67eef2239f28d0d43a4a4168cd0bca0d794091cd32183ae81b400e99bf1d1daf"
-    },
-    {
-      "path": "cs/SkillSessionEntryState.cs",
-      "sha256": "e6f3ae360cdff5646879d33ccf667950032563d73979f195a11d5d6a8025631c"
-    },
-    {
-      "path": "cs/SkillSessionStateV2.cs",
-      "sha256": "5f3d6db7ac73f260bfd29bd807fd2f932cc86d2a22975953aec2412068151f15"
     },
     {
       "path": "cs/SkillsCatalogParams.cs",
@@ -853,7 +861,7 @@
     },
     {
       "path": "cs/TimelineEntry.cs",
-      "sha256": "d2b1ef8a9715b15a009feb983c0af55668d2e98864e1b80b1dd8c03304cc8554"
+      "sha256": "9c6ecdad6f812dd005421b7718b02b60f2cea926b7042e92ed748ea1a202426a"
     },
     {
       "path": "cs/TodoCountsSnapshot.cs",
@@ -897,7 +905,7 @@
     },
     {
       "path": "cs/ToolEffectInfo.cs",
-      "sha256": "4b9fdb8ca2fab6c0c48b57448024cb64e8952ed05b81b85649bea8b4189b9fe4"
+      "sha256": "73e592358e39ec5c1a759da46e1f2e40682c4613ebb7facc6fbbd8c7d851bc76"
     },
     {
       "path": "cs/ToolInterruptionReason.cs",
@@ -944,6 +952,14 @@
       "sha256": "14947f734768160dbab6e392e9dc47719135adea5159bdbae60089aeb126a8ba"
     },
     {
+      "path": "cs/WidgetContext.cs",
+      "sha256": "bbb988b7b69504caca99ba6a7929ed6f8f8977164f050f7f6c934814edcaf5a1"
+    },
+    {
+      "path": "cs/WidgetRef.cs",
+      "sha256": "16acc6d6f89f22419d2ca83fb0185213c442b730c704740f57e9028126e0179f"
+    },
+    {
       "path": "cs/Wire.cs",
       "sha256": "70b7b1bb456038b1fe6149497a7487b7f9c0ccba7e935dbd897337c5ddb6f4aa"
     },
@@ -977,7 +993,7 @@
     },
     {
       "path": "fixtures/approvals-pending.json",
-      "sha256": "40cf755463029492f2e1e815879767ca6d82355b57d1095da58bd51da763db44"
+      "sha256": "7d900c086c6416c1abda9e7dec3cd9f8e99e7a5ae4efbf0deaba7bc4811fc22d"
     },
     {
       "path": "fixtures/bootstrap-response.json",
@@ -1001,7 +1017,7 @@
     },
     {
       "path": "fixtures/command-attach.json",
-      "sha256": "95e51892c4c8b9a9e55ecb775a57c67af48cadd564d276d3647643eebbea06aa"
+      "sha256": "a5b5e2ce79ea74f3814cf5e2fb89bf8c914f45b9fd55eeedc3d2f30cc86ee193"
     },
     {
       "path": "fixtures/command-status-accepted.json",
@@ -1049,11 +1065,11 @@
     },
     {
       "path": "fixtures/open-request.json",
-      "sha256": "f6d4800923de1907323a937314e9ca0d7b8e42e07ecb919dc69af110887fb973"
+      "sha256": "c1c47af55db187e7ca9f420a4f8aa5b5c28f578c09b487a8e82f6e0a27a7cee2"
     },
     {
       "path": "fixtures/open-response.json",
-      "sha256": "2d5cfaf94bd04c160921a44aceacb5b011d39a8bc06507d02c3599d2e4475f04"
+      "sha256": "0721f7b648bd3c1f77e1791cf45c1fbb3085e73a20f8974c9ae28eef9e4a5971"
     },
     {
       "path": "fixtures/pair-params.json",
@@ -1070,6 +1086,10 @@
     {
       "path": "fixtures/pair-token-result.json",
       "sha256": "9976105fba200c6d4fd8abacfe7e2d045487662484b4078a32a0c4c51ff1836e"
+    },
+    {
+      "path": "fixtures/pending-permission-details.json",
+      "sha256": "2c9f1412a4450f1d63b55340b3a8b53b8b9d0c54b44f5778ae9ebb65440c01df"
     },
     {
       "path": "fixtures/receipt-policy.json",
@@ -1089,7 +1109,7 @@
     },
     {
       "path": "fixtures/service-config-load-result.json",
-      "sha256": "b7c12b7013a999966623fd8080a041c48a34eaaf5365c2482b2d70ac867d703a"
+      "sha256": "2f9d98173f45c5050fb60b57090edf66c066fea3842c89766cc2af0c243b9d11"
     },
     {
       "path": "fixtures/service-daemon-version-params.json",
@@ -1249,7 +1269,7 @@
     },
     {
       "path": "fixtures/service-session-list-result.json",
-      "sha256": "c114335f19eea330f73755c43ec3efd1afd76210b4f6bcaad12ea5af3511c902"
+      "sha256": "73ec221f771e8dfdcc89255be08bca6b9f13bdf4386241a608d3fb8f1e332d78"
     },
     {
       "path": "fixtures/service-session-meta-params.json",
@@ -1257,7 +1277,7 @@
     },
     {
       "path": "fixtures/service-session-meta-result.json",
-      "sha256": "bb5060db30ae8dff1e631745b21284f04293a54c62c787b79ebf8edf792bcdf7"
+      "sha256": "a2686fda925cc7d39e70b5d639f43cb096ba3e24a0997b3d4835dd7e3082a8ed"
     },
     {
       "path": "fixtures/service-session-turn-params.json",
@@ -1389,7 +1409,7 @@
     },
     {
       "path": "index.ts",
-      "sha256": "7f779a041a2ed1fc4af02993a74ab8a14cef0aa4e7845b9b4d2dd46689782b55"
+      "sha256": "0b9412c4f917277f1d739809f4d48624b21b8bf43fb47c5e7abd169e04387644"
     },
     {
       "path": "node.ts",
@@ -1489,7 +1509,7 @@
     },
     {
       "path": "types/qaqh/ConfigDto.ts",
-      "sha256": "55e5c5c2742b92b13d61f721d2f99a7a76db71d921d3260cc814c94921b896da"
+      "sha256": "b6f7d14690149571f981bea1d51d2ca8f98a7b55d26db6250318b73a33c626a0"
     },
     {
       "path": "types/qaqh/ConfigLoadParams.ts",
@@ -1497,7 +1517,7 @@
     },
     {
       "path": "types/qaqh/ConfigPatch.ts",
-      "sha256": "d60154f13ab29c983b23c711d4607e0ac53f050c09285a1483cfb45dc4d1034e"
+      "sha256": "e65affa8b049409dd12551a8959040c7ae17daa88fcb3582838885b16cf6872e"
     },
     {
       "path": "types/qaqh/ContentHash.ts",
@@ -1517,7 +1537,7 @@
     },
     {
       "path": "types/qaqh/ConversationSendMessage.ts",
-      "sha256": "64ab57032a8ee050fab8d9f1d37059f3a083e7aecf5b354c5d8df87c76e692e3"
+      "sha256": "4e46e81e3aa9aea8c5b44fa84245cd51ef6d2654b99b3020e0433498eb12dc93"
     },
     {
       "path": "types/qaqh/CredentialSource.ts",
@@ -1676,6 +1696,22 @@
       "sha256": "5105632e922307b9a8ca5074aa770fff06ea5e32934561ab1b6e6d2596d27fe4"
     },
     {
+      "path": "types/qaqh/GoalStatus.ts",
+      "sha256": "179f41d5395595ce93c04da7eaed7f386c80288c5e28275354b2deeb7e8224bf"
+    },
+    {
+      "path": "types/qaqh/GoalView.ts",
+      "sha256": "b12a325960d0562079b6c4e072cd8fa9a6a4076ed0be3ccd232e3d16c6924afc"
+    },
+    {
+      "path": "types/qaqh/GoalsDto.ts",
+      "sha256": "3fe0e77f6f753447dc5bf1b5f6b6b7f0c2b2c4f68066262c0a9dfdfdf03314af"
+    },
+    {
+      "path": "types/qaqh/GoalsPatch.ts",
+      "sha256": "f1a9f6ec76b8bba685a1a24207e4a2fab7afe2637aba957cbe009e575f682907"
+    },
+    {
       "path": "types/qaqh/ImageBlock.ts",
       "sha256": "7d96331ca02783bd1e2ac2c504a50f3abe63ff472b536b56f856712a42f2fd1b"
     },
@@ -1772,6 +1808,10 @@
       "sha256": "9c542edb2aa232bba501329c21b74af3f80f2ee99d8bc192eadc605e8405b9d4"
     },
     {
+      "path": "types/qaqh/PermissionRequestDetails.ts",
+      "sha256": "8e93168bd41810d1abaf1cc6d09f7c5effe4b60108331981e65486737e3a709e"
+    },
+    {
       "path": "types/qaqh/PhaseKind.ts",
       "sha256": "ec92dc448f21571a008b2b6864ac016b61d393f8f07616ba6f83d8d8391f82dc"
     },
@@ -1817,7 +1857,7 @@
     },
     {
       "path": "types/qaqh/RingingCommand.ts",
-      "sha256": "03ce41d72ebb719aca2dc9c96bece58ec949834471a6ae267b8942cf4a053d23"
+      "sha256": "366b2291b295e37408964d1d43c38fc13d445e94d23948c119367d8bb9aa869d"
     },
     {
       "path": "types/qaqh/RingingCommandAck.ts",
@@ -2005,11 +2045,11 @@
     },
     {
       "path": "types/qaqh/SessionEvent.ts",
-      "sha256": "20ba439325f4f5c8e22df5fdaa348e3796eaf7788c7406e31386b51952668572"
+      "sha256": "98208607dd6685108f0638c973a97aa272b2464b33385aded5faaaed3ee55a2d"
     },
     {
       "path": "types/qaqh/SessionEventFrame.ts",
-      "sha256": "9ed3f6e3b1302f8f25e80653fac83647eb5013358bc3c4a1026e3375ed576641"
+      "sha256": "ef3f10cb9bb2bb65516684b4d92ced25b614aa32c7a1879c3852ac951e8b011f"
     },
     {
       "path": "types/qaqh/SessionGetActivityParams.ts",
@@ -2029,7 +2069,7 @@
     },
     {
       "path": "types/qaqh/SessionListEntry.ts",
-      "sha256": "2dfd124c4db019c0094cbc33511a7172d3495eaac93666afe4f702188986059a"
+      "sha256": "b337c482bec50f0fd26a870deaeeb904a6654da9616e421bb784db222b60713e"
     },
     {
       "path": "types/qaqh/SessionListParams.ts",
@@ -2041,7 +2081,7 @@
     },
     {
       "path": "types/qaqh/SessionMeta.ts",
-      "sha256": "f5423311fb273a01047ed267f5d0ee07903da9b7b571a911fbc99d19941669f9"
+      "sha256": "79b5e5b737c9181e251f3ee7b12ee539b152cca7b91db13394bd7ea6027f2435"
     },
     {
       "path": "types/qaqh/SessionMetaParams.ts",
@@ -2057,7 +2097,7 @@
     },
     {
       "path": "types/qaqh/SessionState.ts",
-      "sha256": "377084a52471a76d056c4dd228293f6ca5158da85dfd37044413924bb944ac7d"
+      "sha256": "a92f9fb76270e354dc14b674f0df7784f389f1ea5464ef0bb477b378d995a3de"
     },
     {
       "path": "types/qaqh/SessionToolActivity.ts",
@@ -2146,18 +2186,6 @@
     {
       "path": "types/qaqh/SkillCatalogEntry.ts",
       "sha256": "21d15b4384c9a28b45f2c459cb4119eb95462411bd2b1ef278e1fb8229883ab7"
-    },
-    {
-      "path": "types/qaqh/SkillSessionEntry.ts",
-      "sha256": "f192846517d984e3580e80dc2ee9f646741b22a8bbb4180a7ea5b0034a8bc860"
-    },
-    {
-      "path": "types/qaqh/SkillSessionEntryState.ts",
-      "sha256": "490d641b5757c3effa57cee0ce4a827cb8c448f127bf9abc8876d32c68501991"
-    },
-    {
-      "path": "types/qaqh/SkillSessionStateV2.ts",
-      "sha256": "b8d93c3d1e67ddab25e8f067cf780bb487baabc669982795e477ef9a7092a57d"
     },
     {
       "path": "types/qaqh/SkillsCatalogParams.ts",
@@ -2277,7 +2305,7 @@
     },
     {
       "path": "types/qaqh/TimelineEntry.ts",
-      "sha256": "4cfc1cbeb0278527a2467fc12f8dfdc37f40f02ae4fb568cdf610e1b02d62a36"
+      "sha256": "2433fb969b4597018db703e064b746b3000654a5c91c89b7bac38e0bfe8ce265"
     },
     {
       "path": "types/qaqh/TodoCountsSnapshot.ts",
@@ -2325,7 +2353,7 @@
     },
     {
       "path": "types/qaqh/ToolEffectInfo.ts",
-      "sha256": "122df70911252b298ad22174dc9b6fe9a78c6486d21a638a60c27ef9ae847ae2"
+      "sha256": "64fae10ba606ea8ae7d8e6ae9acddf8a846792f07da8fb390160e7fea32d799f"
     },
     {
       "path": "types/qaqh/ToolInterruptionReason.ts",
@@ -2374,6 +2402,14 @@
     {
       "path": "types/qaqh/UserSendMode.ts",
       "sha256": "559009f9cf062faff51e4c59b8957057bfaefb2682290a6b72e473ff173b175f"
+    },
+    {
+      "path": "types/qaqh/WidgetContext.ts",
+      "sha256": "741ce0210119bf8953a6b97df8e122ea1a632b2e28a0f1ff077a7ba9f292a44f"
+    },
+    {
+      "path": "types/qaqh/WidgetRef.ts",
+      "sha256": "8abcb10f949eab1e0d0aa9cbfcdce17fe36a26e99fc7785fe980cbde087cf1c1"
     },
     {
       "path": "types/qaqh/Wire.ts",

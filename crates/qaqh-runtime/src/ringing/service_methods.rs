@@ -126,6 +126,37 @@ pub struct ExecSessionListResult {
     pub sessions: Vec<qaqh_ringing_contract::ExecSessionView>,
 }
 
+/// `exec_session.output` 的 `max_bytes` 缺省(256KiB)与上限(1MiB)
+/// (ADR-0017 决策 2:客户端循环拉取,单次响应有界)。
+pub const EXEC_OUTPUT_DEFAULT_MAX_BYTES: u64 = 256 * 1024;
+pub const EXEC_OUTPUT_MAX_BYTES: u64 = 1024 * 1024;
+
+/// `exec_session.output` 区间读 append-only 输出日志(ADR-0017 决策 2)。
+/// `from_offset` 是上次 `next_offset` 的字节游标(与 delta 同一字节口径);
+/// 读取上界钳制到 DB 行水位,pump 先写文件后写库 ⇒ 永不读到半块。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ExecSessionOutputParams {
+    pub session_id: String,
+    pub exec_session_id: String,
+    pub from_offset: u64,
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ExecSessionOutputResult {
+    pub exec_session_id: String,
+    /// 本次返回文本之后的字节游标(日志文件字节口径),作为下一次 `from_offset`;
+    /// `text` 为空且游标未前进 ⇒ 已追平水位或日志缺席(旧会话如实返回空)。
+    pub next_offset: u64,
+    /// DB 行 `output_complete`:settle 已收尾,终态权威全文也已入 content store。
+    pub output_complete: bool,
+    /// 日志切片 [from_offset, next_offset) 的 UTF-8 文本(切片端点取整到字符边界)。
+    pub text: String,
+}
+
 /// Load one persisted turn by its canonical turn id for session-level origin links.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -366,6 +397,7 @@ validators! {
         validate_session_activity_params => SessionActivityParams,
         validate_session_get_activity_params => SessionGetActivityParams,
         validate_exec_session_list_params => ExecSessionListParams,
+        validate_exec_session_output_params => ExecSessionOutputParams,
         validate_session_turn_params => SessionTurnParams,
         validate_skills_catalog_params => SkillsCatalogParams,
         validate_workspace_get_params => WorkspaceGetParams,
@@ -387,6 +419,7 @@ validators! {
         validate_session_activity_result => Vec<qaqh_ringing_contract::SessionActivity>,
         validate_session_get_activity_result => Vec<SessionToolActivity>,
         validate_exec_session_list_result => ExecSessionListResult,
+        validate_exec_session_output_result => ExecSessionOutputResult,
         validate_session_turn_result => Option<qaqh_ringing_contract::SessionTurnSnapshot>,
         validate_skills_catalog_result => SkillsCatalogResult,
         validate_workspace_list_result => Vec<qaqh_ringing_contract::WorkspaceEntry>,
@@ -578,6 +611,18 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         validate_result: validate_exec_session_list_result,
     },
     TypedMethodInfo {
+        method: "exec_session.output",
+        params_type: "ExecSessionOutputParams",
+        result_type: "ExecSessionOutputResult",
+        info: MethodInfo {
+            kind: MethodKind::Read,
+            requires_session: true,
+            admin_only: false,
+        },
+        validate_params: validate_exec_session_output_params,
+        validate_result: validate_exec_session_output_result,
+    },
+    TypedMethodInfo {
         method: "session.turn",
         params_type: "SessionTurnParams",
         result_type: "SessionTurnSnapshot",
@@ -749,6 +794,7 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("session.get_activity", READ_SEEDED),
     ("session.turn", READ_SEEDED),
     ("exec_session.list", READ_SEEDED),
+    ("exec_session.output", READ_SEEDED),
     // workspace
     ("workspace.get", READ_SEEDED),
     ("workspace.list", READ),

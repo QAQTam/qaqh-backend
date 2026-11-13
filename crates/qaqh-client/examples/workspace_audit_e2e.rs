@@ -64,6 +64,7 @@ fn main() {
                     model_selection: None,
                     tool_mode: None,
                     custom_tools: None,
+                    handoff_from: None,
                 },
                 CommandOptions::default(),
             )

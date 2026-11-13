@@ -315,8 +315,9 @@ fn generate(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
 fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     use qaqh_runtime::ringing::service_methods::{
         ClientsListParams, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
-        ExecSessionListParams, ExecSessionListResult, FsEntry, FsListParams, FsReadParams,
-        FsReadResult, PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams,
+        ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams,
+        ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult,
+        PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams,
         SessionDashboard, SessionDashboardParams,
         SessionDashboardTask, SessionGetActivityParams, SessionListParams, SessionMetaParams,
         SessionToolActivity, SessionTurnParams, SkillCatalogDiagnostic, SkillCatalogEntry,
@@ -612,6 +613,26 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     write_fixture(
         stage,
+        "service-exec_session-output-params.json",
+        &ExecSessionOutputParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            exec_session_id: "execs_0199a0f000007000800000000001".to_owned(),
+            from_offset: 4096,
+            max_bytes: Some(262144),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-exec_session-output-result.json",
+        &ExecSessionOutputResult {
+            exec_session_id: "execs_0199a0f000007000800000000001".to_owned(),
+            next_offset: 262144,
+            output_complete: false,
+            text: "build ok\n".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
         "service-session-turn-params.json",
         &SessionTurnParams {
             session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
@@ -852,6 +873,9 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_ringing_contract::PermissionRequestDetails,
         qaqh_ringing_contract::SessionBootstrap,
         qaqh_ringing_contract::SessionState,
+        // ADR-0015：goal 读模型（SessionState.goal / GoalUpdated 事件供数）。
+        qaqh_ringing_contract::GoalView,
+        qaqh_ringing_contract::GoalStatus,
         qaqh_ringing_contract::SessionTurnSnapshot,
         qaqh_ringing_contract::SessionEvent,
         qaqh_ringing_contract::SessionEventFrame,
@@ -882,6 +906,8 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::SessionGetActivityParams,
         qaqh_runtime::ringing::service_methods::ExecSessionListParams,
         qaqh_runtime::ringing::service_methods::ExecSessionListResult,
+        qaqh_runtime::ringing::service_methods::ExecSessionOutputParams,
+        qaqh_runtime::ringing::service_methods::ExecSessionOutputResult,
         qaqh_runtime::ringing::service_methods::SessionTurnParams,
         qaqh_runtime::ringing::service_methods::SessionListParams,
         qaqh_runtime::ringing::service_methods::SessionMetaParams,
@@ -923,6 +949,9 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_config_api::ConfigPatch,
         qaqh_config_api::SubagentDto,
         qaqh_config_api::SubagentPatch,
+        // ADR-0015：goal 配置段。
+        qaqh_config_api::GoalsDto,
+        qaqh_config_api::GoalsPatch,
         qaqh_config_api::ExecDto,
         qaqh_config_api::ExecPatch,
         qaqh_config_api::SandboxDto,

@@ -329,6 +329,8 @@ impl AgentRegistry {
     }
 }
 
+mod goal;
+pub(crate) mod handoff_fork;
 mod lifecycle;
 mod messaging;
 mod queries;

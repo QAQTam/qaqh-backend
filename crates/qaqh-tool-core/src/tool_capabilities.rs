@@ -90,7 +90,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
 
 /// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 19] = [
+const TABLE: [(&str, ToolCapabilities); 20] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
@@ -112,6 +112,7 @@ const TABLE: [(&str, ToolCapabilities); 19] = [
     ("todo_update", SESSION_MUTATING),
     ("todo_write", SESSION_MUTATING),
     ("tool_search", READ_ONLY),
+    ("visualize", SESSION_MUTATING),
     ("web_fetch", READ_ONLY_UNBOUND),
     ("write", MUTATING),
     ("write_stdin", EXEC),
@@ -154,6 +155,7 @@ mod tests {
                 "search",
                 "todo_update",
                 "todo_write",
+                "visualize",
                 "web_fetch"
             ],
             "非 workspace 绑定工具必须显式审查（执行器不注入 workspace_root）"

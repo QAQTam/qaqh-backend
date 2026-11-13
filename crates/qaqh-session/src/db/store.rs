@@ -70,6 +70,151 @@ pub fn create_session(conn: &mut Connection, session: &NewSession) -> rusqlite::
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// handoff 工作链(ADR-0015 切片F)
+// ---------------------------------------------------------------------------
+
+/// handoff fork 血缘:session.create 携带 `handoff_from` 时,与建行同事务写入。
+pub fn set_handoff_from(
+    conn: &mut Connection,
+    session_id: &str,
+    from_session_id: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sessions SET handoff_from_session_id = ?2 WHERE session_id = ?1",
+        params![session_id, from_session_id],
+    )?;
+    Ok(())
+}
+
+/// 链上溯:沿 `handoff_from_session_id` 走到根。环 = 数据损坏,fail-closed。
+pub fn handoff_chain_root(conn: &Connection, session_id: &str) -> Result<String, DbError> {
+    let mut current = session_id.to_string();
+    for _ in 0..1024 {
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT handoff_from_session_id FROM sessions WHERE session_id = ?1",
+                [&current],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        match parent {
+            Some(parent) => current = parent,
+            None => return Ok(current),
+        }
+    }
+    Err(DbError::Corrupt(format!(
+        "handoff chain from {session_id} exceeds 1024 hops (cycle?)"
+    )))
+}
+
+/// 链下溯:最新后继会话(客户端可能多次 fork,取最近创建)。无后继 = 自身。
+pub fn handoff_chain_head(conn: &Connection, root: &str) -> Result<String, DbError> {
+    let mut current = root.to_string();
+    for _ in 0..1024 {
+        let child: Option<String> = conn
+            .query_row(
+                "SELECT session_id FROM sessions
+                 WHERE handoff_from_session_id = ?1
+                 ORDER BY created_at_ms DESC, session_id DESC LIMIT 1",
+                [&current],
+                |row| row.get(0),
+            )
+            .optional()?;
+        match child {
+            Some(child) => current = child,
+            None => return Ok(current),
+        }
+    }
+    Err(DbError::Corrupt(format!(
+        "handoff chain from {root} exceeds 1024 hops (cycle?)"
+    )))
+}
+
+/// 会话是否已封箱(handoff 成功时内核写入)。
+pub fn session_handed_off(conn: &Connection, session_id: &str) -> Result<bool, DbError> {
+    let sealed: Option<i64> = conn
+        .query_row(
+            "SELECT handoff_sealed_at_ms FROM sessions WHERE session_id = ?1",
+            [session_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(sealed.is_some())
+}
+
+/// 封箱标记:handoff 成功的权威时刻写入(续跑引擎据此跳过死线)。
+pub fn mark_handoff_sealed(conn: &mut Connection, session_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE sessions SET handoff_sealed_at_ms = ?2 WHERE session_id = ?1",
+        params![session_id, now_ms()],
+    )?;
+    Ok(())
+}
+
+/// ADR-0016 切片 1：内核 fork 的建行闸——链头必须仍停在 `from_session`（本次
+/// 要 fork 的封箱会话）上才允许建后继。行创建、血缘写入与幂等闸在同一写锁
+/// 闭包内，定时任务与兜底扫描撞车也只会开出一条后继。`false` = 闸关闭
+/// （链头已前进 = 已有后继）。
+pub fn create_handoff_successor(
+    conn: &mut Connection,
+    successor: &NewSession,
+    from_session: &str,
+    chain_root: &str,
+) -> Result<bool, DbError> {
+    if handoff_chain_head(conn, chain_root)? != from_session {
+        return Ok(false);
+    }
+    create_session(conn, successor)?;
+    set_handoff_from(conn, &successor.session_id, from_session)?;
+    Ok(true)
+}
+
+/// ADR-0016 切片 3：全部封箱会话 `(session_id, sealed_at_ms)`——fork 兜底
+/// 扫描的读面（「封箱超窗且链头未前进」的判定原料）。
+pub fn sealed_handoff_sessions(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, handoff_sealed_at_ms FROM sessions
+         WHERE handoff_sealed_at_ms IS NOT NULL",
+    )?;
+    let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+/// ADR-0016 切片 1：最近已结算的 `handoff` 工具调用（新→旧，最多 `limit`
+/// 条）。同回合重复调用与首封都是 `state_kind='finished'`，由调用方按
+/// `state_json` 的 `outcome.kind == "completed"` + 可解析的 `handoff_doc`
+/// 挑出真正封箱的那条。
+pub struct HandoffCallTrace {
+    pub call_id: String,
+    pub turn_id: String,
+    pub args_json: Option<String>,
+    pub state_json: Option<String>,
+}
+
+pub fn recent_handoff_calls(
+    conn: &Connection,
+    session_id: &str,
+    limit: i64,
+) -> rusqlite::Result<Vec<HandoffCallTrace>> {
+    let mut stmt = conn.prepare(
+        "SELECT call_id, turn_id, args_json, state_json FROM tool_calls
+         WHERE session_id = ?1 AND tool_name = 'handoff' AND state_kind IN ('finished', 'running')
+         ORDER BY started_at_ms DESC, call_id DESC LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![session_id, limit], |row| {
+        Ok(HandoffCallTrace {
+            call_id: row.get(0)?,
+            turn_id: row.get(1)?,
+            args_json: row.get(2)?,
+            state_json: row.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn session_tree(conn: &Connection, root: &str) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "WITH RECURSIVE tree(id) AS (SELECT session_id FROM sessions WHERE session_id = ?1 \
@@ -96,6 +241,7 @@ pub fn delete_session_tree(conn: &mut Connection, root: &str) -> Result<Vec<Stri
             "exec_sessions",
             "interactions",
             "turns",
+            "session_goals",
         ] {
             tx.execute(&format!("DELETE FROM {table} WHERE session_id = ?1"), [id])?;
         }
@@ -241,13 +387,16 @@ pub struct SessionRow {
     pub ephemeral: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// ADR-0016：handoff 工作链直接前驱（NULL = 非交接会话）。
+    pub handoff_from_session_id: Option<String>,
 }
 
 pub fn session_row(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<SessionRow>> {
     conn.query_row(
         "SELECT session_id, title, cwd, model, tool_mode,
                 model_selection, custom_tools_json, frozen_annotation,
-                settings_revision, archived, ephemeral, created_at_ms, updated_at_ms
+                settings_revision, archived, ephemeral, created_at_ms, updated_at_ms,
+                handoff_from_session_id
          FROM sessions WHERE session_id = ?1",
         [session_id],
         |row| {
@@ -270,6 +419,7 @@ pub fn session_row(conn: &Connection, session_id: &str) -> rusqlite::Result<Opti
                 ephemeral: row.get::<_, i64>(10)? != 0,
                 created_at_ms: row.get(11)?,
                 updated_at_ms: row.get(12)?,
+                handoff_from_session_id: row.get(13)?,
             })
         },
     )
@@ -621,6 +771,44 @@ pub fn finish_turn(
         params![turn_id, status, outcome_json, now_ms()],
     )?;
     Ok(())
+}
+
+/// ADR-0015:goal 记账读回合权威事实——终态 outcome + 回合墙钟时长(ms)。
+/// 回合不存在或无终态返回 `None`;坏 outcome_json 读侧 fail-closed。
+pub fn turn_outcome_and_elapsed(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> Result<Option<(qaqh_ringing_contract::state::TurnOutcome, i64)>, DbError> {
+    let row: Option<(Option<String>, i64, Option<i64>)> = conn
+        .query_row(
+            "SELECT outcome_json, started_at_ms, finished_at_ms FROM turns
+             WHERE session_id = ?1 AND turn_id = ?2",
+            params![session_id, turn_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((outcome_json, started, finished)) = row else {
+        return Ok(None);
+    };
+    let Some(outcome_json) = outcome_json else {
+        return Ok(None);
+    };
+    let outcome = serde_json::from_str(&outcome_json).map_err(|error| {
+        DbError::Corrupt(format!("turn {turn_id} outcome_json: {error}"))
+    })?;
+    let elapsed = finished.unwrap_or_else(now_ms).saturating_sub(started).max(0);
+    Ok(Some((outcome, elapsed)))
+}
+
+/// ADR-0015:回合内工具调用数(空回复审计的「无工具活动」判据)。
+pub fn turn_tool_count(conn: &Connection, turn_id: &str) -> Result<i64, DbError> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM tool_calls WHERE turn_id = ?1",
+        [turn_id],
+        |row| row.get(0),
+    )
+    .map_err(DbError::from)
 }
 
 /// 会话内全局块序:同会话所有块按插入次序编号,transcript 分页一次排好。
@@ -1827,6 +2015,97 @@ mod fork_tests {
             call_id,
             payload_json: serde_json::to_string(&entry).expect("serialize entry"),
         }
+    }
+
+    /// `tool_calls` 直插（测试夹具）：生产写口分 declare/finish 两步，这里
+    /// 一行落定，state_json 形状与生产结算一致。
+    fn handoff_call(
+        conn: &mut Connection,
+        session: &str,
+        turn: &str,
+        call: &str,
+        doc: &str,
+        outcome: &str,
+        state_kind: &str,
+        started_at_ms: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO tool_calls (call_id, session_id, turn_id, tool_name, args_json,
+                state_json, state_kind, started_at_ms)
+             VALUES (?1, ?2, ?3, 'handoff', ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                call,
+                session,
+                turn,
+                serde_json::json!({"handoff_doc": doc, "work_summary": "摘要"}).to_string(),
+                serde_json::json!({"kind":"finished","outcome":{"kind": outcome}}).to_string(),
+                state_kind,
+                started_at_ms,
+            ],
+        )
+        .unwrap();
+    }
+
+    /// ADR-0016 切片 1 建行闸：链头仍停在封箱会话 → 建行 + 血缘同事务；
+    /// 链头已前进 → 闸关闭。血缘从 `session_row` 读出（读模型导出的数据源），
+    /// title_source 落 `auto`。
+    #[test]
+    fn handoff_successor_gate_closes_once_a_successor_exists() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::db::schema::initialize(&mut conn).expect("schema");
+        new_session(&mut conn, "root", None);
+        mark_handoff_sealed(&mut conn, "root").unwrap();
+
+        let successor = || NewSession {
+            session_id: "ses_child".into(),
+            parent_session_id: None,
+            title: "标题".into(),
+            title_source: Some("auto".into()),
+            cwd: None,
+            model: None,
+            tool_mode: None,
+            model_selection: None,
+            custom_tools: None,
+            frozen_annotation: None,
+            ephemeral: false,
+        };
+        assert!(create_handoff_successor(&mut conn, &successor(), "root", "root").unwrap());
+        let row = session_row(&conn, "ses_child")
+            .unwrap()
+            .expect("successor row");
+        assert_eq!(row.handoff_from_session_id.as_deref(), Some("root"));
+        let title_source: Option<String> = conn
+            .query_row(
+                "SELECT title_source FROM sessions WHERE session_id = 'ses_child'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title_source.as_deref(), Some("auto"));
+        assert_eq!(handoff_chain_head(&conn, "root").unwrap(), "ses_child");
+
+        // 链头已前进：同参重放必须关闸，绝不开第二条后继。
+        assert!(!create_handoff_successor(&mut conn, &successor(), "root", "root").unwrap());
+        assert_eq!(handoff_chain_head(&conn, "root").unwrap(), "ses_child");
+    }
+
+    /// 封箱调用回读面：新→旧有序；`running`（封箱→结算的崩溃窗）不丢；
+    /// 「completed 优先」的选择逻辑在 runtime 侧，这里锁读面的行集与顺序。
+    #[test]
+    fn recent_handoff_calls_reads_newest_first_including_running() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        crate::db::schema::initialize(&mut conn).expect("schema");
+        new_session(&mut conn, "s", None);
+        handoff_call(&mut conn, "s", "t1", "c1", "旧文档", "completed", "finished", 1);
+        handoff_call(&mut conn, "s", "t2", "c2", "失败参数", "failed", "finished", 2);
+        handoff_call(&mut conn, "s", "t3", "c3", "崩溃窗文档", "completed", "running", 3);
+
+        let calls = recent_handoff_calls(&conn, "s", 8).unwrap();
+        assert_eq!(
+            calls.iter().map(|trace| trace.call_id.as_str()).collect::<Vec<_>>(),
+            vec!["c3", "c2", "c1"],
+            "新→旧,崩溃窗的 running 行必须在读面里"
+        );
     }
 
     fn input(id: &str, turn: &str, text: &str) -> TimelineEntry {

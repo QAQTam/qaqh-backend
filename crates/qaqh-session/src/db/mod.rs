@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, mpsc};
 use rusqlite::{Connection, OpenFlags};
 use tokio::sync::oneshot;
 
+pub mod goals;
 pub mod schema;
 pub mod store;
 pub mod team;
@@ -62,6 +63,10 @@ pub enum DbError {
     TurnNotFound { session_id: String, turn_id: String },
     #[error("session {session_id} has an active turn {turn_id}; truncate requires an idle session")]
     TruncateConflict { session_id: String, turn_id: String },
+    #[error("session {session_id} already has an unfinished goal")]
+    GoalExists { session_id: String },
+    #[error("session {session_id} has no goal")]
+    NoGoal { session_id: String },
     #[error("corrupt business row: {0}")]
     Corrupt(String),
     #[error("workspace operation: {0}")]

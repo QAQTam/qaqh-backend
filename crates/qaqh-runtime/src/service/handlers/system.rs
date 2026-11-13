@@ -61,4 +61,3 @@ pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) ->
         ))),
     }
 }
-

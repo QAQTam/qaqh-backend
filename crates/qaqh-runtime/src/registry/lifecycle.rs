@@ -135,7 +135,12 @@ impl AgentRegistry {
         };
         use qaqh_ringing_contract::fact::{InputPurpose, InterAgentDelivery, TurnTerminal};
 
-        let Some(trigger) = notice.trigger else { return };
+        // ADR-0015：goal 记账/续跑先于 inter-agent 判定——用户触发的回合也要记账。
+        self.route_goal_terminal(&notice);
+
+        let Some(trigger) = notice.trigger else {
+            return;
+        };
         let Ok(Some(parent)) = self.owners.session_parent(&notice.session_id) else {
             return;
         };
@@ -201,21 +206,22 @@ impl AgentRegistry {
             delivery: InterAgentDelivery::Queue,
             created_at_ms: unix_ms(),
         };
-        let command = qaqh_ringing::RingingCommand::ConversationSendMessage(ConversationSendMessage {
-            text,
-            images: vec![],
-            attachments: None,
-            message_id: Some(message_id),
-            input_purpose: InputPurpose::TriggerTurn,
-            as_system: false,
-            inter_agent: Some(envelope),
-            subagent_terminal: Some(SubagentTerminalNotification {
-                child_session_id: notice.session_id.clone(),
-                parent_call_id: trigger.message_id,
-                terminal: kind,
-            }),
-            widget_context: None,
-        });
+        let command =
+            qaqh_ringing::RingingCommand::ConversationSendMessage(ConversationSendMessage {
+                text,
+                images: vec![],
+                attachments: None,
+                message_id: Some(message_id),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                inter_agent: Some(envelope),
+                subagent_terminal: Some(SubagentTerminalNotification {
+                    child_session_id: notice.session_id.clone(),
+                    parent_call_id: trigger.message_id,
+                    terminal: kind,
+                }),
+                widget_context: None,
+            });
         let env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
             &parent,
             format!("subagent-terminal:{}", notice.turn_id),

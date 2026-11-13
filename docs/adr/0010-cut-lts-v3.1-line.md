@@ -83,6 +83,63 @@
 
 ## 攒着的 refreeze 清单（切线时一次吸收）
 
+- [ ] **Goal 模式**（2026-11-13，ADR-0015，代码已落 main 工作区）：新增命令
+      `goal.set` / `goal.get` / `goal.clear`、事件 `SessionEvent::GoalUpdated`
+      （`goal: Option<GoalView>`，None=清除）、DTO `GoalView` / `GoalStatus`、
+      `SessionState.goal` 字段、拒绝码 `goal_exists` / `no_goal`、配置段
+      `ConfigDto.goals` / `ConfigPatch.goals`（`GoalsDto` / `GoalsPatch`）⇒
+      **wire 实变（命令/事件/DTO 新增 + 读模型字段新增）**，切线时一次吸收。
+      - `COMMAND_CONTRACT_REVISION` 已 bump `ringing-commands-8` → `-9`
+        （ADR-0015 §已决 2，所有者拍板，与 truncate 同律）；5 个常量产物的值差异
+        一并记账。`SESSION_CONTRACT_REVISION` 仍 `-2`（事件/读模型纯增量，
+        沿用本 ADR 对 additive 的口径）。
+      - 会话库 schema 8→9：`session_goals` 表纯增量迁移，无存量归一。
+      - **切片F 追加**：`session.create` 增可选 `handoff_from`（additive）；
+        `sessions` 表增 `handoff_from_session_id` / `handoff_sealed_at_ms`
+        两列（同入 schema 9）。goal 沿 handoff 工作链解析,见 ADR-0015 §切片F。
+      - `ConfigDto` 无向前兼容（crate 纪律）：旧客户端缺 `goals` 字段解析失败，
+        前后端共进退——与既有读模型口径一致，不另开兼容层。
+
+- [ ] **Handoff 内核 fork**（2026-11-13，ADR-0016，切片 1–3 代码已落工作区）：
+      新增事件 `SessionEvent::HandoffSealed`（`sealed_session_id` / `chain_root` /
+      `successor_session_id` / `turn_id` / `work_summary` / `at_ms`）、读模型
+      `SessionMeta.handoff_from_session_id`（additive，随 `session.list` /
+      `session.meta` 导出，G2 键表同步）⇒ **wire 实变（事件变体 + 读模型字段）**，
+      切线时一次吸收。
+      - 命令面零新增（fork 是内核内部动作）；`SESSION_CONTRACT_REVISION` 仍 `-2`
+        （事件/读模型纯增量，沿本清单对 additive 的口径）；`contract_hash` 已随
+        export 重打。
+      - 产物 diff：SessionEvent / SessionEventFrame / SessionMeta /
+        SessionListEntry（ts + cs）、fixtures（session-list / session-meta）、
+        manifest（hash 与 coverage）。
+
+- [ ] **exec 完整输出与只读终端**（2026-11-13，ADR-0017，已采纳·部分实施）：新增 service 方法
+      `exec_session.output`（offset 区间读）与 DTO `ExecSessionOutputParams` /
+      `ExecSessionOutputResult`（result 为单 `text` 形状；ADR-0017 决策 2 修订：原
+      `chunks/source` 形状被否——日志只存解码拼接文本，无 source 维度）⇒
+      **wire 实变（service 方法 + 产物新增）**，切线时一次吸收。
+      - 路由零新增（走既有 `POST /ringing/v2/service/{method}`，两张路由表不动，规则 16）。
+      - 事件词表零变更（`ExecSessionOutputDelta` 原样）；模型侧零改动；不引入 WebSocket。
+      - 终态 transcript 去 1MiB 封顶属数据/行为变化，无 wire 形状变更，不计入本条。
+      - **已决（2026-11-13，所有者）：本条不 bump**（基线版本号不动，`SESSION_CONTRACT_REVISION`
+        维持 `-2`；命令面零新增，`COMMAND_CONTRACT_REVISION` 不涉及）。
+      - 实测（2026-11-13，`qaqh-contract-export` 本机 `export`）：导出物 **608 → 614**
+        （基线 = 当日 main 工作区 golden），only-in-first 恰为本条 6 文件：`types/qaqh/ExecSessionOutputParams.ts` /
+        `ExecSessionOutputResult.ts`、`cs/ExecSessionOutputParams.cs` /
+        `ExecSessionOutputResult.cs`、`fixtures/service-exec_session-output-params.json` /
+        `service-exec_session-output-result.json`；only-in-frozen 为空。
+        `contract_hash`：工作区 golden `1ae84972a3a0ccd1759b575c63eadd4330bc26881bc9e14d9cf391218e5111f0`
+        → 本条导出树 `b96eb79f6ab15226445540d485d8dfcd93a9fbdd20679598c2d2421794e9c426`
+        （本机实测；对照 HEAD 冻结锁：601 文件 / `1a0db0e0a22bdca154c4eeaa18b1fa7461732dbd7727fad45aa038f8488a7fb0`）。
+        本条未触碰 `docs/api-surface/v3.0/`；`check --against` 在 main 上红为设计状态
+        （§背景 2）。
+      - **并发留痕（宪规 19）**：2026-11-13 工作区中 `docs/api-surface/v3.0/` 存在
+        **非本条所为的在途改写**（57 处：Skill* 三型删除、Goal* / PermissionRequestDetails /
+        Widget* 新增、manifest/index/coverage/constants 变更，601 → 608 文件）——与
+        ADR-0010 账本其他在途条目同源，不是重切禁令的私下豁免；本条差额以该工作区状态
+        为基线实测，切线吸收时以届时统一重切的 golden 为准。
+      - 前端连带：ServiceMap + native addon `serviceMethods()` 白名单加方法（packaging
+        测试强制一致）；exec 输出 ref 懒水合 + fetch-on-open + 缺口补读。
 - [x] ADR-0004 前两条：`PermissionRequestDetails` 入导出物 + `.ok()` 静默降级改显式失败
       （本轮，`contract_hash` → `39256ad9…`）
 - [ ] ADR-0004 §已决：出站 `unknown` 变体 + `variant_policy` 声明（TS / C# / schema 三面可见）

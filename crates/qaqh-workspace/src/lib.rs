@@ -47,6 +47,8 @@ pub mod ask_user;
 
 pub mod todo;
 
+pub mod visualize;
+
 pub use qaqh_permission::workspace;
 pub use qaqh_process_tools::process_registry;
 

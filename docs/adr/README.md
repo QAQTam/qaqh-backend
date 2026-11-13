@@ -49,6 +49,9 @@
 | [0012](0012-exec-pwsh-uutils-preamble.md) | exec 的 pwsh 壳集成 uutils coreutils：探测式 preamble 注入 + 最小别名手术 | **已采纳（代码已落地）** · vendor 分发与引导下载延后（另行 ADR） |
 | [0013](0013-legacy-history-graft.md) | 旧史嫁接：QAQ-Harness 298 提交并入 qaqh-backend（1387 连续历史） | 已采纳 · 已执行并 force-push · commit-map 与 gpgsig 陷阱见正文 |
 | [0014](0014-subagent-as-session.md) | 子代理=会话：单权威收敛与跨会话消息（collector/双身份机构退役，wire 不变） | 已采纳（未实施）· 实施排序受 widget-directive 在途改动约束 |
+| [0015](0015-goal-mode.md) | Goal 模式：持久会话目标 + 空闲自动续跑 + 预算熔断（Codex 语义，ADR-0014 机构承载） | 已采纳 · 切片 A–E 代码落工作区（待提交）；wire 实变已记 ADR-0010，revision -9 |
+| [0016](0016-handoff-kernel-fork.md) | Handoff 内核 fork：封箱续推归内核，前端退化为纯投影（翻转 0015 切片F「内核不代建会话」的机器续推部分） | 已采纳 · 切片 0–4 已实施（封箱闭门/内核 fork 引擎/HandoffSealed+血缘导出/daemon sweep/前端纯投影化,证据见落地清单）；运行半边未跑；wire 实变（HandoffSealed + 血缘导出）已记 ADR-0010；决策 3 经所有者 2026-11-13 复核确认,决策 6 [立即继续] 口径统一中 |
+| [0017](0017-exec-full-output-terminal-lifecycle.md) | exec 完整输出与只读终端生命周期：持久化 offset 日志 + 区间读（不引 WebSocket）；附加决策：移除 exec 终态唤醒注入链（已实施）、revision 不 bump | 已采纳（部分实施） · 切片 0 后端半 + 切片 1 已实施（append-only 日志、`exec_session.output` 区间读、DTO 导出，证据见落地清单）；切片 0 前端半随前端仓切片 2、切片 2/3 未实施；决策 2 result 形状修订为单 `text`（实施时定夺）；wire 实变（`exec_session.output` + 2 DTO）已记 ADR-0010 |
 
 ## 阅读顺序
 

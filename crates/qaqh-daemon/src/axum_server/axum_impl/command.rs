@@ -283,6 +283,8 @@ pub(crate) async fn dispatch_session(
                         match code {
                             qaqh_ringing::CommandRejection::TurnActive => StatusCode::CONFLICT,
                             qaqh_ringing::CommandRejection::TurnNotFound => StatusCode::NOT_FOUND,
+                            qaqh_ringing::CommandRejection::GoalExists => StatusCode::CONFLICT,
+                            qaqh_ringing::CommandRejection::NoGoal => StatusCode::NOT_FOUND,
                         },
                         code.code(),
                         message,

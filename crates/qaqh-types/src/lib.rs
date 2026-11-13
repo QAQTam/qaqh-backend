@@ -36,7 +36,7 @@ pub mod token;
 pub use api_types::UsageInfo;
 pub use code_delta::CodeDeltaRecord;
 pub use config::{
-    ConfigStore, PersistentConfig, PersistentExecConfig, PersistentLspConfig,
+    ConfigStore, PersistentConfig, PersistentExecConfig, PersistentGoalsConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
     PersistentSandboxConfig, PersistentSubagentConfig,
 };

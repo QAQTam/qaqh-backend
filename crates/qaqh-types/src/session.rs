@@ -75,6 +75,10 @@ pub struct SessionMeta {
     /// Number of requests whose provider explicitly returned cache usage.
     #[serde(default)]
     pub cache_reported_requests: u32,
+    /// ADR-0016：handoff 工作链**直接前驱**（内核 fork 或客户端 fork 时与
+    /// 建行同事务写入）。`None` = 非交接会话。旧存量缺席 = None（零迁移）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_from_session_id: Option<String>,
 
     // ── Runtime fields (not persisted) ──
     /// If set, this seed is passed as a CLI argument to the agent subprocess for auto-restore on startup.
@@ -251,6 +255,7 @@ mod tests {
             usage_totals: crate::UsageInfo::default(),
             usage_requests: 6,
             cache_reported_requests: 7,
+            handoff_from_session_id: Some("ses_parent".into()),
             title: Some("Bun 引导 daemon".into()),
             cwd: Some("F:\\code\\qaqh".into()),
             resume_session: Some("skip-me".into()),
@@ -290,6 +295,7 @@ mod tests {
             "cwd",
             "ephemeral",
             "frozen_annotation",
+            "handoff_from_session_id",
             "model",
             "model_selection",
             "requested_model_selection",

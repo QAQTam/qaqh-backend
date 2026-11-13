@@ -102,8 +102,16 @@ impl QaqhService {
         // 闭包持 service clone；终态时锁 registry 路由（短临界区、无 await，
         // 与 send_input 的入队语义无死锁）。
         let router_service = service.clone();
+        let fork_service = service.clone();
         if let Ok(mut registry) = service.registry() {
             registry.set_terminal_router(Some(Arc::new(move |notice| {
+                // ADR-0016 切片 1：封箱终态挂钩调度内核 fork（阅读窗
+                // FORK_DELAY_MS 后执行）。路由先走（goal 记账在前是既有顺序），
+                // fork 调度只看 DB 封箱事实，两次索引读，廉价。
+                crate::handoff_fork_schedule::schedule_after_terminal(
+                    &fork_service,
+                    &notice.session_id,
+                );
                 if let Ok(mut registry) = router_service.registry() {
                     registry.route_turn_terminal(notice);
                 }
@@ -229,6 +237,21 @@ impl QaqhService {
                     }
                 });
         } else {
+            // 关闭即终结附属后台 exec(与 delete 同律)。先停 exec 再卸循环。
+            let owned = session_id.to_string();
+            let tree = self
+                .owners
+                .db()
+                .read_blocking(move |conn| qaqh_session::db::store::session_tree(conn, &owned))
+                .map_err(|error| error.to_string())?;
+            {
+                let registry = self.registry()?;
+                for id in &tree {
+                    if let Err(error) = registry.exec_sessions().shutdown_session(id) {
+                        log::warn!("session close {id}: exec shutdown unconfirmed: {error}");
+                    }
+                }
+            }
             self.registry()?.close(session_id);
         }
         // 阶段 3b：SessionStateChanged{Closed} 的 v1 广播已删（A1：wire 零消费方）。
@@ -279,6 +302,24 @@ impl QaqhService {
             return Vec::new();
         };
         registry.cancel_expired_subagent_turns(timeout_secs)
+    }
+
+    /// ADR-0015：goal 周期扫描（daemon 周期任务调用）。Active goal 跨 idle
+    /// 卸载/重启存活；忙会话跳过，终态钩子负责其续跑。
+    pub fn sweep_active_goals(&self) -> Vec<String> {
+        let Ok(mut registry) = self.registry() else {
+            return Vec::new();
+        };
+        registry.sweep_active_goals()
+    }
+
+    /// ADR-0016 切片 3：handoff fork 兜底扫描（daemon 周期任务调用）。封箱
+    /// 超窗且链头未前进的链立即补 fork；幂等由 fork 的建行闸保证。
+    pub fn sweep_handoff_forks(&self) -> Vec<String> {
+        let Ok(mut registry) = self.registry() else {
+            return Vec::new();
+        };
+        registry.sweep_handoff_forks()
     }
 
     fn refresh_memory_components(&self) {
@@ -487,6 +528,9 @@ impl QaqhService {
             RingingCommand::SubagentSpawn { .. } => {
                 handlers::session::handle_ringing(self, target, command)
             }
+            RingingCommand::GoalSet { .. }
+            | RingingCommand::GoalGet {}
+            | RingingCommand::GoalClear {} => handlers::goal::handle_ringing(self, target, command),
             RingingCommand::TodoSet { .. }
             | RingingCommand::TodoCancel { .. }
             | RingingCommand::PlanAction { .. } => {

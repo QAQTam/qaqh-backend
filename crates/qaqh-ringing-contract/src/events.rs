@@ -13,8 +13,8 @@ use crate::fact::{
     InteractionDecision, InteractionId, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId,
 };
 use crate::state::{
-    DriverState, ExecSessionView, InteractionView, SubagentView, TimelineEntry, ToolCallState,
-    TurnOutcome, TurnPhase,
+    DriverState, ExecSessionView, GoalView, InteractionView, SubagentView, TimelineEntry,
+    ToolCallState, TurnOutcome, TurnPhase,
 };
 
 /// `skip_serializing_if` 用的假值判定:值为 `false` 时整键缺席。
@@ -211,6 +211,28 @@ pub enum SessionEvent {
     DriverChanged {
         driver: Option<DriverState>,
     },
+    /// 会话目标变化(ADR-0015):set/状态迁移/记账/清除都经此帧;
+    /// `None` = goal 已清除。与 bootstrap `state.goal` 同形状。
+    GoalUpdated {
+        goal: Option<GoalView>,
+    },
+    /// ADR-0016：内核 fork 完成的权威广播。纯信息面——客户端只做投影切换
+    /// （渲染新会话、标记旧线已封箱），fork 本体不依赖本事件。双发：链根
+    /// （封箱线）与后继线各一条，订阅任一流都看得到完整事实。
+    HandoffSealed {
+        /// 封箱会话（链上本线，已被 handoff 终结）。
+        sealed_session_id: String,
+        /// 链根 = handoff 工作链锚点（goal 挂靠点）。
+        chain_root: String,
+        /// 内核 fork 出的后继会话 id。
+        successor_session_id: String,
+        /// 产生交接的回合（封箱线上的那个回合）。
+        turn_id: TurnId,
+        /// 模型的一句话工作简述（与后继会话标题同源）。
+        work_summary: String,
+        /// fork 完成时刻（unix ms）。
+        at_ms: u64,
+    },
 }
 
 impl SessionEvent {
@@ -227,6 +249,7 @@ impl SessionEvent {
             | SessionEvent::ToolDeclared { turn_id, .. }
             | SessionEvent::ToolStateChanged { turn_id, .. } => Some(turn_id),
             SessionEvent::ToolArgumentsDelta { turn_id, .. } => Some(turn_id),
+            SessionEvent::HandoffSealed { turn_id, .. } => Some(turn_id),
             _ => None,
         }
     }

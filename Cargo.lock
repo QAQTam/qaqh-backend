@@ -2941,6 +2941,7 @@ dependencies = [
  "log",
  "qaqh-acp",
  "qaqh-config",
+ "qaqh-goal",
  "qaqh-mcp",
  "qaqh-process-tools",
  "qaqh-ringing",
@@ -3043,6 +3044,19 @@ dependencies = [
  "tiny_http",
  "tokio",
  "unicode-normalization",
+]
+
+[[package]]
+name = "qaqh-goal"
+version = "3.0.20261110-g1842986"
+dependencies = [
+ "log",
+ "qaqh-ringing-contract",
+ "qaqh-tool-core",
+ "qaqh-workspace",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -3271,6 +3285,7 @@ dependencies = [
  "qaqh-config-api",
  "qaqh-dsaccount",
  "qaqh-gate",
+ "qaqh-goal",
  "qaqh-lsp",
  "qaqh-mcp",
  "qaqh-memwatch",

@@ -17,6 +17,7 @@ qaqh-runtime = { path = "../qaqh-runtime" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-process-tools = { path = "../qaqh-process-tools" }
 qaqh-subagent = { path = "../qaqh-subagent" }
+qaqh-goal = { path = "../qaqh-goal" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
 log = { version = "0.4", features = ["std"] }

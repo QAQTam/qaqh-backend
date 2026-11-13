@@ -21,7 +21,10 @@ mod tests {
     use qaqh_tool_core::{ExecOutputStream, ExecProgressEvent};
 
     use crate::db::store;
-    use crate::owner::{OwnerDirectory, ToolSettlement};
+    use crate::owner::{
+        OwnerDirectory, ToolSettlement, append_exec_log, exec_output_log_path,
+        read_exec_output_log_range,
+    };
 
     #[test]
     fn deleting_a_session_tree_removes_business_rows_without_resource_directories() {
@@ -56,6 +59,84 @@ mod tests {
         let owners =
             Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open owners db"));
         (dir, owners)
+    }
+
+    #[test]
+    fn exec_output_log_path_derives_from_db_dir_and_appends_in_order() {
+        let (dir, owners) = test_owner_dir();
+        let session_id = "ses_TESTLOG";
+        let exec_id = "execs_01TESTLOGEXECSESSION0000000000";
+        let path = exec_output_log_path(owners.db(), session_id, exec_id)
+            .expect("data_dir derivable from db path");
+        assert_eq!(
+            path,
+            dir.path()
+                .join("sessions")
+                .join(session_id)
+                .join("exec")
+                .join(format!("{exec_id}.log"))
+        );
+        append_exec_log(&path, "中").expect("append chunk 1");
+        append_exec_log(&path, "😀tail").expect("append chunk 2");
+        let text = std::fs::read_to_string(&path).expect("read log");
+        assert_eq!(text, "中😀tail");
+        // 字节口径 = capture 解码字节口径,与 next_offset 同一计量(中=3,😀=4,tail=4)。
+        assert_eq!(text.len(), 11);
+    }
+
+    #[test]
+    fn exec_output_range_read_clamps_watermark_and_respects_char_boundaries() {
+        let (_dir, owners) = test_owner_dir();
+        let session_id = "ses_TESTLOG";
+        let exec_id = "execs_01TESTLOGEXECSESSION0000000000";
+        let path = exec_output_log_path(owners.db(), session_id, exec_id)
+            .expect("data_dir derivable from db path");
+        append_exec_log(&path, "中").expect("append chunk 1");
+        append_exec_log(&path, "😀tail").expect("append chunk 2");
+        let db = owners.db();
+
+        // 水位钳制:watermark=7 只到 "中😀",文件里更靠后的 tail 不越过水位。
+        let (next, text) =
+            read_exec_output_log_range(db, session_id, exec_id, 7, 0, 1 << 20)
+                .expect("range behind watermark");
+        assert_eq!((next, text.as_str()), (7, "中😀"));
+
+        // max_bytes 切进多字节字符:终点向前取整到字符边界(😀 的尾字节补全)。
+        let (next, text) = read_exec_output_log_range(db, session_id, exec_id, 11, 0, 4)
+            .expect("range across multibyte char");
+        assert_eq!((next, text.as_str()), (7, "中😀"));
+
+        // 中段续读到末尾:恰好吐完剩余字符。
+        let (next, text) = read_exec_output_log_range(db, session_id, exec_id, 11, 7, 4)
+            .expect("range continuation");
+        assert_eq!((next, text.as_str()), (11, "tail"));
+
+        // 追平:from == watermark ⇒ 空文本、游标原地。
+        let (next, text) = read_exec_output_log_range(db, session_id, exec_id, 11, 11, 256)
+            .expect("range caught up");
+        assert_eq!((next, text.as_str()), (11, ""));
+
+        // from 切进多字节字符:当场报错,不静默对齐(宪规 5)。
+        let error = read_exec_output_log_range(db, session_id, exec_id, 11, 1, 4)
+            .expect_err("mid-char from_offset is an error");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+
+        // 文件短于水位(append 曾丢字节):按实有字节返回,游标停在实有末尾。
+        let (next, text) = read_exec_output_log_range(db, session_id, exec_id, 20, 0, 1 << 20)
+            .expect("range with lost bytes");
+        assert_eq!((next, text.as_str()), (11, "中😀tail"));
+
+        // 日志缺席:空文本、游标原地(旧会话无日志,如实不假装)。
+        let (next, text) = read_exec_output_log_range(
+            db,
+            session_id,
+            "execs_01NOLOG000000000000000000000",
+            11,
+            0,
+            256,
+        )
+        .expect("range without log");
+        assert_eq!((next, text.as_str()), (0, ""));
     }
 
     /// 泵线程异步落库/广播:轮询等待事件帧。

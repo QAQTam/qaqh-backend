@@ -119,6 +119,7 @@ async fn create_fixture_session(client: &Client) -> String {
                 model_selection: None,
                 tool_mode: None,
                 custom_tools: None,
+                handoff_from: None,
             },
             CommandOptions::default(),
         )

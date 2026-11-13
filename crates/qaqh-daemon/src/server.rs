@@ -241,6 +241,8 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     qaqh_subagent::install_host(Arc::new(service.clone()));
     qaqh_subagent::install_task_host(Arc::new(service.clone()));
     qaqh_subagent::install_board_host(Arc::new(service.clone()));
+    // ADR-0015：goal 工具宿主（create_goal/update_goal/get_goal 直达进程内）。
+    qaqh_goal::install_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_ringing_runtime::RingingLeaseStore::new()));
     let (shutdown, _) = watch::channel(false);
     // Route OS signals through the same loop/process shutdown path as the control endpoint.
@@ -305,6 +307,39 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
                                         "[daemon] subagent timeout sweep cancelled {} child turn(s): {:?}",
                                         cancelled.len(),
                                         cancelled
+                                    );
+                                }
+                            })
+                            .await;
+                        }
+                        // ADR-0015：goal 周期扫描——DB 中 Active goal 跨 idle
+                        // 卸载/daemon 存活;忙会话跳过(终态钩子负责续跑)。
+                        {
+                            let service = service.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let continued = service.sweep_active_goals();
+                                if !continued.is_empty() {
+                                    log::info!(
+                                        "[daemon] goal sweep continued {} session(s): {:?}",
+                                        continued.len(),
+                                        continued
+                                    );
+                                }
+                            })
+                            .await;
+                        }
+                        // ADR-0016 切片 3：handoff fork 兜底扫描——封箱超窗
+                        // (FORK_DELAY_MS) 且链头未前进的链立即补 fork,覆盖
+                        // 定时任务失败/丢失与 daemon 窗口内重启。
+                        {
+                            let service = service.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let forked = service.sweep_handoff_forks();
+                                if !forked.is_empty() {
+                                    log::info!(
+                                        "[daemon] handoff sweep forked {} session(s): {:?}",
+                                        forked.len(),
+                                        forked
                                     );
                                 }
                             })

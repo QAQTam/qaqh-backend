@@ -19,8 +19,8 @@ pub mod workspace;
 pub use events::{ExecOutputSource, SessionEvent, SessionEventFrame};
 pub use state::{
     CodeDelta, ExecCancelReason, ExecInterruptReason, ExecSessionOutcome, ExecSessionState,
-    ExecSessionView, ExecStopReason, SessionActivity, SessionActivityState, SessionBootstrap,
-    SessionState, SessionTurnSnapshot, ToolCallState, ToolEffectInfo, TurnPhase,
+    ExecSessionView, ExecStopReason, GoalStatus, GoalView, SessionActivity, SessionActivityState,
+    SessionBootstrap, SessionState, SessionTurnSnapshot, ToolCallState, ToolEffectInfo, TurnPhase,
 };
 // 审批正文（JSON-in-JSON 边界）与其余契约类型同权：既能被 `state::` 路径拿到，
 // 也必须能从 crate 根导出进契约（ADR-0004 §决策 3）。

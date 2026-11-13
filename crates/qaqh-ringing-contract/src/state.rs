@@ -44,6 +44,10 @@ pub struct SessionState {
     pub exec_sessions: Vec<ExecSessionView>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub driver: Option<DriverState>,
+    /// 会话持久目标(ADR-0015):每会话至多一个;缺席 = 无 goal。
+    /// additive:旧客户端读不到就忽略,新客户端把缺席当「无目标」。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<GoalView>,
 }
 
 /// `GET /ringing/v2/sessions/{id}/bootstrap` 的响应:一次 HTTP 拿到
@@ -120,6 +124,41 @@ pub enum TurnOutcome {
     Interrupted {
         reason: InterruptReason,
     },
+}
+
+/// 会话目标状态机(ADR-0015,与 Codex goal 同构六态)。
+/// `active` 是唯一会被自动续跑的状态;`budget_limited`/`usage_limited` 由系统
+/// 置位,`complete`/`blocked`/`paused` 由模型工具或用户命令置位;恢复(active)
+/// 只能由用户命令发起。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum GoalStatus {
+    Active,
+    Paused,
+    Blocked,
+    UsageLimited,
+    BudgetLimited,
+    Complete,
+}
+
+/// 会话持久目标的读模型(ADR-0015)。`token_budget` 缺席 = 无预算;
+/// `tokens_used`/`time_used_ms` 是内核记账的累计消耗,客户端不得自行推算。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct GoalView {
+    pub goal_id: String,
+    pub session_id: String,
+    pub objective: String,
+    pub status: GoalStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    pub tokens_used: u64,
+    pub time_used_ms: u64,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
 }
 
 /// timeline 条目:消息、模型输出块、工具调用引用与压缩摘要。

@@ -11,6 +11,9 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
@@ -330,6 +333,18 @@ impl SessionOwner {
             pump.emit(event);
             Ok(())
         });
+    }
+
+    /// ADR-0015 切片F：handoff 封箱标记(成功时刻的权威写口)。
+    /// 续跑引擎据此跳过已封箱会话,不再向死线投递续跑。
+    pub async fn mark_handoff_sealed(&self) -> Result<(), DbError> {
+        let session_id = self.session_id.clone();
+        self.submit_request(move |pump| {
+            pump.db
+                .write_blocking(move |conn| store::mark_handoff_sealed(conn, &session_id))?;
+            Ok(())
+        })
+        .await
     }
 
     /// 开回合:turn 行(phase=running)+ TurnStarted/TurnPhaseChanged/ActivityChanged。
@@ -1284,6 +1299,13 @@ impl OwnerPump {
                 capture_omitted_bytes,
                 stream_dropped_bytes,
             } => {
+                if let Some(path) =
+                    exec_output_log_path(&self.db, &self.session_id, &exec_session_id)
+                {
+                    if let Err(error) = append_exec_log(&path, &text) {
+                        log::error!("[owner] exec log append {exec_session_id}: {error}");
+                    }
+                }
                 let row_id = exec_session_id.clone();
                 let updated = self.db.write_blocking(move |conn| {
                     store::update_exec_session_progress(
@@ -1318,6 +1340,33 @@ impl OwnerPump {
             }
             OwnerMsg::ExecSessionSettle(settlement) => {
                 let exec_session_id = settlement.exec_session_id.clone();
+                // 全量输出源 = append-only 日志(ADR-0017 决策 3):settle 读全文替代
+                // manager 侧 head+tail 封顶 transcript,并按「日志字节 vs 水位」对账——
+                // 短于水位 ⇒ 落盘曾丢字节,如实标 truncated。日志缺席回退封顶 transcript。
+                let log_text = exec_output_log_path(&self.db, &self.session_id, &exec_session_id)
+                    .and_then(|path| match std::fs::read_to_string(&path) {
+                        Ok(text) => Some(text),
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(error) => {
+                            log::error!("[owner] exec log read {exec_session_id}: {error}");
+                            None
+                        }
+                    })
+                    .filter(|text| !text.is_empty());
+                let (output_text, output_truncated) = if let Some(text) = log_text {
+                    let water_line = self
+                        .db
+                        .read_blocking(|conn| {
+                            store::exec_session_by_id(conn, &exec_session_id).map(|row| {
+                                row.map(|session_row| session_row.next_offset).unwrap_or(0)
+                            })
+                        })
+                        .unwrap_or(0);
+                    let logged = text.len() as u64;
+                    (Some(text), logged < water_line)
+                } else {
+                    (settlement.output_text.clone(), settlement.output_truncated)
+                };
                 let changed = self
                     .db
                     .write_blocking(move |conn| {
@@ -1328,8 +1377,8 @@ impl OwnerPump {
                             settlement.finished_at_ms,
                             settlement.output_complete,
                             settlement.output_content_id.as_deref(),
-                            settlement.output_text.as_deref(),
-                            settlement.output_truncated,
+                            output_text.as_deref(),
+                            output_truncated,
                             &settlement.output_preview,
                             settlement.preview_start_offset,
                         )
@@ -1366,6 +1415,98 @@ impl OwnerPump {
             }
         }
     }
+}
+
+/// exec 输出 append-only 日志路径(ADR-0017 决策 1):
+/// `<data_dir>/sessions/<session_id>/exec/<exec_session_id>.log`。data_dir 由业务库
+/// 路径派生(`qaqh.db` 的父目录);两类 id 都是内核生成的单段路径组件。
+/// owner pump 写入与 runtime `exec_session.output` 区间读共用此定位。
+pub fn exec_output_log_path(
+    db: &Db,
+    session_id: &str,
+    exec_session_id: &str,
+) -> Option<PathBuf> {
+    let data_dir = db.path().parent()?;
+    Some(
+        data_dir
+            .join("sessions")
+            .join(session_id)
+            .join("exec")
+            .join(format!("{exec_session_id}.log")),
+    )
+}
+
+/// 追加一块输出到日志。定序不变量(ADR-0017 决策 1):先写日志、再更新 DB 水位、
+/// 再发 delta ⇒「客户端见过 offset X 的 delta ⇒ 日志必可以读到 X」。
+/// 失败只响亮报错、不阻断实时流;完整性由 settle 侧「日志字节 vs 水位」对账
+/// 如实标 `output_truncated`(宪规 5:不假装完整)。
+pub(crate) fn append_exec_log(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(text.as_bytes())
+}
+
+/// 区间读 exec 输出日志(ADR-0017 决策 2)。读取上界钳制到 `watermark`(DB 行
+/// `next_offset`:pump 先写文件后写库 ⇒ 库水位 ≤ 文件长度,永不读到半块);
+/// 文件若短于水位(append 曾失败),按文件实有字节如实返回,游标停在实有末尾。
+/// `from_offset` 必须落在 UTF-8 字符边界(正常客户端游标天然如此;错值当场报
+/// `InvalidData`,不静默对齐——宪规 5)。切片终点落进多字节字符内部时向前取整
+/// 到字符边界(≤ +3 字节,且不会越过 watermark:watermark 本身就是边界,字符
+/// 不跨越它)。返回 `(next_offset, text)`;`text` 为空且游标未前进 ⇒ 已追平
+/// 水位(或日志缺席,旧会话如此,如实返回空)。
+pub fn read_exec_output_log_range(
+    db: &Db,
+    session_id: &str,
+    exec_session_id: &str,
+    watermark: u64,
+    from_offset: u64,
+    max_bytes: u64,
+) -> std::io::Result<(u64, String)> {
+    let end_cap = from_offset.saturating_add(max_bytes).min(watermark);
+    if end_cap <= from_offset {
+        return Ok((from_offset, String::new()));
+    }
+    let Some(path) = exec_output_log_path(db, session_id, exec_session_id) else {
+        return Ok((from_offset, String::new()));
+    };
+    let file_len = match std::fs::metadata(&path) {
+        Ok(meta) => meta.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((from_offset, String::new()));
+        }
+        Err(error) => return Err(error),
+    };
+    // 终点最多前探 3 字节补全被 max_bytes 切进的多字节字符;探查不越过水位。
+    let read_end = end_cap
+        .saturating_add(3)
+        .min(watermark)
+        .min(file_len);
+    if from_offset >= read_end {
+        return Ok((from_offset, String::new()));
+    }
+    let mut file = std::fs::File::open(&path)?;
+    file.seek(SeekFrom::Start(from_offset))?;
+    let mut bytes = vec![0u8; (read_end - from_offset) as usize];
+    file.read_exact(&mut bytes)?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("exec output log {exec_session_id} is not valid UTF-8 at byte {from_offset}"),
+        )
+    })?;
+    let want = (end_cap - from_offset) as usize;
+    let take = if text.len() <= want {
+        text.len()
+    } else {
+        let mut end = want;
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        end
+    };
+    Ok((from_offset + take as u64, text[..take].to_owned()))
 }
 
 /// ExecSessionView → 持久化行(创建/非终态迁移路径)。

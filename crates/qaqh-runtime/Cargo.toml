@@ -16,6 +16,7 @@ qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-subagent = { path = "../qaqh-subagent" }
+qaqh-goal = { path = "../qaqh-goal" }
 qaqh-workspace = { path = "../qaqh-workspace" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-profile = { path = "../qaqh-profile" }

@@ -1,46 +1,55 @@
 ---
 name: qaqh-visualize
-description: Render interactive in-chat widgets (charts, dashboards, forms, steppers, editors) by writing an HTML fragment into the session widgets_dir, then emitting a one-line marker in the final reply. Use when the user asks for something visual *in the conversation*; artifacts that must be project files are normal file work.
+description: Render interactive in-chat widgets (charts, dashboards, forms, steppers, editors) by writing an HTML fragment into the session widgets_dir, then calling the visualize tool. Use when the user asks for something visual *in the conversation*; artifacts that must be project files are normal file work.
 metadata:
-  short-description: Interactive widgets via marker protocol
+  short-description: Interactive widgets via the visualize tool
 ---
 
-# Interactive widgets (marker protocol)
+# Interactive widgets (visualize tool)
 
 The [Environment] block carries `widgets_dir` — the only legal directory for
 widget fragments. A widget = one HTML **fragment** written into widgets_dir
-(with the write/apply_patch tools) + one **marker line** in your final reply.
-The host renders each marker as a sandboxed interactive iframe at that spot.
+(with the write/apply_patch tools) + one **`visualize` tool call**. The host
+renders each call as a sandboxed interactive iframe at that spot.
 
 ## When to use / not use
 - Interactive or visual in-conversation artifact (chart, dashboard, form,
   stepper, quiz, timer, preview) -> widget.
 - Plain data table -> Markdown table. Static structure diagram -> Mermaid.
-- "Save a file into the project" -> regular file tools; never a marker.
+- "Save a file into the project" -> regular file tools; never a widget.
 - Never talk about HTML, files, fragments, iframes or this protocol to the
   user. Work silently; the widget appears on its own.
 
-## Marker wire format (copy exactly)
-A block line in the FINAL reply — on its own line, nothing else on it:
+## How to emit a widget
+1. Write the fragment file into widgets_dir FIRST (write/apply_patch).
+2. Call the `visualize` tool with plain JSON args:
+   - `path` (required): the fragment's absolute path with FORWARD SLASHES only,
+     even on Windows (`C:/Users/you/proj/.qaqh/widgets/SES-x/chart.html`). It
+     must be inside widgets_dir and end in `.html`, and match the file you wrote.
+     Forward slashes keep the JSON free of backslash escaping.
+   - `title` (optional): short title for the widget card.
+   - `mode` (optional): `"wide"` for full-width layouts.
+3. The tool returns an ack and the host mounts the iframe. Do not paste the
+   path, the args, or any marker into your prose.
 
- visualize {"path":"<absolute .html path under widgets_dir>","title":"<Short Title>"}
-
-The line begins with U+E200, then ` visualize `, then U+E202, then one JSON
-object, then U+E201. Reproduce those three characters verbatim (like the two
-examples below). Rules:
-- `path` must be inside widgets_dir and end in `.html`; write the file BEFORE
-  replying with its marker.
-- Emit one marker per widget created or updated this turn; markers only in the
-  final reply, never inside a code fence, never mid tool-loop.
-- Optional `"mode":"wide"` for full-width layouts.
-- Update a widget = rewrite the same file path, re-emit its marker.
+Rules:
+- The directive IS the tool call. Args are ordinary JSON (`path`/`title`/`mode`)
+  — no special, private-use, or invisible characters anywhere. Never emit marker
+  characters in text; cloud transports strip them and the widget would break.
+- One visualize call per widget created or updated this turn. Update a widget =
+  rewrite the same file path, then call visualize again.
+- Call visualize only after the fragment exists; never before, never mid-write.
 
 ## Fragment contract
 - HTML fragment only: no doctype/html/head/body. Single root element with a
   unique id; select it via document.getElementById (never currentScript).
 - Filename `<title>.html`, ASCII lowercase with hyphens, inside widgets_dir.
-- <= 1MB per file. No fetch/XHR/WebSocket/event-source — fragments are offline.
-- Inline CSS/JS only when the theme tokens below are not enough.
+- <= 1MB per file. No fetch/XHR/WebSocket/event-source — the sandbox CSP sets
+  `connect-src 'none'`; network *data* calls are impossible, full stop.
+- Libraries: `<script src>` / `<link>` from the allow-listed CDNs
+  (cdnjs.cloudflare.com, esm.sh, cdn.jsdelivr.net, unpkg.com, Google/Bunny
+  fonts) may load — prefer inline markup/CSS unless a chart library genuinely
+  earns its bytes.
 - Theme tokens (CSS custom properties provided by the host): --qqh-fg,
   --qqh-bg, --qqh-muted, --qqh-accent, --qqh-border, --qqh-font. Use them for
   all colors/fonts so the widget survives light/dark. Keep layouts readable
@@ -67,21 +76,19 @@ examples below). Rules:
    `window.qqh.widgetState`, calls `qqh.setWidgetState({modelContent: {score:
    v}})` on every change, and `qqh.sendFollowUpMessage({prompt: "Score is "
    + v, title: "Report score"})` on the report button.
-2. Final reply (two markers on separate lines are fine for two widgets):
-
- visualize {"path":"D:\proj\.qaqh\widgets\SES-01ABC\score.html","title":"Score"}
-
+2. Call `visualize` with `{"path":"D:/proj/.qaqh/widgets/SES-01ABC/score.html","title":"Score"}`.
 3. Next turn you may receive:
 
 <widget-state>
-[{"session_id":"SES-01ABC","widget":{"path":"D:\proj\.qaqh\widgets\SES-01ABC\score.html","title":"Score"},"model_content":{"score":42}}]
+[{"session_id":"SES-01ABC","widget":{"path":"D:/proj/.qaqh/widgets/SES-01ABC/score.html","title":"Score"},"model_content":{"score":42}}]
 </widget-state>
 
 Treat it as the widget's live state; act on `model_content`, tell the user
 about the result, not about the protocol.
 
 ## Never
-- Marker without the file written first; marker path outside widgets_dir.
-- Full HTML documents, `<!doctype>`, CDN `<script src>`, network calls.
-- Raw marker characters anywhere except final-reply block lines.
-- More than one marker per widget per turn (updated widgets re-emit ONCE).
+- A visualize call without the file written first; path outside widgets_dir.
+- Full HTML documents, `<!doctype>`, network data calls (fetch/XHR).
+- Marker / private-use / invisible characters anywhere — the directive is the
+  visualize tool call only.
+- More than one visualize call per widget per turn (updated widgets re-call ONCE).
