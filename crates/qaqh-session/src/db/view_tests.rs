@@ -278,6 +278,182 @@ mod tests {
         });
     }
 
+    /// ADR-0018 反证闸门：子代理管理面终态必须读回合 outcome 的 terminal，
+    /// 不得把 status='finished' 一律投影成 Completed——provider 失败/超时取消
+    /// 的回合同样是 'finished'，旧投影让失败子代理在管理面显示"已完成"。
+    #[test]
+    fn subagent_terminal_status_reflects_turn_outcome_not_just_status() {
+        use qaqh_ringing_contract::fact::{SubagentTerminalStatus, TurnError, TurnTerminal};
+        use qaqh_ringing_contract::state::{ToolEffectInfo, TurnOutcome};
+
+        let db = test_db();
+        db.write_blocking(|conn| {
+            let mk_session = |conn: &mut rusqlite::Connection, id: &str, parent: Option<&str>| {
+                store::create_session(
+                    conn,
+                    &store::NewSession {
+                        session_id: id.into(),
+                        parent_session_id: parent.map(str::to_string),
+                        title: id.into(),
+                        title_source: None,
+                        cwd: None,
+                        model: None,
+                        tool_mode: None,
+                        model_selection: None,
+                        custom_tools: None,
+                        frozen_annotation: None,
+                        ephemeral: false,
+                    },
+                )
+            };
+            mk_session(conn, "SES-P", None)?;
+            for child in ["SES-FAILED", "SES-CANCELLED", "SES-OK", "SES-ACTIVE", "SES-INTERRUPTED"] {
+                mk_session(conn, child, Some("SES-P"))?;
+            }
+            // 父会话为每个子代理留一条 spawn 工具调用（effects 是血缘权威）。
+            for (i, child) in ["SES-FAILED", "SES-CANCELLED", "SES-OK", "SES-ACTIVE", "SES-INTERRUPTED"]
+                .iter()
+                .enumerate()
+            {
+                let call_id = format!("C-SPAWN-{i}");
+                store::upsert_tool_call(
+                    conn,
+                    &store::ToolCallUpsert {
+                        call_id: call_id.clone(),
+                        session_id: "SES-P".into(),
+                        turn_id: None,
+                        tool_name: "spawn_subagent".into(),
+                        args_json: None,
+                        state_json: serde_json::to_string(&ToolCallState::Running).unwrap(),
+                        state_kind: "running",
+                    },
+                )?;
+                store::finish_tool_call(
+                    conn,
+                    &store::ToolCallFinish {
+                        call_id,
+                        session_id: "SES-P".into(),
+                        turn_id: None,
+                        tool_name: "spawn_subagent".into(),
+                        state_json: serde_json::to_string(&ToolCallState::Finished {
+                            outcome: ToolCallOutcome::Completed,
+                        })
+                        .unwrap(),
+                        exec_session_id: None,
+                        output_text: None,
+                        output_ref: None,
+                        output_truncated: false,
+                        meta_json: None,
+                        effects_json: Some(
+                            serde_json::to_string(&vec![ToolEffectInfo::SubagentSpawned {
+                                child_session_id: child.to_string(),
+                                name: format!("child_{i}"),
+                                task_text: "task".into(),
+                            }])
+                            .unwrap(),
+                        ),
+                        code_delta_json: None,
+                    },
+                )?;
+            }
+            // 子会话回合终态：三种 finished + 一种 active + 一种 interrupted。
+            let settle = |conn: &mut rusqlite::Connection,
+                          session: &str,
+                          turn: &str,
+                          status: &str,
+                          outcome: Option<TurnOutcome>|
+             -> rusqlite::Result<()> {
+                store::start_turn(conn, turn, session, None)?;
+                store::finish_turn(
+                    conn,
+                    turn,
+                    status,
+                    outcome
+                        .map(|o| serde_json::to_string(&o).unwrap())
+                        .as_deref(),
+                )
+            };
+            settle(
+                conn,
+                "SES-FAILED",
+                "T-F",
+                "finished",
+                Some(TurnOutcome::Finished {
+                    terminal: TurnTerminal::Failed,
+                    usage: None,
+                    error: Some(TurnError {
+                        code: "provider_failed".into(),
+                        message: "upstream closed stream mid-content".into(),
+                        retryable: false,
+                        details_ref: None,
+                    }),
+                }),
+            )?;
+            settle(
+                conn,
+                "SES-CANCELLED",
+                "T-C",
+                "finished",
+                Some(TurnOutcome::Finished {
+                    terminal: TurnTerminal::Cancelled,
+                    usage: None,
+                    error: None,
+                }),
+            )?;
+            settle(
+                conn,
+                "SES-OK",
+                "T-OK",
+                "finished",
+                Some(TurnOutcome::Finished {
+                    terminal: TurnTerminal::Completed,
+                    usage: None,
+                    error: None,
+                }),
+            )?;
+            store::start_turn(conn, "T-A", "SES-ACTIVE", None)?;
+            settle(
+                conn,
+                "SES-INTERRUPTED",
+                "T-I",
+                "interrupted",
+                Some(TurnOutcome::Interrupted {
+                    reason: qaqh_ringing_contract::fact::InterruptReason::Crash,
+                }),
+            )?;
+            Ok::<(), crate::db::DbError>(())
+        })
+        .expect("seed parent/child sessions");
+
+        let state = db
+            .read_blocking(|conn| view::load_session_state(conn, "SES-P"))
+            .expect("load parent state");
+        let status_of = |child: &str| {
+            state
+                .subagents
+                .iter()
+                .find(|s| s.child_session_id.0 == child)
+                .unwrap_or_else(|| panic!("subagent {child} must be listed"))
+                .status
+        };
+        assert_eq!(
+            status_of("SES-FAILED"),
+            Some(SubagentTerminalStatus::Failed),
+            "provider 失败的子代理不得显示已完成"
+        );
+        assert_eq!(
+            status_of("SES-CANCELLED"),
+            Some(SubagentTerminalStatus::Cancelled),
+            "被取消的子代理不得显示已完成"
+        );
+        assert_eq!(status_of("SES-OK"), Some(SubagentTerminalStatus::Completed));
+        assert_eq!(status_of("SES-ACTIVE"), None, "运行中不是终态");
+        assert_eq!(
+            status_of("SES-INTERRUPTED"),
+            Some(SubagentTerminalStatus::Cancelled)
+        );
+    }
+
     /// 64-hex 占位摘要(裸形态)。
     const BARE_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const BARE_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

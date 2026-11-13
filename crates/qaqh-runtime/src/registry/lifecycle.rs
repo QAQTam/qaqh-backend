@@ -240,28 +240,4 @@ impl AgentRegistry {
             );
         }
     }
-
-    /// ADR-0014：子代理超时扫描——取消超预算的子会话活动回合。取代
-    /// per-child collector 的 deadline 循环；预算单一真相源 = config。
-    pub fn cancel_expired_subagent_turns(&mut self, timeout_secs: u64) -> Vec<String> {
-        if timeout_secs == 0 || self.shutting_down {
-            return Vec::new();
-        }
-        let expired: Vec<String> = self
-            .instances
-            .iter()
-            .filter(|(id, instance)| {
-                self.supervisor.parent_of(id).is_some()
-                    && instance.loop_.turn_elapsed_secs() >= timeout_secs
-            })
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in &expired {
-            if let Some(instance) = self.instances.get(id) {
-                instance.loop_.cancel_turn(None);
-            }
-            log::warn!("[subagent] timeout sweep cancelled child {id} (budget {timeout_secs}s)");
-        }
-        expired
-    }
 }

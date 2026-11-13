@@ -13,8 +13,10 @@
 //! 的 struct 级 `#[serde(default)]` 均已删除——前后端共进退，不存在「另一个版本的
 //! 对方」。删 `default` 不只是减重：留着它会让「旧形状」**静默**变成「一份全默认的
 //! 配置」（实测：未知键被忽略 + 缺字段走 default ⇒ 解析成功但值全错），比失败更糟。
-//! **注意** [`ConfigPatch`] / [`SubagentPatch`] 的 struct 级 `default` **不在此列**：
+//! **注意** [`ConfigPatch`] 的 struct 级 `default` **不在此列**：
 //! 那是 K3 合并补丁的语义（字段缺失 = 不动），不是兼容。
+//! 子代理配置段（`SubagentDto`/`SubagentPatch`）已随 ADR-0018 退役：
+//! 子代理=会话，预算/工具面与父同律，限额是内核常量，不再经设置面暴露。
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use serde::{Deserialize, Serialize};
@@ -35,7 +37,6 @@ pub struct ConfigDto {
     /// 语义缺省（开）由**产出侧**决定：`qaqh-config/src/dto.rs::to_dto` 里
     /// `unwrap_or(true)`。读侧不再兜底——见 `dto_rejects_a_partial_payload`。
     pub notifications_enabled: bool,
-    pub subagent: SubagentDto,
     /// Goal 模式配置段(ADR-0015)。
     pub goals: GoalsDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
@@ -56,43 +57,6 @@ pub struct ConfigDto {
     pub tool_allowlist_enabled: bool,
     /// Exact registered names; when enabled, an empty list disables all tools.
     pub tool_allowlist: Vec<String>,
-}
-
-/// 子代理配置段（读模型）。端点族字段（model/baseUrl/apiKey/maxTokens）
-/// 已退役——子代理模型选择唯一真源是 providers.toml 目录 + 会话行
-/// model_selection，经 provider.* 命令面与 session.settings.patch 维护。
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SubagentDto {
-    /// Maximum lifetime in seconds before the subagent is killed.
-    /// 仅作用于模型调用的 `spawn_subagent` 工具路径（qaqh-subagent 的 collector
-    /// deadline）；`subagent.spawn` RPC 路径不读它。
-    pub timeout_secs: u64,
-    /// 空数组 = 全部工具可用（配置语义，非缺省）。
-    pub default_tools: Vec<String>,
-    /// Maximum subagent tree depth. Default 1.
-    /// **只在 daemon 启动时读取**（qaqh-runtime service.rs）；改动需**重启 daemon**。
-    #[serde(default = "default_subagent_max_depth")]
-    pub max_depth: u64,
-    /// Max queued messages from one sender to one recipient. 0 = unlimited.
-    #[serde(default = "default_subagent_message_in_flight")]
-    pub message_in_flight_per_pair: u64,
-    /// Max cumulative outbound message attempts per sender. 0 = unlimited.
-    #[serde(default = "default_subagent_message_outbound")]
-    pub message_outbound_per_sender: u64,
-}
-
-fn default_subagent_max_depth() -> u64 {
-    1
-}
-
-fn default_subagent_message_in_flight() -> u64 {
-    16
-}
-
-fn default_subagent_message_outbound() -> u64 {
-    1024
 }
 
 /// Goal 模式配置段(读模型,ADR-0015)。
@@ -225,8 +189,6 @@ pub struct ConfigPatch {
     pub tool_allowlist_enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_allowlist: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent: Option<SubagentPatch>,
     /// Goal 模式配置(ADR-0015)。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub goals: Option<GoalsPatch>,
@@ -239,24 +201,6 @@ pub struct ConfigPatch {
 pub struct SandboxPatch {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-}
-
-/// 子代理配置段（写模型），嵌套于 [`ConfigPatch::subagent`]。
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct SubagentPatch {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
-    /// 允许空数组（= 全部工具可用）。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_tools: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_depth: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_in_flight_per_pair: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_outbound_per_sender: Option<u64>,
 }
 
 /// Goal 模式配置段(写模型,ADR-0015),嵌套于 [`ConfigPatch::goals`]。
@@ -302,18 +246,6 @@ impl ConfigPatch {
             return Err(format!(
                 "permissionLevel 仅允许 1..=4（1=read-only, 2=workspace-write, 3=skip-permissions, 4=sandbox-run），收到 {level}"
             ));
-        }
-        if let Some(sub) = &self.subagent {
-            if let Some(v) = sub.timeout_secs
-                && v == 0
-            {
-                return Err("subagent.timeoutSecs 必须大于 0".to_string());
-            }
-            if let Some(v) = sub.max_depth
-                && !(1..=16).contains(&v)
-            {
-                return Err(format!("subagent.maxDepth 仅允许 1..=16，收到 {v}"));
-            }
         }
         if let Some(goals) = &self.goals
             && let Some(Some(v)) = goals.max_token_budget
@@ -371,10 +303,6 @@ mod tests {
             "fontFamily": "",
             "theme": null,
             "notificationsEnabled": true,
-            "subagent": {
-                "timeoutSecs": 120,
-                "defaultTools": ["read"]
-            },
             "goals": { "enabled": true, "maxTokenBudget": null },
             "mcp": { "enabled": false, "idleShutdownSecs": 300, "servers": [] },
             "lsp": { "enabled": false, "idleShutdownSecs": 600, "servers": [] },
@@ -388,8 +316,6 @@ mod tests {
         let dto: ConfigDto = serde_json::from_value(payload).expect("完整 wire 形状必须可解析");
         assert_eq!(dto.permission_level, 4);
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
-        assert_eq!(dto.subagent.timeout_secs, 120);
-        assert_eq!(dto.subagent.default_tools, vec!["read".to_string()]);
         assert!(dto.goals.enabled);
         assert_eq!(dto.goals.max_token_budget, None);
         assert_eq!(dto.exec.default_shell.as_deref(), Some("bash"));
@@ -406,20 +332,19 @@ mod tests {
     }
 
     #[test]
-    fn patch_roundtrip_with_nested_subagent() {
+    fn patch_roundtrip_with_nested_goals() {
         let patch = ConfigPatch {
             auto_compact_threshold: Some(0.95),
-            subagent: Some(SubagentPatch {
-                timeout_secs: Some(240),
-                default_tools: Some(vec![]),
-                ..Default::default()
+            goals: Some(GoalsPatch {
+                enabled: Some(true),
+                max_token_budget: Some(Some(4096)),
             }),
             ..Default::default()
         };
         let v = serde_json::to_value(&patch).expect("serialize");
         assert_eq!(v["autoCompactThreshold"], json!(0.95));
-        assert_eq!(v["subagent"]["timeoutSecs"], json!(240));
-        assert_eq!(v["subagent"]["defaultTools"], json!([]));
+        assert_eq!(v["goals"]["enabled"], json!(true));
+        assert_eq!(v["goals"]["maxTokenBudget"], json!(4096));
         // None 字段不得出现在 wire 上。
         assert!(v.get("model").is_none());
         assert!(v.get("theme").is_none());
@@ -431,11 +356,12 @@ mod tests {
         // 不是报错。这正是 Patch 语义（缺失=不动）下的正确结果，不是漏洞。
         let legacy: ConfigPatch = serde_json::from_value(json!({
             "max_tokens": 96_000,
-            "subagent": { "timeout_secs": 60 }
+            "goals": { "max_token_budget": 60 }
         }))
         .expect("未知键不报错");
         assert_eq!(legacy.auto_compact_threshold, None, "snake_case 键已不再生效");
-        assert_eq!(legacy.subagent.expect("subagent").timeout_secs, None);
+        // 外层 goals 键合法 → Some(全 None)；内层 snake 键被忽略 = 什么都没改。
+        assert_eq!(legacy.goals, Some(GoalsPatch::default()));
     }
 
     #[test]

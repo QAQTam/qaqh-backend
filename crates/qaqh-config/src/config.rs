@@ -3,59 +3,14 @@ use crate::secrets::SecretStore;
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentGoalsConfig, PersistentLspConfig,
     PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
-    PersistentSandboxConfig, PersistentSubagentConfig,
+    PersistentSandboxConfig,
 };
 use std::sync::{Mutex, OnceLock};
 
-/// Subagent default configuration.
-/// These are defaults applied when spawning sub-agents. The `spawn_subagent`
-/// tool schema only exposes `task_description` / `agent_name` / `context` /
-/// `timeout_secs`; the remaining fields are set through settings, not per-call.
-/// 端点族字段（model/baseUrl/apiKey/maxTokens）已退役：子代理的模型选择
-/// 唯一真源是 providers.toml 目录 + 会话行 model_selection。
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SubagentConfig {
-    /// Maximum lifetime in seconds before the subagent is killed. Default: 120.
-    #[serde(default = "default_subagent_timeout")]
-    pub timeout_secs: u64,
-    /// Default tool allowlist. Empty = all tools available.
-    #[serde(default)]
-    pub default_tools: Vec<String>,
-    /// Maximum subagent tree depth. Default 1 (root -> child only).
-    #[serde(default = "default_subagent_max_depth")]
-    pub max_depth: u32,
-    /// Max queued messages from one sender to one recipient. 0 = unlimited.
-    #[serde(default = "default_subagent_message_in_flight")]
-    pub message_in_flight_per_pair: u64,
-    /// Max cumulative outbound message attempts per sender. 0 = unlimited.
-    #[serde(default = "default_subagent_message_outbound")]
-    pub message_outbound_per_sender: u64,
-}
-
-fn default_subagent_timeout() -> u64 {
-    120
-}
-fn default_subagent_max_depth() -> u32 {
-    1
-}
-fn default_subagent_message_in_flight() -> u64 {
-    16
-}
-fn default_subagent_message_outbound() -> u64 {
-    1024
-}
-
-impl Default for SubagentConfig {
-    fn default() -> Self {
-        Self {
-            timeout_secs: 120,
-            default_tools: vec!["read".into(), "exec_command".into()],
-            max_depth: 1,
-            message_in_flight_per_pair: 16,
-            message_outbound_per_sender: 1024,
-        }
-    }
-}
+// ADR-0018：子代理配置段（SubagentConfig）已退役——子代理=会话：模型选择
+// 继承父会话行，工具面与父会话同律（STANDARD），生命周期预算与父同律
+// （上下文压力 → handoff）。树深与消息配额是内核常量（qaqh-runtime
+// registry 缺省），不再经配置面暴露。
 
 /// exec 工具默认执行配置。
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -138,8 +93,6 @@ pub struct Config {
     pub theme: Option<String>,
     /// 桌面通知开关。`None` = 开启（缺省）。
     pub notifications_enabled: Option<bool>,
-    /// Default configuration for sub-agent spawning.
-    pub subagent: SubagentConfig,
     /// Goal 模式(ADR-0015):持久目标 + 空闲自动续跑 + 预算熔断。
     pub goals: GoalsConfig,
     /// exec tool default shell selection.
@@ -677,7 +630,6 @@ impl Default for Config {
             font_family: String::new(),
             theme: None,
             notifications_enabled: None,
-            subagent: SubagentConfig::default(),
             goals: GoalsConfig::default(),
             exec: ExecConfig::default(),
             permission_level: 2, // workspace-write — safe autonomous default
@@ -758,7 +710,7 @@ impl Config {
         }
 
         let mut needs_rewrite = false;
-        if let Some(mut pc) = pc {
+        if let Some(pc) = pc {
             let provider_path = store.path().with_file_name("providers.toml");
             let provider_store = qaqh_profile::ProfilesStore::load_or_create(&provider_path)
                 .map_err(|error| ConfigError::invalid(format!("load providers.toml: {error}")))?;
@@ -784,39 +736,6 @@ impl Config {
             if let Some(enabled) = pc.notifications_enabled {
                 cfg.notifications_enabled = Some(enabled);
             }
-            // ── Subagent defaults ──
-            if let Some(ref mut s) = pc.subagent {
-                if let Some(ts) = s.timeout_secs {
-                    cfg.subagent.timeout_secs = ts;
-                }
-                if let Some(ref tools) = s.default_tools {
-                    // 存量迁移：工具改名后（file→read、read_file→read、
-                    // edit_file_v2→edit）旧配置持久化的
-                    // 默认白名单仍指向旧名；加载时归一化为当前正式词汇表，
-                    // 否则 apply_init 会静默剔除旧名，子代理丢失读文件能力。
-                    let migrated_names = migrate_legacy_exec_tool_names(tools);
-                    needs_rewrite |= migrated_names.as_slice() != tools.as_slice();
-                    cfg.subagent.default_tools = migrated_names
-                        .iter()
-                        .map(|t| match t.as_str() {
-                            "file" | "read_file" => "read",
-                            "edit_file_v2" => "edit",
-                            _ => t,
-                        })
-                        .map(String::from)
-                        .collect();
-                }
-                if let Some(depth) = s.max_depth {
-                    cfg.subagent.max_depth = depth;
-                }
-                if let Some(limit) = s.message_in_flight_per_pair {
-                    cfg.subagent.message_in_flight_per_pair = limit;
-                }
-                if let Some(limit) = s.message_outbound_per_sender {
-                    cfg.subagent.message_outbound_per_sender = limit;
-                }
-            }
-
             // ── Goal 模式(ADR-0015)──
             if let Some(ref g) = pc.goals {
                 if let Some(enabled) = g.enabled {
@@ -915,20 +834,6 @@ falling back to 1 (read-only)"
             // 迁移写回：config.toml 中旧工具名的默认白名单归一化为当前
             // 正式词汇表（重新 load 磁盘原值，只改确需归一化的字段）。
             if needs_rewrite && let Ok(Some(mut fresh)) = store.load() {
-                if let Some(ref mut s) = fresh.subagent {
-                    if let Some(ref mut tools) = s.default_tools {
-                        *tools = migrate_legacy_exec_tool_names(tools);
-                        *tools = tools
-                            .iter()
-                            .map(|tool| match tool.as_str() {
-                                "file" | "read_file" => "read",
-                                "edit_file_v2" => "edit",
-                                _ => tool,
-                            })
-                            .map(String::from)
-                            .collect();
-                    }
-                }
                 if let Some(ref mut tools) = fresh.tool_allowlist {
                     *tools = migrate_legacy_exec_tool_names(tools);
                 }
@@ -973,17 +878,6 @@ falling back to 1 (read-only)"
             },
             theme: self.theme.clone(),
             notifications_enabled: self.notifications_enabled,
-            subagent: Some(PersistentSubagentConfig {
-                timeout_secs: Some(self.subagent.timeout_secs),
-                default_tools: if self.subagent.default_tools.is_empty() {
-                    None
-                } else {
-                    Some(self.subagent.default_tools.clone())
-                },
-                max_depth: Some(self.subagent.max_depth),
-                message_in_flight_per_pair: Some(self.subagent.message_in_flight_per_pair),
-                message_outbound_per_sender: Some(self.subagent.message_outbound_per_sender),
-            }),
             goals: Some(PersistentGoalsConfig {
                 enabled: Some(self.goals.enabled),
                 max_token_budget: self.goals.max_token_budget,

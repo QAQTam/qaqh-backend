@@ -42,10 +42,6 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_allowlist: Option<Vec<String>>,
 
-    // ── Subagent defaults ──
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub subagent: Option<PersistentSubagentConfig>,
-
     // ── Goal 模式(ADR-0015)──
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goals: Option<PersistentGoalsConfig>,
@@ -101,31 +97,6 @@ pub struct PersistentExecConfig {
     /// `None` / empty / "auto" = platform priority auto-detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_shell: Option<String>,
-}
-
-/// Persistence-friendly subagent config with all-Option fields.
-/// Stored as a subsection of the main config. All fields are `Option` so that
-/// partial overrides work — `None` = inherit from parent agent config.
-/// 端点族字段（model/baseUrl/apiKey/maxTokens）已退役：子代理的模型选择
-/// 唯一真源是 providers.toml 目录 + 会话行的 model_selection，不再有第二份。
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-pub struct PersistentSubagentConfig {
-    /// Max time in seconds before the subagent is killed. `None` = default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
-    /// Default tool allowlist for subagents. Empty = all tools available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub default_tools: Option<Vec<String>>,
-    /// Maximum subagent tree depth. `None` = default (1).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_depth: Option<u32>,
-    /// Max queued messages from one sender to one recipient. `None` = default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_in_flight_per_pair: Option<u64>,
-    /// Max cumulative outbound message attempts per sender. `None` = default.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub message_outbound_per_sender: Option<u64>,
 }
 
 /// Persistence-friendly goal-mode config(ADR-0015)。全 Option 字段,
@@ -268,9 +239,25 @@ impl ConfigStore {
     /// exist or is invalid TOML.
     /// 读配置：文件不存在 = Ok(None)；解析失败 = Err（绝不静默按缺省跑）。
     pub fn load(&self) -> Result<Option<PersistentConfig>, String> {
-        let Ok(data) = std::fs::read_to_string(&self.path) else {
+        let Ok(mut data) = std::fs::read_to_string(&self.path) else {
             return Ok(None);
         };
+        // ADR-0018 一次性迁移：退役的 [subagent] 段由 daemon 历次 save 自写，
+        // 存量安装人人都有；deny_unknown_fields 会因此拒启动。在读入口剥掉
+        // 并原子写回，此后磁盘上永不再现该段（与工具名迁移写回同律）。
+        // 其余未知键仍 fail-closed，不做静默兼容。
+        if let Ok(mut doc) = toml::from_str::<toml::Value>(&data)
+            && doc
+                .as_table_mut()
+                .is_some_and(|table| table.remove("subagent").is_some())
+        {
+            let stripped = toml::to_string_pretty(&doc)
+                .map_err(|error| format!("config.toml 迁移序列化失败: {error}"))?;
+            if !self.write_content(&stripped) {
+                eprintln!("ConfigStore: 退役 [subagent] 段迁移写回失败（内存按已剥离加载）");
+            }
+            data = stripped;
+        }
         toml::from_str(&data).map(Some).map_err(|error| {
             format!("config.toml 无法解析——配置格式已更新或文件损坏，请重新配置: {error}")
         })

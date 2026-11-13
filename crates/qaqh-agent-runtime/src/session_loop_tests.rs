@@ -93,7 +93,7 @@ mod tests {
             spawn_sse_response(server, response);
             ((), addr)
         };
-        let provider = qaqh_gate::ProviderConfig::chat(
+        let mut provider = qaqh_gate::ProviderConfig::chat(
             &base_url,
             "sk-test",
             "test-model",
@@ -104,6 +104,11 @@ mod tests {
             true,
             None,
         );
+        // 测试要确定性结算：空流重试（ADR-0018）默认 5 次退避会超出轮询窗。
+        provider.retry = Some(qaqh_types::RetrySpec {
+            max_retries: 1,
+            ..Default::default()
+        });
         let spec = ProviderRequestSpec::new(provider, 1024);
         let loop_ = SessionLoop::new("SES-LOOP", owner, port, spec, dir.to_path_buf());
         (loop_, owners, rx)
@@ -324,8 +329,11 @@ mod tests {
         assert_eq!(settled["tools"][0]["state"]["kind"], "finished");
     }
 
+    /// ADR-0018：零内容且无终态帧的流 = 空流掐断——gate 整请求重试（此处
+    /// 禁重试）后带真实原因失败，runtime 结算为 provider_failed（旧分类
+    /// provider_incomplete 留给「有终态但不可用」的响应）。
     #[tokio::test]
-    async fn provider_incomplete_response_finishes_turn_as_failed() {
+    async fn provider_empty_stream_finishes_turn_as_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let (loop_, owners, _rx) =
             test_loop_with_response(dir.path(), "data: [DONE]\n\n".to_string()).await;
@@ -359,7 +367,14 @@ mod tests {
         assert_eq!(failed["turns"][0]["outcome"]["kind"], "finished");
         assert_eq!(
             failed["turns"][0]["outcome"]["data"]["error"]["code"],
-            "provider_incomplete"
+            "provider_failed"
+        );
+        assert!(
+            failed["turns"][0]["outcome"]["data"]["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("upstream closed stream")),
+            "失败必须携带真实原因: {}",
+            failed["turns"][0]["outcome"]["data"]["error"]["message"]
         );
         assert_eq!(
             failed["turns"][0]["outcome"]["data"]["error"]["retryable"],

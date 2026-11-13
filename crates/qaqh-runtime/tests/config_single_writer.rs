@@ -30,14 +30,14 @@ fn daemon_config_actions_share_one_write_port() {
     // spec §0b 删除，故载荷随之改正。本测试真正要钉的东西（「权限写入不得
     // 丢掉其它字段」）与键风格无关。
     // 端点族字段（baseUrl/maxTokens）已随统一模型配置退役（ConfigPatch
-    // 刻意不含，写了也不生效）；改用仍属全局策略的 subagent.timeoutSecs
-    // 验证单写口语义。
+    // 刻意不含，写了也不生效）；子代理段亦随 ADR-0018 退役。改用仍属全局
+    // 策略的 sessionIdleUnloadSecs 验证单写口语义。
     service
         .execute_ringing_command(
             &qaqh_ringing::CommandTarget::Global,
             &qaqh_ringing::RingingCommand::ConfigSave {
                 patch: json!({
-                "subagent": { "timeoutSecs": 240 },
+                "sessionIdleUnloadSecs": 240,
                 }),
             },
         )
@@ -53,8 +53,8 @@ fn daemon_config_actions_share_one_write_port() {
     let cfg = qaqh_config::Config::load().expect("reload config");
     assert_eq!(cfg.permission_level, 2);
     assert_eq!(
-        cfg.subagent.timeout_secs, 240,
-        "permission write must not drop subagent.timeout_secs"
+        cfg.session_idle_unload_secs, 240,
+        "permission write must not drop session_idle_unload_secs"
     );
 
     let _ = std::fs::remove_dir_all(root);

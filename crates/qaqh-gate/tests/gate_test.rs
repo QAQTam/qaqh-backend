@@ -248,6 +248,9 @@ fn finish_with_usage() {
 fn requests_and_emits_stream_usage_with_cache_details() {
     let scenario = vec![
         SseChunk::text("Hello"),
+        // ADR-0018：真终态帧不可省——无 finish_reason 的流按掐流失败。
+        // 真实 OpenAI 序：finish 帧 → usage-only 帧 → [DONE]。
+        SseChunk::finish("stop", None),
         SseChunk::Data(json!({
             "choices": [],
             "usage": mock_server::usage_with_cache(100, 20, 80, 20),
@@ -1264,7 +1267,7 @@ fn responses_chat_stream_basic_text() {
 }
 
 #[test]
-fn responses_stream_without_terminal_event_keeps_partial_output_with_stop_reason_none() {
+fn responses_stream_without_terminal_event_is_a_failure_not_a_salvaged_done() {
     let mock = MockServer::new(vec![mock_server::SseChunk::Raw(
         "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"m1\",\"delta\":\"partial\"}\n\n".into(),
     )]);
@@ -1282,19 +1285,18 @@ fn responses_stream_without_terminal_event_keeps_partial_output_with_stop_reason
         &mut |event| events.push(event),
     );
 
-    // T7 新契约：截断流不再判死。部分产出已流出不可重来 → Ok 收口，
-    // Done{stop_reason:None} 交由上层续写机制带词重启（对齐 chat 协议）。
-    result.expect("truncated stream with partial output must be salvaged, not rejected");
-    let done = events
-        .iter()
-        .find_map(|event| match event {
-            StreamEvent::Done { stop_reason, .. } => Some(stop_reason.clone()),
-            _ => None,
-        })
-        .expect("salvaged truncated stream must still emit Done");
-    assert_eq!(
-        done, None,
-        "stop_reason must be absent so runtime triggers continuation"
+    // ADR-0018：上游掐流 = 失败。旧契约伪造 Done{stop_reason:None} 声称
+    // "交由上层续写机制"——该机制从未存在，runtime 把半截响应当不可用终态，
+    // 子代理管理面还把失败投影成已完成。新契约：真实原因随 Err 上抛，
+    // 不组装任何 Done；已流出的碎片仍经 ContentDelta 如实保留。
+    let error = result.expect_err("mid-stream cut must fail, not fabricate a terminal");
+    assert!(
+        error.to_string().contains("upstream closed stream"),
+        "failure must carry the real cause: {error}"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(event, StreamEvent::Done { .. })),
+        "no fabricated Done for an interrupted stream"
     );
     assert!(
         events

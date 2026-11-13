@@ -148,7 +148,7 @@ impl AgentRegistry {
             .ok_or_else(|| format!("subagent parent metadata missing for {parent_session_id}"))?;
         if parent.agent_path.depth() >= self.max_depth {
             return Err(format!(
-                "subagent max depth {} reached at parent {} (depth {}); raise config.subagent.max_depth and restart the daemon to allow deeper nesting",
+                "subagent max depth {} reached at parent {} (depth {}); nesting depth is a kernel constant (ADR-0018)",
                 self.max_depth,
                 parent.agent_path,
                 parent.agent_path.depth()

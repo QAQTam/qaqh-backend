@@ -720,7 +720,15 @@ async fn consume(
                 response,
                 ..
             }) => {
-                state.stop = finish_reason;
+                // ADR-0018：finish_reason 缺席 = SDK 在 EOF 的合成收口
+                // （真终态帧从未到达）——上游掐流按失败处理，不得把半截
+                // 流洗成完成响应。真实终态恒带 finish_reason。
+                let Some(fr) = finish_reason else {
+                    interrupted =
+                        Some("upstream closed stream before terminal event".to_string());
+                    break;
+                };
+                state.stop = Some(fr);
                 // 旧实现在 [DONE] 收口时 usage 已由末帧事件覆盖；此处兜底
                 // 一次确保 Done 载荷非空（部分端点只在末帧带 usage）。
                 if state.usage.is_none()
@@ -746,10 +754,12 @@ async fn consume(
         return Outcome::Completed;
     }
     if state.had_output() {
+        // ADR-0018：掐流就是失败，不得伪造 Done 把半截输出洗成完成。
+        // 已流出的碎片经 ContentDelta 如实保留；真实原因随 Err 上抛，
+        // runtime 按 StartedUnknown 结算为 provider_failed（部分文本仍落盘）。
         let why = interrupted.unwrap_or_else(|| "upstream closed stream mid-content".to_string());
-        log::warn!("OpenAI SSE interrupted mid-stream, keeping partial output: {why}");
-        state.finalize(false, on_event);
-        return Outcome::Completed;
+        log::warn!("OpenAI SSE interrupted mid-stream: {why}");
+        return Outcome::Fatal(anyhow::anyhow!("{why}"));
     }
     if let Some(why) = interrupted {
         log::warn!("OpenAI stream ended with no content (will retry): {why}");

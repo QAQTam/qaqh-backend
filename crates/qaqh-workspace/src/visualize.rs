@@ -65,7 +65,9 @@ impl TypedTool for VisualizeTool {
             "Render an interactive in-chat widget from an HTML fragment you wrote into widgets_dir. Call this after writing the fragment; args carry only path/title/mode (no special characters). The host mounts a sandboxed iframe at this spot. Load qaqh-visualize for the fragment contract and host bridge.",
             crate::permission::ToolCategory::Read,
             ToolRisk::ReadOnly,
-            std::time::Duration::ZERO,
+            // 纯形状校验 + ack 的进程内快工具；零超时仅 interactive 工具
+            // 可用（descriptor 校验），visualize 在能力表里是 SESSION_MUTATING。
+            std::time::Duration::from_secs(30),
         )
     }
 

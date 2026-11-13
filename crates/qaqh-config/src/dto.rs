@@ -4,7 +4,6 @@
 //! 未映射，在此处直接编译失败（S2「人肉同步」病根由编译器接管）。
 //! 守卫语义冻结（与 2026-08 前 `update_string/update_u32` 行为对齐，见
 //! qaqh-config-api `ConfigPatch` 文档）：
-//! - subagent.apiKey：`"****"` 或空串 = 保持现值（显式删除走专用接口）；
 //! - 字符串字段：空串 = 保持
 //!   （防未加载草稿整包写回时清空用户配置——2026-08 根因 1 同类防御）；
 //! - tokenizerPath：空串 = 清除（None，未设置）；
@@ -14,7 +13,7 @@
 use crate::config::Config;
 use qaqh_config_api::{
     ConfigDto, ConfigPatch, ExecDto, GoalsDto, LspDto, LspServerDto, McpDto, McpServerDto,
-    SandboxDto, SubagentDto,
+    SandboxDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
@@ -26,13 +25,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
         font_family: cfg.font_family.clone(),
         theme: cfg.theme.clone(),
         notifications_enabled: cfg.notifications_enabled.unwrap_or(true),
-        subagent: SubagentDto {
-            timeout_secs: cfg.subagent.timeout_secs,
-            default_tools: cfg.subagent.default_tools.clone(),
-            max_depth: u64::from(cfg.subagent.max_depth),
-            message_in_flight_per_pair: cfg.subagent.message_in_flight_per_pair,
-            message_outbound_per_sender: cfg.subagent.message_outbound_per_sender,
-        },
         goals: GoalsDto {
             enabled: cfg.goals.enabled,
             max_token_budget: cfg.goals.max_token_budget,
@@ -129,24 +121,6 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     {
         cfg.sandbox.enabled = enabled;
     }
-    if let Some(sub) = &patch.subagent {
-        if let Some(v) = sub.timeout_secs {
-            cfg.subagent.timeout_secs = v;
-        }
-        if let Some(v) = &sub.default_tools {
-            // 允许空数组（= 全部工具可用）；工具名归一化在 load 路径统一做。
-            cfg.subagent.default_tools = v.clone();
-        }
-        if let Some(v) = sub.max_depth {
-            cfg.subagent.max_depth = u32::try_from(v).unwrap_or(u32::MAX);
-        }
-        if let Some(v) = sub.message_in_flight_per_pair {
-            cfg.subagent.message_in_flight_per_pair = v;
-        }
-        if let Some(v) = sub.message_outbound_per_sender {
-            cfg.subagent.message_outbound_per_sender = v;
-        }
-    }
     if let Some(goals) = &patch.goals {
         if let Some(enabled) = goals.enabled {
             cfg.goals.enabled = enabled;
@@ -168,10 +142,10 @@ mod tests {
     fn to_dto_projects_all_sections() {
         let mut cfg = Config::default();
         cfg.auto_compact_threshold = 0.95;
-        cfg.subagent.timeout_secs = 300;
+        cfg.goals.max_token_budget = Some(300);
 
         let dto = to_dto(&cfg);
-        assert_eq!(dto.subagent.timeout_secs, 300);
+        assert_eq!(dto.goals.max_token_budget, Some(300));
         assert!((dto.auto_compact_threshold - 0.95).abs() < f64::EPSILON);
     }
 
@@ -250,21 +224,19 @@ mod tests {
     }
 
     #[test]
-    fn apply_patch_subagent_partial_and_empty_tools_allowed() {
+    fn apply_patch_goals_partial_and_budget_clear() {
         let mut cfg = Config::default();
-        cfg.subagent.timeout_secs = 120;
-        cfg.subagent.default_tools = vec!["read".into()];
+        cfg.goals.max_token_budget = Some(120);
         let patch = ConfigPatch {
-            subagent: Some(qaqh_config_api::SubagentPatch {
-                timeout_secs: Some(240),
-                default_tools: Some(vec![]),
-                ..Default::default()
+            goals: Some(qaqh_config_api::GoalsPatch {
+                enabled: Some(false),
+                max_token_budget: Some(None),
             }),
             ..Default::default()
         };
         apply_patch(&mut cfg, &patch).expect("apply");
-        assert_eq!(cfg.subagent.timeout_secs, 240);
-        assert!(cfg.subagent.default_tools.is_empty());
+        assert!(!cfg.goals.enabled);
+        assert_eq!(cfg.goals.max_token_budget, None);
     }
 
     #[test]

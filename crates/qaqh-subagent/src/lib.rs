@@ -8,8 +8,9 @@
 //! 2. 子 loop 回合终态经 registry 的终态路由回传 canonical 结果消息到父
 //!    会话持久 mailbox（父 idle 开新回合、忙则回合边界合流）。没有
 //!    collector 线程，没有重试循环。
-//! 3. 超时 = daemon 周期扫描子会话回合时钟（`config.subagent.timeout_secs`），
-//!    经 `ConversationCancel` 取消。
+//! 3. ADR-0018：子代理=会话，生命周期预算与父同律（上下文压力 → handoff）。
+//!    独立的 120s 墙钟超时清扫已退役；模型选择继承父会话行，工具面与父
+//!    会话同律（STANDARD），不再有配置面白名单/超时旋钮。
 //!
 //! ## Registration
 //!
@@ -106,9 +107,6 @@ pub struct SpawnSubagentOutput {
     task_text: String,
     #[serde(skip)]
     #[schemars(skip)]
-    timeout_secs: u64,
-    #[serde(skip)]
-    #[schemars(skip)]
     parent_session_id: String,
     #[serde(skip)]
     #[schemars(skip)]
@@ -116,9 +114,6 @@ pub struct SpawnSubagentOutput {
     #[serde(skip)]
     #[schemars(skip)]
     spawn_ephemeral: bool,
-    #[serde(skip)]
-    #[schemars(skip)]
-    spawn_timeout_secs: u64,
 }
 
 impl ToolProjection for SpawnSubagentOutput {
@@ -147,13 +142,11 @@ impl ToolProjection for SpawnSubagentOutput {
             child_session_id: self.child_session_id.clone(),
             name: self.name.clone(),
             task_text: self.task_text.clone(),
-            timeout_secs: self.timeout_secs,
             parent_session_id: self.parent_session_id.clone(),
             parent_agent_path: self.parent_agent_path.clone(),
             child_agent_path: self.child_agent_path.clone(),
             spawn_tools: self.spawn_tools.clone(),
             spawn_ephemeral: self.spawn_ephemeral,
-            spawn_timeout_secs: self.spawn_timeout_secs,
         }]
     }
 }
@@ -857,14 +850,10 @@ fn handle_spawn_subagent(
     let context = args.context.unwrap_or_default();
     let fork = args.mode.unwrap_or_default() == SpawnMode::Fork;
 
-    // ADR-0014：模型面只暴露 3 个参数。工具白名单取自用户设置
-    // （cfg.subagent.default_tools）；超时预算 = cfg.subagent.timeout_secs，
-    // 由 daemon 周期扫描执行（不再 per-spawn 覆盖）。模型选择继承父会话行。
-    let (tools, cfg_timeout) = qaqh_config::Config::load()
-        .ok()
-        .map(|cfg| (cfg.subagent.default_tools.clone(), cfg.subagent.timeout_secs))
-        .unwrap_or_default();
-    let timeout_secs = cfg_timeout.max(1);
+    // ADR-0018：子代理=会话——工具面与父会话同律（空白名单 = STANDARD，
+    // 装配时从有效 config 解析），模型选择继承父会话行，生命周期预算与父
+    // 同律。不再有配置面白名单/超时旋钮，也不在工具路径读全局 config。
+    let tools: Vec<String> = Vec::new();
 
     if task.trim().is_empty() {
         return Err(subagent_error(
@@ -950,11 +939,9 @@ fn handle_spawn_subagent(
         child_agent_path,
         content,
         task_text,
-        timeout_secs,
         parent_session_id: ctx.session_id.clone(),
         spawn_tools: tools.clone(),
         spawn_ephemeral: false,
-        spawn_timeout_secs: timeout_secs,
     })
 }
 
@@ -1140,9 +1127,9 @@ mod tests {
             .as_object()
             .expect("tool properties should be an object");
 
-        // ADR-0014：模型面 4 个参数（切片G 增 mode）；超时预算 = config
-        // （daemon 扫描），system_prompt / tools / model / base_url /
-        // max_tokens 不暴露。
+        // ADR-0014：模型面 4 个参数（切片G 增 mode）；ADR-0018：预算/工具面
+        // 与父会话同律，system_prompt / tools / model / base_url /
+        // max_tokens / timeout 不暴露。
         let expected: Vec<&str> = vec!["task_description", "agent_name", "context", "mode"];
         assert_eq!(properties.len(), expected.len());
         for key in expected {
@@ -1206,11 +1193,9 @@ mod tests {
             child_agent_path: "/root/review_code".to_string(),
             content: "Subagent 'review_code' spawned at /root/review_code".to_string(),
             task_text: "[TASK]\nreview".to_string(),
-            timeout_secs: 120,
             parent_session_id: "root-seed".to_string(),
             spawn_tools: vec![],
             spawn_ephemeral: false,
-            spawn_timeout_secs: 120,
         };
         let model = match output.model_blocks().into_iter().next() {
             Some(ToolContentBlock::Text { text }) => text,

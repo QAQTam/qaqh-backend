@@ -1,8 +1,12 @@
 # ADR-0014 子代理=会话：单权威收敛与跨会话消息
 
-状态: `已采纳（未实施）` · 决策日期 2026-11-12 · 决策人 用户提议 + QAQ agent（宪法第 3 条定稿）
+状态: `已采纳（部分实施）` · 决策日期 2026-11-12 · 决策人 用户提议 + QAQ agent（宪法第 3 条定稿）
 
-> 引用本 ADR 时注意状态：**已采纳（未实施）≠ 已完成**。落地清单见文末。
+> 引用本 ADR 时注意状态。落地清单见文末：切片 A–G 与冒烟已实施，
+> writeScopes / Team 根开关两条未实施。
+> **2026-11-13 修订**：决策 4 的"config 驱动超时扫描"已被 **ADR-0018 取代**
+> （子代理独立墙钟预算整体退役，生命周期与父会话同律）；决策 1 的权限/
+> 工具面"与普通会话同律"由 ADR-0018 补齐到工具白名单（default_tools 退役）。
 > 事实基线：`514082bb`（main）。工作区另有一套未提交的 widget-directive 在途改动
 > （102 文件，含 `ConversationSendMessage.widget_context` 契约增量），与本决策正交，
 > 但覆盖同一批文件——实施排序见 §后果 第 4 条。
@@ -67,9 +71,11 @@
    loop 不知道血缘——路由是 registry 的职责。终答从 canonical blocks
    回读（`view::turn_answer_text`）。无重试线程——mailbox 持久，
    注入拒绝不再是丢失路径。
-4. 超时 = daemon 既有周期任务扫描子会话**回合时钟**
+4. ~~超时 = daemon 既有周期任务扫描子会话**回合时钟**
    （`config.subagent.timeout_secs` 单一真相源），超预算发
-   `ConversationCancel`。**实施偏差**：不落 per-spawn deadline 列——
+   `ConversationCancel`。~~ **已取代 by ADR-0018**（2026-11-13）：
+   独立墙钟预算整体退役，子代理回合预算与父同律（上下文压力 → handoff）。
+   以下原文保留以追溯。**实施偏差**：不落 per-spawn deadline 列——
    避免为悬置功能加 schema 迁移；config 驱动即等效，per-spawn 覆盖
    待工具面确有需要时再加列。超时终态呈 Cancelled（旧 TIMEOUT 标签
    退役，扫描日志留痕）。保留 T-1-2 不变量：被取消的终态不注入正文，
