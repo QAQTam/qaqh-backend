@@ -33,8 +33,9 @@ pub(crate) enum Outcome {
 
 /// Accumulating buffers behind the unified `StreamEvent` contract. The gate
 /// assembles `Done.raw_message` from these buffers (not from the SDK
-/// response) so the anthropic/chat paths keep byte-identical semantics,
-/// including the partial-keep path on mid-stream interruption.
+/// response) so the anthropic/chat paths keep byte-identical semantics.
+/// 只有拿到真终态（`responded`）才组装 Done；中途掐流不伪造终态，
+/// 由驱动层带真实原因 Fatal 上抛（ADR-0018）。
 pub(crate) struct StreamState {
     pub text: String,
     pub reasoning: String,
@@ -279,6 +280,10 @@ pub(crate) fn roomy_response_limits() -> ResponseLimits {
     limits.max_sse_line_bytes = 16 * 1024 * 1024;
     limits.max_sse_event_bytes = 32 * 1024 * 1024;
     limits.max_tool_argument_bytes = 4 * 1024 * 1024;
+    // ADR-0018：retain_raw 钉死 true——Responses 驱动靠「raw 是 chunk 数组
+    // 还是 response 对象」判别 SDK 的 EOF 合成收口与真终态；关掉它会让
+    // 掐流被洗成 completed。
+    limits.retain_raw = true;
     limits
 }
 

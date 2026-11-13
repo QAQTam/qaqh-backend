@@ -83,6 +83,19 @@
 
 ## 攒着的 refreeze 清单（切线时一次吸收）
 
+- [ ] **子代理配置面退役**（2026-11-13，ADR-0018，代码已落 main）：
+      `ConfigDto.subagent` / `ConfigPatch.subagent` 字段删除 +
+      `SubagentDto` / `SubagentPatch` 两型删除（ts + cs 各 2 文件，
+      index/coverage/manifest 随机器重切）⇒ **wire 实变（字段/类型删除）**，
+      切线时一次吸收。
+      - 命令面零新增；`COMMAND_CONTRACT_REVISION` 不涉及。
+        `SESSION_CONTRACT_REVISION` 不 bump（读模型字段删除的代价归 §待决 1
+        统一裁决，与 Goal 段新增同律：ConfigDto 无向前兼容，前后端共进退）。
+      - 同 ADR 的内核行为变化（SubagentView 终态说真话 / gate 掐流=失败 /
+        120s 超时清扫退役 / 内部 ToolEffect 超时字段删除）**导出物零变化**，
+        不计入本条。
+      - 前端连带：设置页删子代理段；Team 页补 failed/cancelled 文案；
+        前后端同批发布（旧客户端解析新 ConfigDto 缺字段失败）。
 - [ ] **Goal 模式**（2026-11-13，ADR-0015，代码已落 main 工作区）：新增命令
       `goal.set` / `goal.get` / `goal.clear`、事件 `SessionEvent::GoalUpdated`
       （`goal: Option<GoalView>`，None=清除）、DTO `GoalView` / `GoalStatus`、

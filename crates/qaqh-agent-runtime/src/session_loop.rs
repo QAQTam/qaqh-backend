@@ -133,8 +133,6 @@ struct ActiveTurn {
     cancel: watch::Sender<bool>,
     /// ADR-0014：触发本回合的 inter-agent 信封（终态回传判据）。
     trigger: Option<qaqh_ringing_contract::commands::InterAgentEnvelope>,
-    /// 回合开始毫秒时钟（超时扫描判据）。
-    started_ms: u64,
     /// 运行中合并(Steer/Interject):下一轮 provider 调用前注入。
     steers: Vec<String>,
     /// widget-directive §4：本回合收到的 modelContent 快照，下一轮 provider 请求前
@@ -212,17 +210,6 @@ impl SessionLoop {
             .terminal_port
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(port);
-    }
-
-    /// 活动回合已运行的秒数（无活动回合 = 0）。子代理超时扫描判据。
-    pub fn turn_elapsed_secs(&self) -> u64 {
-        self.lock()
-            .active
-            .as_ref()
-            .map(|active| {
-                (unix_now_ms().max(0) as u64).saturating_sub(active.started_ms) / 1000
-            })
-            .unwrap_or(0)
     }
 
     /// 当前活动回合(无则 None)。
@@ -460,7 +447,6 @@ impl SessionLoop {
             turn_id,
             cancel,
             trigger,
-            started_ms: unix_now_ms().max(0) as u64,
             steers: Vec::new(),
             widget_contexts: Vec::new(),
             pending_interactions: Vec::new(),

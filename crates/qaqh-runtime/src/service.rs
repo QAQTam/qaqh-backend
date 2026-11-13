@@ -76,20 +76,17 @@ impl QaqhService {
         qaqh_mcp::prime_all_async();
         // daemon 进程的工具注册表（供 `skills.list_tools` 等查询；worker 各自
         // 独立 init_tools，本进程只提供注册表快照，不参与工具执行）。
-        // 不带 subagent 注册器：设置页勾选的是子代理可用工具，spawn_subagent
-        // 本身不属于子代理工具集。
+        // 不带会话工具注册器：spawn_subagent 等属于会话工具面，不在 daemon
+        // 查询注册表里。
         qaqh_workspace::runtime::init_tools("daemon", &[], vec![]);
         // 业务库:SQLite WAL 单权威(报告一 §7)。打不开就停止启动,不降级。
         let owners = Arc::new(
             qaqh_session::owner::OwnerDirectory::open(sessions.data_dir().join("qaqh.db"))
                 .expect("open business database"),
         );
-        let mut registry = AgentRegistry::new(Arc::clone(&owners));
-        registry.set_max_depth(config.subagent.max_depth as usize);
-        registry.set_message_quota_limits(
-            config.subagent.message_in_flight_per_pair,
-            config.subagent.message_outbound_per_sender,
-        );
+        // ADR-0018：子代理限额是内核常量（registry 缺省：depth=1、配额
+        // 16/1024），不再经用户配置面覆盖——子代理=会话，生命周期与父同律。
+        let registry = AgentRegistry::new(Arc::clone(&owners));
         let service = Self {
             registry: Arc::new(Mutex::new(registry)),
             hub: std::sync::OnceLock::new(),
@@ -290,18 +287,6 @@ impl QaqhService {
             release_freed_heap_memory();
         }
         unloaded
-    }
-
-    /// ADR-0014：子代理超时扫描——取消超预算的子会话活动回合。
-    /// `timeout_secs` == 0 为 no-op。取代 per-child collector 的 deadline 循环。
-    pub fn cancel_expired_subagent_turns(&self, timeout_secs: u64) -> Vec<String> {
-        if timeout_secs == 0 {
-            return Vec::new();
-        }
-        let Ok(mut registry) = self.registry() else {
-            return Vec::new();
-        };
-        registry.cancel_expired_subagent_turns(timeout_secs)
     }
 
     /// ADR-0015：goal 周期扫描（daemon 周期任务调用）。Active goal 跨 idle

@@ -292,26 +292,9 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
                             })
                             .await;
                         }
-                        // ADR-0014：子代理超时扫描（与 idle 卸载同周期；
-                        // config 是预算单一真相源）。
-                        let subagent_timeout = qaqh_config::watch::authoritative()
-                            .map(|config| config.subagent.timeout_secs)
-                            .unwrap_or(0);
-                        if subagent_timeout > 0 {
-                            let service = service.clone();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                let cancelled =
-                                    service.cancel_expired_subagent_turns(subagent_timeout);
-                                if !cancelled.is_empty() {
-                                    log::warn!(
-                                        "[daemon] subagent timeout sweep cancelled {} child turn(s): {:?}",
-                                        cancelled.len(),
-                                        cancelled
-                                    );
-                                }
-                            })
-                            .await;
-                        }
+                        // ADR-0018：子代理超时清扫已退役——子代理=会话，
+                        // 回合预算与父同律（上下文压力 → handoff），不再有
+                        // 独立墙钟断头台。
                         // ADR-0015：goal 周期扫描——DB 中 Active goal 跨 idle
                         // 卸载/daemon 存活;忙会话跳过(终态钩子负责续跑)。
                         {

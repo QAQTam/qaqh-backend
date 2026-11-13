@@ -945,10 +945,9 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_types::SessionMeta,
         qaqh_types::SessionRunStatus,
         // ── 配置 DTO 面（config.load / config.save 的读写形状）──
+        // ADR-0018：SubagentDto/SubagentPatch 随子代理配置面退役。
         qaqh_config_api::ConfigDto,
         qaqh_config_api::ConfigPatch,
-        qaqh_config_api::SubagentDto,
-        qaqh_config_api::SubagentPatch,
         // ADR-0015：goal 配置段。
         qaqh_config_api::GoalsDto,
         qaqh_config_api::GoalsPatch,

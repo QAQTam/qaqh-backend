@@ -482,8 +482,9 @@ async fn consume(
     let mut state = StreamState::new();
     // tool_use 身份/参数的通报收口（见 `ToolCallAnnouncer`）。
     let mut announcer = ToolCallAnnouncer::default();
-    // 帧内错误/流中断标记：有产出则走 partial-keep 收口（stop=None，
-    // runtime 续写接管），零产出则 EmptyStream 整请求重试。
+    // 帧内错误/流中断标记：有产出则 Fatal 带真实原因上抛（ADR-0018，
+    // runtime 结算为 provider_failed 并保留部分文本），零产出则 EmptyStream
+    // 整请求重试。
     let mut interrupted: Option<String> = None;
 
     loop {
@@ -583,9 +584,15 @@ async fn consume(
                 response,
                 finish_reason,
             }) => {
-                if let Some(fr) = finish_reason {
-                    state.stop = Some(map_anthropic_stop_reason(&fr));
-                }
+                // ADR-0018：finish_reason 缺席 = SDK 在 EOF 的合成收口
+                // （message_delta 的 stop_reason 从未到达）——上游掐流按
+                // 失败处理。真实终态恒带 stop_reason。
+                let Some(fr) = finish_reason else {
+                    interrupted =
+                        Some("upstream closed stream before terminal event".to_string());
+                    break;
+                };
+                state.stop = Some(map_anthropic_stop_reason(&fr));
                 // 旧实现在收口时兜底一次 usage（同一 UsageUpdate 语义）。
                 if let Some(usage) = response.usage.as_ref() {
                     let u = usage_to_info(usage, usage_scope);
@@ -609,10 +616,10 @@ async fn consume(
         return Outcome::Completed;
     }
     if state.had_output() {
+        // ADR-0018：掐流就是失败，不得伪造 Done 把半截输出洗成完成。
         let why = interrupted.unwrap_or_else(|| "upstream closed stream mid-content".to_string());
-        log::warn!("Anthropic SSE interrupted mid-stream, keeping partial output: {why}");
-        state.finalize(true, on_event);
-        return Outcome::Completed;
+        log::warn!("Anthropic SSE interrupted mid-stream: {why}");
+        return Outcome::Fatal(anyhow::anyhow!("{why}"));
     }
     if let Some(why) = interrupted {
         log::warn!("Anthropic stream ended with no content (will retry): {why}");

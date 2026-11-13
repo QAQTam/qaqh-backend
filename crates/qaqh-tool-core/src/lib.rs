@@ -51,13 +51,11 @@ pub enum ToolEffect {
         child_session_id: String,
         name: String,
         task_text: String,
-        timeout_secs: u64,
         parent_session_id: String,
         parent_agent_path: String,
         child_agent_path: String,
         spawn_tools: Vec<String>,
         spawn_ephemeral: bool,
-        spawn_timeout_secs: u64,
     },
 }
 

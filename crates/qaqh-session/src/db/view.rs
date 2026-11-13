@@ -174,31 +174,58 @@ fn load_subagents(conn: &Connection, session_id: &str) -> Result<Vec<SubagentVie
     Ok(subagents)
 }
 
-/// 子会话终态:最后一回合 finished → Completed;interrupted → Cancelled;
+/// 子会话终态:读最后一回合的 **outcome 权威**(ADR-0018)。
+///
+/// `status='finished'` 只表示回合已结算——Completed/Cancelled/Failed 三种
+/// terminal 都落 'finished'。旧投影把 'finished' 一律当 Completed,provider
+/// 失败与超时取消的子代理在管理面显示"已完成",失败被静默吞掉。
 /// 仍在跑 / 从未开回合 → None(运行中,不是终态)。
 fn child_terminal_status(
     conn: &Connection,
     child_session_id: &str,
 ) -> Result<Option<qaqh_ringing_contract::fact::SubagentTerminalStatus>, DbError> {
-    let mut stmt = conn.prepare(
-        "SELECT status FROM turns WHERE session_id = ?1
-         AND status IN ('active', 'finished', 'interrupted')
-         ORDER BY seq DESC LIMIT 1",
-    )?;
-    let status: Option<String> = stmt
-        .query_row([child_session_id], |row| row.get(0))
+    use qaqh_ringing_contract::fact::{SubagentTerminalStatus, TurnTerminal};
+
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT status, outcome_json FROM turns WHERE session_id = ?1
+             AND status IN ('active', 'finished', 'interrupted')
+             ORDER BY seq DESC LIMIT 1",
+            [child_session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()
         .map_err(rusqlite_error)?;
-    Ok(match status.as_deref() {
-        Some("active") | None => None,
-        Some("finished") => Some(qaqh_ringing_contract::fact::SubagentTerminalStatus::Completed),
-        Some("interrupted") => Some(qaqh_ringing_contract::fact::SubagentTerminalStatus::Cancelled),
-        Some(other) => {
-            return Err(DbError::Corrupt(format!(
-                "subagent {child_session_id}: unknown turn status {other:?}"
-            )));
+    let Some((status, outcome_json)) = row else {
+        return Ok(None);
+    };
+    match status.as_str() {
+        "active" => Ok(None),
+        "finished" | "interrupted" => {
+            // 与 turn_view 同律:结算行必须带 outcome,缺失即损坏,不猜终态。
+            let text = outcome_json.ok_or_else(|| {
+                DbError::Corrupt(format!(
+                    "subagent {child_session_id}: turn is {status} without outcome_json"
+                ))
+            })?;
+            let outcome = parse_typed::<TurnOutcome>(
+                &format!("subagent {child_session_id}"),
+                "turn outcome",
+                &text,
+            )?;
+            Ok(Some(match outcome {
+                TurnOutcome::Finished { terminal, .. } => match terminal {
+                    TurnTerminal::Completed => SubagentTerminalStatus::Completed,
+                    TurnTerminal::Failed => SubagentTerminalStatus::Failed,
+                    TurnTerminal::Cancelled => SubagentTerminalStatus::Cancelled,
+                },
+                TurnOutcome::Interrupted { .. } => SubagentTerminalStatus::Cancelled,
+            }))
         }
-    })
+        other => Err(DbError::Corrupt(format!(
+            "subagent {child_session_id}: unknown turn status {other:?}"
+        ))),
+    }
 }
 
 fn rusqlite_error(error: rusqlite::Error) -> DbError {
@@ -394,8 +421,13 @@ fn load_timeline(conn: &Connection, session_id: &str) -> Result<Vec<TimelineEntr
             let text = block.payload_json.ok_or_else(|| {
                 DbError::Corrupt(format!("block {} has no payload_json", block.block_id))
             })?;
-            serde_json::from_str::<TimelineEntry>(&text)
-                .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))
+            let mut entry: TimelineEntry = serde_json::from_str(&text)
+                .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))?;
+            // ord 列是权威落库序;payload_json 里的 ord 只是占位,读取时一律回填。
+            if let TimelineEntry::AssistantBlock { ord, .. } = &mut entry {
+                *ord = block.ord;
+            }
+            Ok(entry)
         })
         .collect()
 }

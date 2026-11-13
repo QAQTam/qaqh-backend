@@ -273,13 +273,11 @@ pub struct AgentRegistry {
     /// P2-7：root session tree 的 durable quota owner。
     quota_ledgers: HashMap<String, QuotaLedger>,
     quota_limits: QuotaLimits,
-    /// Subagent V2：树深上限。root depth = 0；默认 1（只允许 root -> child）。
     /// Subagent V2：agent 树最大深度（`/root` 的 depth 为 0）。
     ///
-    /// 默认 1 = 只允许 `root -> child`；daemon 启动时由
-    /// `config.subagent.max_depth` 覆盖（`service.rs`），改动需重启 daemon。
-    /// 拓扑本身（`AgentPath` 的 parent/child/is_descendant_of）支持任意深度，
-    /// 这个值只是策略闸门。
+    /// ADR-0018：内核常量，默认 1 = 只允许 `root -> child`，不再经配置面
+    /// 覆盖（测试/运维钩子 `set_max_depth` 保留）。拓扑本身（`AgentPath` 的
+    /// parent/child/is_descendant_of）支持任意深度，这个值只是策略闸门。
     max_depth: usize,
     /// Subagent V2：同一 sender-target 的 queued message 上限。0 = unlimited。
     message_in_flight_per_pair: u64,

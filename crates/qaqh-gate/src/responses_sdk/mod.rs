@@ -1423,39 +1423,6 @@ impl Resps {
     fn had_output(&self) -> bool {
         !self.text.is_empty() || !self.reasoning.is_empty() || !self.tools.is_empty()
     }
-
-    fn partial_done(self, on_event: &mut dyn FnMut(StreamEvent)) {
-        let mut blocks: Vec<ContentBlock> = Vec::new();
-        if !self.reasoning.is_empty() {
-            blocks.push(ContentBlock::Reasoning {
-                reasoning: self.reasoning,
-                kind: self.reasoning_kind,
-            });
-        }
-        if !self.text.is_empty() {
-            blocks.push(ContentBlock::text(&self.text));
-        }
-        let mut sorted: Vec<(usize, String, String, String)> = self
-            .tools
-            .into_iter()
-            .map(|(i, t)| (i, t.0, t.1, t.2))
-            .collect();
-        sorted.sort_by_key(|(i, _, _, _)| *i);
-        for (_i, id, name, args) in sorted {
-            let input = serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
-            blocks.push(ContentBlock::ToolUse { id, name, input });
-        }
-        on_event(StreamEvent::Done {
-            raw_message: Message {
-                msg_id: None,
-                role: "assistant".into(),
-                name: None,
-                content: blocks,
-            },
-            usage: self.usage,
-            stop_reason: None,
-        });
-    }
 }
 
 async fn consume(
@@ -1637,10 +1604,21 @@ async fn consume(
                 response,
                 finish_reason,
             }) => {
-                if plan.is_some() && response.raw.is_array() {
-                    return Outcome::Fatal(anyhow::anyhow!(
-                        "native tool plan stream lacks a terminal response"
-                    ));
+                // ADR-0018：raw = SSE chunk 数组（而非 response 对象）= SDK
+                // 在 EOF 的合成收口，response.completed 从未到达 → 上游掐流
+                // 按失败处理，不得洗成完成。真 completed 的 raw 是 response
+                // 对象；其 finish_reason 只携带 incomplete_details.reason
+                // （正常完成缺席 → 下方映射 "stop"）。判别式依赖 retain_raw
+                // 恒 true（roomy_response_limits 钉死）。
+                if response.raw.is_array() {
+                    if plan.is_some() {
+                        return Outcome::Fatal(anyhow::anyhow!(
+                            "native tool plan stream lacks a terminal response"
+                        ));
+                    }
+                    interrupted =
+                        Some("upstream closed stream before terminal event".to_string());
+                    break;
                 }
                 // Terminal-only providers still need a card. Streamed calls
                 // already emitted their arguments; never feed them twice.
@@ -1687,13 +1665,11 @@ async fn consume(
                         args_chunk,
                     });
                 }
-                // 旧契约：completed → stop "stop"；截断（incomplete_details.reason）
-                // 经 ProviderStream 路径处理（见下）。无终止事件的合成收口
-                // （raw = SSE chunks 数组而非 response 对象）→ stop None，
-                // 让 runtime 的续写机制接管——与退役前 T7 契约一致。
+                // completed → stop "stop"；incomplete_details.reason 原样
+                // 上抛（runtime 分类为 Length/Incomplete）。合成收口已在
+                // 上方按掐流失败处理，不会走到这里（ADR-0018）。
                 let stop = match finish_reason {
                     Some(fr) => Some(fr),
-                    None if response.raw.is_array() => None,
                     None => Some("stop".to_string()),
                 };
                 if resp.usage.is_none()
@@ -1885,13 +1861,14 @@ async fn consume(
     }
 
     if resp.had_output() {
+        // ADR-0018：掐流就是失败，不得伪造 Done 把半截输出洗成完成。
+        // 原生工具 plan 流本就 fail-closed；其余 wire 同律带真实原因上抛。
         if plan.is_some() {
             return Outcome::Fatal(anyhow::anyhow!("native tool plan stream interrupted"));
         }
         let why = interrupted.unwrap_or_else(|| "upstream closed stream mid-content".to_string());
-        log::warn!("Responses SSE interrupted mid-stream, keeping partial output: {why}");
-        resp.partial_done(on_event);
-        return Outcome::Completed;
+        log::warn!("Responses SSE interrupted mid-stream: {why}");
+        return Outcome::Fatal(anyhow::anyhow!("{why}"));
     }
     if let Some(why) = interrupted {
         log::warn!("Responses stream ended with no content (will retry): {why}");
