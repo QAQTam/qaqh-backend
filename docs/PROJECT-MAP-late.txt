@@ -1,0 +1,498 @@
+TOOL: explore
+INPUT: {"path":"D:\\project\\DeepX-Desktop"}
+---- RESULT ----
+explore:
+[PROJECT_MAP]
+path: D:\project\DeepX-Desktop
+project markers: Cargo.toml, .git
+
+  Cargo.toml (23 lines, 404B)
+    [workspace]
+  LICENSE (21 lines, 1.1K)
+    MIT License
+  README.md (142 lines, 3.6K)
+    # DeepX v4.0
+crates/
+  dsx/
+      Cargo.toml (10 lines, 245B)
+        [package]
+    src/
+        main.rs (95 lines, 3.6K)
+          DSX — umbrella binary. All roles in one binary.
+          fn main()
+          fn run_config()
+  dsx-agent/
+      Cargo.toml (16 lines, 460B)
+        [package]
+    src/
+        agent.rs (310 lines, 11.2K)
+          AgentState: the core agent session state, shared between TUI and agent loop.
+          pub struct AgentState
+          pub struct FileSnapshot
+          impl FileSnapshot
+          fn hash_of(path: &str) -> u64
+          impl AgentState
+          ... 14 more
+        assembly.rs (590 lines, 21.7K)
+          use crate::agent::AgentState;
+          pub enum AssemblerError
+          impl Step
+          fn new(assistant: Message) -> Self
+          fn assistant_tool_ids(&self) -> Vec<String>
+          fn tool_result_has_id(&self, id: &str) -> bool
+          ... 33 more
+        config.rs (147 lines, 6.2K)
+          pub use crate::prompt::system_prompt;
+          pub struct Config
+          impl Default for Config
+          fn default() -> Self
+          impl Config
+          pub fn load() -> anyhow::Result<Self>
+          ... 5 more
+        dsx_log.rs (83 lines, 2.6K)
+          use simplelog::*;
+          fn level() -> LevelFilter
+          fn log_dir() -> PathBuf
+          fn config_dir() -> PathBuf
+          pub fn init()
+          pub fn set_session(seed: &str)
+          ... 1 more
+        health.rs (58 lines, 1.4K)
+          Agent health tracking: context pressure, turn counting, tool call stats.
+          pub enum ContextTier
+          impl ContextTier
+          pub fn from_tokens(tokens: u32, limit: u32) -> Self
+          pub struct DsAgentsHealthPlatform
+          impl DsAgentsHealthPlatform
+          ... 4 more
+        hp.rs (123 lines, 4.5K)
+          use std::net::TcpStream;
+          pub fn connect() -> Option<TcpStream>
+          pub fn kill_hp_daemon()
+          pub fn try_reconnect() -> Option<TcpStream>
+        lib.rs (19 lines, 402B)
+          dsx-agent: central agent process — orchestrator, memory, session, context.
+          pub mod runner;
+          pub mod config;
+          pub mod assembly;
+          pub mod dsx_log;
+          pub mod prompt;
+          ... 7 more
+        prompt.rs (106 lines, 5.8K)
+          System prompt.
+          pub fn system_prompt() -> String
+        router.rs (2 lines, 163B)
+          router.rs — deleted: PhaseConfig, phase_config, phase_prompt_suffix, read_phase removed.
+        tools.rs (124 lines, 3.6K)
+          Tool execution — in-process via dsx-tools::ToolManager.
+          pub fn init_tools(session_seed: &str)
+          pub fn set_context7_key(key: &str)
+          fn with_mgr<F, R>(f: F) -> Option<R>
+          pub fn all_tools() -> Vec<ToolDef>
+          pub fn execute_tool(name: &str, action: &str, args: &str) -> String
+          ... 7 more
+        tool_parser.rs (464 lines, 18.8K)
+          use dsx_types::{ToolCall, FunctionCall, ToolDef};
+          pub fn strip_fenced_code(content: &str) -> String
+          pub fn parse_xml_tool_calls(content: &str, tool_names: &[String]) -> (String, Vec<ToolCall>)
+          fn parse_tool_use_block(s: &str) -> Option<(String, String, &str)>
+          fn parse_invoke_block(s: &str) -> Option<(String, String, &str)>
+          fn extract_child_args(xml: &str) -> String
+          ... 12 more
+      orchestrator/
+      runner/
+      session/
+  dsx-hp/
+      Cargo.toml (16 lines, 533B)
+        [package]
+    src/
+        lib.rs (18 lines, 382B)
+          dsx-hp: health platform, API proxy gateway, error sentinel, and process registry.
+          pub mod runner;
+          pub mod types;
+          pub mod registry;
+          pub mod liveness;
+          pub mod openai_api;
+        liveness.rs (122 lines, 3.6K)
+          Liveness — agent heartbeat and crash detection.
+          pub struct LivenessState
+          impl Default for LivenessState
+          fn default() -> Self
+          impl LivenessState
+          pub fn new(heartbeat_interval_secs: u64) -> Self
+          ... 8 more
+        openai_api.rs (477 lines, 18.3K)
+          Native OpenAI Chat Completions API streaming client.
+          pub struct Provider
+          impl Provider
+          pub fn new(base_url: &str, api_key: &str) -> Self
+          pub enum StreamEvent
+          pub async fn chat_stream(
+          ... 7 more
+        registry.rs (223 lines, 7.1K)
+          Process registry — registration, heartbeat, liveness polling, GC.
+          pub struct Registration
+          impl Registration
+          fn new(kind: ProcessKind, name: String, pid: u32, timeout_secs: u64) -> Self
+          pub struct ProcessRegistry
+          impl ProcessRegistry
+          ... 14 more
+        runner.rs (597 lines, 20.6K)
+          dsx-hp — Health Platform daemon.
+          impl HealthService
+          fn new(timeout_secs: u64) -> Self
+          pub fn register(
+          fn heartbeat(&mut self, pid: u32) -> Result<(), HpError>
+          fn unregister(&mut self, pid: u32) -> Result<(), HpError>
+          ... 15 more
+        types.rs (82 lines, 2.3K)
+          Core types for the dsx-hp daemon: verdict, errors, process metadata.
+          pub enum Verdict
+          pub enum ProcessKind
+          impl std::fmt::Display for ProcessKind
+          fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result
+          pub enum HpError
+          ... 5 more
+  dsx-proto/
+      Cargo.toml (10 lines, 262B)
+        [package]
+    src/
+        agent_protocol.rs (158 lines, 4.3K)
+          UI ↔ Agent frame definitions (channel-based, mpsc in-process).
+          pub enum Ui2Agent
+          pub enum Agent2Ui
+        hp.rs (112 lines, 3.2K)
+          Agent ↔ HP (Health Platform) frame definitions (TCP JSON-LP).
+          pub enum AgentToHp
+          pub enum HpToAgent
+          fn default_stream_type() -> String
+        lib.rs (105 lines, 3.4K)
+          DSX message protocol — shared frame definitions for agent communication.
+          mod agent_protocol;
+          mod tools;
+          mod hp;
+          pub struct Redacted(pub String);
+          impl Serialize for Redacted
+          ... 11 more
+        tools.rs (65 lines, 1.6K)
+          Agent ↔ Tools frame definitions (direct call, in-process).
+          pub enum AgentToTools
+          pub enum ToolsToAgent
+  dsx-tauri/
+      eslint.config.js (22 lines, 613B)
+        import js from '@eslint/js'
+      index.html (13 lines, 374B)
+        <!doctype html>
+      pnpm-lock.yaml (3002 lines, 98.8K)
+        lockfileVersion: '9.0'
+      README.md (73 lines, 2.4K)
+        # React + TypeScript + Vite
+      vite.config.ts (13 lines, 316B)
+        import { defineConfig } from 'vite'
+    dist/
+        index.html (14 lines, 472B)
+          <!doctype html>
+      assets/
+    public/
+    src/
+        App.tsx (444 lines, 23.7K)
+          import { useState, useRef, useEffect, useCallback, type KeyboardEvent } from 'react'
+        i18n.ts (29 lines, 737B)
+          export const T = {
+        index.css (52 lines, 1.3K)
+          @import "tailwindcss";
+        main.tsx (10 lines, 240B)
+          import { StrictMode } from 'react'
+        state.ts (7 lines, 219B)
+          export let execLiveOutput: Record<string, string> = {}
+        types.ts (23 lines, 417B)
+          export interface Message {
+      assets/
+      components/
+    src-tauri/
+        build.rs (16 lines, 719B)
+          fn main() {
+          fn main()
+        Cargo.toml (28 lines, 694B)
+          [package]
+      capabilities/
+      gen/
+      icons/
+      resources/
+      src/
+  dsx-tools/
+      Cargo.toml (15 lines, 409B)
+        [package]
+    src/
+        ask.rs (55 lines, 2.2K)
+          ask_user tool — ask the user a question mid-task.
+          fn handle_ask_user(ctx: ToolCallCtx) -> ToolResult
+          pub fn register(mgr: &mut crate::ToolManager)
+        exec.rs (331 lines, 12.1K)
+          Command execution via shell.
+          pub fn exec_command(args: &str) -> String
+          fn same_prefix(a: &str, b: &str) -> bool
+          fn common_prefix(lines: &[&str]) -> String
+          fn append_error_summary(result: &mut String, lines: &[&str], error_indices: &[usize], total: usize, truncated: bool)
+          fn append_warning_summary(result: &mut String, lines: &[&str], warning_indices: &[usize], truncated: bool)
+          ... 3 more
+        explore.rs (354 lines, 14.7K)
+          Project exploration: directory structure and module graph.
+          fn extract_sigs_from_str(content: &str) -> Vec<String>
+          fn sanitize_first_line(line: &str) -> String
+          fn derive_rust_graph(root: &str) -> String
+          fn walk_rs_files(dir: &std::path::Path) -> Vec<std::path::PathBuf>
+          fn derive_go_graph(root: &str) -> String
+          ... 3 more
+        file.rs (961 lines, 42.4K)
+          File operations: read, write, edit, search, list directory.
+          fn disambiguate_match(
+          fn apply_diff_and_format(
+          fn rust_search(pattern: &str, glob: Option<String>, dir: &str) -> Result<Vec<String>, String>
+          fn walk_dir(
+          fn simple_glob_match(glob: &str, filename: &str) -> bool
+          ... 6 more
+        git.rs (352 lines, 15.2K)
+          Git tools wrapped via `git` CLI.
+          fn run_git(args: &[&str]) -> Result<String, String>
+          fn next_cp() -> u32
+          fn handle_checkpoint(ctx: ToolCallCtx) -> ToolResult
+          fn handle_status(_ctx: ToolCallCtx) -> ToolResult
+          fn handle_diff(ctx: ToolCallCtx) -> ToolResult
+          ... 14 more
+        ipc.rs (62 lines, 2.1K)
+          JSON-LP IPC protocol transport layer.
+          pub fn ipc_main_loop(manager: &mut ToolManager)
+        lib.rs (334 lines, 10.2K)
+          进程内 ToolManager 框架。
+          pub mod exec;
+          pub mod explore;
+          pub mod file;
+          pub mod git;
+          mod safety;
+          ... 39 more
+        persistence.rs (217 lines, 7.2K)
+          Session I/O: memory and plan persistence.
+          fn now_epoch() -> u64
+          fn chrono_date() -> String
+          fn civil_from_days(days: i64) -> (i64, u32, u32)
+          fn sessions_dir() -> Option<PathBuf>
+          fn session_dir(seed: &str) -> Option<PathBuf>
+          ... 13 more
+        plan.rs (189 lines, 7.8K)
+          Plan management: create, update, read, list plans.
+          fn args_to_string(ctx: &ToolCallCtx) -> String
+          fn handle_plan_create(ctx: ToolCallCtx) -> ToolResult
+          fn handle_plan_update(ctx: ToolCallCtx) -> ToolResult
+          fn handle_plan_read(ctx: ToolCallCtx) -> ToolResult
+          fn handle_plan_list(ctx: ToolCallCtx) -> ToolResult
+          ... 1 more
+        registration.rs (40 lines, 879B)
+          ToolManager 初始化构造器。
+          pub fn build_tool_manager() -> ToolManager
+        safety.rs (62 lines, 1.9K)
+          Safety verdicts for tool invocation.
+          pub enum SafetyVerdict
+          impl SafetyVerdict
+          pub fn is_danger_command(cmd: &str) -> bool
+          pub fn classify_execution(command: &str) -> SafetyVerdict
+        task.rs (176 lines, 7.0K)
+          Task management: create, update, list tasks.
+          fn handle_task_create(ctx: ToolCallCtx) -> ToolResult
+          fn handle_task_update(ctx: ToolCallCtx) -> ToolResult
+          fn handle_task_list(ctx: ToolCallCtx) -> ToolResult
+          pub fn register(mgr: &mut crate::ToolManager)
+        web.rs (408 lines, 16.3K)
+          Web tools: search, fetch, Context7 documentation queries.
+          pub fn set_c7_key(key: &str)
+          fn c7_key() -> String
+          fn c7_get(path: &str) -> Result<String, String>
+          fn c7_url_encode(s: &str) -> String
+          fn build_args_json(ctx: &ToolCallCtx) -> String
+          ... 8 more
+  dsx-tui/
+      Cargo.toml (22 lines, 495B)
+        [package]
+    src/
+        app.rs (1352 lines, 55.0K)
+          use dsx_proto::Agent2Ui;
+          pub enum Screen
+          pub struct SetupState
+          impl SetupState
+          pub fn new() -> Self
+          pub fn total_steps(&self) -> usize
+          ... 44 more
+        i18n.rs (492 lines, 16.0K)
+          #[derive(Clone, Copy, PartialEq)]
+          pub enum Lang
+          impl Lang
+          pub fn as_str(&self) -> &str
+          pub fn from_str(s: &str) -> Self
+          pub fn t_setup_welcome(&self) -> &str
+          ... 99 more
+        main.rs (488 lines, 19.0K)
+          DeepX TUI — terminal frontend for the dsx agent.
+          mod app;
+          mod i18n;
+          mod markdown;
+          mod ui;
+          fn find_dsx_binary() -> String
+          ... 7 more
+        markdown.rs (477 lines, 17.5K)
+          Streaming markdown renderer — line-by-line classification + inline styling.
+          pub struct MarkdownRenderer
+          impl MarkdownRenderer
+          pub fn new() -> Self
+          pub fn push_line(&mut self, line: &str) -> Vec<Line<'static>>
+          pub fn flush(&mut self) -> Vec<Line<'static>>
+          ... 19 more
+        ui.rs (1009 lines, 41.3K)
+          use ratatui::{
+          fn centered_rect(width: u16, height: u16, r: Rect) -> Rect
+          fn cjk_width(s: &str) -> u16
+          fn format_ts(seconds: u64) -> String
+          pub fn render_setup(frame: &mut Frame, app: &App)
+          pub fn render_sessions(frame: &mut Frame, app: &App)
+          ... 4 more
+  dsx-types/
+      Cargo.toml (10 lines, 231B)
+        [package]
+    src/
+        api_types.rs (16 lines, 412B)
+          use serde::{Deserialize, Serialize};
+          pub struct UsageInfo
+        arg.rs (45 lines, 1.5K)
+          Unified JSON argument parsing for tool call arguments.
+          pub fn parse_arg(args: &str, key: &str) -> Option<String>
+          pub fn parse_arg_or(args: &str, key: &str, default: &str) -> String
+          pub fn parse_opt(args: &str, key: &str) -> Option<String>
+          pub fn parse_opt_u64(args: &str, key: &str) -> Option<u64>
+          pub fn tool_action(args: &str) -> String
+          ... 2 more
+        config.rs (113 lines, 3.6K)
+          use serde::{Deserialize, Serialize};
+          pub struct PersistentConfig
+          pub struct ProfileConfig
+          fn default_base_url() -> String
+          pub struct ConfigStore
+          impl ConfigStore
+          ... 8 more
+        lib.rs (40 lines, 1.1K)
+          ── Type definitions for DSX core types ──
+          pub mod message;
+          pub mod tool_def;
+          pub mod state;
+          pub mod config;
+          pub mod session;
+          ... 4 more
+        message.rs (101 lines, 2.7K)
+          use serde::{Deserialize, Serialize};
+          pub enum ContentBlock
+          impl ContentBlock
+          pub fn text(text: &str) -> Self
+          pub struct Message
+          impl Message
+          ... 5 more
+        platform.rs (67 lines, 1.7K)
+          use std::path::PathBuf;
+          pub fn home_dir() -> PathBuf
+          pub fn data_dir() -> PathBuf
+          pub fn config_path() -> PathBuf
+          pub fn hp_port_path() -> PathBuf
+          pub fn sessions_dir() -> PathBuf
+          ... 3 more
+        session.rs (28 lines, 759B)
+          use serde::{Deserialize, Serialize};
+          pub struct SessionMeta
+          pub struct SessionFile
+        state.rs (22 lines, 498B)
+          use serde::{Deserialize, Serialize};
+          pub enum DebugLevel
+          impl Default for DebugLevel
+          fn default() -> Self
+          impl DebugLevel
+          pub fn from_str(s: &str) -> Self
+        token.rs (36 lines, 1.1K)
+          Token counting: CJK heuristic + breakdown types.
+          pub fn count_tokens(text: &str) -> u32
+          pub struct TokenBreakdown
+        tool_def.rs (15 lines, 380B)
+          use serde::{Deserialize, Serialize};
+          pub struct ToolDef
+          pub struct ToolFunction
+
+
+## Module Graph
+crates\dsx-agent\src\agent.rs
+  → crate::config, crate::assembly::ContextAssembler, crate::health::DsAgentsHealthPlatform, crate::session, crate::orchestrator::tracker, crate::tools::wrap_tool_result
+  ⇐ struct AgentState, struct FileSnapshot, fn new, fn tokens_used, fn touch_file, fn is_file_stalecrates\dsx-agent\src\assembly.rs
+  → crate::agent::AgentState
+  ⇐ enum AssemblerError, struct Turn, struct ContextAssembler, fn new, fn push_system, fn push_usercrates\dsx-agent\src\config.rs
+  ⇐ struct Config, fn load, fn save, fn apply_profile, fn save_profile, fn delete_profilecrates\dsx-agent\src\dsx_log.rs
+  ⇐ fn init, fn set_sessioncrates\dsx-agent\src\health.rs
+  ⇐ enum ContextTier, fn from_tokens, struct DsAgentsHealthPlatform, fn new, fn reset_turn, fn record_turncrates\dsx-agent\src\hp.rs
+  ⇐ fn connect, fn kill_hp_daemon, fn try_reconnectcrates\dsx-agent\src\lib.rs
+  → sub:runner, sub:config, sub:assembly, sub:dsx_log, sub:prompt, sub:agent, sub:health, sub:toolscrates\dsx-agent\src\orchestrator\gates.rs
+  → crate::agent::AgentState
+  ⇐ fn explore_gate, fn re_read_gate, fn detect_tool_equivalent, enum PathTrust, fn classify_pathcrates\dsx-agent\src\orchestrator\learning.rs
+  → crate::agent::AgentState
+  ⇐ fn post_turn_maintenancecrates\dsx-agent\src\orchestrator\mod.rs
+  → sub:gates, sub:tracker, sub:learning, crate::session, crate::agent::AgentState
+  ⇐ fn maybe_save_sessioncrates\dsx-agent\src\orchestrator\tracker.rs
+  → crate::agent::AgentState
+  ⇐ fn track_file_written, fn last_assistant_contentcrates\dsx-agent\src\prompt.rs
+  ⇐ fn system_promptcrates\dsx-agent\src\runner\hp_bridge.rs
+  ⇐ fn emit_tool_result, fn read_hp_framecrates\dsx-agent\src\runner\lifecycle.rs
+  → crate::agent::AgentState, crate::dsx_log, crate::session, crate::tools
+  ⇐ fn init_sessioncrates\dsx-agent\src\runner\mod.rs
+  → sub:lifecycle, sub:hp_bridge, sub:turn, crate::agent::AgentState, crate::orchestrator::maybe_save_session
+  ⇐ fn run_agent_loop, fn runcrates\dsx-agent\src\runner\turn.rs
+  → crate::agent::{AgentState, ToolResultAppender}, crate::assembly::AssemblerError, crate::orchestrator::{learning, tracker}, crate::session, crate::tool_parser
+  ⇐ fn build_and_push_assistant, fn handle_user_inputcrates\dsx-agent\src\session\mod.rs
+  → sub:persist, sub:restore
+  ⇐ fn generate_seed, fn now_epoch, fn sessions_dir, fn session_dir, fn session_path, fn live_pathcrates\dsx-agent\src\session\persist.rs
+  ⇐ fn load_session, fn load_session_or_live, fn save_session, fn finalize_session, fn load_index, fn save_live_snapshotcrates\dsx-agent\src\session\restore.rs
+  → crate::session::persist::load_index
+  ⇐ fn find_live_sessionscrates\dsx-agent\src\tool_parser.rs
+  → sub:tests {
+  ⇐ fn strip_fenced_code, fn parse_xml_tool_calls, fn parse_dsml_tool_calls, fn parse_tool_callscrates\dsx-agent\src\tools.rs
+  ⇐ fn init_tools, fn set_context7_key, fn all_tools, fn execute_tool, fn execute_tool_with_id, fn set_current_sessioncrates\dsx-hp\src\lib.rs
+  → sub:runner, sub:types, sub:registry, sub:liveness, sub:openai_apicrates\dsx-hp\src\liveness.rs
+  → sub:tests {
+  ⇐ struct LivenessState, fn new, enum LivenessResult, fn check_liveness, fn heartbeatcrates\dsx-hp\src\openai_api.rs
+  ⇐ struct Provider, fn new, enum StreamEventcrates\dsx-hp\src\registry.rs
+  → crate::liveness::{self, LivenessResult, LivenessState}, crate::types::{HpError, ProcessHealth, ProcessKind, ProcessS…, sub:tests {, crate::types::{HpError, ProcessKind}
+  ⇐ struct Registration, struct ProcessRegistry, fn new, fn register, fn unregister, fn heartbeatcrates\dsx-hp\src\runner.rs
+  → crate::liveness::LivenessResult, crate::registry::ProcessRegistry, crate::types::{HpError, ProcessKind, Verdict}, crate::openai_api::{Provider, StreamEvent}
+  ⇐ fn register, fn runcrates\dsx-hp\src\types.rs
+  ⇐ enum Verdict, enum ProcessKind, enum HpError, struct ProcessHealth, struct ProcessSummarycrates\dsx-proto\src\agent_protocol.rs
+  ⇐ enum Ui2Agent, enum Agent2Uicrates\dsx-proto\src\hp.rs
+  ⇐ enum AgentToHp, enum HpToAgentcrates\dsx-proto\src\lib.rs
+  → sub:agent_protocol, sub:tools, sub:hp
+  ⇐ struct Redacted(pub, fn read_frame<T: for<'de> Deserialize<'de>>, fn write_frame, fn write_linecrates\dsx-proto\src\tools.rs
+  ⇐ enum AgentToTools, enum ToolsToAgentcrates\dsx-tauri\src-tauri\src\lib.rs
+  ⇐ fn runcrates\dsx-tools\src\ask.rs
+  ⇐ fn registercrates\dsx-tools\src\exec.rs
+  → crate::{ToolCallCtx, ToolResult}, crate::{ToolHandler, ToolKey}
+  ⇐ fn exec_command, fn registercrates\dsx-tools\src\explore.rs
+  → crate::CANCEL, crate::{ToolCallCtx, ToolResult}, crate::CURRENT_WORKSPACE, crate::{ToolHandler, ToolKey, SafetyVerdict}
+  ⇐ fn registercrates\dsx-tools\src\file.rs
+  ⇐ fn registercrates\dsx-tools\src\git.rs
+  → crate::{ToolCallCtx, ToolResult}
+  ⇐ fn registercrates\dsx-tools\src\ipc.rs
+  → crate::ToolManager
+  ⇐ fn ipc_main_loopcrates\dsx-tools\src\lib.rs
+  → sub:exec, sub:explore, sub:file, sub:git, sub:safety, sub:web, sub:ask, sub:plan
+  ⇐ fn run, fn set_current_session, fn set_workspace, struct ToolKey, fn new, struct ToolCallCtxcrates\dsx-tools\src\persistence.rs
+  ⇐ fn read_memory, fn write_memory, fn append_memory, fn write_plan, fn update_plan_status, fn read_plan_contentcrates\dsx-tools\src\plan.rs
+  → crate::CURRENT_SESSION, crate::{ToolHandler, ToolKey, SafetyVerdict, ToolCallCtx, To…
+  ⇐ fn registercrates\dsx-tools\src\registration.rs
+  ⇐ fn build_tool_managercrates\dsx-tools\src\safety.rs
+  ⇐ enum SafetyVerdict, fn is_danger_command, fn classify_executioncrates\dsx-tools\src\task.rs
+  → crate::CURRENT_SESSION, crate::{ToolHandler, ToolKey, SafetyVerdict, ToolCallCtx, To…
+  ⇐ fn registercrates\dsx-tools\src\web.rs
+  → crate::{ToolCallCtx, ToolResult}, crate::{ToolHandler, ToolKey, SafetyVerdict}
+  ⇐ fn set_c7_key, fn registercrates\dsx-tui\src\app.rs
+  → crate::markdown::MarkdownRenderer
+  ⇐ enum Screen, struct SetupState, fn new, fn total_steps, fn fill_from_store, fn current_value
+── depth=4, 22076 chars ── Use read_file(path, start_line, end_line) for precise reading ──

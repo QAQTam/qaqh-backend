@@ -1,0 +1,138 @@
+[
+  {
+    "path": "crates\\dsx-agent\\src\\runner\\hp_bridge.rs",
+    "total_lines": 44,
+    "recovered": 44,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "46-read_file-hp_bridge.rs.txt"
+  },
+  {
+    "path": "crates\\dsx-proto\\src\\agent_protocol.rs",
+    "total_lines": 158,
+    "recovered": 158,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "48-read_file-agent_protocol.rs.txt,50-read_file-agent_protocol.rs.txt"
+  },
+  {
+    "path": "crates\\dsx-proto\\src\\tools.rs",
+    "total_lines": 65,
+    "recovered": 60,
+    "coverage_pct": 92.3,
+    "gaps": "51-55",
+    "sources": "49-read_file-tools.rs.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\App.tsx",
+    "total_lines": 447,
+    "recovered": 435,
+    "coverage_pct": 97.3,
+    "gaps": "436-447",
+    "sources": "15-read_file-App.tsx.txt,17-read_file-App.tsx.txt,19-read_file-App.tsx.txt,34-read_file-App.tsx.txt,35-read_file-App.tsx.txt,36-read_file-App.tsx.txt,38-read_file-App.tsx.txt,42-read_file-App.tsx.txt,44-read_file-App.tsx.txt,53-read_file-App.tsx.txt,61-read_file-App.tsx.txt,62-read_file-App.tsx.txt,64-read_file-App.tsx.txt,66-read_file-App.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\components\\AskUserDialog.tsx",
+    "total_lines": 46,
+    "recovered": 46,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "25-read_file-AskUserDialog.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\components\\ChatMessage.tsx",
+    "total_lines": 285,
+    "recovered": 285,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "16-read_file-ChatMessage.tsx.txt,18-read_file-ChatMessage.tsx.txt,20-read_file-ChatMessage.tsx.txt,58-read_file-ChatMessage.tsx.txt,59-read_file-ChatMessage.tsx.txt,60-read_file-ChatMessage.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\components\\ConfigWizard.tsx",
+    "total_lines": 76,
+    "recovered": 60,
+    "coverage_pct": 78.9,
+    "gaps": "51-66",
+    "sources": "24-read_file-ConfigWizard.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\components\\InfoPanel.tsx",
+    "total_lines": 121,
+    "recovered": 60,
+    "coverage_pct": 49.6,
+    "gaps": "51-111",
+    "sources": "22-read_file-InfoPanel.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\components\\SettingsDialog.tsx",
+    "total_lines": 145,
+    "recovered": 60,
+    "coverage_pct": 41.4,
+    "gaps": "51-135",
+    "sources": "21-read_file-SettingsDialog.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\components\\ToolStateIndicator.tsx",
+    "total_lines": 23,
+    "recovered": 23,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "26-read_file-ToolStateIndicator.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\components\\WorkspacePanel.tsx",
+    "total_lines": 109,
+    "recovered": 60,
+    "coverage_pct": 55.0,
+    "gaps": "51-99",
+    "sources": "23-read_file-WorkspacePanel.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\i18n.ts",
+    "total_lines": 29,
+    "recovered": 29,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "30-read_file-i18n.ts.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\index.css",
+    "total_lines": 52,
+    "recovered": 52,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "33-read_file-index.css.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\main.tsx",
+    "total_lines": 10,
+    "recovered": 10,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "32-read_file-main.tsx.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\state.ts",
+    "total_lines": 7,
+    "recovered": 7,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "31-read_file-state.ts.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\types.ts",
+    "total_lines": 23,
+    "recovered": 23,
+    "coverage_pct": 100.0,
+    "gaps": "",
+    "sources": "29-read_file-types.ts.txt,56-read_file-types.ts.txt"
+  },
+  {
+    "path": "crates\\dsx-tauri\\src\\types.tsx",
+    "total_lines": null,
+    "recovered": 0,
+    "coverage_pct": 0.0,
+    "gaps": "",
+    "sources": "27-read_file-types.tsx.txt"
+  }
+]
