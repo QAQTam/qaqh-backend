@@ -1,0 +1,7 @@
+old                                      new                                      ref
+7263f3c0e63b9d674faffa577edd8a8425ac0201 3366a9581adc4a2d398673b7ca29964e6bea365b refs/archive/legacy-main
+3e682ac5bbcac23e6bb17798183a29a1c80dfb02 2bdf5e425ada09fabc7df30689f9e4eb7f2a8a21 refs/archive/worktree-snapshot-20261108
+6ce3eb3bf4f9da8c57c6c7a92e1b9c6de7ed2537 461734c9a54fbfbbb1e09dce9ffec8f168cac251 refs/heads/LTS-v3.1
+6ce3eb3bf4f9da8c57c6c7a92e1b9c6de7ed2537 461734c9a54fbfbbb1e09dce9ffec8f168cac251 refs/heads/main
+66e6cedbeb4095f56d439e1c2367c377227d9c60 65280fb26a4321d06a62793c8a5fbaefa6edd164 refs/tags/v3.0.0
+6b690dd2fdb9e6a5f915f4e83629f27488235821 0360f432ee5b45511d851d1d35713a2913d50947 refs/tags/v3.1.0
