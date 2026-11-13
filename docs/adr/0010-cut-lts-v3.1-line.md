@@ -377,3 +377,8 @@ ci/action 打 Windows/Linux/macOS 二进制」。窗口重开的先声是 ADR-00
   锁身份闸绿。这是恢复锁身份，不是就地重切：冻结树回到登记字节，漂移内容
   迁居新线 golden。污染期 main CI 的 `--skip-export` 硬闸步骤应当是红的
   （job 绿不代表步骤绿，宪规 18），本次切线一并治愈。
+- **surface-policy 的 mutil-ai 旧 pin（切线硬闸揪出，随 PR 修复）**：四个工作流里
+  唯独 `surface-policy.yml` 还 pin 旧 `4387f74d`（缺 `ChatRequest.prompt_cache`，
+  `qaqh-gate` 编不过）。main 上被 `continue-on-error` 掩盖（job 绿、步骤红，
+  宪规 18 的活样本），切线后 LTS 硬闸当场红。修复：与其余三个 workflow 同 pin
+  `b37ca25f`（手册 §4 钉子），走 PR 进 LTS-v3.1 再 ff 回 main。

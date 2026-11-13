@@ -27,10 +27,13 @@ jobs:
           # 分类要算 base..head 的文件集，浅克隆拿不到基线。
           fetch-depth: 0
       # 姊妹 path 依赖：导出器经 qaqh-runtime 传递依赖 mutil-ai，必须按同一 pin 取。
+      # 与 release/lts-api-guard/sdk-contract 同 pin（2026-11-11 prompt-cache 收口升级）；
+      # 旧 pin 4387f74d 缺 ChatRequest.prompt_cache，qaqh-gate 编不过——main 上曾被
+      # continue-on-error 掩盖，LTS 硬闸当场红（ADR-0010 §切线实施记录）。
       - uses: actions/checkout@v4
         with:
           repository: qaqtam/mutil-ai
-          ref: 4387f74d2eff05b76fbbc3fa4a41b1a2fdf52ad4
+          ref: b37ca25f23350a8c6cb78bc69fda023f2cb809aa
           path: mutil-ai
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
