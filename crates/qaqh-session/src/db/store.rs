@@ -2136,6 +2136,7 @@ mod fork_tests {
         append_block(&mut conn, &block("parent", "turn_p1", TimelineEntry::AssistantBlock {
             block_id: BlockId::new("block_p2"),
             turn_id: TurnId::new("turn_p1"),
+            ord: 0,
             block_kind: AssistantBlockKind::Answer,
             content: ContentValue::Inline { text: "world".into() },
             model: "m".into(),

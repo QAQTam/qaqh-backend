@@ -578,6 +578,97 @@ mod tests {
         });
     }
 
+    /// ord 回归:reasoning/answer 块的权威落库序必须随 live 帧与 bootstrap 快照
+    /// 同携,且 reasoning.ord < answer.ord。客户端据此排序而非到达序——重连丢帧后
+    /// 迟到的 reasoning seal 不再插到 answer 之下(思考链落到答案之下的根因修复)。
+    #[test]
+    fn assistant_block_ord_authoritative_in_live_and_snapshot() {
+        use qaqh_ringing_contract::fact::AssistantBlockKind;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-ORD".into(),
+                    parent_session_id: None,
+                    title: String::new(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            owner.start_turn("T1", None).await.expect("start turn");
+            // 排空 start_turn 伴随帧(turn_started/phase/activity)。
+            while rx.try_recv().is_ok() {}
+
+            let block = |id: &str, kind: AssistantBlockKind, text: &str| {
+                TimelineEntry::AssistantBlock {
+                    block_id: BlockId::new(id),
+                    turn_id: TurnId::new("T1"),
+                    ord: 0, // 占位:落库时由 append_block 权威回填
+                    block_kind: kind,
+                    content: ContentValue::Inline { text: text.into() },
+                    model: "m".into(),
+                    usage: None,
+                    generated_ms: None,
+                    opaque: vec![],
+                }
+            };
+            owner
+                .append_block(block("R1", AssistantBlockKind::Reasoning, "think"))
+                .await
+                .expect("append reasoning");
+            owner
+                .append_block(block("A1", AssistantBlockKind::Answer, "answer"))
+                .await
+                .expect("append answer");
+
+            let reasoning_ord = match recv_event(&mut rx) {
+                SessionEvent::TimelineAppended {
+                    entry: TimelineEntry::AssistantBlock { ord, block_kind: AssistantBlockKind::Reasoning, .. },
+                } => ord,
+                other => panic!("expected reasoning timeline_appended, got {other:?}"),
+            };
+            let answer_ord = match recv_event(&mut rx) {
+                SessionEvent::TimelineAppended {
+                    entry: TimelineEntry::AssistantBlock { ord, block_kind: AssistantBlockKind::Answer, .. },
+                } => ord,
+                other => panic!("expected answer timeline_appended, got {other:?}"),
+            };
+            assert!(reasoning_ord > 0, "live 帧必须回填权威 ord, got {reasoning_ord}");
+            assert!(
+                reasoning_ord < answer_ord,
+                "reasoning.ord 必须 < answer.ord(落库序), got {reasoning_ord} vs {answer_ord}"
+            );
+
+            // bootstrap 快照同携 ord,且与 live 帧一致、reasoning 在前。
+            let state = owner.snapshot().await.expect("snapshot");
+            let ords: Vec<i64> = state
+                .timeline
+                .iter()
+                .filter_map(|entry| match entry {
+                    TimelineEntry::AssistantBlock { ord, .. } => Some(*ord),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                ords,
+                vec![reasoning_ord, answer_ord],
+                "快照 ord 必须与 live 帧一致且 reasoning 在前"
+            );
+        });
+    }
+
     /// B04:rename 的唯一写口 = owner.set_title → 业务行 + SessionMetaChanged。
     #[test]
     fn set_title_updates_row_and_emits_meta_changed() {
