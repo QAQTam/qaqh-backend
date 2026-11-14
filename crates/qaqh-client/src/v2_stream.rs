@@ -159,7 +159,8 @@ impl V2Stream {
         // 订阅。**不能**裸订阅——服务端把「无游标」解释为「只看 live」,
         // bootstrap 与订阅之间的业务变化会被判为缺口要求 resync。
         if self.cursor.is_none() {
-            let bootstrap = self.client.bootstrap_v2(&self.session_id).await?;
+            // 流建立只消费 seq 水位(cursor),不消费 timeline;保持全量读口不动。
+            let bootstrap = self.client.bootstrap_v2(&self.session_id, None).await?;
             self.cursor = Some(bootstrap.state.seq.to_string());
         }
 

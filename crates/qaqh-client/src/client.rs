@@ -479,8 +479,9 @@ impl Client {
     pub async fn bootstrap(
         &self,
         session_id: &str,
+        timeline_tail: Option<u32>,
     ) -> Result<qaqh_ringing_contract::SessionBootstrap> {
-        self.bootstrap_v2(session_id).await
+        self.bootstrap_v2(session_id, timeline_tail).await
     }
 
     /// `POST /ringing/v2/service/{method}` — 白名单式服务面直调。

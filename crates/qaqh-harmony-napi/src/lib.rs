@@ -152,7 +152,7 @@ impl HarmonyClient {
     pub async fn bootstrap(&self, session_id: String) -> Result<SessionSnapshot> {
         let snapshot = self
             .inner
-            .bootstrap(&session_id)
+            .bootstrap(&session_id, None)
             .await
             .map_err(napi_error)?;
         Ok(SessionSnapshot {

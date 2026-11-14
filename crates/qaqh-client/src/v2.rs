@@ -185,14 +185,25 @@ impl Client {
         Ok(response.json().await?)
     }
 
-    /// `GET /ringing/v2/sessions/{seed}/bootstrap`.
-    pub async fn bootstrap_v2(&self, session_id: &str) -> Result<SessionBootstrap> {
+    /// `GET /ringing/v2/sessions/{seed}/bootstrap`。
+    /// `timeline_tail` 为 Some(n) 时追加 `?timeline_tail=n`:响应 timeline 只含
+    /// 最近 n 块(回合边界回退,`state.timeline_from_ord` 标记边界),历史回合
+    /// 由 `session.turn` 按需取回。None = 全量快照,旧语义不变。
+    pub async fn bootstrap_v2(
+        &self,
+        session_id: &str,
+        timeline_tail: Option<u32>,
+    ) -> Result<SessionBootstrap> {
         let state = self.require_v2_session().await?;
         let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/bootstrap");
+        let url = match timeline_tail {
+            Some(tail) => format!("{}{path}?timeline_tail={tail}", self.credentials().base_url),
+            None => format!("{}{path}", self.credentials().base_url),
+        };
         let response = self
             .inner
             .http
-            .get(format!("{}{path}", self.credentials().base_url))
+            .get(url)
             .bearer_auth(&self.credentials().token)
             .header("X-QAQH-Client-Session-Id", &state.client_session_id)
             .send()

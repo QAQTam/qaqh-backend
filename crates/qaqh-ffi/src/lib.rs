@@ -286,7 +286,8 @@ impl QaqhClient {
     /// bootstrap 快照（SessionState JSON，含 `seq` 水位）。流 Open / on_reset
     /// 之后都应重新拉取。
     pub async fn bootstrap_json(&self, session_id: String) -> Result<String, CoreError> {
-        let bootstrap = with_timeout(self.inner.bootstrap(&session_id)).await?;
+        // FFI 客户端暂保持全量 bootstrap;尾窗为桌面壳 opt-in。
+        let bootstrap = with_timeout(self.inner.bootstrap(&session_id, None)).await?;
         to_json_string(&bootstrap)
     }
 
