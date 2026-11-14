@@ -136,7 +136,7 @@ fn lost_ack_status_and_replay_preserve_each_known_outcome() {
             state,
             RingingCommandState::Accepted | RingingCommandState::Running
         );
-        let result = terminal.then(|| RingingV2CommandResult::PlanReviewResolved {
+        let result = terminal.then(|| RingingV2CommandResult::PermissionResolved {
             interaction_id: "interaction-synthetic".into(),
             approved: false,
         });

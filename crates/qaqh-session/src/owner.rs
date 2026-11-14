@@ -326,6 +326,23 @@ impl SessionOwner {
         Ok(state)
     }
 
+    /// SessionState 快照(尾窗变体):仅 bootstrap HTTP 读口使用。
+    ///
+    /// 定序纪律与 [`Self::snapshot`] 一致:先取水位,再读库。尾窗只裁剪
+    /// timeline 载荷(最近 `tail_blocks` 块,回合边界回退,`timeline_from_ord`
+    /// 标记边界),不改 `seq` 覆盖的事件序号空间——含尾窗外历史块产生的事件,
+    /// SSE 续传不受影响(B01)。调用方负责 clamp tail 值域(daemon 侧执行)。
+    pub async fn snapshot_tailed(&self, tail_blocks: u32) -> Result<SessionState, DbError> {
+        let watermark = self.current_seq();
+        let session_id = self.session_id.clone();
+        let mut state = self
+            .db
+            .read(move |conn| view::load_session_state_tailed(conn, &session_id, tail_blocks))
+            .await?;
+        state.seq = watermark;
+        Ok(state)
+    }
+
     /// 外部生产者的公共事件出口:非 owner 内部状态的变化(如 driver 席位)
     /// 经此进入唯一单流定序,seq 与业务事件同源单调。
     pub fn publish(&self, event: SessionEvent) {

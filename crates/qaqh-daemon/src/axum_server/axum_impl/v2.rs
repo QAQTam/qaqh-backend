@@ -25,6 +25,29 @@ pub struct V2EventsQuery {
     pub since_cursor: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct BootstrapQuery {
+    /// timeline 尾窗块数(opt-in):缺席 = 全量快照(与旧客户端响应逐字节
+    /// 一致);解析失败 400;合法值由 [`parse_timeline_tail`] clamp。
+    pub timeline_tail: Option<String>,
+}
+
+/// 尾窗上界:调用方传得再大,服务端最多取这么多块,bootstrap 响应体积保持
+/// 有界。常量集中定义,便于按实测调优。
+const MAX_TIMELINE_TAIL_BLOCKS: u32 = 2_000;
+
+/// 解析 `timeline_tail`:缺席 = None(全量快照);非法值 = Err;
+/// 合法值 clamp 到 [1, MAX_TIMELINE_TAIL_BLOCKS](0 视为 1,窗口至少一块)。
+fn parse_timeline_tail(raw: Option<&str>) -> Result<Option<u32>, &'static str> {
+    match raw {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<u32>()
+            .map(|tail| Some(tail.clamp(1, MAX_TIMELINE_TAIL_BLOCKS)))
+            .map_err(|_| "invalid_timeline_tail"),
+    }
+}
+
 /// Cadence for the admin-only memory diagnostics frames that ride the session
 /// SSE. Sampling is opt-in (`diagnostics.memory.start`), so this only ticks
 /// while a probe window is open.
@@ -161,6 +184,7 @@ pub(crate) async fn handle_bootstrap_v2(
     Extension(identity): Extension<Identity>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
+    Query(query): Query<BootstrapQuery>,
 ) -> Response {
     if let Err(response) = require_lease_on_session(&state, &headers, &identity, &session_id) {
         return response;
@@ -172,11 +196,27 @@ pub(crate) async fn handle_bootstrap_v2(
             "missing seed",
         );
     }
+    // 尾窗 opt-in:参数缺席 = 全量快照(现状语义,旧客户端回归线);带参数
+    // 才裁剪 timeline 载荷。tail 只影响 bootstrap 载荷,seq 水位空间不变。
+    let timeline_tail = match parse_timeline_tail(query.timeline_tail.as_deref()) {
+        Ok(tail) => tail,
+        Err(code) => {
+            return api_error_response(
+                StatusCode::BAD_REQUEST,
+                code,
+                "timeline_tail must be a non-negative integer",
+            );
+        }
+    };
     if let Err(response) = require_business_session(state.service.owners(), &session_id).await {
         return response;
     }
     let owner = state.service.owners().get_or_create(&session_id);
-    let mut snapshot = match owner.snapshot().await {
+    let snapshot_result = match timeline_tail {
+        Some(tail) => owner.snapshot_tailed(tail).await,
+        None => owner.snapshot().await,
+    };
+    let mut snapshot = match snapshot_result {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return api_error_response(
@@ -700,6 +740,38 @@ impl std::fmt::Display for ApprovalBodyError {
                 "permission body violates PermissionRequestDetails::is_valid()"
             ),
         }
+    }
+}
+
+/// 尾窗 query 参数(opt-in):缺席 = 全量快照,旧客户端响应逐字节不变。
+#[cfg(test)]
+mod bootstrap_timeline_tail_tests {
+    use super::{MAX_TIMELINE_TAIL_BLOCKS, parse_timeline_tail};
+
+    #[test]
+    fn timeline_tail_parses_absent_valid_invalid_and_clamps() {
+        assert_eq!(parse_timeline_tail(None).expect("absent"), None);
+        assert_eq!(parse_timeline_tail(Some("600")).expect("valid"), Some(600));
+        assert_eq!(
+            parse_timeline_tail(Some("0")).expect("zero floors to 1"),
+            Some(1)
+        );
+        assert_eq!(
+            parse_timeline_tail(Some("99999999")).expect("oversize clamps"),
+            Some(MAX_TIMELINE_TAIL_BLOCKS)
+        );
+        assert_eq!(
+            parse_timeline_tail(Some("abc")).err(),
+            Some("invalid_timeline_tail")
+        );
+        assert_eq!(
+            parse_timeline_tail(Some("-1")).err(),
+            Some("invalid_timeline_tail")
+        );
+        assert_eq!(
+            parse_timeline_tail(Some("")).err(),
+            Some("invalid_timeline_tail")
+        );
     }
 }
 

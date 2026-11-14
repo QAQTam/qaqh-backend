@@ -79,6 +79,8 @@ fn write_bootstrap(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }),
             // ADR-0015：夹具会话无 goal（缺席 = 无目标,默认态）。
             goal: None,
+            // 夹具 timeline 为空 = 完整快照,无尾窗边界(尾窗仅大库 bootstrap 填充)。
+            timeline_from_ord: None,
         },
     };
     super::write_fixture(stage, "bootstrap-response.json", &bootstrap)

@@ -504,6 +504,65 @@ mod tests {
         });
     }
 
+    /// 尾窗快照(仅 bootstrap 读口):timeline 裁剪到窗口,`timeline_from_ord`
+    /// 标记边界;seq 水位与全量快照一致,事件序号空间不因尾窗改变(B01)。
+    #[test]
+    fn snapshot_tailed_trims_timeline_without_touching_watermark() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-TAIL".into(),
+                    parent_session_id: None,
+                    title: String::new(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let input = |id: &str| TimelineEntry::Input {
+                block_id: BlockId::new(id),
+                turn_id: None,
+                purpose: InputPurpose::TriggerTurn,
+                content: ContentValue::Inline { text: id.into() },
+                attachments: vec![],
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                actor: ActorRef {
+                    kind: ActorKind::User,
+                    id: "user".into(),
+                    display_name: None,
+                },
+            };
+            for id in ["B1", "B2", "B3"] {
+                owner.append_block(input(id)).await.expect("append");
+            }
+            let full = owner.snapshot().await.expect("full snapshot");
+            assert_eq!(full.timeline.len(), 3);
+            assert_eq!(full.timeline_from_ord, None);
+            assert_eq!(full.seq, 3);
+
+            let tailed = owner.snapshot_tailed(2).await.expect("tailed snapshot");
+            assert_eq!(tailed.timeline.len(), 2);
+            // 块 ord 从 1 起:窗口 = [B2,B3],B1 在界外;输入块无回合锚点,
+            // 边界 = 窗口首块 ord,不做回合回退。
+            assert_eq!(tailed.timeline_from_ord, Some(2), "窗口 [B2,B3],B1 在界外");
+            assert_eq!(tailed.seq, 3, "水位不因尾窗改变");
+            assert_eq!(owner.current_seq(), 3, "空闲读水位不变");
+        });
+    }
+
     /// B03:declare 落库 + ToolDeclared 事件(工具身份与最终参数),与
     /// bootstrap `tools` 视图同形状。
     #[test]

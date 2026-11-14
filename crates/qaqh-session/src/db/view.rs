@@ -25,6 +25,26 @@ fn parse_typed<T: DeserializeOwned>(who: &str, label: &str, text: &str) -> Resul
 
 /// 从业务表组装 SessionState。
 pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<SessionState, DbError> {
+    load_session_state_inner(conn, session_id, None)
+}
+
+/// 尾窗变体(仅 bootstrap 读口):timeline 裁剪为最近 `tail_blocks` 块并向前
+/// 回退到回合边界,`timeline_from_ord` 标记截断边界;其余组装与全量快照完全
+/// 一致,`seq` 水位语义不变。agent 上下文组装(provider 消息流)、approvals、
+/// interaction 回放等全量读口**必须**走 [`load_session_state`]。
+pub fn load_session_state_tailed(
+    conn: &Connection,
+    session_id: &str,
+    tail_blocks: u32,
+) -> Result<SessionState, DbError> {
+    load_session_state_inner(conn, session_id, Some(tail_blocks))
+}
+
+fn load_session_state_inner(
+    conn: &Connection,
+    session_id: &str,
+    tail_blocks: Option<u32>,
+) -> Result<SessionState, DbError> {
     if !store::session_exists(conn, session_id)? {
         return Err(DbError::SessionNotFound {
             session_id: session_id.to_string(),
@@ -32,7 +52,10 @@ pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<Session
     }
 
     let turns = load_turns(conn, session_id)?;
-    let timeline = load_timeline(conn, session_id)?;
+    let (timeline, timeline_from_ord) = match tail_blocks {
+        Some(tail) => load_timeline_tail(conn, session_id, tail)?,
+        None => (load_timeline(conn, session_id)?, None),
+    };
     let tools = store::recent_tool_calls(conn, session_id, 500)?
         .into_iter()
         .map(tool_call_view)
@@ -87,6 +110,7 @@ pub fn load_session_state(conn: &Connection, session_id: &str) -> Result<Session
         exec_sessions,
         driver: None,
         goal,
+        timeline_from_ord,
     })
 }
 
@@ -463,21 +487,64 @@ fn turn_view(
 
 fn load_timeline(conn: &Connection, session_id: &str) -> Result<Vec<TimelineEntry>, DbError> {
     let blocks = store::read_transcript_page(conn, session_id, None, 10_000)?;
-    blocks
-        .into_iter()
-        .map(|block| {
-            let text = block.payload_json.ok_or_else(|| {
-                DbError::Corrupt(format!("block {} has no payload_json", block.block_id))
-            })?;
-            let mut entry: TimelineEntry = serde_json::from_str(&text)
-                .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))?;
-            // ord 列是权威落库序;payload_json 里的 ord 只是占位,读取时一律回填。
-            if let TimelineEntry::AssistantBlock { ord, .. } = &mut entry {
-                *ord = block.ord;
-            }
-            Ok(entry)
-        })
-        .collect()
+    blocks.iter().map(parse_block_entry).collect()
+}
+
+/// block 行 → TimelineEntry;ord 列是权威落库序,payload_json 里的 ord 只是
+/// 占位,读取时一律回填。
+fn parse_block_entry(block: &store::BlockRow) -> Result<TimelineEntry, DbError> {
+    let text = block.payload_json.as_deref().ok_or_else(|| {
+        DbError::Corrupt(format!("block {} has no payload_json", block.block_id))
+    })?;
+    let mut entry: TimelineEntry = serde_json::from_str(text)
+        .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))?;
+    if let TimelineEntry::AssistantBlock { ord, .. } = &mut entry {
+        *ord = block.ord;
+    }
+    Ok(entry)
+}
+
+/// 尾窗 timeline:最近 `tail_blocks` 块;截断时向前回退到回合边界(截断点
+/// 不得落在某回合的块中间,否则首屏出现「无头回合」),并把被截区域最近一条
+/// compaction 摘要头插(压缩块的表示不因截断而消失)。返回
+/// `(timeline, timeline_from_ord)`;完整快照时后者为 None。压缩块无回合锚点
+/// (`turn_id` NULL),不参与回退。
+fn load_timeline_tail(
+    conn: &Connection,
+    session_id: &str,
+    tail_blocks: u32,
+) -> Result<(Vec<TimelineEntry>, Option<i64>), DbError> {
+    let page = store::read_transcript_page(conn, session_id, None, tail_blocks)?;
+    let Some(first) = page.first() else {
+        // 空会话:无块即完整。
+        return Ok((Vec::new(), None));
+    };
+    // 未取满窗口或首块之下再无块:快照本来完整。
+    if page.len() < tail_blocks as usize
+        || !store::has_blocks_before(conn, session_id, first.ord)?
+    {
+        let timeline = page.iter().map(parse_block_entry).collect::<Result<Vec<_>, _>>()?;
+        return Ok((timeline, None));
+    }
+    // 截断已发生:回退到回合边界。整窗均无锚点块的病理形态按窗口原样输出。
+    let boundary = match page.iter().find_map(|block| block.turn_id.clone()) {
+        Some(turn_id) => {
+            store::min_turn_block_ord(conn, session_id, &turn_id)?.unwrap_or(first.ord)
+        }
+        None => first.ord,
+    };
+    if store::min_block_ord(conn, session_id)?.is_some_and(|min| boundary <= min) {
+        // 回退后已覆盖全会话:实际完整,按完整快照标记。
+        return load_timeline(conn, session_id).map(|timeline| (timeline, None));
+    }
+    let mut timeline = Vec::new();
+    if let Some(compaction) = store::latest_compaction_before(conn, session_id, boundary)? {
+        timeline.push(parse_block_entry(&compaction)?);
+    }
+    for block in store::read_transcript_from(conn, session_id, boundary)? {
+        timeline.push(parse_block_entry(&block)?);
+    }
+    Ok((timeline, Some(boundary)))
 }
 
 fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {

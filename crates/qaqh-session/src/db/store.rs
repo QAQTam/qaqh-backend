@@ -868,21 +868,24 @@ pub fn read_transcript_page(
          LIMIT ?3",
     )?;
     let mut rows: Vec<BlockRow> = stmt
-        .query_map(params![session_id, before_ord, limit], |row| {
-            Ok(BlockRow {
-                block_id: row.get(0)?,
-                turn_id: row.get(1)?,
-                ord: row.get(2)?,
-                kind: row.get(3)?,
-                text: row.get(4)?,
-                call_id: row.get(5)?,
-                payload_json: row.get(6)?,
-                created_at_ms: row.get(7)?,
-            })
-        })?
+        .query_map(params![session_id, before_ord, limit], map_block_row)?
         .collect::<Result<_, _>>()?;
     rows.reverse();
     Ok(rows)
+}
+
+/// blocks 行 → `BlockRow`;列序与三条 transcript 读口保持一致。
+fn map_block_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BlockRow> {
+    Ok(BlockRow {
+        block_id: row.get(0)?,
+        turn_id: row.get(1)?,
+        ord: row.get(2)?,
+        kind: row.get(3)?,
+        text: row.get(4)?,
+        call_id: row.get(5)?,
+        payload_json: row.get(6)?,
+        created_at_ms: row.get(7)?,
+    })
 }
 
 /// One turn's transcript, ordered by the same session-global block ordinal as bootstrap.
@@ -897,19 +900,79 @@ pub fn read_transcript_for_turn(
          WHERE session_id = ?1 AND turn_id = ?2
          ORDER BY ord ASC",
     )?;
-    let rows = stmt.query_map(params![session_id, turn_id], |row| {
-        Ok(BlockRow {
-            block_id: row.get(0)?,
-            turn_id: row.get(1)?,
-            ord: row.get(2)?,
-            kind: row.get(3)?,
-            text: row.get(4)?,
-            call_id: row.get(5)?,
-            payload_json: row.get(6)?,
-            created_at_ms: row.get(7)?,
-        })
-    })?;
+    let rows = stmt.query_map(params![session_id, turn_id], map_block_row)?;
     rows.collect()
+}
+
+/// `ord >= from_ord` 的全部块,升序。尾窗回合边界回退后的最终读口:回退可能
+/// 把窗口拉到早于首屏 N 块的起点,此处一次取齐(走 idx_blocks_session)。
+pub fn read_transcript_from(
+    conn: &Connection,
+    session_id: &str,
+    from_ord: i64,
+) -> rusqlite::Result<Vec<BlockRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT block_id, turn_id, ord, kind, text, call_id, payload_json, created_at_ms
+         FROM blocks
+         WHERE session_id = ?1 AND ord >= ?2
+         ORDER BY ord ASC",
+    )?;
+    let rows = stmt.query_map(params![session_id, from_ord], map_block_row)?;
+    rows.collect()
+}
+
+/// 会话内是否存在 `ord < before_ord` 的块(尾窗截断探测)。
+pub fn has_blocks_before(
+    conn: &Connection,
+    session_id: &str,
+    before_ord: i64,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM blocks WHERE session_id = ?1 AND ord < ?2)",
+        params![session_id, before_ord],
+        |row| row.get::<_, i64>(0).map(|exists| exists != 0),
+    )
+}
+
+/// 会话首块 ord;空会话为 None(尾窗完整性判定)。
+pub fn min_block_ord(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT MIN(ord) FROM blocks WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get(0),
+    )
+}
+
+/// 回合首块 ord(尾窗回合边界回退:截断点所在回合的块必须整回合入窗,
+/// 否则首屏出现「无头回合」)。回合无块时为 None。
+pub fn min_turn_block_ord(
+    conn: &Connection,
+    session_id: &str,
+    turn_id: &str,
+) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT MIN(ord) FROM blocks WHERE session_id = ?1 AND turn_id = ?2",
+        params![session_id, turn_id],
+        |row| row.get(0),
+    )
+}
+
+/// 边界之下最近一条压缩块(尾窗头插的 compaction 摘要)。压缩块无回合锚点
+/// (`turn_id` NULL,写口见 owner),只能按 kind 识别。
+pub fn latest_compaction_before(
+    conn: &Connection,
+    session_id: &str,
+    before_ord: i64,
+) -> rusqlite::Result<Option<BlockRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT block_id, turn_id, ord, kind, text, call_id, payload_json, created_at_ms
+         FROM blocks
+         WHERE session_id = ?1 AND ord < ?2 AND kind = 'compaction'
+         ORDER BY ord DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![session_id, before_ord], map_block_row)?;
+    rows.next().transpose()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

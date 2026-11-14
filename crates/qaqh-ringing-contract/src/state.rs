@@ -48,6 +48,16 @@ pub struct SessionState {
     /// additive:旧客户端读不到就忽略,新客户端把缺席当「无目标」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub goal: Option<GoalView>,
+    /// timeline 尾窗起点(exclusive),仅 bootstrap 读口填充。Some(n) 表示本
+    /// 快照的 `timeline` 只含 `ord >= n` 的块,外加一条**显式例外**:被截掉
+    /// 区域里最近一条 compaction 摘要块(其 ord < n,客户端必须照常渲染在
+    /// timeline 首位——「以上内容已压缩」的表示不因尾窗而消失)。None(或旧
+    /// payload 缺席)= 完整快照。回合元数据 `turns` 始终全量,不受尾窗影响。
+    /// 这是读模型填充边界,不是事件水位:不得与 `seq` 混用;`seq` 仍覆盖
+    /// 全量事件流(含尾窗外历史块),SSE 续传不受尾窗影响(B01)。additive:
+    /// 旧客户端读不到就忽略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeline_from_ord: Option<i64>,
 }
 
 /// `GET /ringing/v2/sessions/{id}/bootstrap` 的响应:一次 HTTP 拿到

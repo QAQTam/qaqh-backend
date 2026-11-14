@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use super::super::{Db, store, view};
-    use qaqh_ringing_contract::fact::{ContentValue, ToolCallOutcome};
+    use qaqh_ringing_contract::fact::{ContentValue, ToolCallId, ToolCallOutcome, TurnId};
     use qaqh_ringing_contract::state::{TimelineEntry, ToolCallState};
 
     fn test_db() -> Db {
@@ -677,5 +677,206 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].message_id, "msg_1");
         assert_eq!(hits[0].recipient, "/root");
+    }
+
+    // ── 尾窗(bootstrap timeline tail;仅 bootstrap 读口接尾窗变体)──────
+
+    fn seed_window_session(db: &Db, session_id: &str) {
+        let session_id = session_id.to_string();
+        db.write_blocking(move |conn| {
+            store::create_session(
+                conn,
+                &store::NewSession {
+                    session_id: session_id.clone().into(),
+                    parent_session_id: None,
+                    title: session_id.into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                },
+            )
+        })
+        .expect("seed session");
+    }
+
+    /// 落一个回合 2 个 ToolCall 块;返回逐块 `(turn_id, ord)`。
+    fn seed_window_turn(db: &Db, session_id: &str, turn_no: usize) -> Vec<(String, i64)> {
+        let session_id = session_id.to_string();
+        db.write_blocking(move |conn| {
+            let turn_id = format!("T{turn_no}");
+            store::start_turn(conn, &turn_id, &session_id, None)?;
+            let mut blocks = Vec::new();
+            for b in 0..2 {
+                let call_id = format!("C{turn_no}_{b}");
+                let ord = store::append_block(
+                    conn,
+                    &store::NewBlock {
+                        block_id: format!("B_{call_id}"),
+                        session_id: session_id.clone().into(),
+                        turn_id: Some(turn_id.clone()),
+                        kind: "tool_call",
+                        text: None,
+                        call_id: Some(call_id.clone()),
+                        payload_json: serde_json::to_string(&TimelineEntry::ToolCall {
+                            call_id: ToolCallId::new(call_id),
+                            turn_id: Some(TurnId::new(turn_id.clone())),
+                        })
+                        .expect("serialize tool call entry"),
+                    },
+                )?;
+                blocks.push((turn_id.clone(), ord));
+            }
+            Ok::<Vec<(String, i64)>, rusqlite::Error>(blocks)
+        })
+        .expect("seed turn")
+    }
+
+    /// 压缩块无回合锚点(turn_id NULL),与 owner 写口同形态。
+    fn seed_window_compaction(db: &Db, session_id: &str, summary: &str) -> i64 {
+        let (session_id, summary) = (session_id.to_string(), summary.to_string());
+        db.write_blocking(move |conn| {
+            store::append_block(
+                conn,
+                &store::NewBlock {
+                    block_id: "B-COMPACT".into(),
+                    session_id: session_id.into(),
+                    turn_id: None,
+                    kind: "compaction",
+                    text: None,
+                    call_id: None,
+                    payload_json: serde_json::to_string(&TimelineEntry::Compaction {
+                        summary: ContentValue::Inline { text: summary.into() },
+                    })
+                    .expect("serialize compaction"),
+                },
+            )
+        })
+        .expect("seed compaction")
+    }
+
+    fn turn_of(entry: &TimelineEntry) -> &str {
+        let TimelineEntry::ToolCall { turn_id, .. } = entry else {
+            panic!("tool call entry expected");
+        };
+        turn_id.as_ref().map(|turn| turn.as_ref()).unwrap_or("?")
+    }
+
+    #[test]
+    fn tailed_bootstrap_matches_full_when_window_covers_session() {
+        let db = test_db();
+        seed_window_session(&db, "SES-TW1");
+        for n in 1..=3 {
+            seed_window_turn(&db, "SES-TW1", n);
+        }
+        let full = db
+            .read_blocking(|conn| view::load_session_state(conn, "SES-TW1"))
+            .expect("full");
+        let tailed = db
+            .read_blocking(|conn| view::load_session_state_tailed(conn, "SES-TW1", 600))
+            .expect("tailed");
+        assert_eq!(full, tailed, "窗口覆盖全会话时尾窗变体与全量逐字段一致");
+        assert_eq!(tailed.timeline_from_ord, None);
+        assert_eq!(tailed.timeline.len(), 6);
+    }
+
+    #[test]
+    fn tailed_bootstrap_marks_turn_boundary_without_headless_turn() {
+        let db = test_db();
+        seed_window_session(&db, "SES-TW2");
+        let blocks: Vec<(String, i64)> = (1..=3)
+            .flat_map(|n| seed_window_turn(&db, "SES-TW2", n))
+            .collect();
+        // 每回合 2 块,ord 按落库序递增;窗口 2 = T3 全回合。
+        let state = db
+            .read_blocking(|conn| view::load_session_state_tailed(conn, "SES-TW2", 2))
+            .expect("tailed");
+        let t3_first = blocks[4].1;
+        assert_eq!(state.timeline_from_ord, Some(t3_first));
+        assert_eq!(state.timeline.len(), 2);
+        assert_eq!(turn_of(&state.timeline[0]), "T3", "不得出现无头回合");
+
+        // 窗口 3 从 T2 尾块开始:向前回退到 T2 首块,整回合入窗。
+        let state = db
+            .read_blocking(|conn| view::load_session_state_tailed(conn, "SES-TW2", 3))
+            .expect("tailed");
+        let t2_first = blocks[2].1;
+        assert_eq!(state.timeline_from_ord, Some(t2_first));
+        assert_eq!(state.timeline.len(), 4, "T2 + T3 整回合入窗");
+        assert_eq!(turn_of(&state.timeline[0]), "T2");
+    }
+
+    #[test]
+    fn tailed_bootstrap_reports_none_when_rollback_covers_session() {
+        let db = test_db();
+        seed_window_session(&db, "SES-TW3");
+        for n in 1..=2 {
+            seed_window_turn(&db, "SES-TW3", n);
+        }
+        // 取满窗口但会话恰好只有 4 块:本来完整。
+        let state = db
+            .read_blocking(|conn| view::load_session_state_tailed(conn, "SES-TW3", 4))
+            .expect("tailed");
+        assert_eq!(state.timeline_from_ord, None);
+        // 窗口 3 从 T1 尾块开始,回退到 T1 首块后已覆盖全会话:按完整快照标记。
+        let state = db
+            .read_blocking(|conn| view::load_session_state_tailed(conn, "SES-TW3", 3))
+            .expect("tailed");
+        assert_eq!(state.timeline_from_ord, None);
+        assert_eq!(state.timeline.len(), 4);
+    }
+
+    #[test]
+    fn tailed_bootstrap_prepends_latest_truncated_compaction() {
+        let db = test_db();
+        seed_window_session(&db, "SES-TW4");
+        let blocks: Vec<(String, i64)> = {
+            let mut blocks = seed_window_turn(&db, "SES-TW4", 1);
+            seed_window_compaction(&db, "SES-TW4", "早期内容已压缩");
+            blocks.extend((2..=3).flat_map(|n| seed_window_turn(&db, "SES-TW4", n)));
+            blocks
+        };
+        // 块序:T1 两块、压缩、T2 两块、T3 两块;压缩块无回合锚点,不在 blocks 里。
+        let state = db
+            .read_blocking(|conn| view::load_session_state_tailed(conn, "SES-TW4", 2))
+            .expect("tailed");
+        let t3_first = blocks[4].1;
+        assert_eq!(state.timeline_from_ord, Some(t3_first));
+        let TimelineEntry::Compaction { summary } = &state.timeline[0] else {
+            panic!("compaction head insert expected");
+        };
+        assert!(matches!(
+            summary,
+            ContentValue::Inline { text } if text == "早期内容已压缩"
+        ));
+        assert_eq!(state.timeline.len(), 3);
+        assert_eq!(turn_of(&state.timeline[1]), "T3");
+    }
+
+    #[test]
+    fn session_turn_returns_full_slice_for_truncated_history() {
+        let db = test_db();
+        seed_window_session(&db, "SES-TW5");
+        for n in 1..=3 {
+            seed_window_turn(&db, "SES-TW5", n);
+        }
+        let full = db
+            .read_blocking(|conn| view::load_session_state(conn, "SES-TW5"))
+            .expect("full");
+        let tailed = db
+            .read_blocking(|conn| view::load_session_state_tailed(conn, "SES-TW5", 2))
+            .expect("tailed");
+        assert!(tailed.timeline_from_ord.is_some());
+        // 尾窗外的 T1:按回合取回完整切片,与全量快照一致。
+        let slice = db
+            .read_blocking(|conn| view::load_session_turn(conn, "SES-TW5", "T1"))
+            .expect("slice")
+            .expect("turn exists");
+        assert_eq!(slice.timeline.len(), 2);
+        assert_eq!(slice.timeline, full.timeline[..2]);
     }
 }
