@@ -1,0 +1,11 @@
+[
+  {
+    "orderId": "order-fixture",
+    "campaign": "campaign-fixture",
+    "amount": "10",
+    "currency": "CNY",
+    "grantedAt": "2026-01-01",
+    "expiresAt": "2027-01-01",
+    "message": "synthetic bonus"
+  }
+]
