@@ -4,10 +4,6 @@ fn main() {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    // UA 契约(见 platform.rs):对外只暴露不带构建后缀的稳定版本
-    // (`3.0.20261103-1` → `3.0.20261103`)。收口在唯一注入点。
-    let release_version = build_version
-        .split_once('-')
-        .map_or(build_version.as_str(), |(version, _)| version);
-    println!("cargo:rustc-env=QAQH_BUILD_VERSION={release_version}");
+    // UA 契约(见 platform.rs):对外暴露固定版本号。收口在唯一注入点。
+    println!("cargo:rustc-env=QAQH_BUILD_VERSION={build_version}");
 }

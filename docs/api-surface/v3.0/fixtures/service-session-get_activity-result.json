@@ -1,9 +1,0 @@
-[
-  {
-    "tool_name": "fs_read",
-    "summary": "read synthetic file",
-    "status": "ok",
-    "finished_at_ms": 42,
-    "args": "{\"path\":\"/synthetic/workspace/README.md\"}"
-  }
-]

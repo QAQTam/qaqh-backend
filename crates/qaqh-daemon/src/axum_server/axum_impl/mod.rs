@@ -110,17 +110,15 @@ async fn log_http_errors(req: Request, next: Next) -> Response {
     response
 }
 
-/// Daemon 控制面 HTTP 路由表 —— LTS 冻结面的一部分,但不属于 Ringing 契约面。
+/// Daemon 控制面 HTTP 路由表 —— 不属于 Ringing 契约面。
 ///
 /// 与 `qaqh_ringing::RINGING_V2_HTTP_ROUTES` 同构,两张表合起来是路由的**唯一登记处**:
 /// - `build_router` 遍历本表注册 handler:表里有而 match 缺 arm = 启动即 panic;
-/// - `scripts/check-lts-api-surface.py` 从两张**数据表**生成 `snapshots/routes.txt`,
-///   不再从 `.route()` 调用点用正则反推;同脚本 lint 禁止本模块树出现字面量路径的
-///   `.route("…")`/`.nest(…)`/`.merge(…)` —— 加路由的唯一途径是往表里写一行。
+/// - 加路由的唯一途径是往表里写一行,不允许在本模块树出现字面量路径的
+///   `.route("…")`/`.nest(…)`/`.merge(…)`。
 ///
-/// 为什么必须入表(实测缺陷,ADR-0003 §缺口 1):此前这 4 条由 `ROUTE_CHAINED` 正则从
-/// `.route()` 抓取,而该正则只捕获 path 不捕获 method,于是快照里长期是
-/// `* /health` 这类通配形态 —— **这 4 个端点的 HTTP 方法从未真正被冻结**。
+/// 为什么必须入表(实测缺陷,ADR-0003 §缺口 1):此前这 4 条由正则从 `.route()`
+/// 抓取,而该正则只捕获 path 不捕获 method —— HTTP 方法曾长期漏登记。
 pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/health"),
     ("GET", "/activity"),

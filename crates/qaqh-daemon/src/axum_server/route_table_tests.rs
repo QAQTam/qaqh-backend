@@ -84,8 +84,7 @@ async fn is_router_fallback(response: Response) -> bool {
     bytes.as_ref() == FALLBACK_BODY.as_bytes()
 }
 
-/// 名字带 `v2_` 前缀是刻意的：CI 只跑 `cargo test -p qaqh-daemon v2_`
-/// （`.github/workflows/sdk-contract.yml:39`），否则这道闸在 CI 里根本不会被执行。
+/// 名字带 `v2_` 前缀是刻意的：用于单独筛选 daemon 的 v2 路由测试。
 #[tokio::test]
 async fn v2_route_table_equals_the_real_router() {
     let state = test_state();
@@ -97,7 +96,7 @@ async fn v2_route_table_equals_the_real_router() {
     assert_eq!(
         CONTROL_PLANE_ROUTES.len() + RINGING_V2_HTTP_ROUTES.len(),
         20,
-        "路由登记处总数变了：若是有意的，同步重切 snapshots/routes.txt 并按 guard-tightening 处理"
+        "路由登记处总数变了：若是有意的，同步更新本断言的预期值"
     );
 
     for (method, path) in declared {

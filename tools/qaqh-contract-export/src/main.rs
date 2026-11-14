@@ -1140,9 +1140,7 @@ fn compare_trees(expected: &Path, actual: &Path) -> Result<(), Box<dyn std::erro
     let actual_files = export_artifact_paths(actual)?;
     if expected_files != actual_files {
         // 整棵树 dump 两遍等于没报错：600 条路径会吃掉 ~24KB 日志，真正要看的那 3 条
-        // 反而被埋掉。增删+数量足够定位；逐产物的 wire 语义判定是
-        // `scripts/check-surface-change-policy.py` 的活（它给 `artifact added/deleted`
-        // 与 `wire-differs` 列表），这里不重复一遍。
+        // 反而被埋掉。这里只报增删+数量，足够定位集合漂移。
         let only_expected: Vec<&str> = expected_files
             .iter()
             .filter(|path| !actual_files.contains(path))
@@ -1195,9 +1193,8 @@ fn summarize(paths: &[&str]) -> String {
     rendered
 }
 
-/// `snapshots/` 是 `scripts/check-lts-api-surface.py` 消费的 route/facade
-/// 基线，不是导出器产物。与 guard 的 `compare_file_set` 同口径排除，否则
-/// `check --against docs/api-surface/*` 永远报集合漂移（误导性的"API 变更"）。
+/// `snapshots/` 是路由/facade 基线，不属于导出产物，比对文件集合时排除，
+/// 否则 `check --against` 永远报集合漂移（误导性的 "API 变更"）。
 fn export_artifact_paths(root: &Path) -> Result<Vec<String>, std::io::Error> {
     Ok(list_files(root)?
         .into_iter()

@@ -1,7 +1,2 @@
 # Auto detect text files and perform LF normalization
 * text=auto
-
-# 契约 golden 目录钉死 LF：exporter 产物即 LF，`check` / guard 的
-# compare_file_set 做字节等值；Windows 按 autocrlf 检出 CRLF 会把全部
-# 产物报成 differs 假阳性漂移。
-docs/api-surface/** text eol=lf

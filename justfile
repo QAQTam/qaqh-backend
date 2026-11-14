@@ -40,9 +40,6 @@ sdk-export out:
 sdk-check against:
     cargo run -p qaqh-contract-export -- check --against {{against}}
 
-# 在独立临时目录验证单测、确定性、摘要及可选严格 TS 消费
-sdk-verify *args:
-    python3 scripts/check-sdk-contract.py {{args}}
 
 # ── 检查 & 测试 ─────────────────────────────────────
 
@@ -81,7 +78,3 @@ status:
 clean:
     cargo clean
 
-# 从 version.txt 同步版本号到所有后端配置文件
-[windows]
-sync-version:
-    @pwsh -File scripts/sync-version.ps1

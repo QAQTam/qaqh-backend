@@ -18,7 +18,7 @@ macro_rules! qaqh_ua_version {
 /// 对外产品版本号（与 `QAQH_USER_AGENT` 同源，见上）。
 pub const QAQH_UA_VERSION: &str = qaqh_ua_version!();
 
-/// 统一产品 User-Agent：`qaqharness/2.0.0/`。
+/// 统一产品 User-Agent：`qaqharness/4.0.0/`。
 ///
 /// 用于所有对外 API 请求（gate chat/responses、provider 模型目录拉取），
 /// 便于服务端识别客户端与版本。
@@ -529,11 +529,7 @@ mod data_root_tests {
 
     #[test]
     fn ua_version_tracks_build_version() {
-        let build_version = env!("QAQH_BUILD_VERSION");
-        let release_version = build_version
-            .split_once('-')
-            .map_or(build_version, |(version, _)| version);
-        assert_eq!(qaqh_ua_version!(), release_version);
+        assert_eq!(qaqh_ua_version!(), env!("QAQH_BUILD_VERSION"));
     }
 
     #[test]

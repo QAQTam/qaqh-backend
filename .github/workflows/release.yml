@@ -51,7 +51,7 @@ jobs:
             plat="$(echo "$RUNNER_OS" | tr '[:upper:]' '[:lower:]')-$(echo "$RUNNER_ARCH" | tr '[:upper:]' '[:lower:]')"
             cp target/release/qaqh-daemon "$out/"
           fi
-          cp version.txt qaqh-backend.lock.json "$out/"
+          cp qaqh-backend.lock.json "$out/"
           if [ "$RUNNER_OS" = "Windows" ]; then
             7z a "$RUNNER_TEMP/qaqh-daemon-$TAG-$plat.zip" "$out/*" >/dev/null
           else
