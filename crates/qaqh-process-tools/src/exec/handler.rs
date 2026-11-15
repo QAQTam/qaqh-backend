@@ -31,7 +31,7 @@ pub struct ExecArgs {
     /// Positional args; per-shell rules in the system prompt.
     #[serde(default)]
     pub args: Option<Vec<String>>,
-    /// Shell for command: bash | zsh | sh | pwsh | powershell | cmd (default auto-detected: pwsh on Windows, zsh on macOS, bash elsewhere).
+    /// Shell dialect used to wrap `command` — write `command` in that dialect. One of pwsh | bash | bash4windows | zsh | sh (default auto-detected: pwsh on Windows, zsh on macOS, bash elsewhere). NEVER put a payload interpreter (node/bun/python/deno) here — run it inside `command`.
     #[serde(default)]
     pub shell: Option<String>,
     /// Defaults to workspace root.
@@ -63,7 +63,7 @@ impl TypedTool for ExecTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "exec",
-            "Run a shell command. The command is wrapped by the selected shell (pwsh on Windows, zsh on macOS, bash elsewhere; shell= to override). Returns exit_code/output; long runs return process_id.",
+            "Run a shell command. The command is wrapped by the selected shell dialect (shell=; pwsh on Windows, zsh on macOS, bash elsewhere by default). stdout/stderr are captured as separate streams; avoid `2>&1` unless merging is intentional. Pagers/git prompts/editors are disarmed via env; payload interpreters (node/bun/python) run inside `command`, never via shell=. Returns exit_code/output; long runs return process_id.",
             crate::permission::ToolCategory::Exec,
             ToolRisk::Destructive,
             Duration::from_secs(30),
@@ -117,15 +117,41 @@ pub(crate) fn resolve_shell(
     use super::shell::Shell;
 
     let resolve_named = |name: &str, source: &str| {
-        Shell::from_name(name).ok_or_else(|| {
+        let shell = Shell::from_name(name).ok_or_else(|| {
             exec_error(
                 "unknown_shell",
                 format!("unknown shell '{name}' from {source}"),
                 Some(
-                    "Use one of: pwsh, powershell, bash, bash4windows, zsh, sh, cmd. The default is auto-detected.",
+                    "Use one of: pwsh, bash, bash4windows, zsh, sh. The default is auto-detected.",
                 ),
             )
-        })
+        })?;
+        // 模型面白名单：powershell（5.1 方言，`&&` 是 parse error）与 cmd 不
+        // 给模型选——只保留给 config exec.default_shell 与 bare-machine 兜底
+        // 降级链（auto 链中 5.1 仍优于 cmd）。source 为字符串，"exec shell"
+        // 即模型请求路径。
+        if source == "exec shell" {
+            match shell {
+                Shell::WindowsPowerShell => {
+                    return Err(exec_error(
+                        "unknown_shell",
+                        format!("shell '{name}' is not selectable here"),
+                        Some(
+                            "Windows PowerShell 5.1 has no `&&` statement separator; use 'pwsh'.",
+                        ),
+                    ));
+                }
+                Shell::Cmd => {
+                    return Err(exec_error(
+                        "unknown_shell",
+                        format!("shell '{name}' is not selectable here"),
+                        Some("Use 'pwsh' or 'bash'."),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(shell)
     };
 
     if let Some(shell) = fixed {

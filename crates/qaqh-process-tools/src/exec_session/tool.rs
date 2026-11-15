@@ -16,9 +16,12 @@ pub struct ExecCommandArgs {
     /// Working directory. Defaults to the conversation workspace.
     #[serde(default)]
     pub workdir: Option<String>,
-    /// Shell name; defaults to the host-selected shell.
+    /// Shell dialect used to wrap `cmd` — write `cmd` in that dialect. One of
+    /// pwsh | bash | bash4windows | zsh | sh. Omit for auto-detect. NEVER put
+    /// a payload interpreter (node/bun/python/deno) here — run it inside
+    /// `cmd`, e.g. cmd="node build.js".
     #[serde(default)]
-    pub shell: Option<String>,
+    pub shell: Option<ShellName>,
     /// Start a login shell. Supported for bash, zsh, and sh.
     #[serde(default)]
     pub login: bool,
@@ -34,6 +37,41 @@ pub struct ExecCommandArgs {
     /// Maximum model output budget in tokens.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+}
+
+/// exec_command `shell` 字段的白名单——这个 enum **就是**模型面 schema：
+/// `powershell`（Windows PowerShell 5.1，无 `&&` 语句分隔符）与 `cmd` 只保留
+/// 给 config `exec.default_shell` 与 bare-machine 兜底降级链，不再出现在
+/// 模型面。任何 payload 解释器（node/bun/python）是 `cmd` 里运行的程序，
+/// 不是包装 shell（历史上模型把 shell 字段当「payload 解释器选择器」填
+/// node/python → unknown_shell）。
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ShellName {
+    /// POSIX bash. On Windows resolves Git-for-Windows/MSYS2 bash, never the WSL wrapper.
+    Bash,
+    /// Explicit Windows alias of `bash` (same resolution; disambiguates when platform guessing is risky).
+    #[serde(rename = "bash4windows")]
+    Bash4Windows,
+    /// zsh (macOS default).
+    Zsh,
+    /// POSIX sh.
+    Sh,
+    /// PowerShell 7+ (`pwsh.exe`).
+    Pwsh,
+}
+
+impl ShellName {
+    /// 映射回 [`crate::exec::shell::Shell::from_name`] 接受的显式壳名
+    /// （resolve_shell 的 requested 路径按名解析）。
+    pub(crate) fn config_name(&self) -> &'static str {
+        match self {
+            ShellName::Bash | ShellName::Bash4Windows => "bash",
+            ShellName::Zsh => "zsh",
+            ShellName::Sh => "sh",
+            ShellName::Pwsh => "pwsh",
+        }
+    }
 }
 
 fn default_tty() -> bool {
@@ -154,7 +192,7 @@ impl TypedTool for ExecCommandTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "exec_command",
-            "Run a shell command. Long-running commands return an execution session id; use write_stdin to read output or provide terminal input.",
+            "Run a shell command. `cmd` is wrapped by the selected shell dialect (`shell`); long-running commands return an execution session id — use write_stdin to read output or provide terminal input. stdout/stderr are captured as separate streams; avoid `2>&1`/`1>&2` unless merging is intentional. Pagers and git prompts/editors are disarmed via env (PAGER/GIT_PAGER/GH_PAGER=cat, GIT_TERMINAL_PROMPT=0, GIT_EDITOR=true); output ending in `:` means stuck in a pager — send `q` via write_stdin. Payload interpreters (node/bun/python/deno) are programs to run inside `cmd`, never a value for `shell`.",
             crate::permission::ToolCategory::Exec,
             crate::ToolRisk::Destructive,
             Duration::from_secs(30),
@@ -178,7 +216,11 @@ impl TypedTool for ExecCommandTool {
             .into());
         }
         let max_output_tokens = output_budget(args.max_output_tokens)?;
-        let shell = crate::exec::handler::resolve_shell(context, args.shell.as_deref(), None)?;
+        let shell = crate::exec::handler::resolve_shell(
+            context,
+            args.shell.as_ref().map(|shell| shell.config_name()),
+            None,
+        )?;
         crate::exec::handler::ensure_shell_available(shell)?;
         if args.login
             && !matches!(
@@ -216,6 +258,9 @@ impl TypedTool for ExecCommandTool {
         if args.tty && !env.iter().any(|(key, _)| key == "TERM") {
             env.push(("TERM".into(), "xterm-256color".into()));
         }
+        // pager/编辑器/凭据提示解除（harness 最终权威）：tty 路径 git 内置
+        // less 分页必挂死，见 forced_child_env 文档。
+        env.extend(crate::exec::direct::forced_child_env());
         let host = context.exec_host.as_ref().ok_or_else(|| {
             ToolExecutionError::from(ToolError::new(
                 ToolErrorKind::Unavailable,

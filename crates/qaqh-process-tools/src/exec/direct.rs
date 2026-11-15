@@ -164,6 +164,9 @@ fn direct_exec_inner(
     if let Some(env) = env {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }
+    // pager/编辑器/凭据提示解除：harness 最终权威，压过模型显式 env
+    // （动机与键位见 [`forced_child_env`] 文档）。
+    cmd.envs(forced_child_env().iter().map(|(k, v)| (k, v)));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -555,6 +558,31 @@ pub(crate) fn minimal_child_env() -> Vec<(String, String)> {
             })
         })
         .collect()
+}
+
+/// exec 全路径强制注入的子进程环境（harness 最终权威：所有注入点必须把它
+/// 排在 passthrough 与调用方/模型显式 env **之后**，保证最后覆盖）。
+///
+/// 动机不是防 daemon 环境泄漏——[`minimal_child_env`] 白名单本就不含这些
+/// 键——而是中和**交互式程序的自身默认**，它们在 PTY 路径（tty 缺省 true +
+/// TERM=xterm-256color）下挂死会话而非报错：
+/// - `PAGER`/`GIT_PAGER`/`GH_PAGER=cat`：git for Windows 未设时仍起内置
+///   less 分页（`LESS=FRX`，短输出不显、长输出必停 `:` 等 q，实测
+///   `git log -80 --oneline` 挂死需 write_stdin 收割）；gh 同理。
+/// - `GIT_TERMINAL_PROMPT=0`：凭据交互提示改为直接失败，不挂会话等输入。
+/// - `GIT_EDITOR=true`：commit / tag -e / rebase -i 的编辑器挂起改为
+///   no-op 成功。
+///
+/// 刻意不注入 `TERM=dumb`/`NO_COLOR`：qaqh 的 tty 路径刻意把 ANSI 原样推
+/// 给前端（pty_exec.rs 模块文档），dumb/无色会砍掉实时终端语义。
+pub(crate) fn forced_child_env() -> Vec<(String, String)> {
+    vec![
+        ("PAGER".to_string(), "cat".to_string()),
+        ("GIT_PAGER".to_string(), "cat".to_string()),
+        ("GH_PAGER".to_string(), "cat".to_string()),
+        ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+        ("GIT_EDITOR".to_string(), "true".to_string()),
+    ]
 }
 
 /// Structured output from a command execution.

@@ -89,6 +89,10 @@ pub(crate) fn pty_exec(
     if let Some(env) = env {
         env_pairs.extend(env.iter().cloned());
     }
+    // pager/编辑器/凭据提示解除（harness 最终权威，压过调用方 env）：tty
+    // 路径 TERM=xterm-256color 下 git 内置 less 分页必挂死，见
+    // [`super::direct::forced_child_env`] 文档。
+    env_pairs.extend(super::direct::forced_child_env());
     session_spec.env = env_pairs;
     session_spec.cwd = cwd.map(std::path::PathBuf::from);
 

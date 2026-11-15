@@ -45,7 +45,8 @@ pub(crate) use pipe::{PipePumpCtx, Readiness, drain_pipe_to_registry};
 pub(crate) use pipe::decode_windows_oem;
 #[cfg(test)]
 pub(crate) use shell::{
-    PS_UTF8_PREAMBLE, Shell, base64_decode, executable_in_dirs, executable_on_path, ps_encode,
+    PS_EXIT_CODE_TAIL, PS_UTF8_PREAMBLE, Shell, base64_decode, executable_in_dirs,
+    executable_on_path, ps_encode,
 };
 #[cfg(test)]
 pub(crate) use truncate::token_truncate;

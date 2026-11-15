@@ -342,8 +342,12 @@ impl Shell {
                 // 统一 UTF-8 preamble 进脚本正文（两条 argv 形态共用），
                 // 见 [`PS_UTF8_PREAMBLE`] 的实测依据；已装 uutils coreutils 时
                 // 前缀追加 PATH 前插与最小冲突别名手术（docs/adr/0012）。
+                // 首行重置 `$LASTEXITCODE`（防同会话残留）+ 尾部传播段
+                // （[`PS_EXIT_CODE_TAIL`]）：先查 native 码再查 `$?`，防
+                // 尾随 cmdlet 把 `$?` 刷真吞掉 native 失败。
+                let prefix = super::uutils::pwsh_script_prefix(coreutils_bin);
                 let script =
-                    format!("{}\n{command}", super::uutils::pwsh_script_prefix(coreutils_bin));
+                    format!("{prefix}\n$global:LASTEXITCODE = 0\n{command}\n{PS_EXIT_CODE_TAIL}");
                 if let Some(a) = args.filter(|a| !a.is_empty()) {
                     // -CommandWithArgs：首参是脚本，后续空格分隔的 CommandParameters 原样进 $args
                     let mut v = vec![
@@ -444,6 +448,22 @@ fn windows_system_shell(
 /// setter 在 stdin=null / 输出重定向 / ConPTY 三种宿主形态实测无异常
 /// （pwsh 7.6.9 + 5.1，`$ErrorActionPreference=Stop` 下 exit 0）。
 pub(crate) const PS_UTF8_PREAMBLE: &str = "$OutputEncoding = [Console]::OutputEncoding = [Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)";
+
+/// PowerShell 系脚本尾部的退出码传播段（与 [`PS_UTF8_PREAMBLE`] 一样两条
+/// argv 形态共用，命令正文接在其前）。
+///
+/// `pwsh -Command`/`-EncodedCommand` 把**最后一个语句**的成败归一成退出码，
+/// native 命令的真实退出码被吞（实测 pwsh 7.7：`cmd /c exit 5` → 1；尾随
+/// cmdlet 时 → 0；崩溃码 0xC0000005 → 1）。传播顺序是刻意的：**先查
+/// `$LASTEXITCODE` 再查 `$?`**——codex hook 的 `if ($?) { exit 0 }` 前置版
+/// 会被「native 失败后尾随 cmdlet 把 `$?` 刷真」骗回 0，对任意模型脚本不可
+/// 接受。本会话六案例实测（反序版）：trail-cmdlet=5、纯 cmdlet 成功=0、
+/// 显式 `exit 7` 透传、`throw`=1、崩溃码 -1073741819 原样、native 失败=9。
+/// 纯 pwsh 语句，Windows PowerShell 5.1 同样可用。
+pub(crate) const PS_EXIT_CODE_TAIL: &str = "\
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if ($?) { exit 0 }
+exit 1";
 
 /// PowerShell `-EncodedCommand` 要求的编码：UTF-16LE → Base64（RFC 4648）。
 /// 与 `pwsh -EncodedCommand` 文档一致：`[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))`

@@ -9,3 +9,6 @@ pub use manager::{
     ExecSessionPublisher, ExecSessionResult, ExecSessionStart, StopResult,
 };
 pub use tool::register;
+// crate 内测试面：ShellName/ExecCommandArgs 的白名单反序列化断言（exec/tests.rs）。
+#[cfg(test)]
+pub(crate) use tool::{ExecCommandArgs, ShellName};

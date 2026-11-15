@@ -198,8 +198,10 @@ fn shell_derive_args_are_shell_specific() {
     );
     assert_eq!(pwsh.len(), 12);
     // 验证 Base64(UTF-16LE) 可逆且与 ps_encode 一致（脚本正文 = 统一 UTF-8
-    // preamble + 原命令，preamble 只改脚本内容、不改 argv 形态）。
-    let expected_script = format!("{PS_UTF8_PREAMBLE}\nGet-ChildItem");
+    // preamble + 退出码重置 + 原命令 + 传播尾，只改脚本内容、不改 argv 形态）。
+    let expected_script = format!(
+        "{PS_UTF8_PREAMBLE}\n$global:LASTEXITCODE = 0\nGet-ChildItem\n{PS_EXIT_CODE_TAIL}"
+    );
     assert_eq!(pwsh[11], ps_encode(&expected_script));
     let decoded = {
         let bytes = base64_decode(&pwsh[11]).expect("valid base64");
@@ -257,10 +259,10 @@ fn command_with_args_contract_is_dollar_args_only() {
     let argv =
         Shell::PowerShell.derive_exec_args_with_uutils("Write-Output $args[0]", Some(&args), None);
     // 派生：脚本 + 参数原样尾随，中间无 `-Command` 之类的再包装。
-    // 脚本 token = UTF-8 preamble + `\n` + 原命令，按尾段定位。
+    // 脚本 token = preamble + 退出码重置 + 原命令 + 传播尾，按命令正文定位。
     let script_at = argv
         .iter()
-        .position(|token| token.ends_with("Write-Output $args[0]"))
+        .position(|token| token.contains("Write-Output $args[0]"))
         .expect("script token");
     assert_eq!(argv[script_at + 1..], args[..]);
     assert_eq!(argv.len(), script_at + 2);
@@ -274,12 +276,9 @@ fn pwsh_command_with_args_uses_command_with_args() {
         "hello world".to_string(),
         "a\"b".to_string(),
     ];
+    let command = "Write-Output $args[0]; Write-Output $args[1]";
     let pwsh = Shell::PowerShell
-        .derive_exec_args_with_uutils(
-            "Write-Output $args[0]; Write-Output $args[1]",
-            Some(&args),
-            None,
-        );
+        .derive_exec_args_with_uutils(command, Some(&args), None);
     // 审计 M2：argv[0] 为绝对路径，壳身份按尾段断言。
     assert!(
         pwsh[0].ends_with("pwsh.exe") || pwsh[0].ends_with("pwsh"),
@@ -288,7 +287,7 @@ fn pwsh_command_with_args_uses_command_with_args() {
     );
     // 脚本 token 带统一 UTF-8 preamble 前缀（argv 形态不变）。
     let expected_script =
-        format!("{PS_UTF8_PREAMBLE}\nWrite-Output $args[0]; Write-Output $args[1]");
+        format!("{PS_UTF8_PREAMBLE}\n$global:LASTEXITCODE = 0\n{command}\n{PS_EXIT_CODE_TAIL}");
     let expected_script = expected_script.as_str();
     assert_eq!(
         &pwsh[1..12],
@@ -368,7 +367,10 @@ fn pwsh_derive_matches_coreutils_detection_state() {
             )),
             "script: {script}"
         ),
-        None => assert_eq!(script, format!("{PS_UTF8_PREAMBLE}\nGet-ChildItem")),
+        None => assert_eq!(
+            script,
+            format!("{PS_UTF8_PREAMBLE}\n$global:LASTEXITCODE = 0\nGet-ChildItem\n{PS_EXIT_CODE_TAIL}")
+        ),
     }
 }
 
@@ -511,12 +513,14 @@ fn exec_with_bash_shell_and_args_executes_via_positional_params() {
 
 #[test]
 fn cmd_tool_with_args_rejected() {
-    // cmd 无位置参数语义：args 必须拒绝（而非静默忽略）。
+    // cmd 无位置参数语义：args 必须拒绝（而非静默忽略）。模型面已进不来
+    // （shell= "cmd" 被 resolve_shell 白名单拒绝），用 fixed=Some(Cmd) 直测
+    // args 校验本身；模型路径的拒绝见 model_requested_legacy_windows_shells。
     let ctx = make_ctx(
         "exec",
         serde_json::json!({ "command": "dir", "shell": "cmd", "args": ["x"], "cwd": std::env::current_dir().unwrap() }),
     );
-    let r = crate::exec::run_exec_for_test(&ctx.ctx, ctx.args, None);
+    let r = crate::exec::run_exec_for_test(&ctx.ctx, ctx.args, Some(Shell::Cmd));
     assert!(!r.is_success(), "cmd + args must fail");
     assert!(
         r.error
@@ -1483,14 +1487,16 @@ fn exec_registered_alone_with_shell_param() {
     let exec = &defs[0];
     assert_eq!(exec.function.name, "exec");
     let props = exec.function.parameters.get("properties").unwrap();
-    // exec 必须暴露 shell 参数（含 powershell 别名）且只接受 shell command。
-    // v2 类型生成：shell 是 serde(default) 的 Option<String>，schema 为
-    // string|null 无 enum；合法 shell 名由描述文档 + run() 校验兜底。
+    // exec 必须暴露 shell 参数且只接受 shell command。shell 白名单收缩后
+    // （powershell 5.1/cmd 移出模型面），文档必须点名新白名单且不再出现
+    // powershell；合法名仍由描述文档 + run() 校验（unknown_shell）兜底。
     let shell = &props["shell"];
     assert!(
         shell["description"]
             .as_str()
-            .is_some_and(|d| d.contains("powershell")),
+            .is_some_and(|d| {
+                d.contains("pwsh | bash | bash4windows | zsh | sh") && !d.contains("powershell")
+            }),
         "exec.shell description must enumerate accepted shells: {:?}",
         shell["description"]
     );
@@ -1966,4 +1972,94 @@ fn tty_exec_collects_bounded_when_grandchild_holds_pty_slave() {
         elapsed < std::time::Duration::from_secs(5),
         "collect must not hang waiting for grandchild-held slave EOF, took {elapsed:?}"
     );
+}
+
+/// forced_child_env 必须真实到达子进程（tty=false 管道路径端到端：bash 取值）。
+/// 动机与键位见 [`crate::exec::direct::forced_child_env`] 文档。
+#[test]
+fn forced_child_env_reaches_the_child() {
+    skip_without_shell!(Shell::Bash, "bash");
+    let ctx = shell_test_context(None);
+    let output = run_exec(
+        &ctx,
+        shell_test_args(
+            "echo PAGER=$PAGER GIT_PAGER=$GIT_PAGER GH_PAGER=$GH_PAGER GIT_TERMINAL_PROMPT=$GIT_TERMINAL_PROMPT GIT_EDITOR=$GIT_EDITOR",
+            Some("bash"),
+        ),
+        None,
+        None,
+    )
+    .expect("forced env execution");
+    assert!(
+        output
+            .stdout
+            .contains("PAGER=cat GIT_PAGER=cat GH_PAGER=cat GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true"),
+        "stdout: {:?}",
+        output.stdout
+    );
+}
+
+/// pwsh 退出码传播端到端：native 失败 + 尾随 cmdlet 不得被吞（无 wrapper
+/// 实测 `cmd /c exit 5; 'done'` → 0，wrapper 后必须 5）。
+#[test]
+fn pwsh_exit_code_survives_trailing_cmdlet() {
+    skip_without_shell!(Shell::PowerShell, "pwsh");
+    let ctx = shell_test_context(None);
+    let output = run_exec(
+        &ctx,
+        shell_test_args("cmd /c exit 5; 'done'", Some("pwsh")),
+        None,
+        None,
+    )
+    .expect("pwsh exit code propagation");
+    assert_eq!(output.exit_code, Some(5), "stdout: {:?}", output.stdout);
+}
+
+/// 模型面白名单：powershell/cmd 从请求路径拒绝并给 did-you-mean（config
+/// exec.default_shell 的放行不受影响，由 explicit_shell_overrides… 等既有
+/// 测试覆盖）。
+#[test]
+fn model_requested_legacy_windows_shells_are_rejected() {
+    let ctx = shell_test_context(None);
+    for name in ["powershell", "cmd"] {
+        let error = run_exec(
+            &ctx,
+            shell_test_args("echo must-not-run", Some(name)),
+            None,
+            None,
+        )
+        .expect_err("legacy shell must be rejected for model requests");
+        match error {
+            ToolExecutionError::Recoverable(error) => {
+                assert_eq!(error.code.as_str(), "unknown_shell", "{name}");
+                assert!(
+                    error.detail.contains("not selectable"),
+                    "{name}: {}",
+                    error.detail
+                );
+            }
+            ToolExecutionError::Fatal(error) => panic!("unexpected fatal: {error:?}"),
+        }
+    }
+}
+
+/// exec_command 的 shell= 白名单是 schema 级：enum 之外的名字（含已移除的
+/// powershell/cmd 与 payload 解释器 node/python）反序列化即失败。
+#[test]
+fn exec_command_shell_arg_whitelist_is_enum_enforced() {
+    use crate::exec_session::{ExecCommandArgs, ShellName};
+    let ok: ExecCommandArgs =
+        serde_json::from_value(serde_json::json!({ "cmd": "x", "shell": "pwsh" }))
+            .expect("pwsh is whitelisted");
+    assert!(matches!(ok.shell, Some(ShellName::Pwsh)));
+    for rejected in ["node", "python", "powershell", "cmd"] {
+        assert!(
+            serde_json::from_value::<ExecCommandArgs>(serde_json::json!({
+                "cmd": "x",
+                "shell": rejected
+            }))
+            .is_err(),
+            "{rejected} must fail schema validation"
+        );
+    }
 }

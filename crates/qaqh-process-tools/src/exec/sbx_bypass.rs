@@ -323,6 +323,9 @@ pub(crate) fn sbx_exec(
     if let Some(env) = env {
         env_pairs.extend(env.iter().cloned());
     }
+    // pager/编辑器/凭据提示解除：harness 最终权威，压过模型显式 env
+    // (sbx 后端与 std Command 路径同一口径)。
+    env_pairs.extend(super::direct::forced_child_env());
 
     // cwd:redirect 下工作区内路径映射进视图;无 cwd 时非 redirect 用
     // scratch\tmp,redirect 用视图根。
