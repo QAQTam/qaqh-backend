@@ -176,6 +176,8 @@ struct SessionCore {
     active_slot_released: bool,
     finished_at_ms: Option<i64>,
     stream_dropped_bytes: u64,
+    /// tty 会话的模型侧重排重建器（ConPTY 行重排签名跨读持有）；pipe 为 None。
+    model_reflower: Option<crate::exec::truncate::ConptyReflower>,
 }
 
 #[cfg(any(unix, windows))]
@@ -359,6 +361,9 @@ impl ExecSessionManager {
                 active_slot_released: false,
                 finished_at_ms: None,
                 stream_dropped_bytes: 0,
+                model_reflower: request
+                    .tty
+                    .then(|| crate::exec::truncate::ConptyReflower::new(spec.cols)),
             }),
             changed: Condvar::new(),
             interaction: Mutex::new(()),
@@ -730,7 +735,7 @@ impl ManagedSession {
     ) -> ExecSessionResult {
         let mut core = self.core.lock().unwrap_or_else(|e| e.into_inner());
         let read = core.capture.take_model_pending(max_output_bytes);
-        result_from_core(&self.id, &core, read, starting_call, input_bytes_written)
+        result_from_core(&self.id, &mut core, read, starting_call, input_bytes_written)
     }
 
     fn cancelled_without_consuming(&self) -> ExecSessionResult {
@@ -752,22 +757,33 @@ impl ManagedSession {
 
 fn result_from_core(
     id: &ExecSessionId,
-    core: &SessionCore,
+    core: &mut SessionCore,
     read: ModelRead,
     starting_call: bool,
     input_bytes_written: Option<usize>,
 ) -> ExecSessionResult {
-    let output = read
+    let raw_output = read
         .chunks
         .iter()
         .map(|chunk| chunk.text.as_str())
         .collect::<String>();
-    // tty 会话的模型侧出口必须剥控制序列（与 exec::pty_exec 的 strip_ansi
-    // 契约同形）：pwsh 在 ConPTY 下会注入 DEC 私有模式（?9001/?1004/?25）、
-    // OSC 标题与彩色表格帧，pipe 会话里原生程序也可能自发上色。前端
-    // progress/transcript 面保持原样 ANSI，渲染层自行消费；预算与偏移按
-    // 原始字节计，此处只净化文本。
-    let output = crate::exec::truncate::strip_ansi(&output);
+    // tty 会话的模型侧出口：先重建 ConPTY 行重排（exec 会话 ID / repo 名在
+    // 80 列边界被 `CRLF+CSI+重发字符` 撕裂的根源，跨读尾巴由 reflower 持有；
+    // EOF 后 flush 未决尾巴），再剥控制序列并规范化换行（与 exec::pty_exec
+    // 的 clean_pty_model_text 契约同形）：pwsh 在 ConPTY 下会注入 DEC 私有
+    // 模式（?9001/?1004/?25）、OSC 标题与彩色表格帧，pipe 会话里原生程序
+    // 也可能自发上色。前端 progress/transcript 面保持原样 ANSI，渲染层自行
+    // 消费；预算与偏移按原始字节计，此处只净化文本。
+    let output = match core.model_reflower.as_mut() {
+        Some(reflower) => {
+            let mut joined = reflower.feed(&raw_output);
+            if core.finalized {
+                joined.push_str(&reflower.finish());
+            }
+            crate::exec::truncate::strip_ansi(&joined).replace("\r\n", "\n")
+        }
+        None => crate::exec::truncate::strip_ansi(&raw_output),
+    };
     let exit_code = core.exit.as_ref().and_then(|exit| exit.code);
     let timed_out = matches!(core.terminal, Some(ExecSessionOutcome::TimedOut { .. }));
     let cancelled = matches!(core.terminal, Some(ExecSessionOutcome::Cancelled { .. }));
@@ -835,7 +851,7 @@ fn wait_for_call(
     loop {
         if core.terminal.is_some() {
             let read = core.capture.take_model_pending(max_output_bytes);
-            return result_from_core(&session.id, &core, read, starting_call, None);
+            return result_from_core(&session.id, &mut core, read, starting_call, None);
         }
         if cancellation.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
             drop(core);
@@ -850,7 +866,7 @@ fn wait_for_call(
         let now = Instant::now();
         if now >= deadline {
             let read = core.capture.take_model_pending(max_output_bytes);
-            return result_from_core(&session.id, &core, read, starting_call, None);
+            return result_from_core(&session.id, &mut core, read, starting_call, None);
         }
         let slice = deadline
             .saturating_duration_since(now)

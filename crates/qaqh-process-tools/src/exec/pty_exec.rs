@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{ExecOutputStream, ExecProgressSender};
 
-use super::truncate::{strip_ansi, token_truncate};
+use super::truncate::{clean_pty_model_text, token_truncate};
 
 /// PTY 路径的轮询粒度（与 direct_exec 主循环一致）。
 const POLL_TICK: std::time::Duration = std::time::Duration::from_millis(50);
@@ -193,7 +193,7 @@ pub(crate) fn pty_exec(
                 .collect()
         })
         .unwrap_or_default();
-    let cleaned = strip_ansi(&outcome.text);
+    let cleaned = clean_pty_model_text(&outcome.text, session_spec.cols);
     qaqh_sandbox::record_denial_if_any(
         sandbox_backend,
         exit_code,
