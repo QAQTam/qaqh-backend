@@ -6,6 +6,7 @@
 //! 内核读行回放建后继，交接文档经 canonical `send_input` 投成后继第一回合。
 //! 延时调度在 service 层的终态路由挂钩（`FORK_DELAY_MS` 阅读窗，默认口径 10s）；
 //! daemon 60s sweep（§切片 3）兜底超窗 / 失败 / 重启丢定时器。
+//! 窗口常量在 `qaqh_agent_runtime::handoff::FORK_DELAY_MS`（唯一真相源）。
 //!
 //! 幂等与并发：建行、血缘写入与「链头必须仍停在封箱会话」的原子闸在同一写锁
 //! 闭包内（`store::create_handoff_successor`），定时任务与 sweep 撞车也只会开出
@@ -16,16 +17,13 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use qaqh_ringing::ConversationSendMessage;
+use qaqh_agent_runtime::handoff::FORK_DELAY_MS;
 use qaqh_ringing_contract::events::SessionEvent;
 use qaqh_ringing_contract::fact::InputPurpose;
 use qaqh_ringing_contract::ulid::generate_ulid;
 use qaqh_session::db::store::{self, NewSession};
 
 use super::AgentRegistry;
-
-/// 封箱 → fork 的阅读窗（ADR-0016 §决策 3，默认口径 10s）。常量起步不进
-/// ConfigDto：尚无第二消费者，加配置段属于为想象中的需求扩面（宪法 1）。
-pub(crate) const FORK_DELAY_MS: u64 = 10_000;
 
 /// 后继会话标题上限（与前端 `handoffTitle` 同口径：摘要优先、首行回退、72 字截断）。
 const SUCCESSOR_TITLE_CHARS: usize = 72;

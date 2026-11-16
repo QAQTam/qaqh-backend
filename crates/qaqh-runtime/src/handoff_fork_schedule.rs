@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use crate::registry::handoff_fork::FORK_DELAY_MS;
+use qaqh_agent_runtime::handoff::FORK_DELAY_MS;
 use crate::service::QaqhService;
 
 pub(crate) fn schedule_after_terminal(service: &QaqhService, session_id: &str) {

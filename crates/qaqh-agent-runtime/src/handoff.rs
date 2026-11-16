@@ -20,6 +20,30 @@ pub const TOOL_NAME: &str = "handoff";
 pub const FIELD_DOC: &str = "handoff_doc";
 /// 一句话工作简述字段（新会话标题/首行摘要用）。
 pub const FIELD_SUMMARY: &str = "work_summary";
+/// 「自动接续」偏好字段：模型可声明本次交接不要自动把人拽到新会话。
+/// 缺省 true（零迁移）。它只影响**前端的自动接续**（自动跳转/开箱），
+/// 不改变内核 fork 的决策权（ADR-0016 §决策 1/3）：链照常接上，
+/// 后继会话由用户点「打开交接会话」接管，不存在「撤销封箱」这种不可逆语义。
+pub const FIELD_AUTO_CONTINUE: &str = "auto_continue";
+/// 封箱 → 内核 fork 的阅读窗（ADR-0016 §决策 3，默认口径 10s）。
+///
+/// **全系统唯一真相源**：调度器（`qaqh-runtime::handoff_fork_schedule`）、兜底
+/// 扫描（`sweep_handoff_forks`）与下发给前端的 `planned_open_at_ms` 都读这一份。
+/// 不进 ConfigDto：尚无第二消费者，加配置段属于为想象中的需求扩面（宪法 1）。
+/// 放在本模块而不是 `qaqh-runtime`：依赖方向是 `qaqh-runtime → qaqh-agent-runtime`，
+/// 反向不成立；`pub mod handoff` 让调度层可直接引用，不必提到 `qaqh-types`。
+pub const FORK_DELAY_MS: u64 = 10_000;
+
+/// 当前 unix 毫秒（与 `qaqh-session::db::store::now_ms` 同口径，daemon 与前端同机）。
+/// 封箱确认时刻随 tool_result 机器面下发，前端据此驱动倒计时，
+/// 不再用 renderer 本地的工具步 endedAt 猜 T0。
+#[must_use]
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
+}
 
 /// 一条「本会话改过的文件」事实，来源是 `tool_calls.code_delta`。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +58,8 @@ pub struct FileNote {
 pub struct Doc {
     pub handoff_doc: String,
     pub work_summary: String,
+    /// false = 模型声明本次交接需要人先看一眼，不自动接续。缺省 true。
+    pub auto_continue: bool,
 }
 
 fn tool_description() -> String {
@@ -70,6 +96,10 @@ pub fn tool_def() -> ToolDef {
                     FIELD_SUMMARY: {
                         "type": "string",
                         "description": "一句话工作简述：新会话的标题与首行摘要用"
+                    },
+                    FIELD_AUTO_CONTINUE: {
+                        "type": "boolean",
+                        "description": "默认 true：交接完成后自动切到新会话。仅当本次交接需要人先确认某个决策、不该带着当前前提自动续跑时才写 false——链仍会接上，只是不自动把人拽过去，由你手动打开新会话继续"
                     }
                 },
                 "required": [FIELD_DOC, FIELD_SUMMARY]
@@ -107,9 +137,17 @@ fn field<'a>(input: &'a serde_json::Value, key: &str) -> Result<&'a str, String>
 /// # Errors
 /// 字段缺失、类型不对或为空串时报错——让模型重写，而不是后端替它编一份。
 pub fn parse_doc(input: &serde_json::Value) -> Result<Doc, String> {
+    // 缺省 = true（零迁移：老模型/老 args 不带这个字段照常自动接续）。
+    // 显式非布尔值当入参错误报回去，让模型改参数，不静默吞掉（宪法 5）。
+    let auto_continue = match input.get(FIELD_AUTO_CONTINUE) {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err(format!("handoff 的 `{FIELD_AUTO_CONTINUE}` 必须是布尔值")),
+    };
     Ok(Doc {
         handoff_doc: field(input, FIELD_DOC)?.to_string(),
         work_summary: field(input, FIELD_SUMMARY)?.to_string(),
+        auto_continue,
     })
 }
 
@@ -223,6 +261,7 @@ pub fn success_output(
     mirror: &std::path::Path,
     files: &[FileNote],
     context: Option<ContextUsage>,
+    sealed_at_ms: i64,
 ) -> String {
     let report = serde_json::json!({
         "handed_off": true,
@@ -237,6 +276,17 @@ pub fn success_output(
             .collect::<Vec<_>>(),
         "context_used_tokens": context.map(|usage| usage.used_tokens),
         "context_window_tokens": context.map(|usage| usage.window_tokens),
+        // T0 权威状态：封箱确认时刻 + 模型声明的自动接续偏好 + 派生状态。
+        // tool_result 落库即 bootstrap 可读，离线重建不用专用事件；前端
+        // `handoffPayloadFromOutput` 已在解析这段机器面，零 wire 契约变化。
+        "sealed_at_ms": sealed_at_ms,
+        // 计划开箱时刻 = T0 + 同一份内核窗口常量。前端倒计时的终点与分母
+        // 全用它，不再各自硬编码 10_000。**计划值不是承诺值**：定时器丢失 /
+        // daemon 重启 / fork 失败时 sweep 会晚于此时刻补 fork，故到点前端只
+        // 进入「等待内核」态，真正切 B 仍由 HandoffSealed 权威事件驱动。
+        "planned_open_at_ms": sealed_at_ms.saturating_add(FORK_DELAY_MS as i64),
+        "auto_continue": doc.auto_continue,
+        "handoff_state": if doc.auto_continue { "scheduled" } else { "paused" },
         "next": "客户端用 session.create 建新会话（继承 cwd/model_selection/tool_mode/custom_tools），\
                  再以 conversation.send_message 把 handoff_doc 作为新会话第一条输入投进去",
         "loop": "本会话 loop 已终止；不会再有下一次模型请求",
@@ -421,9 +471,15 @@ mod tests {
             parse_doc(&ok).expect("合法入参"),
             Doc {
                 handoff_doc: "d".into(),
-                work_summary: "s".into()
+                work_summary: "s".into(),
+                auto_continue: true,
             }
         );
+        // 模型显式声明不自动接续：照原样解析，不替模型改主意。
+        let paused = serde_json::json!({ FIELD_DOC: "d", FIELD_SUMMARY: "s", FIELD_AUTO_CONTINUE: false });
+        assert!(!parse_doc(&paused).expect("合法入参").auto_continue);
+        let wrong = serde_json::json!({ FIELD_DOC: "d", FIELD_SUMMARY: "s", FIELD_AUTO_CONTINUE: "no" });
+        assert!(parse_doc(&wrong).unwrap_err().contains(FIELD_AUTO_CONTINUE));
     }
 
     #[test]
