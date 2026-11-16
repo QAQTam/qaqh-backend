@@ -869,6 +869,113 @@ impl Client {
         }
     }
 
+    // ───────────────────── 市场控制面（ADR-0022） ─────────────────────
+    //
+    // 前端壳消费的市场 API。响应体为控制面 JSON（wire 契约真源 =
+    // axum_impl/marketplace_api.rs），壳层直接渲染，client 层不二次建模。
+
+    /// `GET /marketplace/v1/list` —— 全部市场 + 清单（清单不可读的市场带
+    /// `error` 字段，不断整表）。
+    pub async fn marketplace_list(&self) -> Result<serde_json::Value> {
+        self.control_get("/marketplace/v1/list").await
+    }
+
+    /// `GET /marketplace/v1/installed` —— 安装账本（管理面事实源）。
+    pub async fn marketplace_installed(&self) -> Result<serde_json::Value> {
+        self.control_get("/marketplace/v1/installed").await
+    }
+
+    /// `POST /marketplace/v1/add` —— 注册市场（url 与 local 二选一）。
+    pub async fn marketplace_add(
+        &self,
+        name: &str,
+        url: Option<&str>,
+        local: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        self.control_post(
+            "/marketplace/v1/add",
+            serde_json::json!({ "name": name, "url": url, "local": local }),
+        )
+        .await
+    }
+
+    /// `POST /marketplace/v1/install` —— 安装插件。`exec=false` 返回投影计划
+    /// （dry-run），`exec=true` 执行（admin token 即审批）。
+    pub async fn marketplace_install(
+        &self,
+        marketplace: &str,
+        plugin: &str,
+        target: &str,
+        exec: bool,
+    ) -> Result<serde_json::Value> {
+        self.control_post(
+            "/marketplace/v1/install",
+            serde_json::json!({
+                "marketplace": marketplace,
+                "plugin": plugin,
+                "target": target,
+                "exec": exec,
+            }),
+        )
+        .await
+    }
+
+    /// `POST /marketplace/v1/uninstall` —— 卸载插件（账本驱动反向投影）。
+    /// `exec=false` 返回删除计划（dry-run）。
+    pub async fn marketplace_uninstall(
+        &self,
+        plugin: &str,
+        target: &str,
+        exec: bool,
+    ) -> Result<serde_json::Value> {
+        self.control_post(
+            "/marketplace/v1/uninstall",
+            serde_json::json!({ "plugin": plugin, "target": target, "exec": exec }),
+        )
+        .await
+    }
+
+    /// `POST /marketplace/v1/remove` —— 注销市场（url 型缓存一并删除）。
+    pub async fn marketplace_remove(&self, name: &str) -> Result<serde_json::Value> {
+        self.control_post("/marketplace/v1/remove", serde_json::json!({ "name": name }))
+            .await
+    }
+
+    async fn control_get(&self, path: &str) -> Result<serde_json::Value> {
+        let response = self
+            .inner
+            .http
+            .get(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path: path.into(),
+            });
+        }
+        Ok(response.json().await?)
+    }
+
+    async fn control_post(&self, path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+        let response = self
+            .inner
+            .http
+            .post(format!("{}{path}", self.credentials().base_url))
+            .bearer_auth(&self.credentials().token)
+            .json(&body)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            return Err(ClientError::Http {
+                status: response.status().as_u16(),
+                path: path.into(),
+            });
+        }
+        Ok(response.json().await?)
+    }
+
     /// Stop all background tasks (SSE streams + renewal).
     pub fn close(&self) {
         let _ = self.inner.stop_tx.send(true);

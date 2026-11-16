@@ -59,31 +59,6 @@ fn build_chat_url(base_url: &str, chat_path: Option<&str>) -> String {
     }
 }
 
-/// Some compatible endpoints put reasoning inside `content` using think tags.
-/// Split complete tags before events reach the frontend. The normal provider
-/// fields remain the authoritative path; this is a compatibility guard.
-fn split_inline_thinking(text: &str, in_thinking: &mut bool) -> Vec<(bool, String)> {
-    let mut result = Vec::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let marker = if *in_thinking { "</think>" } else { "<think>" };
-        match rest.find(marker) {
-            Some(index) => {
-                if index > 0 {
-                    result.push((*in_thinking, rest[..index].to_string()));
-                }
-                *in_thinking = !*in_thinking;
-                rest = &rest[index + marker.len()..];
-            }
-            None => {
-                result.push((*in_thinking, rest.to_string()));
-                break;
-            }
-        }
-    }
-    result
-}
-
 /// Project harness history onto the SDK's neutral model for Chat
 /// Completions. Harness-level semantics preserved: `read_image` placeholders
 /// with session-global numbering (continuing from `image_index_base`), and
@@ -618,7 +593,6 @@ async fn consume(
     hub.drain(&mut *on_event);
 
     let mut state = StreamState::new();
-    let mut inline_thinking = false;
     let mut interrupted: Option<String> = None;
 
     loop {
@@ -635,21 +609,13 @@ async fn consume(
             }
             Ok(SdkEvent::Start { .. }) => {}
             Ok(SdkEvent::TextDelta { text }) => {
-                // inline <think> 切分：正文里夹带的思考标签不进 content。
-                for (is_reasoning, t) in split_inline_thinking(&text, &mut inline_thinking) {
-                    if t.is_empty() {
-                        continue;
-                    }
-                    if is_reasoning {
-                        // 正文里 `<think>` 夹带的思考：来源可读、类别明确是完整文本。
-                        let kind = qaqh_types::ReasoningKind::Text;
-                        state.push_reasoning(kind, &t);
-                        on_event(StreamEvent::ReasoningDelta { kind, text: t });
-                    } else {
-                        state.text.push_str(&t);
-                        on_event(StreamEvent::ContentDelta(t));
-                    }
-                }
+                // content 一律是正文。思考只认端点声明的 reasoning 字段
+                // （reasoning_content / reasoning / thinking / analysis_content，
+                // 见 chat_profile 的 aliases，由 SDK 在 ReasoningDelta 上报）；
+                // 不再对正文做 `<think>` 字面量切分——那会把正文里恰好出现该
+                // 字面量之后的全部文本误判进思考链（见 ADR-0023）。
+                state.text.push_str(&text);
+                on_event(StreamEvent::ContentDelta(text));
             }
             Ok(SdkEvent::ReasoningDelta { kind, text }) => {
                 let kind = stored_reasoning_kind(kind);
@@ -910,24 +876,6 @@ mod tests {
             (base.as_str(), path.as_str()),
             ("https://api.deepseek.com", "/v1/chat/completions")
         );
-    }
-
-    #[test]
-    fn inline_think_tags_split_across_chunks() {
-        let mut in_think = false;
-        let mut reasoning = String::new();
-        let mut text = String::new();
-        for chunk in ["lead <think>deep", " thought</think> tail"] {
-            for (is_r, t) in split_inline_thinking(chunk, &mut in_think) {
-                if is_r {
-                    reasoning.push_str(&t);
-                } else {
-                    text.push_str(&t);
-                }
-            }
-        }
-        assert_eq!(reasoning, "deep thought");
-        assert_eq!(text, "lead  tail");
     }
 
     /// 复现 BUG-2026-09-16-01：合成 media user 消息不得插在两条 tool 消息之间。

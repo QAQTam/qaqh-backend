@@ -218,42 +218,6 @@
     },
     {
       "fixtures": [
-        "driver-claim-busy.json",
-        "command-ack-accepted.json"
-      ],
-      "id": "driver.claim",
-      "method": "POST",
-      "minimum_scope": "interact",
-      "path": "/ringing/v2/commands",
-      "remote_transport_acceptance": "not_verified",
-      "requires_lease": true,
-      "status": "implemented",
-      "types": [
-        "RingingV2DriverClaimResponse",
-        "RingingV2CommandAck"
-      ],
-      "validation": "rust-dto"
-    },
-    {
-      "fixtures": [
-        "driver-release.json",
-        "command-ack-accepted.json"
-      ],
-      "id": "driver.release",
-      "method": "POST",
-      "minimum_scope": "interact",
-      "path": "/ringing/v2/commands",
-      "remote_transport_acceptance": "not_verified",
-      "requires_lease": true,
-      "status": "implemented",
-      "types": [
-        "RingingV2DriverReleaseResponse",
-        "RingingV2CommandAck"
-      ],
-      "validation": "rust-dto"
-    },
-    {
-      "fixtures": [
         "pair-token-params.json",
         "pair-token-result.json"
       ],

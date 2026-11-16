@@ -15,6 +15,6 @@ public sealed record GoalsPatch
     public bool? Enabled { get; init; }
     [JsonPropertyName("maxTokenBudget")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long?? MaxTokenBudget { get; init; }
+    public long? MaxTokenBudget { get; init; }
 }
 

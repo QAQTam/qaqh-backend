@@ -9,6 +9,7 @@
 
 pub mod direct;
 pub mod display;
+pub mod env_overlay;
 pub mod handler;
 pub mod head_tail;
 pub mod pipe;

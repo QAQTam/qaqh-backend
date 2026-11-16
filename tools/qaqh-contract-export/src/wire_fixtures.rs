@@ -5,7 +5,7 @@ use std::path::Path;
 use qaqh_ringing::{
     RingingCommandAckStatus, RingingCommandState, RingingV2AskOutcome, RingingV2CommandAck,
     RingingV2CommandResult, RingingV2CommandStatus, RingingV2DeviceWire, RingingV2DevicesResponse,
-    RingingV2DriverClaimResponse, RingingV2DriverReleaseResponse, RingingV2ExistingResult,
+    RingingV2ExistingResult,
     RingingV2LeaseRenewResponse, RingingV2PairRequest, RingingV2PairResponse,
     RingingV2PairTokenRequest, RingingV2PairTokenResponse, RingingV2SyncResult,
 };
@@ -23,26 +23,6 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             ok: true,
             lease_ttl_ms: 30_000,
             renew_interval_ms: 10_000,
-        },
-    )?;
-    super::write_fixture(
-        stage,
-        "driver-claim-busy.json",
-        &RingingV2DriverClaimResponse {
-            accepted: false,
-            holder: Some("other-client-fixture".into()),
-            driver_epoch: 4,
-            reason: "driver_busy".into(),
-        },
-    )?;
-    super::write_fixture(
-        stage,
-        "driver-release.json",
-        &RingingV2DriverReleaseResponse {
-            accepted: true,
-            holder: None,
-            driver_epoch: 5,
-            reason: "released".into(),
         },
     )?;
     for (name, result) in [

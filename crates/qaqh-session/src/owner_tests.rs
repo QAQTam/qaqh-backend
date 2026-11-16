@@ -771,7 +771,7 @@ mod tests {
         });
     }
 
-    /// D7:外部生产者经 owner.publish 进入同一单流定序(driver 席位事件)。
+    /// D7:外部生产者经 owner.publish 进入同一单流定序(跨生产者事件)。
     /// publish 经泵队列;submit 回执语义同样覆盖(发送完成前事件已定序)。
     #[test]
     fn published_events_share_the_single_stream_sequence() {
@@ -783,7 +783,7 @@ mod tests {
             let (_dir, owners) = test_owner_dir();
             let owner = owners
                 .create_session(store::NewSession {
-                    session_id: "SES-DRIVER".into(),
+                    session_id: "SES-PUBLISH".into(),
                     parent_session_id: None,
                     title: String::new(),
                     title_source: None,
@@ -798,11 +798,8 @@ mod tests {
                 .await
                 .expect("create session");
             let mut rx = owner.subscribe();
-            owner.publish(SessionEvent::DriverChanged {
-                driver: Some(qaqh_ringing_contract::state::DriverState {
-                    holder: Some("lease-a".into()),
-                    epoch: 1,
-                }),
+            owner.publish(SessionEvent::SessionMetaChanged {
+                title: Some("via-publish".into()),
             });
             let frame = {
                 let deadline = Instant::now() + Duration::from_secs(5);
@@ -819,10 +816,10 @@ mod tests {
             };
             assert_eq!(frame.seq, 0);
             match frame.event {
-                SessionEvent::DriverChanged { driver } => {
-                    assert_eq!(driver.map(|d| d.epoch), Some(1));
+                SessionEvent::SessionMetaChanged { title } => {
+                    assert_eq!(title.as_deref(), Some("via-publish"));
                 }
-                other => panic!("expected driver changed, got {other:?}"),
+                other => panic!("expected session meta changed, got {other:?}"),
             }
         });
     }

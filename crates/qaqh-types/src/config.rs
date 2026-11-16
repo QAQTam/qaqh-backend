@@ -97,6 +97,13 @@ pub struct PersistentExecConfig {
     /// `None` / empty / "auto" = platform priority auto-detection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_shell: Option<String>,
+    /// exec/PTY 子进程 env 注入面：用户在 config 显式声明「允许子进程看到
+    /// 这些键值」（审计 M1 白名单之上的授权层）。值可含 `${secret:name}`
+    /// 占位符（secrets.toml `[secrets.mcp]` 段同命名空间；load 时 fail-fast
+    /// 校验引用名，daemon 应用覆盖层时才解析真值）。BTreeMap 保证注入
+    /// 顺序确定（同键后写覆盖先写）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<std::collections::BTreeMap<String, String>>,
 }
 
 /// Persistence-friendly goal-mode config(ADR-0015)。全 Option 字段,

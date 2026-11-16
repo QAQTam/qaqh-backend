@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mutil-ai 自嵌库 · 架构判断</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1b1f24; --bg:#f7f8fa; --card:#fff; --border:#dfe3e8; --muted:#5c6672; --accent:#0b62c4; --ok:#0a7a3c; --warn:#a15c00; --bad:#b42318; --code:#f1f3f6; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e7ebf0; --bg:#12151a; --card:#1b2028; --border:#313946; --muted:#99a4b2; --accent:#74b8ff; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --code:#0f1319; } }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:30px 18px 70px; background:var(--bg); color:var(--fg); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif; line-height:1.72; font-size:15px; }
+  .wrap { max-width:980px; margin:0 auto; }
+  h1 { font-size:26px; margin:0 0 6px; }
+  h2 { font-size:19px; margin:34px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:20px 0 8px; }
+  p { margin:10px 0; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:22px; }
+  .verdict { background:var(--card); border:1px solid var(--border); border-left:5px solid var(--accent); border-radius:10px; padding:16px 18px; margin:18px 0; }
+  .verdict strong { color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:12px; margin:16px 0; }
+  .kpi { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .kpi b { display:block; font-size:12.5px; color:var(--muted); font-weight:600; }
+  .kpi span { font-size:18px; font-weight:700; }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:13.5px; }
+  th, td { border:1px solid var(--border); padding:8px 10px; text-align:left; vertical-align:top; }
+  th { background:var(--code); font-weight:650; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",monospace; }
+  code { background:var(--code); padding:1px 5px; border-radius:4px; font-size:.9em; }
+  pre { background:var(--code); border:1px solid var(--border); border-radius:8px; padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.6; }
+  pre code { background:none; padding:0; }
+  .ok { color:var(--ok); font-weight:650; }
+  .warn { color:var(--warn); font-weight:650; }
+  .bad { color:var(--bad); font-weight:650; }
+  ul, ol { padding-left:22px; }
+  li { margin:6px 0; }
+  .note { background:var(--card); border:1px dashed var(--border); border-radius:8px; padding:12px 14px; font-size:13.5px; color:var(--muted); }
+  .rec { background:var(--card); border:1px solid var(--border); border-left:5px solid var(--ok); border-radius:10px; padding:14px 18px; margin:14px 0; }
+  footer { margin-top:42px; color:var(--muted); font-size:12.5px; border-top:1px solid var(--border); padding-top:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>mutil-ai 自嵌库（vendor）· 架构判断</h1>
+<p class="sub">QAQ-Harness · 2026-11-16 · 延续「思考链路输出泄露」排查 · 会话 ses_01M7H9YG8TEQ8BMY0XAVGBGK7V<br>
+当前仍是旧 gate，长输出同样落盘 HTML。本轮为源码 + ADR 静态分析，<strong>未改任何代码 / ADR / Cargo 文件</strong>。</p>
+
+<div class="verdict">
+  <strong>结论：不建议把「自嵌库 / 不再独立依赖」当作解决「各做一半」的下一步。</strong><br>
+  Claude 的观察<strong>属实</strong>，但病因是<strong>绞杀者迁移未收尾 + wire 职责双份</strong>，不是依赖获取方式。
+  vendor 只把 <code>path</code> 依赖变成「源码在本仓」，gate 里那些重判 / 兜底 / 对账<strong>一行都不会因此消失</strong>；
+  它真正解锁的是「能直接改 SDK 源码」，而消除各做一半靠的是<strong>合并职责、单一真相源</strong>，不是拷贝源码。
+  更关键：它直接撞两条<strong>已采纳</strong> ADR（0001 决策 5、0018 被否选项），按规则 17 需 owner 重开决策并留痕。
+</div>
+
+<div class="grid">
+  <div class="kpi"><b>本仓依赖它的 crate</b><span>1 个（gate）</span></div>
+  <div class="kpi"><b>SDK 规模</b><span>18,616 行 / 23 文件</span></div>
+  <div class="kpi"><b>旧手写栈 transport.rs</b><span>362 行 · 仍接线</span></div>
+  <div class="kpi"><b>Done 组装路径</b><span>2 套</span></div>
+</div>
+
+<h2>1. Claude 的观察属实 —— 证据与分类</h2>
+<table>
+  <tr><th>代码点</th><th>现象</th><th>性质 / 判定</th></tr>
+  <tr>
+    <td><code>sdk_common.rs:1-4</code> 头注</td>
+    <td>「Shared machinery for the mutil-ai-powered transports ... Kept separate from <code>transport.rs</code> (the legacy hand-written stack) so the two can coexist during the <strong>strangler migration</strong> and the legacy half can be deleted wholesale.」<code>transport.rs</code> 362 行仍被 5 个模块 + <code>lib.rs</code> 接线。</td>
+    <td class="bad">根因：迁移未收尾，两套栈并存</td>
+  </tr>
+  <tr>
+    <td><code>sdk_common.rs:34-38</code></td>
+    <td>「The gate assembles <code>Done.raw_message</code> from these buffers (<strong>not from the SDK response</strong>) so the anthropic/chat paths keep byte-identical semantics.」</td>
+    <td class="bad">重复组装：故意不用 SDK 的 response</td>
+  </tr>
+  <tr>
+    <td>四条 wire 的 Done 入口</td>
+    <td>chat / gemini / messages → <code>state.finalize()</code>（gate 自攒缓冲）；responses → <code>response_message_to_blocks(&amp;response.message)</code>（SDK 组装的 parts 映射）</td>
+    <td class="bad">同一件事两套做法</td>
+  </tr>
+  <tr>
+    <td>ADR-0018 + 四处判别</td>
+    <td>SDK 在 EOF 未收到真终态帧时<strong>合成假终态</strong>；gate 在 <code>chat_sdk.rs:689</code> / <code>gemini_sdk.rs:485</code> / <code>messages_sdk.rs:587</code> / <code>responses_sdk:1608</code> 各写一遍 <code>finish_reason</code> 缺席判别来反制</td>
+    <td class="bad">不忠实相信，四份判别</td>
+  </tr>
+  <tr>
+    <td>tool call 兜底族</td>
+    <td><code>reconcile_absent_tool_calls</code>(messages_sdk:641)、<code>reconcile_streamed_tool_calls</code>(responses_sdk:1115)、<code>salvage_first_json_object</code>(sdk_common:208)、<code>ToolCallAnnouncer</code>(sdk_common:286)、<code>wire_tool_input</code>(sdk_common:190)</td>
+    <td class="warn">畸形 wire 兜底（上游代理 / 端点形态）</td>
+  </tr>
+  <tr>
+    <td>刚删的 inline 状态机（ADR-0023）</td>
+    <td>SDK 已按字段别名处理 reasoning，gate 又按字符串标签把正文切一遍 → 正文泄露进思考链</td>
+    <td class="ok">重复解析（已修，本轮之前）</td>
+  </tr>
+  <tr>
+    <td><code>chat_sdk.rs:310 chat_profile</code></td>
+    <td>端点差异以声明数据交给 SDK 的 <code>ProviderProfile</code>：<code>p.reasoning.aliases</code> / <code>p.reasoning.replay</code> / <code>p.normalize.system_placement</code> / <code>p.reasoning.thinking</code>；头注亦写「quirks ... are expressed as a declarative ProviderProfile」</td>
+    <td class="ok"><strong>正例</strong>：这正是「忠实相信 SDK」，不要一起砍</td>
+  </tr>
+  <tr>
+    <td><code>responses_sdk</code> 的 plan / custom-tool 收口</td>
+    <td>出站 wire 形态收敛（端点只认特定形状），不是解析重复</td>
+    <td>端点要求，另论</td>
+  </tr>
+</table>
+<div class="note"><strong>分类结论</strong>：要合并 / 砍的是「重复解析 + 畸形兜底」，要保留并推广的是「声明式配置」；根子是 <code>transport.rs</code> 代表的旧栈没退场。把这三类和「依赖形态」混为一个问题，就会开出 vendor 这剂不对症的药。</div>
+
+<h2>2. 为什么「自嵌库」不解决「各做一半」</h2>
+<table>
+  <tr><th>vendor 改变的</th><th>vendor 不改变的</th></tr>
+  <tr>
+    <td>依赖获取方式（<code>path/git</code> → 源码内联到本仓）<br>能直接改 SDK 源码<br>构建可重现（不再需要 sibling checkout）</td>
+    <td>谁解析 wire<br>谁判终态真伪<br>谁组装 <code>Done.raw_message</code><br>谁兜底畸形 tool call / 参数<br>gate 是否「忠实相信」SDK</td>
+  </tr>
+</table>
+<p>若 vendor 之后<strong>不改职责划分</strong>，得到的是：本仓里 18,616 行 SDK + 9,413 行 gate，两套真相源<strong>同仓共存</strong>，以后更容易互相打补丁 —— 按宪法 9（禁止拧巴设计 / 为兼容写转换层）这是更糟，不是更好。</p>
+<p>vendor 唯一真实的收益是<strong>构建可重现性</strong>（<code>../mutil-ai</code> 缺失就编不过、CI 必须额外 checkout 一个固定 commit）。但这是<strong>另一个独立问题</strong>：最小代价是 <strong>git submodule 固定 commit</strong>（保留独立仓与 pin、不推翻 ADR-0001），而不是把 18.6k 行拷进来。把「可重现性」和「各做一半」捆在一起，是问题定义错了。</p>
+
+<h2>3. 与已采纳 ADR 的冲突（规则 17：引用必须看状态字段）</h2>
+<table>
+  <tr><th>ADR / 状态</th><th>原文要点</th><th>冲突</th></tr>
+  <tr>
+    <td><code>0001</code> <strong>已采纳</strong> · 决策 5</td>
+    <td>「LTS 周期内<strong>禁止升级外部 path 依赖 pin</strong>（<code>qaqtam/mutil-ai @ 4387f74d…</code>）。它的行为是<strong>用户空间可见面的一部分</strong>，pin 动了，『后端可以随便改』这句就不成立了。」</td>
+    <td class="bad">vendor 把 18.6k 行纳入 LTS 用户空间，或让 SDK 行为随本仓改动 —— 两条都推翻它（规则 21「用户空间不可变」）</td>
+  </tr>
+  <tr>
+    <td><code>0018</code> <strong>已采纳</strong> · 被否选项</td>
+    <td>「<strong>改 mutil-ai 让它 EOF 不合成 Done</strong>：SDK 是姊妹仓独立版本线，合成收口对其它消费者可能是合理行为；判别式在 gate 侧收口，<strong>不跨仓改契约</strong>。」</td>
+    <td class="bad">vendor 正是重开这条被否决策。mutil-ai 确为独立发布 crate（crates.io badge / docs.rs / <code>cargo add mutil-ai</code>），有本仓之外消费者预期</td>
+  </tr>
+  <tr>
+    <td><code>0002</code> <strong>已采纳</strong></td>
+    <td>契约真相源 = Rust DTO；引入 OpenAPI / Pact 被否，理由「那是<strong>第二份不可校验的真相</strong>」，宪法 9 禁止的正是「为声称兼容而写的转换层」</td>
+    <td class="warn">双份真相源正是被批判的形态</td>
+  </tr>
+  <tr>
+    <td><code>docs/adr/README.md</code> §1.3</td>
+    <td>「任何『为了兼容再加一层转换』的念头被接受或被拒绝时（宪法 9）都要留痕」</td>
+    <td>本决策必须落 ADR：建议 <code>ADR-0024</code>，状态 <strong>提议中</strong>，等 owner 拍板后落笔</td>
+  </tr>
+</table>
+<p>按规则 17，这两条都是 <strong>已采纳 / 已落地</strong>，不是「已采纳（未实施）」—— 不能当成没生效而绕过去；被否选项重提必须留痕防反复。</p>
+
+<h2>4. 工程代价（规则 15 / 18 / 19 / 21）</h2>
+<ul>
+  <li>动 <code>Cargo.toml:52</code>（<code>mutil-ai = { version = "0.7.0", path = "../mutil-ai" }</code>）、<code>Cargo.lock</code>、<code>release.yml:31-33</code>（checkout <code>qaqtam/mutil-ai @ b37ca25f23350…</code>）→ <strong>闸门改动</strong>，规则 18 要求反证它真会红、且要看 CI 步骤明细。</li>
+  <li>ADR-0010 §切线实施记录：四个 workflow 曾有一个仍 pin 旧 <code>4387f74d</code>（缺 <code>ChatRequest.prompt_cache</code>，gate 编不过），被 <code>continue-on-error</code> 掩盖，切线时随 PR 修复 → <strong>pin 分散是已知故障源</strong>。</li>
+  <li>上一任务实测：<code>Cargo.toml</code> / <code>Cargo.lock</code> / <code>docs/api-surface/v4.0/**</code> 正被并发写入者重写 → <strong>规则 19 撞车面未收敛</strong>，此时动同类文件会双重修同一处。</li>
+  <li>规则 15 契约面分类：若 SDK 行为变化导致导出物变 ⇒ <code>[contract-refreeze]</code> ⇒ 禁入冻结线、只能开新 LTS 线并 bump revision。</li>
+  <li>规则 21：LTS 仓用户空间不可变；vendor 等于把不可变面扩大 18.6k 行。</li>
+  <li>法务：mutil-ai 为 <code>MIT OR Apache-2.0</code>（LICENSE / LICENSE-MIT / LICENSE-APACHE 齐全），vendor 需保留三份许可，并决定版本 / CHANGELOG / 后续上游合并策略。</li>
+</ul>
+
+<h2>5. 按宪法 3 / 4 / 9 的推荐下一步（开快车）</h2>
+<div class="rec">
+<ol>
+  <li><strong>收尾 strangler 迁移</strong>：删掉 <code>transport.rs</code> 旧半边（头注明说可 <code>deleted wholesale</code>）；仍被引用的零星工具（<code>RetryPolicy</code> / <code>SseTrace</code> / 取消 / <code>http_error_description</code>）迁到 <code>sdk_common</code> 或由 SDK 承担。SDK 成为<strong>唯一 wire 解析方</strong>。</li>
+  <li><strong>统一 Done 组装</strong>：四条 wire 都走「SDK 组装好的 message → harness 内容块」映射（responses 的 <code>response_message_to_blocks</code> 已是正例），删掉 <code>StreamState.finalize</code> 的自攒缓冲路径 → 消除 <em>"not from the SDK response"</em> 与两套做法。</li>
+  <li><strong>兜底按宪法 5 二选一</strong>：要么<strong>上移到 SDK</strong>（在姊妹仓改 + 按规则 15 开新 LTS 线 / bump pin），要么<strong>直接砍掉</strong>让畸形 wire 如实报错；不再在 gate 里养第二套终态判别 / tool call 对账 / 参数抢救。不写防御性补丁。</li>
+  <li><strong>保留并推广 <code>ProviderProfile</code> 声明式配置</strong>：端点差异以声明数据交给 SDK，不在 gate 再养一套解析器 —— 这才是「忠实相信」的正确形态。</li>
+  <li><strong>构建可重现性单独解</strong>：git submodule 固定 commit（或 CI 统一 pin），不与「各做一半」捆绑。</li>
+</ol>
+</div>
+<p>这才是单一真相源，且不拆 LTS 边界。顺带一提：本仓<strong>只有 <code>qaqh-gate</code> 一个 crate</strong> 依赖 mutil-ai —— 收尾迁移后，gate 会薄成一层「SDK 事件 → RingingV2 <code>StreamEvent</code>」投影，正好符合宪法 9「任何模块为 RingingV2 让路、不写转换层」。</p>
+
+<h2>6. 若 owner 明确要 vendor，前置条件</h2>
+<ol>
+  <li>写 <code>ADR-0024</code>：记录重开 ADR-0001 决策 5 / ADR-0018 被否选项的理由，并把「只 vendor 不改职责」列为<strong>被否选项</strong>（防重提）。</li>
+  <li>owner 明确确认「mutil-ai 不再对外独立发布、只服务本仓」—— 否则 ADR-0018 的「对其它消费者可能合理」仍成立，被否理由未消失。</li>
+  <li>规则 15 分类 + 规则 18 闸门反证 + 规则 19 撞车面收敛后，再动 <code>Cargo.toml</code> / <code>Cargo.lock</code> / workflows。</li>
+  <li>保留三份 LICENSE；定版本 / CHANGELOG / 上游合并策略。</li>
+  <li><strong>vendor 后必须同步执行第 5 节的职责合并</strong>，否则只是白 vendor：18.6k 行进仓、各做一半照旧。</li>
+</ol>
+
+<h2>7. 诚实边界</h2>
+<ul>
+  <li>本轮为源码 + ADR 静态分析；<strong>未编译、未改任何代码 / ADR / Cargo / workflow 文件</strong>，也未做 GitHub 同类项目调研（规则 6 允许但未执行）。</li>
+  <li>ADR 状态按规则 17 逐条核对：<code>0001 / 0002 / 0004 / 0009 / 0010 / 0018 / 0023</code> 均为「已采纳」或「已落地于 main」，<strong>不是「已采纳（未实施）」</strong>。</li>
+  <li>决策<strong>未拍板</strong>：本文件是判断依据；<code>ADR-0024</code>（提议中）待 owner 定。上一轮的代码修复仍留在工作区、未提交未发版 —— 旧 gate 仍在跑，这也是本文件继续用 HTML 查看的原因。</li>
+</ul>
+
+<footer>QAQ-Harness · 架构判断 · 2026-11-16 · 本文件自包含、可离线打开。相关：<code>gate-leak-report.html</code>（上一轮排查报告）、<code>docs/adr/0023-retire-inline-think-split.md</code>。</footer>
+
+</div>
+</body>
+</html>

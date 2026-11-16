@@ -34,11 +34,11 @@ public sealed record SessionState
     public SubagentView[] Subagents { get; init; }
     [JsonPropertyName("exec_sessions")]
     public ExecSessionView[] ExecSessions { get; init; }
-    [JsonPropertyName("driver")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public DriverState? Driver { get; init; }
     [JsonPropertyName("goal")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public GoalView? Goal { get; init; }
+    [JsonPropertyName("timeline_from_ord")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? TimelineFromOrd { get; init; }
 }
 

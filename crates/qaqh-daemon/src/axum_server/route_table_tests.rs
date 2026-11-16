@@ -95,7 +95,10 @@ async fn v2_route_table_equals_the_real_router() {
     let declared = CONTROL_PLANE_ROUTES.iter().chain(RINGING_V2_HTTP_ROUTES.iter());
     assert_eq!(
         CONTROL_PLANE_ROUTES.len() + RINGING_V2_HTTP_ROUTES.len(),
-        20,
+        // 11 = 4 控制面（health/activity/stop/stop-if-idle）+ 7 市场端点
+        //（ADR-0022：list/installed GET，add/install/uninstall/remove/update
+        // POST）；16 = Ringing v2。
+        27,
         "路由登记处总数变了：若是有意的，同步更新本断言的预期值"
     );
 

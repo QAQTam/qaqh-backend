@@ -1181,4 +1181,319 @@ mod handoff_tests {
             .count();
         assert_eq!(watchdog, 2, "提醒与折叠各留一条可见事实");
     }
+
+    // ── 出站口延迟 + 流式信息完整度 / 顺序回归 ────────────────────────────
+    //
+    // 复现现场（多端实测）：一句完整回答 "好的，我这就开始展开调查" 之后跟一次
+    // 工具调用，前端却呈现 "好的，" → 工具卡片 → "好的，我这就开始展开调查"。
+    //
+    // 关键前提：**上游时间顺序完全正常**。服务商按 token 分片是常态，一句话会
+    // 拆成 N 个 content delta，且全部在 tool_calls 之前到达；本 fixture 正是
+    // 连续 3 片文本 → 1 片 tool_calls → finish_reason=tool_calls，没有任何交错。
+    // 半句不是上游给的，也不是前端拆的，是内核自己造的：
+    //
+    //   provider_job.rs:259-267 ContentDelta 按 PROGRESS_INTERVAL=40ms 合并窗
+    //     发「累积前缀」→ 只有第 1 片触发 due() 首发，其余 N-1 片落在同一窗内
+    //     被吞，出站口只看到第 1 片的前缀（半句）。
+    //   provider_job.rs:282-305 ToolCallProgress 是流式帧，参数一闭合就抢发
+    //     ToolArgumentsDelta（mark_complete() 短路，不等节流窗）。
+    //   provider_job.rs:189-198 stream_once 整体返回后，run_round 才用
+    //     outcome.partial_text 补发完整文本（"final values always published"）。
+    //
+    // ⇒ 帧序：MessageDelta(半句) → ToolArgumentsDelta → MessageDelta(全句)。
+    // 文本不丢（信息完整度 OK），但工具展示帧把一句话劈成两半；前端按到达
+    // 顺序把两类帧渲染进不同区域，就成了「话没说完先调工具、事后补全」。
+    //
+    // 观测点 = owner 单流 broadcast，即 daemon `handle_events_v2` 的
+    // `attach.receiver` 拿到的同一批帧（出站口排队前的最后一站；不含 axum
+    // mpsc(64) 序列化与网络，故这是延迟**下界**，不是 TCP 到屏时间）。
+    //
+    // 已知缺陷（本守卫当前应红）。修复方向：让 answer 终帧在首个工具进度帧
+    // 之前落地，或工具卡片延后到 ToolDeclared（其 seq 已在完整文本帧之后）
+    // 再建；修复后本测试自动转为回归守卫。
+
+    use qaqh_ringing_contract::events::{SessionEvent, SessionEventFrame};
+    use qaqh_ringing_contract::state::TimelineEntry;
+
+    /// 服务商按 token 分片的正常顺序：3 片连续文本，全部在工具调用之前。
+    const ANSWER_CHUNKS: [&str; 3] = ["好的，", "我这就开始", "展开调查"];
+
+    /// 上游时间顺序完全正常；不构造任何 content/tool_calls 交错。
+    fn normal_order_answer_then_tool_sse() -> String {
+        let mut frames = Vec::new();
+        for text in ANSWER_CHUNKS {
+            frames.push(
+                serde_json::json!({
+                    "choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]
+                })
+                .to_string(),
+            );
+        }
+        frames.push(
+            serde_json::json!({
+                "choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{
+                    "index":0,"id":"call_order_1","type":"function",
+                    "function":{"name":"__probe_unknown__","arguments":"{\"path\":\"x\"}"}
+                }]},"finish_reason":null}]
+            })
+            .to_string(),
+        );
+        frames.push(
+            serde_json::json!({
+                "choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+            })
+            .to_string(),
+        );
+        let mut body = String::new();
+        for frame in frames {
+            body.push_str("data: ");
+            body.push_str(&frame);
+            body.push_str("\n\n");
+        }
+        body.push_str("data: [DONE]\n\n");
+        body
+    }
+
+    fn stop_sse() -> String {
+        concat!(
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_string()
+    }
+
+    struct OutboundProbe {
+        loop_: Arc<SessionLoop>,
+        rx: tokio::sync::broadcast::Receiver<SessionEventFrame>,
+        upstream_written_at: Arc<Mutex<Option<std::time::Instant>>>,
+        _owners: Arc<OwnerDirectory>,
+    }
+
+    async fn outbound_probe(dir: &std::path::Path) -> OutboundProbe {
+        let owners = Arc::new(OwnerDirectory::open(dir.join("qaqh.db")).expect("open owners db"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: "SES-OUTBOUND".into(),
+                parent_session_id: None,
+                title: "outbound".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let rx = owner.subscribe();
+        let manager = Arc::new(Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(&[]),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            "SES-OUTBOUND",
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let base_url = format!("http://{}", server.server_addr());
+        let upstream_written_at: Arc<Mutex<Option<std::time::Instant>>> =
+            Arc::new(Mutex::new(None));
+        {
+            let t0 = Arc::clone(&upstream_written_at);
+            std::thread::spawn(move || {
+                let header = tiny_http::Header::from_bytes(
+                    &b"Content-Type"[..],
+                    &b"text/event-stream"[..],
+                )
+                .expect("header");
+                let mut n = 0usize;
+                for request in server.incoming_requests() {
+                    let payload = if n == 0 {
+                        normal_order_answer_then_tool_sse()
+                    } else {
+                        stop_sse()
+                    };
+                    n += 1;
+                    // 只记第一次 respond：第二次是工具结果后的收尾请求，不算上游进门。
+                    if n == 1 {
+                        *t0.lock().unwrap() = Some(std::time::Instant::now());
+                    }
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(payload).with_header(header.clone()),
+                    );
+                }
+            });
+        }
+        let mut provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        provider.retry = Some(qaqh_types::RetrySpec {
+            max_retries: 1,
+            ..Default::default()
+        });
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        let loop_ = SessionLoop::new("SES-OUTBOUND", owner, port, spec, dir.to_path_buf());
+        OutboundProbe {
+            loop_,
+            rx,
+            upstream_written_at,
+            _owners: owners,
+        }
+    }
+
+    fn brief(event: &SessionEvent) -> String {
+        let debug = format!("{event:?}");
+        debug.chars().take(150).collect()
+    }
+
+    #[tokio::test]
+    async fn upstream_chunk_to_outbound_latency_and_stream_completeness() {
+        use qaqh_ringing_contract::fact::{AssistantBlockKind, ContentValue};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut probe = outbound_probe(dir.path()).await;
+        probe.loop_.send_input(input("开始调查")).expect("send input");
+
+        let mut frames: Vec<(SessionEventFrame, std::time::Instant)> = Vec::new();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(8), probe.rx.recv()).await {
+                Ok(Ok(frame)) => {
+                    let ended = matches!(frame.event, SessionEvent::TurnEnded { .. });
+                    frames.push((frame, std::time::Instant::now()));
+                    if ended {
+                        break;
+                    }
+                }
+                Ok(Err(error)) => panic!("event channel: {error}"),
+                Err(_) => panic!("出站帧未在 8s 内收齐（已收 {} 帧）", frames.len()),
+            }
+        }
+
+        let t0 = probe
+            .upstream_written_at
+            .lock()
+            .unwrap()
+            .expect("上游未写出 SSE");
+        eprintln!("=== 出站口观测：t0 = 上游首个 SSE respond（共 {} 帧）===", frames.len());
+        for (frame, at) in &frames {
+            eprintln!(
+                "seq={:<3} +{:<5}ms {}",
+                frame.seq,
+                at.saturating_duration_since(t0).as_millis(),
+                brief(&frame.event)
+            );
+        }
+
+        // ① 延迟：上游内容驱动的首帧 / 回合收口末帧。
+        let first = frames
+            .iter()
+            .find(|(f, _)| {
+                matches!(
+                    f.event,
+                    SessionEvent::MessageDelta { .. } | SessionEvent::ToolArgumentsDelta { .. }
+                )
+            })
+            .expect("上游内容没有驱动任何出站帧");
+        let first_ms = first.1.saturating_duration_since(t0).as_millis();
+        let last_ms = frames
+            .last()
+            .unwrap()
+            .1
+            .saturating_duration_since(t0)
+            .as_millis();
+        eprintln!("[延迟] 首帧 {first_ms}ms / 回合收口 {last_ms}ms（下界，不含 axum+网络）");
+        assert!(first_ms < 5_000, "上游内容到出站口首帧超过 5s：{first_ms}ms");
+        assert!(last_ms < 8_000, "回合收口超过 8s：{last_ms}ms");
+
+        // ② 信息完整度：区分「上游丢信息」与「流式通道丢信息」。
+        eprintln!("[上游] content 分片顺序 = {ANSWER_CHUNKS:?}（全部在 tool_calls 之前，时间顺序正常）");
+        let expected: String = ANSWER_CHUNKS.concat();
+        let seal_text = frames.iter().find_map(|(f, _)| match &f.event {
+            SessionEvent::TimelineAppended {
+                entry:
+                    TimelineEntry::AssistantBlock {
+                        block_kind, content, ..
+                    },
+            } if *block_kind == AssistantBlockKind::Answer => match content {
+                ContentValue::Inline { text } => Some(text.as_str()),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(
+            seal_text,
+            Some(expected.as_str()),
+            "上游全文在 seal 里必须完整；若这里就缺，是上游/解析丢信息，不是展示通道问题"
+        );
+
+        let answer_deltas: Vec<(u64, &str)> = frames
+            .iter()
+            .filter_map(|(f, _)| match &f.event {
+                SessionEvent::MessageDelta {
+                    block_kind, text, ..
+                } if *block_kind == AssistantBlockKind::Answer => Some((f.seq, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        let tool_declared_seq = frames.iter().find_map(|(f, _)| match &f.event {
+            SessionEvent::ToolDeclared { .. } => Some(f.seq),
+            _ => None,
+        });
+        eprintln!("[完整度] answer MessageDelta 序列 = {answer_deltas:?}");
+        eprintln!("[完整度] seal 全文 = {seal_text:?} / 首个 ToolDeclared seq = {tool_declared_seq:?}");
+
+        // 替换语义的终值必须等于上游完整回答，不能停在半句等 seal 事后补。
+        assert_eq!(
+            answer_deltas.last().map(|(_, t)| *t),
+            Some(expected.as_str()),
+            "MessageDelta 终值停在半句 → 前端先显示半句、工具卡片插队、完整文本事后才补"
+        );
+        if let Some(seq) = tool_declared_seq {
+            assert!(
+                answer_deltas
+                    .iter()
+                    .any(|(s, t)| *t == expected && *s < seq),
+                "完整回答帧必须先于工具声明（seq {seq}）到达出站口"
+            );
+        }
+
+        // ③ 展示顺序：answer 的 MessageDelta 序列必须连续，中间不得夹工具展示帧。
+        let first_answer_seq = answer_deltas.first().map(|(s, _)| *s);
+        let last_answer_seq = answer_deltas.last().map(|(s, _)| *s);
+        let interleaved: Vec<u64> = frames
+            .iter()
+            .filter_map(|(f, _)| {
+                let is_tool_frame = matches!(
+                    f.event,
+                    SessionEvent::ToolArgumentsDelta { .. }
+                        | SessionEvent::ToolDeclared { .. }
+                        | SessionEvent::ToolStateChanged { .. }
+                        | SessionEvent::ToolFinished { .. }
+                );
+                let within = Some(f.seq) > first_answer_seq && Some(f.seq) < last_answer_seq;
+                (is_tool_frame && within).then_some(f.seq)
+            })
+            .collect();
+        eprintln!(
+            "[顺序] answer 区间 {first_answer_seq:?}..={last_answer_seq:?} 内夹的工具帧 seq = {interleaved:?}"
+        );
+        assert!(
+            interleaved.is_empty(),
+            "工具展示帧插在 answer 的两帧 MessageDelta 之间 → 前端呈现『半句 → 工具卡片 → 事后补全』"
+        );
+    }
 }

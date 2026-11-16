@@ -10,9 +10,17 @@ use std::io::{Read, Write};
 /// 诊断日志 sink：daemon 此前无任何 logger 初始化，agent loop（前 msgloop crate，现
 /// runtime/agent）的 [COMPACT]/[TURN] 等 log::error/warn 全部丢弃，压缩失败等原因无从追查。
 /// 追加写入 `<数据目录>/qaqh-daemon.log`（Windows: `%USERPROFILE%\.qaqh`）。
+///
+/// gate 诊断拆分：`qaqh_gate::*` 目标（wire 级参数/身份埋点）与 daemon.log 里
+/// file_cache 之类的高频日志彻底分流到 `<数据目录>/qaqh-gate.log`——主日志
+/// 被 CACHE invalidated 刷屏后，wire 排查只能靠翻页。路由键是 log target 前缀，
+/// 格式与主日志一致；gate 文件打开失败时全部回退主日志（诊断可丢，日志不能丢）。
 fn init_file_logging() {
-    struct FileLogger(std::sync::Mutex<std::fs::File>);
-    impl log::Log for FileLogger {
+    struct SplitFileLogger {
+        daemon: std::sync::Mutex<std::fs::File>,
+        gate: Option<std::sync::Mutex<std::fs::File>>,
+    }
+    impl log::Log for SplitFileLogger {
         fn enabled(&self, metadata: &log::Metadata) -> bool {
             metadata.level() <= log::Level::Info
         }
@@ -20,7 +28,12 @@ fn init_file_logging() {
             if !self.enabled(record.metadata()) {
                 return;
             }
-            let Ok(mut file) = self.0.lock() else {
+            let routed = self
+                .gate
+                .as_ref()
+                .filter(|_| record.target().starts_with("qaqh_gate"))
+                .unwrap_or(&self.daemon);
+            let Ok(mut file) = routed.lock() else {
                 return;
             };
             let secs = std::time::SystemTime::now()
@@ -39,15 +52,21 @@ fn init_file_logging() {
     }
     // 与 platform::data_dir() 同根：多实例（QAQH_DATA_DIR）时日志必须落在
     // 各自数据根，否则两个 daemon 混写同一文件（冒烟测试实证）。
-    let path = qaqh_types::platform::data_dir().join("qaqh-daemon.log");
-    let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-    else {
+    let open = |name: &str| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(qaqh_types::platform::data_dir().join(name))
+            .ok()
+    };
+    let Some(daemon) = open("qaqh-daemon.log") else {
         return;
     };
-    let _ = log::set_boxed_logger(Box::new(FileLogger(std::sync::Mutex::new(file))));
+    let gate = open("qaqh-gate.log");
+    let _ = log::set_boxed_logger(Box::new(SplitFileLogger {
+        daemon: std::sync::Mutex::new(daemon),
+        gate: gate.map(std::sync::Mutex::new),
+    }));
     log::set_max_level(log::LevelFilter::Info);
 }
 
@@ -136,9 +155,10 @@ fn main() {
         }
         Some("todo") => std::process::exit(todo_cli(&args[1..])),
         Some("mcp") => std::process::exit(mcp_cli(&args[1..])),
+        Some("marketplace") => std::process::exit(marketplace_cli(&args[1..])),
         Some(command) => {
             eprintln!(
-                "unknown command: {command}; expected run [--acp], acp, server, status, stop, todo, or mcp"
+                "unknown command: {command}; expected run [--acp], acp, server, status, stop, todo, mcp, or marketplace"
             );
             std::process::exit(2);
         }
@@ -711,6 +731,10 @@ fn mcp_cli(args: &[String]) -> i32 {
             let path = Path::new(root.as_deref().unwrap_or(".")).join(".mcp.json");
             qaqh_config::mcp_import::scan_claude(&path, ExternalSource::ClaudeProject)
         }
+        ExternalSource::Marketplace => {
+            eprintln!("mcp import: marketplace 源走 `qaqh-daemon marketplace install`");
+            return 2;
+        }
     };
     if servers.is_empty() {
         println!("no MCP servers found for source {}", source.from_flag());
@@ -797,6 +821,358 @@ fn mcp_cli(args: &[String]) -> i32 {
     }
     println!("(config saved; restart daemon or wait for config reload to take effect)");
     0
+}
+
+// ───────────────────────── marketplace CLI（ADR-0022） ─────────────────────────
+//
+// 市场注册/安装的用户面。正典清单 = `.agents/plugins/marketplace.json`（中立
+// 命名空间，Codex 原生读、occ 配套补丁读）；安装投影面见 qaqh-marketplace
+// installer 模块注。
+//
+// 用法：
+//   qaqh-daemon marketplace add --name <n> (--url <git-url> | --local <dir>)
+//   qaqh-daemon marketplace list
+//   qaqh-daemon marketplace remove --name <n>
+//   qaqh-daemon marketplace update --name <n>
+//   qaqh-daemon marketplace install --marketplace <m> --plugin <p>
+//       --target qaqh|codex|claude [--exec]
+//   qaqh-daemon marketplace installed [--target qaqh|codex|claude]
+//   qaqh-daemon marketplace uninstall --plugin <p> --target qaqh|codex|claude [--exec]
+
+fn marketplace_cli(args: &[String]) -> i32 {
+    use qaqh_marketplace::installer::{self, HostTarget};
+    use qaqh_marketplace::manifest;
+    use qaqh_marketplace::registry;
+
+    fn home_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(std::path::PathBuf::from)
+            .filter(|path| !path.as_os_str().is_empty())
+    }
+
+    /// `--flag value` 提取。
+    fn flag(args: &[String], name: &str) -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1).cloned())
+    }
+
+    fn has(args: &[String], name: &str) -> bool {
+        args.iter().any(|a| a == name)
+    }
+
+    let Some(sub) = args.first().map(String::as_str) else {
+        eprintln!(
+            "usage: qaqh-daemon marketplace add|list|remove|update|install ...（见模块注）"
+        );
+        return 2;
+    };
+    let Some(home) = home_dir() else {
+        eprintln!("marketplace: 无法定位用户主目录（USERPROFILE/HOME）");
+        return 1;
+    };
+    let rest = &args[1..];
+
+    match sub {
+        "add" => {
+            let (Some(name), url, local) = (flag(rest, "--name"), flag(rest, "--url"), flag(rest, "--local")) else {
+                eprintln!("marketplace add: --name 必填，--url/--local 二选一");
+                return 2;
+            };
+            match registry::add(&home, &name, &url.unwrap_or_default(), &local.unwrap_or_default())
+            {
+                Ok(entry) => {
+                    println!("marketplace {:?} 已注册", entry.name);
+                    0
+                }
+                Err(error) => {
+                    eprintln!("marketplace add: {error}");
+                    1
+                }
+            }
+        }
+        "list" => {
+            let rows = registry::list_with_manifests(&home);
+            if rows.is_empty() {
+                println!("(no marketplaces; add one first)");
+                return 0;
+            }
+            for (entry, manifest) in &rows {
+                match manifest {
+                    Ok(m) => {
+                        println!("{} [{}]", entry.name, if entry.local.is_empty() { "url" } else { "local" });
+                        for plugin in &m.plugins {
+                            println!(
+                                "  - {:?} v={} [{}] {}",
+                                plugin.name,
+                                if plugin.version.is_empty() { "-" } else { &plugin.version },
+                                if plugin.category.is_empty() { "-" } else { &plugin.category },
+                                plugin.description,
+                            );
+                        }
+                    }
+                    Err(error) => println!("{} [清单不可读: {error}]", entry.name),
+                }
+            }
+            0
+        }
+        "remove" => {
+            let Some(name) = flag(rest, "--name") else {
+                eprintln!("marketplace remove: --name 必填");
+                return 2;
+            };
+            match registry::remove(&home, &name) {
+                Ok(()) => {
+                    println!("marketplace {name:?} 已注销（缓存已删）");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("marketplace remove: {error}");
+                    1
+                }
+            }
+        }
+        "update" => {
+            let Some(name) = flag(rest, "--name") else {
+                eprintln!("marketplace update: --name 必填");
+                return 2;
+            };
+            match registry::update(&home, &name) {
+                Ok(()) => {
+                    println!("marketplace {name:?} 已更新");
+                    0
+                }
+                Err(error) => {
+                    eprintln!("marketplace update: {error}");
+                    1
+                }
+            }
+        }
+        "install" => {
+            let (Some(marketplace_name), Some(plugin_name), Some(target_flag)) = (
+                flag(rest, "--marketplace"),
+                flag(rest, "--plugin"),
+                flag(rest, "--target"),
+            ) else {
+                eprintln!("marketplace install: --marketplace/--plugin/--target 必填");
+                return 2;
+            };
+            let exec = has(rest, "--exec");
+            let Ok(target) = HostTarget::from_flag(&target_flag) else {
+                eprintln!("marketplace install: {target_flag}");
+                return 2;
+            };
+            let market_root = match registry::resolve_root(&home, &marketplace_name) {
+                Ok(root) => root,
+                Err(error) => {
+                    eprintln!("marketplace install: {error}");
+                    return 1;
+                }
+            };
+            let manifest = match manifest::load_manifest(&market_root) {
+                Ok(manifest) => manifest,
+                Err(error) => {
+                    eprintln!("marketplace install: {error}");
+                    return 1;
+                }
+            };
+            let Some(entry) = manifest.plugins.iter().find(|p| p.name == plugin_name) else {
+                eprintln!(
+                    "marketplace install: 插件 {plugin_name:?} 不在市场 {marketplace_name:?} 清单中"
+                );
+                return 1;
+            };
+            let plan = match installer::plan(entry, &market_root, target, &home, &marketplace_name) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    eprintln!("marketplace install: {error}");
+                    return 1;
+                }
+            };
+            if !exec {
+                println!("install plan ({} -> {}):", entry.name, target.flag());
+                for line in plan.describe() {
+                    println!("  {line}");
+                }
+                println!("(dry-run; re-run with --exec)");
+                return 0;
+            }
+
+            // --exec。市场内容 = 第三方供应链面：MCP server 逐个确认；
+            // skill 拷贝随 --exec 直接执行（计划已在上一步 dry-run 呈现）。
+            let secrets = qaqh_config::secrets::SecretStore::default_location();
+            let report = if target == HostTarget::Qaqh {
+                use qaqh_types::ConfigStore;
+                let store = ConfigStore::default_location();
+                let mut config = match qaqh_config::Config::load() {
+                    Ok(config) => config,
+                    Err(error) => {
+                        eprintln!("marketplace install: config load failed: {error}");
+                        return 1;
+                    }
+                };
+                let report = match installer::execute(
+                    &plan,
+                    &|server| {
+                        print!(
+                            "import MCP server {:?} from marketplace (third-party content)? [y/N] ",
+                            server.name
+                        );
+                        use std::io::Write as _;
+                        let _ = std::io::stdout().flush();
+                        let mut line = String::new();
+                        std::io::stdin().read_line(&mut line).is_ok()
+                            && line.trim().eq_ignore_ascii_case("y")
+                    },
+                    &mut config.mcp,
+                    &secrets,
+                    &home,
+                ) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        eprintln!("marketplace install: {error}");
+                        return 1;
+                    }
+                };
+                if let Err(error) = config.save_with(&store, &secrets) {
+                    eprintln!("marketplace install: config save failed: {error}");
+                    return 1;
+                }
+                report
+            } else {
+                // codex/claude 目标无 MCP 导入（plan 阶段已拒），config 参数不触达。
+                let mut unused = qaqh_config::config::McpConfig::default();
+                match installer::execute(&plan, &|_| true, &mut unused, &secrets, &home) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        eprintln!("marketplace install: {error}");
+                        return 1;
+                    }
+                }
+            };
+            if !report.copied_skills.is_empty() {
+                println!("installed skills: {:?}", report.copied_skills);
+            }
+            if !report.imported_servers.is_empty() {
+                println!("imported MCP servers: {:?}", report.imported_servers);
+            }
+            if !report.skipped_existing.is_empty() {
+                println!("skipped (already configured): {:?}", report.skipped_existing);
+            }
+            if !report.rejected.is_empty() {
+                println!("rejected (not confirmed): {:?}", report.rejected);
+            }
+            println!("(restart daemon / re-open host session to take effect)");
+            0
+        }
+        "installed" => {
+            let records = match installer::installed_list(&home) {
+                Ok(records) => records,
+                Err(error) => {
+                    eprintln!("marketplace installed: {error}");
+                    return 1;
+                }
+            };
+            let filter = flag(rest, "--target");
+            let mut shown = 0;
+            for record in &records {
+                if let Some(target) = &filter
+                    && record.target != *target
+                {
+                    continue;
+                }
+                shown += 1;
+                println!(
+                    "{} [{}] marketplace={} skills={:?} mcp={:?}",
+                    record.plugin,
+                    record.target,
+                    record.marketplace,
+                    record.skills,
+                    record.mcp_servers
+                );
+            }
+            if shown == 0 {
+                println!("(no installed plugins)");
+            }
+            0
+        }
+        "uninstall" => {
+            let (Some(plugin_name), Some(target_flag)) = (flag(rest, "--plugin"), flag(rest, "--target")) else {
+                eprintln!("marketplace uninstall: --plugin/--target 必填");
+                return 2;
+            };
+            let exec = has(rest, "--exec");
+            let Ok(target) = HostTarget::from_flag(&target_flag) else {
+                eprintln!("marketplace uninstall: {target_flag}");
+                return 2;
+            };
+            let plan = match installer::uninstall_plan(&home, &plugin_name, target, &home) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    eprintln!("marketplace uninstall: {error}");
+                    return 1;
+                }
+            };
+            if !exec {
+                println!("uninstall plan ({} -> {}):", plugin_name, target.flag());
+                for line in plan.describe() {
+                    println!("  {line}");
+                }
+                println!("(dry-run; re-run with --exec)");
+                return 0;
+            }
+            let secrets = qaqh_config::secrets::SecretStore::default_location();
+            let report = if target == HostTarget::Qaqh {
+                use qaqh_types::ConfigStore;
+                let store = ConfigStore::default_location();
+                let mut config = match qaqh_config::Config::load() {
+                    Ok(config) => config,
+                    Err(error) => {
+                        eprintln!("marketplace uninstall: config load failed: {error}");
+                        return 1;
+                    }
+                };
+                let report = match installer::uninstall_execute(&plan, &mut config.mcp, &secrets, &home)
+                {
+                    Ok(report) => report,
+                    Err(error) => {
+                        eprintln!("marketplace uninstall: {error}");
+                        return 1;
+                    }
+                };
+                if let Err(error) = config.save_with(&store, &secrets) {
+                    eprintln!("marketplace uninstall: config save failed: {error}");
+                    return 1;
+                }
+                report
+            } else {
+                let mut unused = qaqh_config::config::McpConfig::default();
+                match installer::uninstall_execute(&plan, &mut unused, &secrets, &home) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        eprintln!("marketplace uninstall: {error}");
+                        return 1;
+                    }
+                }
+            };
+            if !report.removed_skills.is_empty() {
+                println!("removed skills: {:?}", report.removed_skills);
+            }
+            if !report.removed_servers.is_empty() {
+                println!("removed MCP servers: {:?}", report.removed_servers);
+            }
+            if !report.removed_secrets.is_empty() {
+                println!("removed secrets: {:?}", report.removed_secrets);
+            }
+            println!("(restart daemon / re-open host session to take effect)");
+            0
+        }
+        other => {
+            eprintln!("marketplace: unknown subcommand {other:?}");
+            2
+        }
+    }
 }
 
 #[cfg(test)]

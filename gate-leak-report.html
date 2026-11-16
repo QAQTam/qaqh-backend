@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>思考链路输出泄露 · 排查与处置报告</title>
+<style>
+  :root { color-scheme: light dark; --fg:#1b1f24; --bg:#f7f8fa; --card:#ffffff; --border:#dfe3e8; --muted:#5c6672; --accent:#0b62c4; --ok:#0a7a3c; --warn:#a15c00; --bad:#b42318; --code:#f1f3f6; }
+  @media (prefers-color-scheme: dark) { :root { --fg:#e7ebf0; --bg:#12151a; --card:#1b2028; --border:#313946; --muted:#99a4b2; --accent:#74b8ff; --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --code:#0f1319; } }
+  * { box-sizing: border-box; }
+  body { margin:0; padding:30px 18px 70px; background:var(--bg); color:var(--fg); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",system-ui,sans-serif; line-height:1.72; font-size:15px; }
+  .wrap { max-width:960px; margin:0 auto; }
+  h1 { font-size:26px; margin:0 0 6px; letter-spacing:.2px; }
+  h2 { font-size:19px; margin:36px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--border); }
+  h3 { font-size:16px; margin:22px 0 8px; }
+  p { margin:10px 0; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:22px; }
+  .verdict { background:var(--card); border:1px solid var(--border); border-left:5px solid var(--accent); border-radius:10px; padding:16px 18px; margin:18px 0; }
+  .verdict strong { color:var(--accent); }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(200px,1fr)); gap:12px; margin:16px 0; }
+  .kpi { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+  .kpi b { display:block; font-size:12.5px; color:var(--muted); font-weight:600; }
+  .kpi span { font-size:18px; font-weight:700; }
+  table { width:100%; border-collapse:collapse; margin:12px 0; font-size:14px; }
+  th, td { border:1px solid var(--border); padding:9px 11px; text-align:left; vertical-align:top; }
+  th { background:var(--code); font-weight:650; }
+  code, pre { font-family:ui-monospace,SFMono-Regular,Consolas,"Cascadia Mono",monospace; }
+  code { background:var(--code); padding:1px 5px; border-radius:4px; font-size:.92em; }
+  pre { background:var(--code); border:1px solid var(--border); border-radius:8px; padding:14px 16px; overflow-x:auto; font-size:13px; line-height:1.62; }
+  pre code { background:none; padding:0; }
+  .ok { color:var(--ok); font-weight:650; }
+  .warn { color:var(--warn); font-weight:650; }
+  .bad { color:var(--bad); font-weight:650; }
+  ul, ol { padding-left:22px; }
+  li { margin:5px 0; }
+  .note { background:var(--card); border:1px dashed var(--border); border-radius:8px; padding:12px 14px; font-size:13.5px; color:var(--muted); }
+  footer { margin-top:42px; color:var(--muted); font-size:12.5px; border-top:1px solid var(--border); padding-top:14px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>思考链路输出泄露 · 排查与处置报告</h1>
+<p class="sub">QAQ-Harness · 2026-11-16 · 会话 ses_01M7H9YG8TEQ8BMY0XAVGBGK7V<br>
+本文件为落盘 HTML，绕过仍在运行的旧版 gate 流式解析。文中所有触发标记一律以 HTML 实体书写：浏览器照常显示，但写入这份文件的通道本身不会命中那个字符串状态机。</p>
+
+<div class="verdict">
+  <strong>结论：是 gate 侧 bug，不是远端「切到思考链完成最后输出」。</strong><br>
+  远端始终在 <code>content</code> 字段正常流式吐正文；是 gate 把 <code>content</code> 文本按写死的字符串标签重新分类，
+  误发成 <code>StreamEvent::ReasoningDelta</code>，于是正文被灌进思考链路，并一路持久化到回放历史。
+  「输出到某个特定语句后突然切过去」正是<strong>内容字符串匹配触发</strong>的特征，与远端按生成阶段切换字段的行为不符。
+</div>
+
+<div class="grid">
+  <div class="kpi"><b>引入提交</b><span>27ded88a</span></div>
+  <div class="kpi"><b>引入日期</b><span>2026-10-06</span></div>
+  <div class="kpi"><b>受影响 LTS release</b><span>3 / 3</span></div>
+  <div class="kpi"><b>回归验证</b><span>43 passed / 0 failed</span></div>
+</div>
+
+<h2>1. 触发机制</h2>
+<p>根因位于 <code>crates/qaqh-gate/src/chat_sdk.rs</code>：<code>split_inline_thinking</code>（原 65–85 行）是一个跨整个请求的有状态机，
+在 <code>consume</code>（原 621 / 639 行）里对<strong>每一个</strong> <code>SdkEvent::TextDelta</code>（即 <code>content</code> 正文）<strong>无条件运行</strong>，
+无 provider 门控、无跨 delta 标签拼接缓冲。marker 写死为 <code>&lt;think&gt;</code> 与 <code>&lt;/think&gt;</code>。</p>
+<ul>
+  <li>命中开标记即把 <code>in_thinking</code> 翻为 true，此后所有正文经 <code>push_reasoning</code> 发成 <code>ReasoningDelta</code>；正文里几乎不会有配对的闭标记，状态<strong>卡死</strong> → 表现就是「最后一段像是在思考链里说完的」。</li>
+  <li>标记是固定字面量，但函数每次只看单个 delta：闭标记一旦被 SSE 切成两帧就识别不到，状态同样卡死；这解释了现象的<strong>偶发性 / 边界相关</strong>。</li>
+  <li>注释自称 "compatibility guard"，实际却对所有 Chat Completions 端点的所有正文生效。</li>
+</ul>
+
+<h3>最小复现（精确复刻该纯函数，node 跑的，未编译仓库）</h3>
+<table>
+  <tr><th>场景</th><th>落到【正文】</th><th>落到【思考链】</th><th>结束态</th></tr>
+  <tr>
+    <td>A：正文里引用该字面量（不闭合），之后继续正常输出</td>
+    <td><code>"用法示例：在配置里写 "</code></td>
+    <td><code>" 即可开启思考模式。 然后这里是正常的收尾正文，一直到本句结束。"</code></td>
+    <td class="bad">inThinking=true（卡死）</td>
+  </tr>
+  <tr>
+    <td>B：闭标记被切成 <code>&lt;/thi</code> + <code>nk&gt;</code> 两帧</td>
+    <td><code>"先想一下"</code></td>
+    <td><code>"内部推理过程&lt;/think&gt; 之后本该是正文的全部内容以及后续第二帧正文"</code></td>
+    <td class="bad">inThinking=true（卡死）</td>
+  </tr>
+</table>
+<p>两种场景都稳定把<strong>后续正文</strong>灌进思考链，远端完全没参与 —— 纯本地字符串处理。</p>
+
+<h3>完整链路（为什么是持久泄露，不只是显示错）</h3>
+<pre><code>远端 content delta
+  → gate consume: 状态机翻转 → ReasoningDelta          ← 错在这里
+  → sdk_common.rs finalize(94-99): 按 reasoning/text 缓冲分别建 ContentBlock::Reasoning / Text
+      → Done.raw_message 里这段落成思考块（回放历史也错）
+  → provider_job.rs(269-281): 完全信任 gate 分类、无二次纠正 → publish_block(Reasoning)</code></pre>
+<p>现有测试 <code>inline_think_tags_split_across_chunks</code>（原 916 行）只测了「标签完整闭合」的正向场景，没有覆盖「正文里出现该字面量却不闭合」与「标签被切块」，所以这个洞一直没人踩到。</p>
+
+<h3>为什么排除「远端切通道」</h3>
+<ul>
+  <li>真·思考通道是<strong>字段级</strong>的：<code>chat_profile</code> 的 <code>aliases.response_text = [reasoning_content, reasoning, thinking, analysis_content]</code>，由 SDK 解析成 <code>SdkEvent::ReasoningDelta</code>（原 654 行）如实转发。</li>
+  <li>远端按生成阶段 / 协议决定把字节放 <code>content</code> 还是 <code>reasoning_content</code>，<strong>不会因为「看到自己输出的某个语句」而切换字段</strong>。</li>
+  <li>全仓唯一「看到某个字面量就改变后续分类」的代码就是这个状态机，与现象严丝合缝。</li>
+  <li>影响范围仅 <strong>Chat Completions wire</strong>（<code>/chat/completions</code> 全部端点）；messages / responses / gemini 三条 wire 没有这层标签切分。</li>
+</ul>
+<div class="note"><strong>一把区分的取证方法</strong>：用 <code>scripts/wire-capture-proxy.mjs</code> + <code>crates/qaqh-gate/examples/gate_wire_probe.rs</code>（<code>QAQH_GATE_PROBE_WIRE=chat</code>）同时抓「上游回了什么字段」与「gate 发了什么 StreamEvent」。
+gate bug：上游始终在 <code>delta.content</code> 输出，但 gate 出 <code>ReasoningDelta</code>，且泄露起点那一句含该字面量 → 字段 / 事件错配。
+远端切通道：上游字段本身变成 <code>delta.reasoning_content</code>（或 Responses 的 reasoning item），切换点与「某个语句」无关。</div>
+
+<h2>2. 追溯结果</h2>
+<table>
+  <tr><th>项</th><th>值</th><th>证据</th></tr>
+  <tr>
+    <td>引入提交</td>
+    <td><code>27ded88a</code> — <code>refactor(gate,config): 传输层走 mutil-ai 统一 SDK，配置收口 BYOK 六字段</code></td>
+    <td>QAQTam，2026-10-06 16:29:05 +0800</td>
+  </tr>
+  <tr>
+    <td>原始位置</td>
+    <td><code>crates/qaqh-gate/src/openai_sdk.rs</code>（该次重构新建；同批删掉 chat_completions_api.rs / message_api.rs / responses_api.rs / sse.rs），后重命名为 <code>chat_sdk.rs</code></td>
+    <td><code>git blame -L 62,85</code> 全部归属它；<code>git log --follow -S</code> 确认最早</td>
+  </tr>
+  <tr>
+    <td>误导线索</td>
+    <td><code>git log -S</code> 在新路径上返回的 4 个「Generative UI 协议版本说明」提交只是<strong>文件路径搬迁</strong></td>
+    <td>不是逻辑引入点</td>
+  </tr>
+</table>
+
+<h3>版本时间线（决定性）</h3>
+<table>
+  <tr><th>tag</th><th>发布</th><th>含 27ded88a</th><th>release 资产</th></tr>
+  <tr><td>v3.0.0</td><td>2026-11-09</td><td class="bad">是</td><td>3</td></tr>
+  <tr><td>v3.1.0</td><td>2026-11-13</td><td class="bad">是</td><td>4</td></tr>
+  <tr><td>v4.0.0（Latest）</td><td>2026-11-15</td><td class="bad">是</td><td>4</td></tr>
+</table>
+<p><code>git merge-base --is-ancestor</code> 与 <code>git tag --contains</code> 双重确认：三个 LTS release <strong>全部带此缺陷，不存在「干净的旧版」可留</strong>。
+因此「删掉旧版 release 来保护新用户」会适得其反：删光后没有 Latest 可下、11 个二进制资产 URL 与所有 LTS tag 引用 404、不可逆，且与本仓 LTS 定位（规则 21）冲突。已记录为 ADR-0023 的被否选项。</p>
+
+<h2>3. 已完成的处置</h2>
+<p>按所有者确认的口径：<strong>先修 bug → 发修复版设 Latest → 旧版保留并标注警示</strong>。按宪法 3/4/5/9 采取「直接砍掉兼容层」，而不是打防御补丁或加 provider 门控 —— 门控要往 <code>ConfigDto</code> 加字段 ⇒ wire 实变 ⇒ 把一次 bugfix 升级成换锁发版，代价倒挂。</p>
+<table>
+  <tr><th>动作</th><th>落点</th><th>验证</th></tr>
+  <tr>
+    <td>删除状态机</td>
+    <td><code>chat_sdk.rs</code>：删函数 / <code>inline_thinking</code> 状态 / 切分调用；<code>TextDelta</code> 一律 <code>state.text.push_str</code> + <code>ContentDelta</code>；删只测「标签完整闭合」的旧单测。思考只认端点声明的 reasoning 字段别名。</td>
+    <td class="ok">grep 零残留</td>
+  </tr>
+  <tr>
+    <td>反证回归钉</td>
+    <td><code>gate_test.rs::literal_think_tag_in_content_stays_in_answer</code>：正文含该字面量时断言 0 个 <code>ReasoningDelta</code>、<code>Done</code> 不带 <code>Reasoning</code> 块</td>
+    <td class="ok">ok</td>
+  </tr>
+  <tr>
+    <td>官方验证（规则 20）</td>
+    <td><code>cargo test -p qaqh-gate --test gate_test -- --skip anthropic</code></td>
+    <td class="ok">43 passed / 0 failed</td>
+  </tr>
+  <tr>
+    <td>决策留痕（规则 17 / 宪法 9）</td>
+    <td><code>docs/adr/0023-retire-inline-think-split.md</code> + <code>docs/adr/README.md</code> 索引</td>
+    <td class="ok">已落盘</td>
+  </tr>
+  <tr>
+    <td>旧版标注警示</td>
+    <td>gh 上 v3.0.0 / v3.1.0 / v4.0.0 的 release body 追加已知缺陷警示（保留原文与全部资产，不碰 tag / title / Latest）</td>
+    <td class="ok">读回：警示=1、原资产说明=1、assets 3/4/4 不变、Latest 仍 v4.0.0</td>
+  </tr>
+</table>
+<div class="note"><strong>关于完整测试集的 6 个 anthropic 失败</strong>：报 <code>max_tokens 4096 is below the thinking budget requirement 5120</code> 与 sync 无 runtime context。
+这些测试与 <code>4096 + high</code> 的 helper 在 HEAD 里本就存在，本次 diff <strong>零触及</strong> anthropic / messages / thinking_budget，
+属并发写入者正在改 <code>messages_sdk.rs</code> / config 那片导致的<strong>预存基线红</strong>（规则 18 反证）。未越界代修（规则 19），但发版前需要 owner 跟进使其变绿。</div>
+
+<h2>4. 未完成：发 v4.0.1 设 Latest</h2>
+<p class="warn">没有在当前状态下强行打 tag / push，三个实测硬阻塞：</p>
+<ol>
+  <li><code>Cargo.toml</code>、<code>Cargo.lock</code>、<code>docs/api-surface/v4.0/**</code> 正被并发写入者重写 —— 版本戳同步与 v4.0 金标准机器重切<strong>恰好落在同一批文件</strong>（规则 19 撞车面未收敛）。</li>
+  <li><code>main</code> 另有 1 个<strong>未推送</strong>提交 <code>e8a7a60c</code>（exec ConPTY 修复），发版基线不干净。</li>
+  <li><code>release.yml</code> 的 <code>make_latest: true</code> 依赖 tag push → CI 三平台 release 构建；打 tag / push 是<strong>不可逆的 owner 级决策</strong>（ADR-0010 §切线实施记录）。</li>
+</ol>
+<p><code>git fetch</code> 那次 <code>github.com:443</code> 超时是瞬时抖动，<code>git ls-remote</code> 复测已通，不是当前阻塞。</p>
+<p><strong>「不影响新下载用户」当前已被覆盖</strong>：三个 release（含 Latest）都挂了醒目警示，新用户下载前即可看到「勿用于新部署」。但真正拿到修复版仍需 v4.0.1 落地。</p>
+
+<h2>5. 可直接执行的发版清单（并发收敛后）</h2>
+<pre><code>1. 版本戳 4.0.0 → 4.0.1：
+   Cargo.toml:58            [workspace.package].version
+   qaqh-backend.lock.json:2 version
+   crates/qaqh-types/src/platform.rs:21   (统一 UA)
+   Cargo.lock 内 workspace crate 版本 + 契约导出常量
+   （按 ADR-0010「五处同步」由机器 / 脚本收口，勿手改金标准）
+
+2. 干净提交：chat_sdk.rs 修复 + gate_test.rs 回归钉 + ADR-0023 + 索引
+   （本次改动目前留在工作区，未替你 commit）
+
+3. git tag -a v4.0.1 && git push origin main --follow-tags
+   → .github/workflows/release.yml 自动三平台 release 构建
+     + qaqh-sdk-contract zip + make_latest: true
+
+4. gh release list 复核 v4.0.1 = Latest；
+   把旧版警示文案改成「已修复，请升级 v4.0.1」</code></pre>
+
+<h2>6. 诚实边界</h2>
+<ul>
+  <li>排查为源码静态分析 + 对该纯函数的最小复现；<strong>没有</strong>本机 release 全量构建、没有跑契约官方命令、没有现场抓包数据（内存 7.9GB / 8 核，遵循规则 7/10）。</li>
+  <li>修复改动<strong>未提交 git commit</strong>；工作区另有大量并发写入者的未提交改动，未触碰。</li>
+  <li>本文件里所有触发标记以 HTML 实体（<code>&amp;lt;think&amp;gt;</code>）书写：既让浏览器正确显示，又保证写入这份文件的通道本身不被旧版 gate 状态机误判 —— 这正是改用 HTML 查看的原因。</li>
+  <li>契约面分类：导出物（<code>StreamEvent</code> 变体 / 契约 DTO / 快照）零字节变化 ⇒ 不触发规则 15 的三种分类，不 bump revision、不开新 LTS 线（规则 21）。</li>
+</ul>
+
+<footer>QAQ-Harness · 排查会话 ses_01M7H9YG8TEQ8BMY0XAVGBGK7V · 报告生成于 2026-11-16 · 本文件自包含、不依赖网络，可直接用浏览器打开。</footer>
+
+</div>
+</body>
+</html>

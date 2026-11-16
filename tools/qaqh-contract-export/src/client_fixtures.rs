@@ -15,7 +15,7 @@ use qaqh_ringing_contract::fact::{
     ActivityState, AgentPath, ContentValue, InterAgentActor, InterAgentDelivery, InteractionKind,
     MessageId, SessionId,
 };
-use qaqh_ringing_contract::state::{DriverState, InteractionView, PermissionRequestDetails};
+use qaqh_ringing_contract::state::{InteractionView, PermissionRequestDetails};
 use qaqh_ringing_contract::team::{
     TaskBoardSnapshot, TaskView, TeamAgentResidency, TeamAgentSnapshot, TeamAgentStatus,
     TeamBoardSnapshot, TeamInboxSummary, TeamSnapshot,
@@ -73,10 +73,6 @@ fn write_bootstrap(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             interactions: Vec::new(),
             subagents: Vec::new(),
             exec_sessions: Vec::new(),
-            driver: Some(DriverState {
-                holder: None,
-                epoch: 4,
-            }),
             // ADR-0015：夹具会话无 goal（缺席 = 无目标,默认态）。
             goal: None,
             // 夹具 timeline 为空 = 完整快照,无尾窗边界(尾窗仅大库 bootstrap 填充)。

@@ -602,7 +602,11 @@ fn parse_type(c: &mut Cursor) -> Result<TsType, String> {
         if rhs != "null" {
             return Err(format!("unsupported union member {rhs:?} in field position"));
         }
-        ty = TsType::Nullable(Box::new(ty));
+        // `Option<Option<T>>` renders as `T | null | null` (缺席/null/设置三态);
+        // C# 没有嵌套可空, 一层 `?` 已同时表达两个 null 层级。
+        if !matches!(ty, TsType::Nullable(_)) {
+            ty = TsType::Nullable(Box::new(ty));
+        }
     }
     Ok(ty)
 }

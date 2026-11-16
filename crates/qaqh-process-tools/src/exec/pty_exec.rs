@@ -86,6 +86,9 @@ pub(crate) fn pty_exec(
     if !env_pairs.iter().any(|(key, _)| key == "TERM") {
         env_pairs.push(("TERM".to_string(), "xterm-256color".to_string()));
     }
+    // config [exec.env] 用户授权注入面（daemon 热重载实时更新；层序见
+    // env_overlay 模块注释）。
+    env_pairs.extend(crate::exec::env_overlay::snapshot());
     if let Some(env) = env {
         env_pairs.extend(env.iter().cloned());
     }

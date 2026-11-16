@@ -51,26 +51,6 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             vec!["RingingV2CommandStatus"],
             vec!["command-status-accepted.json"],
         ),
-        // B02:driver 席位走统一命令面(POST /commands + target),旧专用
-        // /sessions/{id}/driver/* URL 从未存在于 router——coverage 不得虚报。
-        (
-            "driver.claim",
-            "POST",
-            "/ringing/v2/commands",
-            "interact",
-            true,
-            vec!["RingingV2DriverClaimResponse", "RingingV2CommandAck"],
-            vec!["driver-claim-busy.json", "command-ack-accepted.json"],
-        ),
-        (
-            "driver.release",
-            "POST",
-            "/ringing/v2/commands",
-            "interact",
-            true,
-            vec!["RingingV2DriverReleaseResponse", "RingingV2CommandAck"],
-            vec!["driver-release.json", "command-ack-accepted.json"],
-        ),
         (
             "pairing.issue",
             "POST",

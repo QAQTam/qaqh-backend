@@ -29,6 +29,9 @@ pub enum ExternalSource {
     ClaudeProject,
     /// opencode `~/.config/opencode/opencode.json` 顶层 `mcp` 段（用户级）。
     Opencode,
+    /// 插件市场安装投影（qaqh-marketplace）：来自市场插件包的 `.mcp.json`。
+    /// 只走 B 路线显式导入，从不进只读合并（市场内容是第三方供应链面）。
+    Marketplace,
 }
 
 impl ExternalSource {
@@ -39,6 +42,7 @@ impl ExternalSource {
             ExternalSource::ClaudeUser => "ext-claude-",
             ExternalSource::ClaudeProject => "ext-claproj-",
             ExternalSource::Opencode => "ext-opencode-",
+            ExternalSource::Marketplace => "ext-market-",
         }
     }
 
@@ -49,6 +53,7 @@ impl ExternalSource {
             ExternalSource::ClaudeUser => "claude",
             ExternalSource::ClaudeProject => "claude-project",
             ExternalSource::Opencode => "opencode",
+            ExternalSource::Marketplace => "marketplace",
         }
     }
 }

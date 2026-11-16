@@ -226,9 +226,6 @@ pub(crate) async fn handle_bootstrap_v2(
             );
         }
     };
-    // driver 席位归属 daemon(内存);overlay 进快照,claim/release 经 owner
-    // 发 DriverChanged 保持实时一致。
-    snapshot.driver = state.drivers.get(&session_id);
     let response = SessionBootstrap {
         schema: RINGING_SCHEMA.into(),
         version: RINGING_V2_VERSION,
@@ -517,7 +514,7 @@ pub(crate) async fn handle_pending_approvals_v2(
 ///
 /// body：`RingingV2ApprovalRespondRequest`（challenge_id/decision/payload）。
 /// device 身份：一次性消费 challenge（scope = 本会话）→ `command_for` 映射回 canonical
-/// 命令 → 进 `execute_command`（保留「审批应答不受 driver 门控」语义）。
+/// 命令 → 进 `execute_command`。
 /// **admin 不使用本端点**——桌面宿主维持 canonical 透传命令通道。
 ///
 /// spec §9 描述了本流程但未定 wire 端点，此为本 spec 的补充设计。

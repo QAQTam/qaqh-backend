@@ -227,7 +227,7 @@ const bootstrap = (session, seed) => request("GET", `/ringing/v2/sessions/${seed
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ── 会话与 driver 席位 ──────────────────────────────────────────────────────
+// ── 会话 ───────────────────────────────────────────────────────────────────
 const client = await openClient("probe-userpos");
 const before = new Set(fs.readdirSync(path.join(DATA, "sessions")));
 const ack = await command(client, { kind: "global" }, {
@@ -246,24 +246,6 @@ if (created.size !== 1) {
 }
 const seed = [...created][0];
 console.log(`seed=${seed}`);
-
-const claim = await request("POST", `/ringing/v2/sessions/${seed}/driver/claim`, { session: client });
-if (claim.status !== 200 || claim.body.accepted !== true) {
-  console.error(`FAIL: driver claim ${claim.status} ${JSON.stringify(claim.body)}`);
-  process.exit(1);
-}
-let ready = false;
-for (let i = 0; i < 60 && !ready; i++) {
-  const { body } = await bootstrap(client, seed);
-  const driver = body?.control?.state?.driver;
-  ready = driver?.holder === client;
-  if (!ready) await sleep(250);
-}
-if (!ready) {
-  console.error("FAIL: driver 席位未就绪");
-  process.exit(1);
-}
-console.log("driver seat acquired");
 
 // ── 发送 "ok"，等 5 个流式请求（lap 0-4）落地 ───────────────────────────────
 const send = await command(

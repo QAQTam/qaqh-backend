@@ -5,7 +5,6 @@ import type { AssistantBlockKind } from "./AssistantBlockKind";
 import type { BlockId } from "./BlockId";
 import type { CodeDelta } from "./CodeDelta";
 import type { ContentValue } from "./ContentValue";
-import type { DriverState } from "./DriverState";
 import type { ExecOutputSource } from "./ExecOutputSource";
 import type { ExecSessionId } from "./ExecSessionId";
 import type { ExecSessionView } from "./ExecSessionView";
@@ -41,7 +40,7 @@ code_delta?: CodeDelta | null,
 /**
  * 工具产生的结构化效果(owner 消费后随终态发布)。
  */
-effects?: Array<ToolEffectInfo>, } | { "type": "exec_session_started", session: ExecSessionView, } | { "type": "exec_session_state_changed", session: ExecSessionView, } | { "type": "exec_session_output_delta", exec_session_id: ExecSessionId, start_offset: number, end_offset: number, source: ExecOutputSource, text: string, } | { "type": "exec_session_finished", session: ExecSessionView, } | { "type": "timeline_appended", entry: TimelineEntry, } | { "type": "timeline_truncated", from_turn_id: TurnId, removed_turn_ids: Array<TurnId>, } | { "type": "message_delta", turn_id: TurnId, block_id: BlockId, block_kind: AssistantBlockKind, text: string, } | { "type": "interaction_requested", interaction: InteractionView, } | { "type": "interaction_resolved", interaction_id: InteractionId, decision: InteractionDecision | null, status: InteractionEndStatus, } | { "type": "subagent_updated", subagent: SubagentView, } | { "type": "session_meta_changed", title: string | null, } | { "type": "driver_changed", driver: DriverState | null, } | { "type": "goal_updated", goal: GoalView | null, } | { "type": "handoff_sealed", 
+effects?: Array<ToolEffectInfo>, } | { "type": "exec_session_started", session: ExecSessionView, } | { "type": "exec_session_state_changed", session: ExecSessionView, } | { "type": "exec_session_output_delta", exec_session_id: ExecSessionId, start_offset: number, end_offset: number, source: ExecOutputSource, text: string, } | { "type": "exec_session_finished", session: ExecSessionView, } | { "type": "timeline_appended", entry: TimelineEntry, } | { "type": "timeline_truncated", from_turn_id: TurnId, removed_turn_ids: Array<TurnId>, } | { "type": "message_delta", turn_id: TurnId, block_id: BlockId, block_kind: AssistantBlockKind, text: string, } | { "type": "provider_retrying", turn_id: TurnId, attempt: number, max_attempts: number, delay_secs: number, error: string, } | { "type": "interaction_requested", interaction: InteractionView, } | { "type": "interaction_resolved", interaction_id: InteractionId, decision: InteractionDecision | null, status: InteractionEndStatus, } | { "type": "subagent_updated", subagent: SubagentView, } | { "type": "session_meta_changed", title: string | null, } | { "type": "goal_updated", goal: GoalView | null, } | { "type": "handoff_sealed", 
 /**
  * 封箱会话（链上本线，已被 handoff 终结）。
  */

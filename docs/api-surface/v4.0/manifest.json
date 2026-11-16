@@ -2,18 +2,18 @@
   "format_version": 1,
   "wire_version": 2,
   "backend_version": "4.0.0",
-  "source_revision": "da33cbae596b0e34522562b4e8cb356974c43448",
-  "source_dirty": false,
+  "source_revision": "development",
+  "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "66c41ad0c80ee0340bd33d5c35131b3fd86f4a1c4b31148aa9843d00d5bc082f",
+  "contract_hash": "2cd681315dd2ce5abc80559f29ec23df415b980f4ae1890c8a2dad409126bff7",
   "files": [
     {
       "path": "constants.ts",
-      "sha256": "33d538244ab29f2b9d802a81c2df93b59decd1d096f5703d250f1b48d445d638"
+      "sha256": "73dcd609bebfa894bfcc58bbfc1116b984bfc32dc7741a882de9a50dc986e515"
     },
     {
       "path": "coverage.json",
-      "sha256": "b64d062203e8d0108df9577fbdf429c4748c3ae82152337ba88427c1b17dfa80"
+      "sha256": "4d95cc4716e144860804608c6235e76cf0e320c7266dfccef949fa2ab6fa81b0"
     },
     {
       "path": "cs/AccountsEmptyParams.cs",
@@ -105,7 +105,7 @@
     },
     {
       "path": "cs/ContractConstants.cs",
-      "sha256": "76ba4f7ce718a9a0b95fb306fe67b9b49af1b21d75f127370218939d41493e55"
+      "sha256": "91a579d99d58d71b3e955f3973af1397ff9e42d4329fc5234ac2f4eaaf790329"
     },
     {
       "path": "cs/ContractJson.cs",
@@ -126,10 +126,6 @@
     {
       "path": "cs/DiagnosticsMemorySnapshotParams.cs",
       "sha256": "af5f0778c6fb26de635fdf108ba2cad30703b8ed7d6ec5924105bd0c27366162"
-    },
-    {
-      "path": "cs/DriverState.cs",
-      "sha256": "2d66f1fc1ce7e400aae2d872a505ea31d5e56793af568a9dbe4076b95a7a7b1d"
     },
     {
       "path": "cs/DsAccountAttemptParams.cs",
@@ -285,7 +281,7 @@
     },
     {
       "path": "cs/GoalsPatch.cs",
-      "sha256": "711d22d20d26e4bb734d2efa7d527ac5468e9bb3a7176a67bbc579697e02f383"
+      "sha256": "7b9fe2ff35f9eeb743bc702bbe6ce770089b03870c630a676ccbcde329b47e44"
     },
     {
       "path": "cs/ImageBlock.cs",
@@ -441,7 +437,7 @@
     },
     {
       "path": "cs/RingingCommand.cs",
-      "sha256": "6eaca617d91404b0918ed6683d6c483efaa1b37d01f1eeac393b436110f79f04"
+      "sha256": "84b4bb0045c8c60ab3771d6056c320fe1056f018e3678ebf4f269f26b94d5600"
     },
     {
       "path": "cs/RingingCommandAck.cs",
@@ -518,14 +514,6 @@
     {
       "path": "cs/RingingV2DevicesResponse.cs",
       "sha256": "251c688256f88558214659190be920295a060b342af5d8142ce74fe3c0d8b2ff"
-    },
-    {
-      "path": "cs/RingingV2DriverClaimResponse.cs",
-      "sha256": "1aeb44d6e08e9e9df01db19f4ef17187e0b25074632015a4b9272cd23bfc6a39"
-    },
-    {
-      "path": "cs/RingingV2DriverReleaseResponse.cs",
-      "sha256": "d5f9924443b44c53b402283e8466dfea5efda0f381023c02a14efe63d6495dee"
     },
     {
       "path": "cs/RingingV2ExistingResult.cs",
@@ -625,11 +613,11 @@
     },
     {
       "path": "cs/SessionEvent.cs",
-      "sha256": "227f2dbbd9ba1f894972d0ebe1f4b601db5edd01199b75295791f3a127eedc66"
+      "sha256": "6088364a9e3c700119f6a81e2ac4d215f81112504a4846108e5a7278b1caa153"
     },
     {
       "path": "cs/SessionEventFrame.cs",
-      "sha256": "df19cb49ec9ca87115f8c0cb776c32e0c652f5fa2e2494d5589dc55def35f9c9"
+      "sha256": "f4965e7e6c1a8e5a3b5ade27497401e5dd7dead39f2294a96d624c8c2770bb0c"
     },
     {
       "path": "cs/SessionGetActivityParams.cs",
@@ -673,7 +661,7 @@
     },
     {
       "path": "cs/SessionState.cs",
-      "sha256": "b8654ce832e9941a156c238f9527d29e64f56cb835ebb5840e0439b9f9b91bc2"
+      "sha256": "abf12e8f6463e9d332093fbfbae265f83da13f0a5290c0de80c8cea323d5920f"
     },
     {
       "path": "cs/SessionToolActivity.cs",
@@ -1001,7 +989,7 @@
     },
     {
       "path": "fixtures/bootstrap-response.json",
-      "sha256": "6a8e50abe75606b43ede9d42d776139128573d0bac4db44aa990c42436d44815"
+      "sha256": "5d35e21660356e8b1ad8dd8b15ca3a27ddc2efef8fc4626d32117f3aa82c7600"
     },
     {
       "path": "fixtures/command-ack-accepted.json",
@@ -1021,7 +1009,7 @@
     },
     {
       "path": "fixtures/command-attach.json",
-      "sha256": "a5b5e2ce79ea74f3814cf5e2fb89bf8c914f45b9fd55eeedc3d2f30cc86ee193"
+      "sha256": "b3deaa07ea2315f91d1b9199ae5975070213c0a06191761fdd21393126bbe3bd"
     },
     {
       "path": "fixtures/command-status-accepted.json",
@@ -1052,14 +1040,6 @@
       "sha256": "e49dd396a21fa97c5f90907f856ab448ea396fd070eab045d22dcdfa0389dbcd"
     },
     {
-      "path": "fixtures/driver-claim-busy.json",
-      "sha256": "e0d80266c4b9b4b2171d0c2289b611979383f470c06f8241929d18c600611fb2"
-    },
-    {
-      "path": "fixtures/driver-release.json",
-      "sha256": "45d4c57af6ffae48a57778901166322ab33b6eb33c8270bb22033bd9be058f95"
-    },
-    {
       "path": "fixtures/event-frame-interaction.json",
       "sha256": "284d1ca8bcc5bd8b6555d3f7c1380b4a7dcc846447b708025d4db5f208411657"
     },
@@ -1069,11 +1049,11 @@
     },
     {
       "path": "fixtures/open-request.json",
-      "sha256": "c1c47af55db187e7ca9f420a4f8aa5b5c28f578c09b487a8e82f6e0a27a7cee2"
+      "sha256": "b0fd6d743c51f3b6dfb460948b9353bd285c16924cb5a4b860c851c6477544ba"
     },
     {
       "path": "fixtures/open-response.json",
-      "sha256": "0721f7b648bd3c1f77e1791cf45c1fbb3085e73a20f8974c9ae28eef9e4a5971"
+      "sha256": "b3c04367902d0ee2885e5511b4cc0de190ed00598432ac95b79162ab8873fa48"
     },
     {
       "path": "fixtures/pair-params.json",
@@ -1421,7 +1401,7 @@
     },
     {
       "path": "index.ts",
-      "sha256": "e0fa2f8b207e154ae37dd0843c844b3095eb13039497e6489f2a47fe913d51c1"
+      "sha256": "513f7e64c1ac4aa40e03824ef89a64f82f64e2c540617ca6b46273c0baf360e4"
     },
     {
       "path": "node.ts",
@@ -1505,7 +1485,7 @@
     },
     {
       "path": "types/qaqh/CommandPrecondition.ts",
-      "sha256": "cdaa1575f66f4441a79750d05db01e24eafb46ba312ba290060c23dccbe1a006"
+      "sha256": "643cf80686ceec1dca0feb7d69b370fdd4c45d2ed9ee2d33804af81bb36b52c3"
     },
     {
       "path": "types/qaqh/CommandTarget.ts",
@@ -1566,10 +1546,6 @@
     {
       "path": "types/qaqh/DiagnosticsMemorySnapshotParams.ts",
       "sha256": "2bbfc1f07c06a4480264b0fcbac3446be5e3953647dab4790259b53c0a3951fa"
-    },
-    {
-      "path": "types/qaqh/DriverState.ts",
-      "sha256": "7df697ec6c697fced24655c4110877516b19de98a60695ce12f1edabd06abc83"
     },
     {
       "path": "types/qaqh/DsAccountAttemptParams.ts",
@@ -1881,7 +1857,7 @@
     },
     {
       "path": "types/qaqh/RingingCommand.ts",
-      "sha256": "366b2291b295e37408964d1d43c38fc13d445e94d23948c119367d8bb9aa869d"
+      "sha256": "1d4e5e06dcad4c8fafda4bdf8aa4c5117c295f4be92696312eedec78744751e2"
     },
     {
       "path": "types/qaqh/RingingCommandAck.ts",
@@ -1958,14 +1934,6 @@
     {
       "path": "types/qaqh/RingingV2DevicesResponse.ts",
       "sha256": "51c08db279dc7194bf9f4a8b40bc45cdf89ef347b3272c303e7063afc2013a88"
-    },
-    {
-      "path": "types/qaqh/RingingV2DriverClaimResponse.ts",
-      "sha256": "c9b4ac716f9d63f0c65cb59436a7f307940798f006c159705bc31d3ae8feccac"
-    },
-    {
-      "path": "types/qaqh/RingingV2DriverReleaseResponse.ts",
-      "sha256": "342bb57cc510b042ac755e55c4093046ac720d8a63374c319ba385e63e7a8987"
     },
     {
       "path": "types/qaqh/RingingV2ExistingResult.ts",
@@ -2069,11 +2037,11 @@
     },
     {
       "path": "types/qaqh/SessionEvent.ts",
-      "sha256": "98208607dd6685108f0638c973a97aa272b2464b33385aded5faaaed3ee55a2d"
+      "sha256": "e69d77294a2e26e29f1e46bd1499a5b4febb711f453397a6c9d88d1f030eaba0"
     },
     {
       "path": "types/qaqh/SessionEventFrame.ts",
-      "sha256": "ef3f10cb9bb2bb65516684b4d92ced25b614aa32c7a1879c3852ac951e8b011f"
+      "sha256": "7982de87a1f7804484f8a38cd50fc9cc8bc7a31c7a10460534586c28a6845844"
     },
     {
       "path": "types/qaqh/SessionGetActivityParams.ts",
@@ -2121,7 +2089,7 @@
     },
     {
       "path": "types/qaqh/SessionState.ts",
-      "sha256": "a92f9fb76270e354dc14b674f0df7784f389f1ea5464ef0bb477b378d995a3de"
+      "sha256": "977f3924e8104f7bcee14f7b11df046273c5d8bd629f9cdd3d28675b7fa8e094"
     },
     {
       "path": "types/qaqh/SessionToolActivity.ts",

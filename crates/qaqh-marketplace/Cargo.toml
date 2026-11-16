@@ -1,0 +1,19 @@
+[package]
+name = "qaqh-marketplace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QAQ-Harness 插件市场 —— codex/claudecode 双宿主兼容清单与安装投影（ADR-0022）"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+log = "0.4"
+qaqh-config = { path = "../qaqh-config" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

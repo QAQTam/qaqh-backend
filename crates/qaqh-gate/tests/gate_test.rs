@@ -137,6 +137,42 @@ fn basic_text_stream() {
     assert_eq!(combined, "Hello, world!");
 }
 
+/// ADR-0023 反证回归：正文里出现字面量 `<think>` 不得被切进思考链。
+/// 修复前 gate 对每个 content delta 跑一个 `<think>`/`</think>` 状态机，命中一次
+/// 便把此后全部正文判成 ReasoningDelta，且未闭合时状态永不复位。
+#[test]
+fn literal_think_tag_in_content_stays_in_answer() {
+    let scenario = vec![
+        SseChunk::text("用法示例：在配置里写 <think> 即可开启。"),
+        SseChunk::text(" 之后是正常收尾正文，一直到句末。"),
+        SseChunk::finish("stop", None),
+        SseChunk::done(),
+    ];
+    let mock = MockServer::new(scenario);
+    let provider = make_provider(&mock);
+    let events = collect_events(&provider, vec![Message::user("explain")], None);
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, StreamEvent::ReasoningDelta { .. })),
+        "literal <think> in content must not emit reasoning frames: {events:?}"
+    );
+    let combined: String = events.iter().filter_map(event_text).collect();
+    assert_eq!(
+        combined,
+        "用法示例：在配置里写 <think> 即可开启。 之后是正常收尾正文，一直到句末。"
+    );
+    let msg = events.iter().find_map(event_done).unwrap();
+    assert!(
+        !msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Reasoning { .. })),
+        "Done must not carry a Reasoning block for literal <think> text"
+    );
+}
+
 #[test]
 fn slow_initial_response_is_not_treated_as_transport_timeout() {
     let scenario = vec![

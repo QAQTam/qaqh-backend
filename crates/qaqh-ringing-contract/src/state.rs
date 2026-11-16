@@ -42,8 +42,6 @@ pub struct SessionState {
     /// ContentValue 引用按需读取(spec §6.3)。
     #[serde(default)]
     pub exec_sessions: Vec<ExecSessionView>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub driver: Option<DriverState>,
     /// 会话持久目标(ADR-0015):每会话至多一个;缺席 = 无 goal。
     /// additive:旧客户端读不到就忽略,新客户端把缺席当「无目标」。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -510,13 +508,4 @@ pub struct SubagentView {
     pub status: Option<SubagentTerminalStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<ContentValue>,
-}
-
-/// driver 席位:holder 为 daemon 认证的 client_session_id,epoch 单调递增。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct DriverState {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub holder: Option<String>,
-    pub epoch: u64,
 }

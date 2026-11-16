@@ -435,48 +435,6 @@ impl QaqhClient {
         .await
     }
 
-    /// `driver.claim`；`client_session_id` 由当前租约现取。
-    pub async fn driver_claim(
-        &self,
-        session_id: String,
-        stale_holder: Option<String>,
-    ) -> Result<String, CoreError> {
-        let state = self
-            .inner
-            .v2_session_state()
-            .await
-            .ok_or(CoreError::Negotiation {
-                detail: "v2 session not open".into(),
-            })?;
-        self.send_command_json(
-            Some(session_id),
-            to_json_string(&RingingCommand::DriverClaim {
-                client_session_id: state.client_session_id,
-                stale_holder,
-            })?,
-        )
-        .await
-    }
-
-    /// `driver.release`。
-    pub async fn driver_release(&self, session_id: String) -> Result<String, CoreError> {
-        let state = self
-            .inner
-            .v2_session_state()
-            .await
-            .ok_or(CoreError::Negotiation {
-                detail: "v2 session not open".into(),
-            })?;
-        self.send_command_json(
-            Some(session_id),
-            to_json_string(&RingingCommand::DriverRelease {
-                client_session_id: state.client_session_id,
-                expected_epoch: None,
-            })?,
-        )
-        .await
-    }
-
     /// `conversation.send_message`（纯文本便捷面；富内容用 `send_command_json`）。
     pub async fn send_message(&self, session_id: String, text: String) -> Result<String, CoreError> {
         self.send_command_json(

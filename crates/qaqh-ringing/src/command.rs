@@ -43,7 +43,7 @@ pub struct ConversationSendMessage {
     pub widget_context: Option<WidgetContext>,
 }
 
-/// RingingV2 业务命令根。target、身份、revision 和 driver epoch 只由提交信封表达。
+/// RingingV2 业务命令根。target、身份和 revision 只由提交信封表达。
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -124,18 +124,6 @@ pub enum RingingCommand {
     },
     #[serde(rename = "interaction.ask.dismiss")]
     InteractionAskDismiss { interaction_id: String },
-    #[serde(rename = "driver.claim")]
-    DriverClaim {
-        client_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stale_holder: Option<String>,
-    },
-    #[serde(rename = "driver.release")]
-    DriverRelease {
-        client_session_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        expected_epoch: Option<u64>,
-    },
     #[serde(rename = "tool.permission.respond")]
     ToolPermissionRespond {
         tool_call_id: String,
@@ -245,8 +233,6 @@ impl RingingCommand {
             Self::GoalClear {} => "goal.clear",
             Self::InteractionAskRespond { .. } => "interaction.ask.respond",
             Self::InteractionAskDismiss { .. } => "interaction.ask.dismiss",
-            Self::DriverClaim { .. } => "driver.claim",
-            Self::DriverRelease { .. } => "driver.release",
             Self::ToolPermissionRespond { .. } => "tool.permission.respond",
             Self::ExecSessionInterrupt {} => "exec_session.interrupt",
             Self::ExecSessionTerminate {} => "exec_session.terminate",

@@ -1550,6 +1550,41 @@ fn pwsh_tool_executes_command_through_fixed_shell() {
 }
 
 #[test]
+fn exec_injects_config_env_overlay_and_model_env_wins() {
+    skip_without_shell!(Shell::Bash, "bash");
+    // 覆盖层是进程级全局：本用例独占 test_lock，防并行用例互见注入键。
+    let _guard = crate::exec::env_overlay::test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    crate::exec::env_overlay::apply(&std::collections::BTreeMap::from([
+        ("QAQH_OVERLAY_TEST_VAR".to_string(), "from-overlay".to_string()),
+        ("QAQH_OVERLAY_ONLY".to_string(), "only-in-overlay".to_string()),
+    ]));
+    let ctx = make_ctx(
+        "exec",
+        serde_json::json!({
+            "command": "echo o=$QAQH_OVERLAY_TEST_VAR p=$QAQH_OVERLAY_ONLY m=$QAQH_MODEL_TEST_VAR",
+            "shell": "bash",
+            "env": {
+                "QAQH_OVERLAY_TEST_VAR": "from-model",
+                "QAQH_MODEL_TEST_VAR": "from-model-env"
+            },
+            "cwd": std::env::current_dir().unwrap()
+        }),
+    );
+    let r = handle_run_exec(ctx);
+    // 无论断言成败先清 overlay，再断言（进程级全局不外溢）。
+    crate::exec::env_overlay::apply(&std::collections::BTreeMap::new());
+    assert!(r.is_success(), "model text: {}", r.model_text());
+    // 层序：overlay 注入生效（p=），模型显式 env 压过 overlay（o=）。
+    assert!(
+        r.model_text().contains("o=from-model p=only-in-overlay m=from-model-env"),
+        "overlay 层序失效: {}",
+        r.model_text()
+    );
+}
+
+#[test]
 fn exec_rejects_removed_argv_and_requires_command() {
     let ctx = make_ctx(
         "exec",
@@ -1680,6 +1715,83 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
         !target.exists(),
         "unauthorized write ESCAPED the token plane: {}",
         target.display()
+    );
+    let _ = out;
+}
+
+/// 会话同款 spec（`for_permission(…, sandbox=true)` 产出的 Auto 后端）经过
+/// direct 路径的强制裁决探针。daemon 会话从不设显式后端：若 Auto 在
+/// `wrap_command` 里解析出 TokenPlane 却仍走普通 spawn（sbx_policy_json
+/// 无人消费），这里就是裁决点——工作区外写必须不落盘。
+#[cfg(windows)]
+#[test]
+fn sbx_auto_session_spec_unauthorized_write_is_enforced() {
+    use crate::exec::direct::direct_exec_sandboxed;
+    use qaqh_policy::SandboxSpec;
+
+    if is_elevated() {
+        eprintln!("skipped: elevated process");
+        return;
+    }
+
+    let ws = tempfile::tempdir().expect("workspace tempdir");
+    let ws_root = ws.path().to_path_buf();
+    let ws_str = ws_root.to_string_lossy().into_owned();
+
+    // 会话真实形态：backend 恒 Auto（不覆写），network=Deny，writable_roots=[ws]。
+    let spec = SandboxSpec::workspace_write(ws_root.clone());
+
+    // ② 授权写：工作区内落盘。
+    let argv = vec![
+        "cmd".to_string(),
+        "/c".to_string(),
+        "echo auto-ok > sbx_auto_probe.txt".to_string(),
+    ];
+    let out = direct_exec_sandboxed(
+        &argv,
+        None,
+        Some(&ws_str),
+        10000,
+        60,
+        None,
+        None,
+        None,
+        "sbx-auto-allow",
+        &spec,
+        "echo auto-ok > sbx_auto_probe.txt",
+    );
+    assert_eq!(out.exit_code, Some(0), "output: {}", out.output);
+    assert!(
+        ws_root.join("sbx_auto_probe.txt").is_file(),
+        "authorized write did not land in workspace"
+    );
+
+    // ③ 未授权写：工作区外。Auto 解析出 windows_token 就必须真的拦住。
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let target = outside.path().join("sbx_auto_escape.txt");
+    let argv = vec![
+        "cmd".to_string(),
+        "/c".to_string(),
+        format!("echo escape > {}", target.display()),
+    ];
+    let out = direct_exec_sandboxed(
+        &argv,
+        None,
+        None,
+        10000,
+        60,
+        None,
+        None,
+        None,
+        "sbx-auto-deny",
+        &spec,
+        &format!("echo escape > {}", target.display()),
+    );
+    assert!(
+        !target.exists(),
+        "AUTO-spec unauthorized write ESCAPED (plain spawn despite windows_token log): {} — output: {}",
+        target.display(),
+        out.output
     );
     let _ = out;
 }

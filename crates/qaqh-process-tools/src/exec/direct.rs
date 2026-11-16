@@ -161,6 +161,9 @@ fn direct_exec_inner(
     // 最小白名单，模型显式传入的 `env` 最后覆盖。
     cmd.env_clear();
     cmd.envs(minimal_child_env());
+    // config [exec.env] 用户授权注入面（daemon 热重载实时更新；模型显式
+    // env 仍可逐调用覆盖）。层序文档见 env_overlay 模块注释。
+    cmd.envs(crate::exec::env_overlay::snapshot());
     if let Some(env) = env {
         cmd.envs(env.iter().map(|(k, v)| (k, v)));
     }

@@ -29,8 +29,6 @@ namespace Qaqh.Sdk.Contract;
 [JsonDerivedType(typeof(RingingCommandGoalClear), "goal.clear")]
 [JsonDerivedType(typeof(RingingCommandInteractionAskRespond), "interaction.ask.respond")]
 [JsonDerivedType(typeof(RingingCommandInteractionAskDismiss), "interaction.ask.dismiss")]
-[JsonDerivedType(typeof(RingingCommandDriverClaim), "driver.claim")]
-[JsonDerivedType(typeof(RingingCommandDriverRelease), "driver.release")]
 [JsonDerivedType(typeof(RingingCommandToolPermissionRespond), "tool.permission.respond")]
 [JsonDerivedType(typeof(RingingCommandExecSessionInterrupt), "exec_session.interrupt")]
 [JsonDerivedType(typeof(RingingCommandExecSessionTerminate), "exec_session.terminate")]
@@ -158,7 +156,7 @@ public sealed record RingingCommandGoalSet : RingingCommand
     public GoalStatus? Status { get; init; }
     [JsonPropertyName("token_budget")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long?? TokenBudget { get; init; }
+    public long? TokenBudget { get; init; }
 }
 
 public sealed record RingingCommandGoalGet : RingingCommand;
@@ -177,24 +175,6 @@ public sealed record RingingCommandInteractionAskDismiss : RingingCommand
 {
     [JsonPropertyName("interaction_id")]
     public string InteractionId { get; init; }
-}
-
-public sealed record RingingCommandDriverClaim : RingingCommand
-{
-    [JsonPropertyName("client_session_id")]
-    public string ClientSessionId { get; init; }
-    [JsonPropertyName("stale_holder")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? StaleHolder { get; init; }
-}
-
-public sealed record RingingCommandDriverRelease : RingingCommand
-{
-    [JsonPropertyName("client_session_id")]
-    public string ClientSessionId { get; init; }
-    [JsonPropertyName("expected_epoch")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public long? ExpectedEpoch { get; init; }
 }
 
 public sealed record RingingCommandToolPermissionRespond : RingingCommand

@@ -50,6 +50,19 @@ fn tools() -> Vec<ToolDef> {
             }}),
         ),
         mk(
+            "grep",
+            "Search file contents with ripgrep regex. Returns path:line:content.",
+            json!({"type": "object", "properties": {
+                "pattern": {"type": "string", "description": "ripgrep regex"},
+                "paths": {"type": "array", "items": {"type": "string"}},
+                "glob": {"type": "array", "items": {"type": "string"}},
+                "case_sensitive": {"type": "boolean"},
+                "context_before": {"type": "integer"},
+                "context_after": {"type": "integer"},
+                "max_results": {"type": "integer"}
+            }, "required": ["pattern"]}),
+        ),
+        mk(
             "list_dir",
             "List a directory. Reply with exactly one tool call and no prose.",
             json!({"type": "object", "properties": {
@@ -179,7 +192,7 @@ fn main() {
         &provider,
         messages,
         Some(tools()),
-        4096,
+        16384,
         Some(effort),
         None,
         None,

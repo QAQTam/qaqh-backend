@@ -258,6 +258,9 @@ impl TypedTool for ExecCommandTool {
         if args.tty && !env.iter().any(|(key, _)| key == "TERM") {
             env.push(("TERM".into(), "xterm-256color".into()));
         }
+        // config [exec.env] 用户授权注入面（daemon 热重载实时更新；层序见
+        // exec::env_overlay 模块注释）。
+        env.extend(crate::exec::env_overlay::snapshot());
         // pager/编辑器/凭据提示解除（harness 最终权威）：tty 路径 git 内置
         // less 分页必挂死，见 forced_child_env 文档。
         env.extend(crate::exec::direct::forced_child_env());

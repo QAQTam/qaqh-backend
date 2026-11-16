@@ -26,11 +26,11 @@ namespace Qaqh.Sdk.Contract;
 [JsonDerivedType(typeof(SessionEventTimelineAppended), "timeline_appended")]
 [JsonDerivedType(typeof(SessionEventTimelineTruncated), "timeline_truncated")]
 [JsonDerivedType(typeof(SessionEventMessageDelta), "message_delta")]
+[JsonDerivedType(typeof(SessionEventProviderRetrying), "provider_retrying")]
 [JsonDerivedType(typeof(SessionEventInteractionRequested), "interaction_requested")]
 [JsonDerivedType(typeof(SessionEventInteractionResolved), "interaction_resolved")]
 [JsonDerivedType(typeof(SessionEventSubagentUpdated), "subagent_updated")]
 [JsonDerivedType(typeof(SessionEventSessionMetaChanged), "session_meta_changed")]
-[JsonDerivedType(typeof(SessionEventDriverChanged), "driver_changed")]
 [JsonDerivedType(typeof(SessionEventGoalUpdated), "goal_updated")]
 [JsonDerivedType(typeof(SessionEventHandoffSealed), "handoff_sealed")]
 public abstract record SessionEvent;
@@ -205,6 +205,20 @@ public sealed record SessionEventMessageDelta : SessionEvent
     public string Text { get; init; }
 }
 
+public sealed record SessionEventProviderRetrying : SessionEvent
+{
+    [JsonPropertyName("turn_id")]
+    public string TurnId { get; init; }
+    [JsonPropertyName("attempt")]
+    public long Attempt { get; init; }
+    [JsonPropertyName("max_attempts")]
+    public long MaxAttempts { get; init; }
+    [JsonPropertyName("delay_secs")]
+    public long DelaySecs { get; init; }
+    [JsonPropertyName("error")]
+    public string Error { get; init; }
+}
+
 public sealed record SessionEventInteractionRequested : SessionEvent
 {
     [JsonPropertyName("interaction")]
@@ -231,12 +245,6 @@ public sealed record SessionEventSessionMetaChanged : SessionEvent
 {
     [JsonPropertyName("title")]
     public string? Title { get; init; }
-}
-
-public sealed record SessionEventDriverChanged : SessionEvent
-{
-    [JsonPropertyName("driver")]
-    public DriverState? Driver { get; init; }
 }
 
 public sealed record SessionEventGoalUpdated : SessionEvent

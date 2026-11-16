@@ -13,8 +13,8 @@ use crate::fact::{
     InteractionDecision, InteractionId, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId,
 };
 use crate::state::{
-    DriverState, ExecSessionView, GoalView, InteractionView, SubagentView, TimelineEntry,
-    ToolCallState, TurnOutcome, TurnPhase,
+    ExecSessionView, GoalView, InteractionView, SubagentView, TimelineEntry, ToolCallState,
+    TurnOutcome, TurnPhase,
 };
 
 /// `skip_serializing_if` 用的假值判定:值为 `false` 时整键缺席。
@@ -192,6 +192,18 @@ pub enum SessionEvent {
         block_kind: AssistantBlockKind,
         text: String,
     },
+    /// provider 请求正在重试(仅展示;不落库、不进任何事实)。触发面只有两类:
+    /// SDK 建连前重试(429/5xx/传输抖动/Retry-After)与 2xx 后零内容掐流的
+    /// 整请求重试(ADR-0018:有产出掐流不重试,所以本帧永远不与已展示的
+    /// 文本并存)。`attempt` 从 1 计,`max_attempts` 与 `delay_secs` 原样透传
+    /// gate 侧策略;`error` 是重试原因的可读短语,客户端可整串渲染。
+    ProviderRetrying {
+        turn_id: TurnId,
+        attempt: u32,
+        max_attempts: u32,
+        delay_secs: u64,
+        error: String,
+    },
     InteractionRequested {
         interaction: InteractionView,
     },
@@ -205,11 +217,6 @@ pub enum SessionEvent {
     },
     SessionMetaChanged {
         title: Option<String>,
-    },
-    /// driver 席位变化(claim/release 生效);`None` = 席位空。与 bootstrap
-    /// `state.driver` 同形状。
-    DriverChanged {
-        driver: Option<DriverState>,
     },
     /// 会话目标变化(ADR-0015):set/状态迁移/记账/清除都经此帧;
     /// `None` = goal 已清除。与 bootstrap `state.goal` 同形状。
@@ -246,6 +253,7 @@ impl SessionEvent {
             | SessionEvent::TurnEnded { turn_id, .. }
             | SessionEvent::TurnPhaseChanged { turn_id, .. }
             | SessionEvent::MessageDelta { turn_id, .. }
+            | SessionEvent::ProviderRetrying { turn_id, .. }
             | SessionEvent::ToolDeclared { turn_id, .. }
             | SessionEvent::ToolStateChanged { turn_id, .. } => Some(turn_id),
             SessionEvent::ToolArgumentsDelta { turn_id, .. } => Some(turn_id),

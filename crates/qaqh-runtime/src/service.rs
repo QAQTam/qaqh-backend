@@ -58,6 +58,10 @@ impl QaqhService {
         // LSP manager 装配（；与 MCP 同款单例；
         // 默认关闭——enabled=false 时 disabled 形态拒一切调用 LSP_DISABLED）。
         qaqh_lsp::install_manager(qaqh_lsp::LspManager::new(config.lsp.clone()));
+        // [exec.env] 子进程 env 注入面：启动铺底（解析 `${secret:name}` 后写入
+        // process-tools 覆盖层，exec/PTY 各 spawn 组装点消费）；热重载订阅在
+        // 下方 tokio 守卫内接线。
+        apply_exec_env_overlay(&config);
         // P2-1：热重载接线——①重载器：订阅 watch 单写口广播，[mcp] 段变化
         // → 外部配置重扫（Codex/Claude 用户级）→ apply_config diff 保连；
         // ②文件轮询器：手改 config.toml（不经单写口）→ mtime 检测 →
@@ -68,6 +72,7 @@ impl QaqhService {
             spawn_mcp_reloader();
             spawn_lsp_reloader();
             spawn_config_file_poller();
+            spawn_exec_env_reloader();
         }
         // 投影预热（PR-M1-5 冒烟修正）：lazy 连接的唯一触发点是工具执行，
         // 而工具要先投影才会被调用——不预热则全新 daemon 上模型首回合永远
@@ -888,6 +893,49 @@ fn spawn_lsp_reloader() {
     });
 }
 
+/// `[exec.env]` → 子进程 env 覆盖层：解析 `${secret:name}`（secrets.toml
+/// `[secrets.mcp]` 段，现读现解密——改 secret 同样无需重启）后全量写入
+/// process-tools 覆盖层。任一值解析失败 → 保留旧覆盖层（不半应用）并告警。
+/// 返回是否已应用。启动铺底与热重载订阅共用本函数（幂等：全量替换）。
+fn apply_exec_env_overlay(config: &qaqh_config::Config) -> bool {
+    let store = qaqh_config::secrets::SecretStore::default_location();
+    let mut resolved = std::collections::BTreeMap::new();
+    for (key, value) in &config.exec.env {
+        match qaqh_config::config::interpolate_secret_placeholders(value, |name| {
+            store.load_mcp(name)
+        }) {
+            Ok(value) => {
+                resolved.insert(key.clone(), value);
+            }
+            Err(error) => {
+                log::warn!("[exec] env overlay 配置无效，保留旧覆盖层：{error}");
+                return false;
+            }
+        }
+    }
+    qaqh_process_tools::exec::env_overlay::apply(&resolved);
+    true
+}
+
+/// `[exec.env]` 热重载器（P2-1 同款订阅）：config 快照发布 → 重解析 → 全量
+/// 替换覆盖层。全量替换幂等，无需段级 diff；`load` 已 fail-fast 校验引用名，
+/// 运行期解析失败（secret 被删）只告警保留旧层。
+fn spawn_exec_env_reloader() {
+    let rx = qaqh_config::watch::subscribe();
+    tokio::spawn(async move {
+        reload_loop(rx, |published| async move {
+            if apply_exec_env_overlay(&published) {
+                log::info!(
+                    "[exec] env overlay hot-reload applied ({} keys)",
+                    published.exec.env.len()
+                );
+            }
+        })
+        .await;
+        log::warn!("[exec] env-overlay watcher channel closed; exiting");
+    });
+}
+
 /// P2-1：config.toml 文件轮询器——手改文件（不经 `Config::update` 单写口）
 /// 也能触发热重载。
 /// 策略：mtime 检测（1.5s 周期）→ 变化即 `reload_from_disk()`（内部：
@@ -1183,5 +1231,58 @@ mod plan_service_tests {
             output
         };
         std::fs::write(plan_path, output).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod exec_env_overlay_tests {
+    use super::apply_exec_env_overlay;
+
+    /// QAQH_DATA_DIR 是进程级全局：串行锁独占（session_loop_tests 同款口径）。
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// `[exec.env]` → 覆盖层：占位符解析注入 + 解析失败保留旧层。
+    /// QAQH_DATA_DIR 重定向到 tempdir 隔离真实用户 secrets.toml。
+    #[test]
+    fn exec_env_overlay_resolves_placeholders_and_keeps_old_on_failure() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().expect("tempdir");
+        let previous = std::env::var_os("QAQH_DATA_DIR");
+        // SAFETY: 与用例末尾的还原配对，本用例独占该变量（ENV_LOCK 串行）。
+        unsafe { std::env::set_var("QAQH_DATA_DIR", root.path().join(".qaqh")) };
+
+        let secrets = qaqh_config::secrets::SecretStore::default_location();
+        secrets.set_mcp("demo_key", "s3cret-value").expect("set mcp secret");
+
+        // ① 解析成功：占位符 → 真值写入覆盖层。
+        let mut config = qaqh_config::Config::default();
+        config
+            .exec
+            .env
+            .insert("TOKEN".to_string(), "Bearer ${secret:demo_key}".to_string());
+        assert!(apply_exec_env_overlay(&config), "apply must succeed");
+        assert_eq!(
+            qaqh_process_tools::exec::env_overlay::snapshot(),
+            vec![("TOKEN".to_string(), "Bearer s3cret-value".to_string())]
+        );
+
+        // ② 解析失败（未注册名）：返回 false 且保留旧覆盖层（不半应用）。
+        let mut broken = qaqh_config::Config::default();
+        broken
+            .exec
+            .env
+            .insert("TOKEN".to_string(), "${secret:missing_key}".to_string());
+        assert!(!apply_exec_env_overlay(&broken), "missing secret must fail");
+        assert_eq!(
+            qaqh_process_tools::exec::env_overlay::snapshot(),
+            vec![("TOKEN".to_string(), "Bearer s3cret-value".to_string())]
+        );
+
+        // 清理：覆盖层清空 + env 还原。
+        qaqh_process_tools::exec::env_overlay::apply(&std::collections::BTreeMap::new());
+        match previous {
+            Some(value) => unsafe { std::env::set_var("QAQH_DATA_DIR", value) },
+            None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
+        }
     }
 }

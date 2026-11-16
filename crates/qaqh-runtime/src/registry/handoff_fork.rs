@@ -192,6 +192,12 @@ impl AgentRegistry {
             ));
         }
         // 文档先行（ADR-0016 §被否 3：goal 续跑只能排队跟在交接文档之后）。
+        // BUG-2026-11-15-03：文档是后继会话的**首条**输入。曾以 as_system 投递
+        // （actor=system → 上下文重建 role:"system" → messages 线投影吸进顶层
+        // system 参数 → messages 数组为空），Anthropic 协议与智谱网关都要求
+        // messages 非空——6/6 handoff 后继首轮 400「[1214] messages 参数非法」
+        // （官方线同样会拒）。同一份文档以 user 形态重发立即成功，故改走
+        // user 注入；goal 续跑仍走 as_system（追加在非空历史上，合法）。
         let input = ConversationSendMessage {
             text: snapshot.doc,
             images: vec![],
@@ -201,7 +207,7 @@ impl AgentRegistry {
                 snapshot.sealed, snapshot.turn_id
             )),
             input_purpose: InputPurpose::TriggerTurn,
-            as_system: true,
+            as_system: false,
             inter_agent: None,
             subagent_terminal: None,
             widget_context: None,

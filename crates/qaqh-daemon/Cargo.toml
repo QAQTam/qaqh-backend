@@ -13,6 +13,7 @@ qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
 qaqh-mcp = { path = "../qaqh-mcp" }
+qaqh-marketplace = { path = "../qaqh-marketplace" }
 qaqh-runtime = { path = "../qaqh-runtime" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-process-tools = { path = "../qaqh-process-tools" }

@@ -2087,6 +2087,16 @@ impl ProgressSink for OwnerSink {
         );
     }
 
+    fn retrying(&self, update: crate::progress::RetryingProgress<'_>) {
+        self.owner.provider_retrying(
+            &TurnId::new(update.turn_id.to_string()),
+            update.attempt,
+            update.max_attempts,
+            update.delay_secs,
+            update.error,
+        );
+    }
+
     fn attempt_finished(&self, _turn_id: &str, _block_ids: &[String], _call_ids: &[String]) {
         // owner 无在飞身份登记;快照 + seq 水位自愈。
     }

@@ -108,7 +108,6 @@ fn load_session_state_inner(
         interactions,
         subagents,
         exec_sessions,
-        driver: None,
         goal,
         timeline_from_ord,
     })

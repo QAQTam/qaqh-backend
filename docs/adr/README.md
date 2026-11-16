@@ -54,6 +54,7 @@
 | [0017](0017-exec-full-output-terminal-lifecycle.md) | exec 完整输出与只读终端生命周期：持久化 offset 日志 + 区间读（不引 WebSocket）；附加决策：移除 exec 终态唤醒注入链（已实施）、revision 不 bump | 已采纳（部分实施） · 切片 0 后端半 + 切片 1 已实施（append-only 日志、`exec_session.output` 区间读、DTO 导出，证据见落地清单）；切片 0 前端半随前端仓切片 2、切片 2/3 未实施；决策 2 result 形状修订为单 `text`（实施时定夺）；wire 实变（`exec_session.output` + 2 DTO）已记 ADR-0010 |
 | [0018](0018-subagent-terminal-truth.md) | 子代理终态说真话：掐流=失败、预算与父同律、配置面退役（取代 0014 决策 4） | 已采纳 · 投影/gate/清扫/配置面/迁移已落地；wire 实变（ConfigDto/ConfigPatch 删 subagent 段 + 两型）已记 ADR-0010 |
 | [0019](0019-team-inbox-inter-agent-actor.md) | Team inbox 跨根署名：`InterAgentActor` 寻址统一（path/session union），跨根投递入 inbox | 已采纳 · 已实施（2026-11-13 随 LTS-v3.1 切线：读侧 + 死变体退役，含孤儿 InterAgentContent/MAILBOX_TEAM）；wire 实变由 v3.1 金标准机器重切吸收 |
+| [0023](0023-retire-inline-think-split.md) | 退役 gate 的 inline `<think>` 兼容切分：正文只认端点声明的 reasoning 字段 | 已采纳 · 代码已落工作区，发布/标注见落地清单未完成项 |
 
 ## 阅读顺序
 

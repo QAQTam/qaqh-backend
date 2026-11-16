@@ -299,23 +299,6 @@ try:
     seed = created.pop()
     print(f"seed={seed}")
 
-    # driver 席位：conversation 命令受 not_driver gate 保护。
-    status, claim = request(
-        "POST",
-        f"/ringing/v2/sessions/{seed}/driver/claim",
-        session=client_a,
-    )
-    assert status == 200 and claim.get("accepted") is True, f"driver claim: {status} {claim}"
-    wait_until(
-        lambda: (
-            (boot := bootstrap(client_a, seed))
-            and boot[0] == 200
-            and boot[1].get("control", {}).get("state", {}).get("driver", {}).get("holder")
-            == client_a
-        ),
-        "driver seat",
-    )
-
     status, ack = command(
         client_a,
         {"kind": "session", "session_id": seed},

@@ -143,8 +143,7 @@ await request("POST", "/ringing/v2/commands", {
 await sleep(1200);
 const seed = [...new Set(fs.readdirSync(path.join(DATA, "sessions")))].filter((s) => !before.has(s) && s !== "index.jsonl")[0];
 if (!seed) throw new Error("未发现新会话 seed");
-await request("POST", `/ringing/v2/sessions/${seed}/driver/claim`, { session: client });
-console.log(`[${label}] seed=${seed} driver claimed`);
+console.log(`[${label}] seed=${seed}`);
 
 const sendMsg = (text) =>
   request("POST", "/ringing/v2/commands", {

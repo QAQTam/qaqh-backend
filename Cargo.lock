@@ -2942,6 +2942,7 @@ dependencies = [
  "qaqh-acp",
  "qaqh-config",
  "qaqh-goal",
+ "qaqh-marketplace",
  "qaqh-mcp",
  "qaqh-process-tools",
  "qaqh-ringing",
@@ -3092,6 +3093,18 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tower",
+]
+
+[[package]]
+name = "qaqh-marketplace"
+version = "4.0.0"
+dependencies = [
+ "log",
+ "qaqh-config",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
@@ -3289,6 +3302,7 @@ dependencies = [
  "qaqh-lsp",
  "qaqh-mcp",
  "qaqh-memwatch",
+ "qaqh-process-tools",
  "qaqh-profile",
  "qaqh-ringing",
  "qaqh-ringing-contract",

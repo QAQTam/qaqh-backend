@@ -74,6 +74,11 @@ fn child_env(
 ) -> Vec<(String, String)> {
     let mut env: std::collections::BTreeMap<String, String> =
         super::direct::minimal_child_env().into_iter().collect();
+    // config [exec.env] 用户授权注入面：排在 sandbox 重指之前——scratch
+    // 重指是 harness 沙箱权威，压过用户配置（overlay 不能破坏 TMP/HOME 隔离）。
+    for (key, value) in crate::exec::env_overlay::snapshot() {
+        env.insert(key, value);
+    }
     let repoint = [
         ("TEMP", scratch_tmp.display().to_string()),
         ("TMP", scratch_tmp.display().to_string()),
@@ -492,7 +497,7 @@ pub(crate) fn sbx_exec(
     let _ = std::fs::remove_dir_all(&scratch);
 
     // 审计 M1:denial 日志里的输出片段先过脱敏。
-    let injected_secrets: Vec<String> = env
+    let mut injected_secrets: Vec<String> = env
         .map(|pairs| {
             pairs
                 .iter()
@@ -501,6 +506,13 @@ pub(crate) fn sbx_exec(
                 .collect()
         })
         .unwrap_or_default();
+    // [exec.env] overlay 可能携带解析后的 secret 值：一并纳入脱敏名单。
+    injected_secrets.extend(
+        crate::exec::env_overlay::snapshot()
+            .into_iter()
+            .map(|(_, value)| value)
+            .filter(|value| value.chars().count() >= 8),
+    );
     let combined_for_denial = format!("{stderr_out}{stdout_out}");
     qaqh_sandbox::record_denial_if_any(
         qaqh_policy::SandboxBackend::WindowsToken,

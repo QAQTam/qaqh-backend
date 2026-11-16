@@ -26,11 +26,11 @@ namespace Qaqh.Sdk.Contract;
 [JsonDerivedType(typeof(SessionEventFrameTimelineAppended), "timeline_appended")]
 [JsonDerivedType(typeof(SessionEventFrameTimelineTruncated), "timeline_truncated")]
 [JsonDerivedType(typeof(SessionEventFrameMessageDelta), "message_delta")]
+[JsonDerivedType(typeof(SessionEventFrameProviderRetrying), "provider_retrying")]
 [JsonDerivedType(typeof(SessionEventFrameInteractionRequested), "interaction_requested")]
 [JsonDerivedType(typeof(SessionEventFrameInteractionResolved), "interaction_resolved")]
 [JsonDerivedType(typeof(SessionEventFrameSubagentUpdated), "subagent_updated")]
 [JsonDerivedType(typeof(SessionEventFrameSessionMetaChanged), "session_meta_changed")]
-[JsonDerivedType(typeof(SessionEventFrameDriverChanged), "driver_changed")]
 [JsonDerivedType(typeof(SessionEventFrameGoalUpdated), "goal_updated")]
 [JsonDerivedType(typeof(SessionEventFrameHandoffSealed), "handoff_sealed")]
 public abstract record SessionEventFrame
@@ -209,6 +209,20 @@ public sealed record SessionEventFrameMessageDelta : SessionEventFrame
     public string Text { get; init; }
 }
 
+public sealed record SessionEventFrameProviderRetrying : SessionEventFrame
+{
+    [JsonPropertyName("turn_id")]
+    public string TurnId { get; init; }
+    [JsonPropertyName("attempt")]
+    public long Attempt { get; init; }
+    [JsonPropertyName("max_attempts")]
+    public long MaxAttempts { get; init; }
+    [JsonPropertyName("delay_secs")]
+    public long DelaySecs { get; init; }
+    [JsonPropertyName("error")]
+    public string Error { get; init; }
+}
+
 public sealed record SessionEventFrameInteractionRequested : SessionEventFrame
 {
     [JsonPropertyName("interaction")]
@@ -235,12 +249,6 @@ public sealed record SessionEventFrameSessionMetaChanged : SessionEventFrame
 {
     [JsonPropertyName("title")]
     public string? Title { get; init; }
-}
-
-public sealed record SessionEventFrameDriverChanged : SessionEventFrame
-{
-    [JsonPropertyName("driver")]
-    public DriverState? Driver { get; init; }
 }
 
 public sealed record SessionEventFrameGoalUpdated : SessionEventFrame

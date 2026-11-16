@@ -17,6 +17,10 @@ use std::sync::{Mutex, OnceLock};
 pub struct ExecConfig {
     /// 用户指定的默认 shell；`None` / 空 / "auto" = 平台优先级自动探测。
     pub default_shell: Option<String>,
+    /// 子进程 env 注入面（config.toml `[exec.env]`）。保存**原始值**：
+    /// `${secret:name}` 占位符在此不解析（mcp env 同纪律），由 daemon
+    /// 应用覆盖层时经 [`interpolate_secret_placeholders`] 求值。
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 /// Goal 模式配置(ADR-0015)。`enabled` 缺省 true(Codex Stable 同律);
@@ -590,7 +594,31 @@ const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生�
 #   [providers.<id>]        name / base_url / wire / credential / api_key
 #   [providers.<id>.models.<model_id>]  context_window / max_output_tokens / reasoning_levels
 #   default_model_selection = { provider, model }   # 新会话的缺省选择
+#
+# exec 子进程环境变量注入面（热重载：改完约 1.5s 自动生效，无需重启 daemon；
+# 仅新 spawn 的子进程可见）：
+#   [exec.env]
+#   MY_TOOL_TOKEN = "${secret:my_tool_token}"   # 值引用 secrets.toml [secrets.mcp] 段
 "#;
+
+/// 启动校验：`[exec.env]` 里 `${secret:name}` 引用的名字必须在 secrets.toml
+/// 已注册（E-4 同 mcp/lsp：缺 key 不静默；报错只含名字不含值，E-6）。
+fn validate_exec_env_secret_refs(
+    env: &std::collections::BTreeMap<String, String>,
+    secrets: &SecretStore,
+) -> Result<(), String> {
+    for (key, value) in env {
+        for secret_name in secret_placeholder_names(value)? {
+            if !secrets.has_mcp(&secret_name) {
+                return Err(format!(
+                    "[exec] env[{key:?}]: 引用的 secret {secret_name:?} 未注册；已注册：{:?}",
+                    secrets.list_mcp()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn migrate_legacy_exec_tool_names(tools: &[String]) -> Vec<String> {
     tools
@@ -757,6 +785,7 @@ impl Config {
                     let shell = shell.trim().to_ascii_lowercase();
                     (!shell.is_empty() && shell != "auto").then_some(shell)
                 });
+                cfg.exec.env = exec.env.unwrap_or_default();
             }
 
             // ── Multimodal (vision) ──
@@ -830,6 +859,9 @@ falling back to 1 (read-only)"
             cfg.lsp = map_lsp_config(pc.lsp.clone())?;
             // LSP env 的 `${secret:name}` 复用 mcp 校验（同 secrets.toml `[secrets.mcp]` 段）。
             validate_lsp_secret_refs(&cfg.lsp, &secrets)?;
+            // [exec.env] E-4 同律：`${secret:name}` 引用的名必须已注册
+            // （fail-fast 与 mcp/lsp 同口径；拼错名启动即报，不拖到首次调用）。
+            validate_exec_env_secret_refs(&cfg.exec.env, &secrets)?;
 
             // 迁移写回：config.toml 中旧工具名的默认白名单归一化为当前
             // 正式词汇表（重新 load 磁盘原值，只改确需归一化的字段）。
@@ -892,6 +924,7 @@ falling back to 1 (read-only)"
                         !shell.is_empty() && !shell.eq_ignore_ascii_case("auto")
                     })
                     .cloned(),
+                env: (!self.exec.env.is_empty()).then(|| self.exec.env.clone()),
             }),
             permission_tier: Some(self.permission_level),
             // 旧键不再写出:防止数字 3 在新三档下被再次当成旧 WorkspaceFree
@@ -1065,6 +1098,39 @@ mod c3_migration_tests {
     }
 
     #[test]
+    fn exec_env_roundtrips_and_placeholders_stay_raw() {
+        let (dir, store, secrets) = setup(
+            "exec-env",
+            "[exec.env]\nMY_TOKEN = \"${secret:my_key}\"\nPLAIN = \"plain-value\"\n",
+        );
+        // 占位符引用名必须已注册（E-4 fail-fast），先注册再 load。
+        secrets.set_mcp("my_key", "dummy").unwrap();
+        let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).unwrap();
+        assert_eq!(
+            cfg.exec.env.get("MY_TOKEN").map(String::as_str),
+            Some("${secret:my_key}")
+        );
+        assert_eq!(
+            cfg.exec.env.get("PLAIN").map(String::as_str),
+            Some("plain-value")
+        );
+        // 往返：save 不解析占位符，load 原样回来。
+        cfg.save_with(&store, &secrets).unwrap();
+        let reloaded = Config::load_from_paths_with(store, secrets).unwrap();
+        assert_eq!(reloaded.exec.env, cfg.exec.env);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn exec_env_unknown_secret_ref_fails_load() {
+        let (dir, store, secrets) =
+            setup("exec-env-bad", "[exec.env]\nTOKEN = \"${secret:nope_key}\"\n");
+        let error = Config::load_from_paths_with(store, secrets).unwrap_err();
+        assert!(error.to_string().contains("nope_key"), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn exec_default_shell_loads_normalizes_and_roundtrips() {
         let (dir, store, secrets) = setup("exec-shell", "[exec]\ndefault_shell = \"zsh\"\n");
         let cfg = Config::load_from_paths_with(store.clone(), secrets.clone()).expect("load");
@@ -1078,6 +1144,7 @@ mod c3_migration_tests {
         let auto = Config {
             exec: ExecConfig {
                 default_shell: Some("auto".into()),
+                env: Default::default(),
             },
             ..Default::default()
         };

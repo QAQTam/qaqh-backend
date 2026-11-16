@@ -331,8 +331,25 @@ fn stream_once(
                     publish_tool_input(display, entry);
                 }
             }
-            qaqh_gate::StreamEvent::WebSearchStatus(_)
-            | qaqh_gate::StreamEvent::Retrying { .. } => {}
+            qaqh_gate::StreamEvent::WebSearchStatus(_) => {}
+            // 重试可见性(此前整类被吞,UI 永远看不到"正在重试"):原样透传
+            // attempt/max/delay/原因,display 缺席时按无展示旁路处理。
+            qaqh_gate::StreamEvent::Retrying {
+                attempt,
+                max_retries,
+                delay_secs,
+                error,
+            } => {
+                if let Some(display) = &display {
+                    display.sink.retrying(crate::progress::RetryingProgress {
+                        turn_id: &display.blocks.turn_id,
+                        attempt,
+                        max_attempts: max_retries,
+                        delay_secs,
+                        error: &error,
+                    });
+                }
+            }
             }
         },
     );
@@ -665,9 +682,40 @@ fn classify(stop_reason: Option<&str>, message: &Message) -> (ProviderFinish, Op
             || matches!(block, ContentBlock::ToolUse { input, .. } if input.is_null())
     });
     if has_corrupt_tool {
+        // 逐块留痕：哪个调用坏了、是 Null 参数还是悬挂身份、当时的 stop_reason。
+        // gate 层（finalize）已有 args-head 级日志，这里是 wire 无关的兜底视图，
+        // 两条日志对起来即可定性上游形态（BUG-2026-11-15-01 系列排查埋点）。
+        for block in &message.content {
+            let ContentBlock::ToolUse { id, name, input } = block else {
+                continue;
+            };
+            let hanging = block.is_hanging_tool_use();
+            if hanging || input.is_null() {
+                // 显式 target 路由进 qaqh-gate.log（daemon 按 target 前缀分流），
+                // 与 gate 侧 args-head 日志同文件对读。
+                log::warn!(
+                    target: "qaqh_gate::provider_classify",
+                    "[provider] corrupt tool call at classify (id={id:?}, name={name:?}, \
+                     hanging={hanging}, input_null={}, stop_reason={stop_reason:?})",
+                    input.is_null(),
+                );
+            }
+        }
+        // stop_reason 已经说明真正的死因时如实转述：参数截断最常见的触发是
+        // 输出 token 预算在参数流中途耗尽（thinking + 大补丁参数），与「上游
+        // 参数流损坏」的处置完全不同——前者该调大预算或缩减参数，后者才需要
+        // 查代理/网络。用户看到的文本要指向正确的排查方向。
+        let length_cut = matches!(
+            stop_reason,
+            Some("length" | "max_tokens" | "max_output_tokens" | "MAX_TOKENS")
+        );
         return (
             ProviderFinish::Incomplete,
-            Some("truncated or invalid tool call arguments".into()),
+            Some(if length_cut {
+                "tool arguments truncated at the provider output token limit".into()
+            } else {
+                "truncated or invalid tool call arguments".into()
+            }),
         );
     }
     let declares_tools = message
@@ -767,7 +815,50 @@ fn worker_crashed(message: &str) -> ProviderOutcome {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolInputStream;
+    use super::{classify, ContentBlock, Message, ProviderFinish, ToolInputStream};
+
+    /// 损坏参数 + 长度型 stop：报错文本要指向真因（输出预算耗尽），而不是
+    /// 泛化的「参数流损坏」——两者的排查方向完全不同（调预算 vs 查代理）。
+    #[test]
+    fn length_cut_with_partial_arguments_names_the_real_cause() {
+        let message = Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "apply_patch".into(),
+                input: serde_json::Value::Null,
+            }],
+        };
+        let (finish, reason) = classify(Some("max_tokens"), &message);
+        assert_eq!(finish, ProviderFinish::Incomplete);
+        assert_eq!(
+            reason.as_deref(),
+            Some("tool arguments truncated at the provider output token limit")
+        );
+    }
+
+    /// 损坏参数 + 非长度型 stop（如 tool_use）：保持泛化的损坏文本，True 值
+    /// 不掺假——上游没说死因时不替它编。
+    #[test]
+    fn corrupt_arguments_without_length_stop_stay_generic() {
+        let message = Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::ToolUse {
+                id: "call_1".into(),
+                name: "apply_patch".into(),
+                input: serde_json::Value::Null,
+            }],
+        };
+        let (_finish, reason) = classify(Some("tool_use"), &message);
+        assert_eq!(
+            reason.as_deref(),
+            Some("truncated or invalid tool call arguments")
+        );
+    }
 
     /// 两条参数面的到达形状不同（JSON 面给增量、codex 原生面给累计快照），
     /// 但都必须收敛到同一个估算终值；快照不再是前缀延伸（provider 换体重发）

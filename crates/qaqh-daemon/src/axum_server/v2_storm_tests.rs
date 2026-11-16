@@ -180,7 +180,7 @@ async fn event_in_attach_window_is_replayed_not_resynced() {
     let owner = state.service.owners().get_or_create(&seed);
 
     let (seq, _) = bootstrap_watermark(&app, &seed, &cs).await;
-    owner.publish(SessionEvent::DriverChanged { driver: None });
+    owner.publish(SessionEvent::SessionMetaChanged { title: None });
     for _ in 0..400 {
         if owner.current_seq() > seq {
             break;
@@ -200,7 +200,7 @@ async fn event_in_attach_window_is_replayed_not_resynced() {
     );
     assert!(!ended, "补发后流应保持 live");
     assert!(
-        stream.contains("driver_changed"),
+        stream.contains("session_meta_changed"),
         "水位窗口内的事件必须经回放尾补发到帧流：{stream}"
     );
 }
@@ -218,7 +218,7 @@ async fn sustained_flood_attach_succeeds_every_cycle() {
     for cycle in 0..8 {
         let (seq, _) = bootstrap_watermark(&app, &seed, &cs).await;
         for _ in 0..20 {
-            owner.publish(SessionEvent::DriverChanged { driver: None });
+            owner.publish(SessionEvent::SessionMetaChanged { title: None });
             window_frames_total += 1;
         }
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -252,7 +252,7 @@ async fn slow_consumer_catches_up_from_ring_without_resync() {
 
     let events = subscribe_raw(&app, &seed, &cs, None).await;
     for _ in 0..1_500 {
-        owner.publish(SessionEvent::DriverChanged { driver: None });
+        owner.publish(SessionEvent::SessionMetaChanged { title: None });
     }
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -280,7 +280,7 @@ async fn genuine_gaps_still_fall_back_to_resync() {
     // (a) 远古游标：灌 2600 帧 > REPLAY_FRAME_CAP(2048)，最早帧已淘汰出环。
     let (watermark, _) = bootstrap_watermark(&app, &seed, &cs).await;
     for _ in 0..2_600 {
-        owner.publish(SessionEvent::DriverChanged { driver: None });
+        owner.publish(SessionEvent::SessionMetaChanged { title: None });
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     let (stream, ended, _) = read_sse(

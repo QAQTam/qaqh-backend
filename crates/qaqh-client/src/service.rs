@@ -64,8 +64,8 @@ pub fn is_allowed(method: &str) -> bool {
 ///
 /// daemon 服务面的失败体统一是 `{ "code": …, "message": … }`
 /// （`service_methods::error_response`）：`code` 让调用方能把「方法不存在」
-/// （`unknown_method`）、「缺 lease」（`lease_required`）、「不是 driver」
-/// （`not_driver`）与「查询/执行失败」（`query_failed` / `action_failed`）分开。
+/// （`unknown_method`）、「缺 lease」（`lease_required`）与「查询/执行失败」
+/// （`query_failed` / `action_failed`）分开。
 /// 解析不出来就退回 [`ClientError::Http`](crate::ClientError)，绝不假装成功。
 pub(crate) fn response_error(status: u16, path: &str, body: &str) -> crate::ClientError {
     #[derive(serde::Deserialize)]

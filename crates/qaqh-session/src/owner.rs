@@ -343,7 +343,7 @@ impl SessionOwner {
         Ok(state)
     }
 
-    /// 外部生产者的公共事件出口:非 owner 内部状态的变化(如 driver 席位)
+    /// 外部生产者的公共事件出口:非 owner 内部状态的变化
     /// 经此进入唯一单流定序,seq 与业务事件同源单调。
     pub fn publish(&self, event: SessionEvent) {
         self.send_request(move |pump| {
@@ -621,6 +621,30 @@ impl SessionOwner {
                 lines_removed,
                 target_files,
                 args_complete,
+            });
+            Ok(())
+        });
+    }
+
+    /// provider 请求正在重试(仅展示;不落库)。attempt/delay 原样透传 gate
+    /// 侧策略,客户端渲染"第 n/m 次重试,退避 s 秒"。
+    pub fn provider_retrying(
+        &self,
+        turn_id: &TurnId,
+        attempt: u32,
+        max_attempts: u32,
+        delay_secs: u64,
+        error: &str,
+    ) {
+        let turn_id = turn_id.clone();
+        let error = error.to_string();
+        self.send_request(move |pump| {
+            pump.emit(SessionEvent::ProviderRetrying {
+                turn_id,
+                attempt,
+                max_attempts,
+                delay_secs,
+                error,
             });
             Ok(())
         });

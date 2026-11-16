@@ -107,15 +107,62 @@ impl StreamState {
             .collect();
         sorted.sort_by_key(|(idx, _, _, _)| *idx);
         for (_idx, id, name, args_json) in sorted {
-            let input: serde_json::Value =
-                serde_json::from_str(&args_json).unwrap_or(serde_json::Value::Null);
-            // 参数损坏（截断 / delta+快照混流）时保持 `Null` 真值，**不得**
-            // 伪造 `{}`：`{}` 会让 typed 工具报「invalid arguments: missing
-            // field `x`」假错——模型明明发过参数，却被告知参数缺失，无从
-            // 自纠。Null input 会被 runtime 执行界面如实转换为「上游参数流
-            // 损坏，未执行」。wire 回放兼容（掐流时 `"arguments": "null"`
-            // 会被端点判 400，T-7-1 / BUG-2026-09-13-13）由出站
-            // [`wire_tool_input`] 统一收敛，语义层不再掺假。
+            // 空累计串 ≠ 参数损坏：零参数调用是合法形态，端点不发任何
+            // `input_json_delta` 时缓冲就是空串，收敛为 `{}`（与
+            // `tool_parser::normalize_arguments` 的「缺失 → `{}`」同语义）。
+            // 只有**非空但 parse 失败**才是真损坏（截断 / delta+快照混流），
+            // 保持 `Null` 真值，**不得**伪造 `{}`：`{}` 会让 typed 工具报
+            // 「invalid arguments: missing field `x`」假错——模型明明发过参数，
+            // 却被告知参数缺失，无从自纠。Null input 会被 runtime 执行界面如实
+            // 转换为「上游参数流损坏，未执行」。wire 回放兼容（掐流时
+            // `"arguments": "null"` 会被端点判 400，T-7-1 /
+            // BUG-2026-09-13-13）由出站 [`wire_tool_input`] 统一收敛，语义层
+            // 不再掺假。
+            let input: serde_json::Value = if args_json.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                match serde_json::from_str::<serde_json::Value>(&args_json) {
+                    Ok(value) => value,
+                    // BUG-2026-11-15-01：部分代理把完整 tool_call 折进
+                    // `content_block_start` 的 input，`input_json_delta` 又把同一
+                    // 份参数重发一遍——SDK 累加器按协议顺序拼接，缓冲成了
+                    // `{..}{..}` 双份参数，整串 parse 必败。抢救首个配平 object
+                    // （它就是真值）；真截断没有配平 object，依旧落 Null 真值。
+                    // 两条分支都留痕：args head 是判定上游形态（双发/截断/
+                    // 混流）的一手证据，进 daemon 日志。
+                    Err(error) => match salvage_first_json_object(&args_json) {
+                        Some(value) => {
+                            log::warn!(
+                                "[gate] tool args salvaged from corrupt buffer \
+                                 (name={name:?}, id={id:?}, len={}, head={:?})",
+                                args_json.len(),
+                                args_json.chars().take(240).collect::<String>(),
+                            );
+                            value
+                        }
+                        None => {
+                            log::warn!(
+                                "[gate] tool args unparseable and unsalvageable \
+                                 (name={name:?}, id={id:?}, len={}, head={:?}, error={error})",
+                                args_json.len(),
+                                args_json.chars().take(240).collect::<String>(),
+                            );
+                            serde_json::Value::Null
+                        }
+                    },
+                }
+            };
+            // 悬挂判据埋点：name 空 = classify 必判「参数损坏」（BUG-2026-09-13-13
+            // 判据），与参数内容无关。身份没跟上的上游在这里现形。
+            if name.is_empty() || (id.is_empty() && !synth_missing_tool_ids) {
+                log::warn!(
+                    "[gate] tool call missing identity at finalize \
+                     (name={:?}, id={:?}, args_len={}, synth_ids={synth_missing_tool_ids})",
+                    name,
+                    id,
+                    args_json.len(),
+                );
+            }
             let id = if id.is_empty() && synth_missing_tool_ids {
                 format!("toolu_{}", uuid_simple())
             } else {
@@ -146,6 +193,66 @@ pub(crate) fn wire_tool_input(input: &serde_json::Value) -> serde_json::Value {
     } else {
         input.clone()
     }
+}
+
+/// 从拼接污染的参数缓冲里抢救**首个配平的 JSON object**（引号/转义感知）。
+///
+/// 触发面（BUG-2026-11-15-01）：部分代理对上游一次性 tool_call 的转换形态是
+/// `content_block_start.input` 带完整参数、`input_json_delta` 再重发同一份；
+/// SDK 按协议把两者顺序拼接，缓冲成了 `{..}{..}`——整串 parse 必败，不改
+/// 这里回合会被 classify 冤判成「truncated or invalid tool call arguments」。
+/// 只取首个 object：双份场景第一份即真值；引号内的 `{`/`}` 不参与配平；
+/// 首个配平片段若 parse 失败继续向后扫；真截断没有配平 object，返回 `None`
+/// （调用方落 Null 真值，不掺假）。非 object 的配平片段不收——typed 工具
+/// 的参数必须是 object。
+pub(crate) fn salvage_first_json_object(buffer: &str) -> Option<serde_json::Value> {
+    let bytes = buffer.as_bytes();
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => {
+                if depth == 0 {
+                    start = Some(i);
+                }
+                depth += 1;
+            }
+            b'}' => {
+                if depth == 0 {
+                    continue;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    let end = i + 1;
+                    if let Some(s) = start {
+                        // ASCII 结构字符切分点必是 char boundary，直接按字节切。
+                        if let Ok(value) =
+                            serde_json::from_str::<serde_json::Value>(&buffer[s..end])
+                            && value.is_object()
+                        {
+                            return Some(value);
+                        }
+                    }
+                    start = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// tool-call 身份的单字段收口：非空且槽位还空着才写入（first-writer-wins）。
@@ -641,7 +748,7 @@ mod tests {
         state.text = "hi".into();
         state
             .tools
-            .insert(1, ("b".into(), "exec".into(), String::new()));
+            .insert(1, ("b".into(), "exec".into(), "{\"p\":1".into()));
         state
             .tools
             .insert(0, ("a".into(), "read".into(), "{\"p\":1}".into()));
@@ -651,8 +758,9 @@ mod tests {
             panic!("expected Done");
         };
         // [Text, ToolUse(a), ToolUse(b)] — reasoning absent, tools index-sorted.
-        // b 的参数缓冲损坏（截断/混流）：保持 Null 真值，**不得**伪造 `{}`——
-        // `{}` 会让 typed 工具报「missing field `x`」假错（BUG-2026-10-15）。
+        // b 的参数缓冲损坏（截断/混流，非空但 parse 失败）：保持 Null 真值，
+        // **不得**伪造 `{}`——`{}` 会让 typed 工具报「missing field `x`」假错
+        // （BUG-2026-10-15）。空缓冲是合法零参数，走 `{}`，另测。
         match &raw_message.content[1] {
             ContentBlock::ToolUse { id, input, .. } => {
                 assert_eq!(id, "a");
@@ -664,6 +772,91 @@ mod tests {
             ContentBlock::ToolUse { id, input, .. } => {
                 assert_eq!(id, "b");
                 assert!(input.is_null(), "损坏参数必须保持 Null 真值: {input:?}");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zero_argument_calls_finalize_as_empty_object() {
+        // 零参数调用合法：端点不发任何 `input_json_delta`，缓冲是空串。
+        // 收敛为 `{}`，不得误报「参数损坏」（Null 会让 runtime 拒绝执行）。
+        let mut state = StreamState::new();
+        state
+            .tools
+            .insert(0, ("t1".into(), "list_all".into(), String::new()));
+        let mut events = Vec::new();
+        state.finalize(false, &mut |e| events.push(e));
+        let StreamEvent::Done { raw_message, .. } = &events[0] else {
+            panic!("expected Done");
+        };
+        match &raw_message.content[0] {
+            ContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "t1");
+                assert_eq!(name, "list_all");
+                assert_eq!(input, &serde_json::json!({}));
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn salvage_extracts_first_balanced_object_from_doubled_args() {
+        // BUG-2026-11-15-01：content_block_start.input 已带完整参数，
+        // input_json_delta 又重发同一份——缓冲 = 参数×2。首个配平 object
+        // 即真值；字符串里的花括号不参与配平。
+        let args = r#"{"max_results":30,"pattern":"a{2}b"}"#;
+        let doubled = format!("{args}{args}");
+        let salvaged = salvage_first_json_object(&doubled).expect("首份 object 可抢救");
+        assert_eq!(
+            salvaged,
+            serde_json::json!({"max_results":30,"pattern":"a{2}b"})
+        );
+    }
+
+    #[test]
+    fn salvage_skips_unparseable_leading_object_and_keeps_scanning() {
+        // 首个配平片段本身不是合法 JSON 时继续向后扫；下一个合法 object 胜出。
+        let buffer = r#"{"p": not-json}{"q":1}"#;
+        assert_eq!(
+            salvage_first_json_object(buffer),
+            Some(serde_json::json!({"q": 1}))
+        );
+    }
+
+    #[test]
+    fn salvage_leaves_genuinely_truncated_args_unrescued() {
+        // 真截断（无配平 object）与非 JSON 文本一律 None——调用方落 Null 真值，
+        // 与既有「截断不掺假」口径一致。
+        assert_eq!(salvage_first_json_object(r#"{"p":1"#), None);
+        assert_eq!(salvage_first_json_object("plain text"), None);
+        assert_eq!(salvage_first_json_object(""), None);
+    }
+
+    #[test]
+    fn finalize_salvages_doubled_argument_buffer() {
+        // 端到端：双份参数缓冲在 finalize 收敛成首份 object，不再落 Null 把
+        // 回合冤判成「truncated or invalid tool call arguments」。
+        let args = r#"{"max_results":30,"pattern":"truncated or invalid tool call arguments"}"#;
+        let mut state = StreamState::new();
+        state.tools.insert(
+            0,
+            ("call_1".into(), "grep".into(), format!("{args}{args}")),
+        );
+        let mut events = Vec::new();
+        state.finalize(false, &mut |e| events.push(e));
+        let StreamEvent::Done { raw_message, .. } = &events[0] else {
+            panic!("expected Done");
+        };
+        match &raw_message.content[0] {
+            ContentBlock::ToolUse { input, .. } => {
+                assert_eq!(
+                    input,
+                    &serde_json::json!({
+                        "max_results": 30,
+                        "pattern": "truncated or invalid tool call arguments"
+                    })
+                );
             }
             other => panic!("unexpected {other:?}"),
         }

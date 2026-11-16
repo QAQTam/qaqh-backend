@@ -26,7 +26,7 @@ pub enum CommandTarget {
     ExecSession { id: qaqh_types::ExecSessionId },
 }
 
-/// 资源 revision 与 driver epoch 由命令信封携带。
+/// 资源 revision 由命令信封携带。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -83,12 +83,12 @@ impl CommandRejection {
 /// `-9`（2026-11-13，ADR-0015 §已决 2，所有者拍板）：新增 `goal.set` / `goal.get` /
 /// `goal.clear` 命令 + `goal_exists` / `no_goal` 拒绝码 ⇒ 与 `-8` 同律 bump。
 /// 代价与 `-8` 相同（未重编旧客户端 open 即拒），账记 ADR-0010 攒着的清单。
-pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-9";
+pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-10";
 
 /// 会话读模型/事件词表契约代际(spec §11)。管理事件与读模型的破坏性变化;
 /// open 与 bootstrap 均携带,客户端必须严格校验。首个显式修订 = ringing-session-2,
 /// 当前无该字段的读模型视为隐式第 1 代。
-pub const SESSION_CONTRACT_REVISION: &str = "ringing-session-2";
+pub const SESSION_CONTRACT_REVISION: &str = "ringing-session-3";
 
 /// RingingV2 唯一公共命令信封。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,8 +246,6 @@ impl RingingCommand {
                 | Self::GoalClear {}
                 | Self::InteractionAskRespond { .. }
                 | Self::InteractionAskDismiss { .. }
-                | Self::DriverClaim { .. }
-                | Self::DriverRelease { .. }
                 | Self::ToolPermissionRespond { .. }
                 | Self::WorkspaceSet { .. }
                 | Self::WorkspaceMoveSession { .. }
@@ -794,26 +792,6 @@ pub struct RingingV2CommandStatus {
     /// 同步命令结果回放(B05):succeeded 且缺失 = 引擎类命令,不携带。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_result: Option<RingingV2SyncResult>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2DriverClaimResponse {
-    pub accepted: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub holder: Option<String>,
-    pub driver_epoch: u64,
-    pub reason: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
-pub struct RingingV2DriverReleaseResponse {
-    pub accepted: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub holder: Option<String>,
-    pub driver_epoch: u64,
-    pub reason: String,
 }
 
 pub fn open_path() -> String {

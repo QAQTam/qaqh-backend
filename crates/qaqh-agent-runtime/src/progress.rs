@@ -44,10 +44,24 @@ pub struct ToolInputProgress<'a> {
     pub args_complete: bool,
 }
 
+/// One provider-request retry notice (display only, never a fact).
+pub struct RetryingProgress<'a> {
+    pub turn_id: &'a str,
+    /// 1-based attempt number about to run.
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub delay_secs: u64,
+    pub error: &'a str,
+}
+
 /// Host-owned destination for in-flight display updates.
 pub trait ProgressSink: Send + Sync + 'static {
     fn assistant_block(&self, update: AssistantProgress<'_>);
     fn tool_input(&self, update: ToolInputProgress<'_>);
+    /// A provider request is being retried (pre-connect 429/5xx or a zero
+    /// content 2xx stream). Display only: the durable truth is still the
+    /// sealed response or the failure fact.
+    fn retrying(&self, update: RetryingProgress<'_>);
     /// The attempt ended (sealed, failed, cancelled or superseded). Any
     /// in-flight identity must be dropped so a reconnect cannot resurrect it.
     fn attempt_finished(&self, turn_id: &str, block_ids: &[String], call_ids: &[String]);

@@ -42,7 +42,7 @@ pub mod command;
 pub mod commands;
 pub mod content;
 pub mod control;
-pub mod driver;
+pub mod marketplace_api;
 pub mod pairing;
 pub mod service_api;
 pub(crate) mod test_hooks;
@@ -89,8 +89,6 @@ pub struct AppState {
     pub tls_fingerprint: Option<String>,
     /// 服务端一次性审批 challenge（device 身份走不透明 id，canonical id 不出 daemon）。
     pub challenges: Arc<challenge::ChallengeStore>,
-    /// driver 席位（内存，per-session 单席位；holder 为 lease id，不跨重启）。
-    pub drivers: Arc<driver::DriverSeats>,
     pub epoch: String,
     pub shutdown: tokio::sync::watch::Sender<bool>,
     pub(crate) test_hooks: Arc<test_hooks::TestHooks>,
@@ -124,6 +122,13 @@ pub const CONTROL_PLANE_ROUTES: &[(&str, &str)] = &[
     ("GET", "/activity"),
     ("POST", "/control/v1/stop"),
     ("POST", "/control/v1/stop-if-idle"),
+    ("GET", "/marketplace/v1/list"),
+    ("GET", "/marketplace/v1/installed"),
+    ("POST", "/marketplace/v1/add"),
+    ("POST", "/marketplace/v1/install"),
+    ("POST", "/marketplace/v1/uninstall"),
+    ("POST", "/marketplace/v1/remove"),
+    ("POST", "/marketplace/v1/update"),
 ];
 
 pub fn build_router(state: AppState) -> Router {
@@ -135,6 +140,27 @@ pub fn build_router(state: AppState) -> Router {
             ("GET", "/activity") => router.route(path, get(activity)),
             ("POST", "/control/v1/stop") => router.route(path, post(handle_stop)),
             ("POST", "/control/v1/stop-if-idle") => router.route(path, post(handle_stop_if_idle)),
+            ("GET", "/marketplace/v1/list") => {
+                router.route(path, get(marketplace_api::handle_marketplace_list))
+            }
+            ("GET", "/marketplace/v1/installed") => {
+                router.route(path, get(marketplace_api::handle_marketplace_installed))
+            }
+            ("POST", "/marketplace/v1/add") => {
+                router.route(path, post(marketplace_api::handle_marketplace_add))
+            }
+            ("POST", "/marketplace/v1/install") => {
+                router.route(path, post(marketplace_api::handle_marketplace_install))
+            }
+            ("POST", "/marketplace/v1/uninstall") => {
+                router.route(path, post(marketplace_api::handle_marketplace_uninstall))
+            }
+            ("POST", "/marketplace/v1/remove") => {
+                router.route(path, post(marketplace_api::handle_marketplace_remove))
+            }
+            ("POST", "/marketplace/v1/update") => {
+                router.route(path, post(marketplace_api::handle_marketplace_update))
+            }
             other => panic!("control-plane route without a registered handler: {other:?}"),
         };
     }

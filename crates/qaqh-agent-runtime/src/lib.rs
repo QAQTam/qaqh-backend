@@ -15,6 +15,8 @@ pub mod session_agent;
 pub mod session_loop;
 #[cfg(test)]
 mod session_loop_tests;
+#[cfg(test)]
+mod permission_reject_verify_tests;
 pub mod session_title;
 pub mod tool_job;
 

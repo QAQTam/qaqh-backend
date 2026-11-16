@@ -1,10 +1,10 @@
 use std::fmt;
 
 use super::types::{
-    ActorRef, ContentHash, ContentRef, FactPayload, FactSchema,
-    MAX_SAFE_FACT_SEQ, RecoveryAction, RecoveryOutcome, RecoveryRef, RecoveryToolCompletion,
-    SessionFact, SessionMetadataPatch, ToolError, ToolIntentPolicyOutcome, ToolMetrics,
-    ToolReplayCapability, ToolTerminalStatus, TurnError, TurnTerminal,
+    ActorRef, ContentHash, ContentRef, FactPayload, FactSchema, MAX_SAFE_FACT_SEQ, RecoveryAction,
+    RecoveryOutcome, RecoveryRef, RecoveryToolCompletion, SessionFact, SessionMetadataPatch,
+    ToolError, ToolIntentPolicyOutcome, ToolMetrics, ToolReplayCapability, ToolTerminalStatus,
+    TurnError, TurnTerminal,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -142,8 +142,6 @@ impl SessionFact {
             FactPayload::ProviderResponseCommitted(payload) => {
                 require_turn_id(self.turn_id.as_ref(), &payload.turn_id)?;
             }
-            // Driver seat changes carry no turn/call/interaction envelope link.
-            FactPayload::DriverChanged(_) => {}
             FactPayload::TurnFinished(payload) => {
                 require_turn_id(self.turn_id.as_ref(), &payload.turn_id)?;
             }
@@ -356,20 +354,6 @@ impl FactPayload {
                     return Err(ValidationError::InvalidField {
                         field: "resolution_seq",
                         message: "must be 1 for the first answer".to_owned(),
-                    });
-                }
-            }
-            Self::DriverChanged(payload) => {
-                if let Some(holder) = &payload.holder {
-                    validate_non_empty("holder", holder)?;
-                }
-                if payload.driver_epoch == 0 || payload.driver_epoch > MAX_SAFE_FACT_SEQ {
-                    return Err(ValidationError::InvalidField {
-                        field: "driver_epoch",
-                        message: format!(
-                            "driver_epoch must be in 1..={MAX_SAFE_FACT_SEQ}, got {}",
-                            payload.driver_epoch
-                        ),
                     });
                 }
             }

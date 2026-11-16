@@ -523,48 +523,6 @@ async fn dispatch(
                 let revision = catalog_revision(&value);
                 (value, revision)
             }),
-        RingingCommand::DriverClaim {
-            client_session_id: _,
-            stale_holder,
-        } => {
-            let CommandTarget::Session { session_id } = &envelope.target else {
-                return fail_response(
-                    &state,
-                    command_id,
-                    StatusCode::BAD_REQUEST,
-                    "target_mismatch",
-                    "driver.claim requires a session target",
-                );
-            };
-            let verdict = state
-                .drivers
-                .claim(session_id, client_session, stale_holder.as_deref());
-            if verdict.accepted {
-                publish_driver_changed(&state, session_id);
-            }
-            driver_result(&verdict)
-        }
-        RingingCommand::DriverRelease {
-            client_session_id: _,
-            expected_epoch,
-        } => {
-            let CommandTarget::Session { session_id } = &envelope.target else {
-                return fail_response(
-                    &state,
-                    command_id,
-                    StatusCode::BAD_REQUEST,
-                    "target_mismatch",
-                    "driver.release requires a session target",
-                );
-            };
-            let verdict = state
-                .drivers
-                .release(session_id, client_session, *expected_epoch);
-            if verdict.accepted {
-                publish_driver_changed(&state, session_id);
-            }
-            driver_result(&verdict)
-        }
         RingingCommand::ConfigSave { .. }
         | RingingCommand::ConfigSetPermissionLevel { .. }
         | RingingCommand::WorkspaceSet { .. }
@@ -632,30 +590,6 @@ async fn dispatch(
             error.to_string(),
         ),
     }
-}
-
-/// driver 裁定 → 命令 result JSON(`RingingV2DriverClaim/ReleaseResponse`
-/// 同形状)。拒绝是带内业务裁定(`accepted=false` + reason),不是命令失败。
-fn driver_result(
-    verdict: &super::driver::DriverVerdict,
-) -> Result<(serde_json::Value, Option<u64>), qaqh_runtime::QaqhError> {
-    Ok((
-        json!({
-            "accepted": verdict.accepted,
-            "holder": verdict.holder,
-            "driver_epoch": verdict.driver_epoch,
-            "reason": verdict.reason,
-        }),
-        None,
-    ))
-}
-
-/// claim/release 生效后经 owner 发 `DriverChanged`,与业务事件同流定序。
-fn publish_driver_changed(state: &AppState, session_id: &str) {
-    let owner = state.service.owners().get_or_create(session_id);
-    owner.publish(qaqh_ringing_contract::events::SessionEvent::DriverChanged {
-        driver: state.drivers.get(session_id),
-    });
 }
 
 fn catalog_revision(result: &serde_json::Value) -> Option<u64> {

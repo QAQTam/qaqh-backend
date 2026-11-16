@@ -1,7 +1,7 @@
 {
   "schema": "qaqh.Ringing",
   "version": 2,
-  "session_contract_revision": "ringing-session-2",
+  "session_contract_revision": "ringing-session-3",
   "server_epoch": "fixture-epoch",
   "session_id": "0199a0f0-0000-7000-8000-000000000001",
   "state": {
@@ -15,9 +15,6 @@
     "tools": [],
     "interactions": [],
     "subagents": [],
-    "exec_sessions": [],
-    "driver": {
-      "epoch": 4
-    }
+    "exec_sessions": []
   }
 }

@@ -598,6 +598,12 @@ async fn consume(
                     let u = usage_to_info(usage, usage_scope);
                     state.usage = Some(u);
                 }
+                // BUG-2026-11-15-02：部分代理把上游的完整 tool_call 折进
+                // `content_block_start`（`input` 非空）且**不发任何
+                // `input_json_delta`**——SDK 的事件通道就不出这一帧，gate 只从
+                // 事件建块，整条调用被静默丢弃（回合变成「说了话什么都没做」）。
+                // Done 载荷携带累加器终值，按 call id 对账补齐缺席条目。
+                reconcile_absent_tool_calls(&mut state.tools, &response.message);
                 state.responded = true;
                 break;
             }
@@ -625,6 +631,51 @@ async fn consume(
         log::warn!("Anthropic stream ended with no content (will retry): {why}");
     }
     Outcome::EmptyStream
+}
+
+/// 把 Done 载荷里、事件流从未出现过的 tool call 补进缓冲（BUG-2026-11-15-02
+/// 的一次性 tool_use 兜底）。对账键是 call id；已流条目一律让位。id 缺席的
+/// 载荷条目以空 id 收口（finalize 的 anthropic parity 会合成 `toolu_…`）。
+/// 参数取累加器终值：object 直接序列化；SDK 已判不可解析的 string 原文照搬
+/// （finalize 的抢救/Null 真值口径统一裁决）；缺席视为零参数 `{}`。
+fn reconcile_absent_tool_calls(
+    tools: &mut std::collections::HashMap<usize, (String, String, String)>,
+    message: &WireMessage,
+) {
+    let known: std::collections::HashSet<String> = tools
+        .values()
+        .map(|(id, _, _)| id.clone())
+        .filter(|id| !id.is_empty())
+        .collect();
+    let mut next_index = tools.keys().copied().max().map_or(0, |max| max + 1);
+    for part in &message.parts {
+        let Part::ToolCall(call) = part else {
+            continue;
+        };
+        if call.name.is_empty() {
+            continue;
+        }
+        if let Some(id) = call.id.as_deref()
+            && !id.is_empty()
+            && known.contains(id)
+        {
+            continue;
+        }
+        let args = match &call.arguments {
+            serde_json::Value::String(raw) => raw.clone(),
+            serde_json::Value::Null => "{}".to_string(),
+            other => other.to_string(),
+        };
+        tools.insert(
+            next_index,
+            (
+                call.id.clone().unwrap_or_default(),
+                call.name.clone(),
+                args,
+            ),
+        );
+        next_index += 1;
+    }
 }
 
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
@@ -781,6 +832,67 @@ mod tests {
         normalize(request, Protocol::AnthropicMessages)
             .expect("normalize")
             .0
+    }
+
+    fn wire_tool_call(id: Option<&str>, name: &str, arguments: serde_json::Value) -> Part {
+        Part::ToolCall(WireToolCall {
+            id: id.map(str::to_string),
+            name: name.to_string(),
+            arguments,
+            provider_state: None,
+        })
+    }
+
+    /// BUG-2026-11-15-02：一次性 tool_use（start 带 input、零 delta）不出任何
+    /// 流事件，收口时按 call id 对账补进缓冲；已流条目让位不重复。
+    #[test]
+    fn reconcile_adds_tool_calls_absent_from_the_event_stream() {
+        let mut tools = std::collections::HashMap::new();
+        tools.insert(
+            0usize,
+            (
+                "call_streamed".to_string(),
+                "grep".to_string(),
+                r#"{"pattern":"a"}"#.to_string(),
+            ),
+        );
+        let message = WireMessage {
+            role: mutil_ai::Role::Assistant,
+            parts: vec![
+                Part::text("narration"),
+                // 已流条目：对账让位。
+                wire_tool_call(Some("call_streamed"), "grep", serde_json::json!({"pattern":"a"})),
+                // 一次性条目：事件流从未出现，补齐。
+                wire_tool_call(Some("call_oneshot"), "grep", serde_json::json!({"pattern":"b"})),
+                // id 缺席：以空 id 收口（finalize 合成 toolu_…）。
+                wire_tool_call(None, "exec", serde_json::json!({"command":"ls"})),
+                // 无名条目不可执行：丢弃。
+                wire_tool_call(Some("call_nameless"), "", serde_json::json!({})),
+            ],
+        };
+        reconcile_absent_tool_calls(&mut tools, &message);
+        assert_eq!(tools.len(), 3, "无名条目丢弃，缺席条目补齐: {tools:?}");
+        let oneshot = tools.values().find(|(id, _, _)| id == "call_oneshot").expect("oneshot");
+        assert_eq!(oneshot.1, "grep");
+        assert_eq!(oneshot.2, r#"{"pattern":"b"}"#);
+        let anonymous = tools.values().find(|(id, _, _)| id.is_empty()).expect("anonymous");
+        assert_eq!(anonymous.1, "exec");
+        assert_eq!(anonymous.2, r#"{"command":"ls"}"#);
+    }
+
+    /// 载荷参数是 SDK 判不可解析的 string（如双份拼接原文）时原文照搬，
+    /// 由 finalize 的抢救/Null 真值口径统一裁决，不做二次加工。
+    #[test]
+    fn reconcile_passes_unparseable_argument_text_through_verbatim() {
+        let mut tools = std::collections::HashMap::new();
+        let doubled = r#"{"a":1}{"a":1}"#;
+        let message = WireMessage {
+            role: mutil_ai::Role::Assistant,
+            parts: vec![wire_tool_call(Some("call_x"), "grep", serde_json::Value::String(doubled.into()))],
+        };
+        reconcile_absent_tool_calls(&mut tools, &message);
+        let entry = tools.values().next().expect("entry");
+        assert_eq!(entry.2, doubled);
     }
 
     #[test]
