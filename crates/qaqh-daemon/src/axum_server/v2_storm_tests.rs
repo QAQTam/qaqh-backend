@@ -238,9 +238,7 @@ async fn sustained_flood_attach_succeeds_every_cycle() {
         delivered >= window_frames_total,
         "窗口洪峰 {window_frames_total} 帧，仅送达 {delivered}——回放尾丢帧"
     );
-    eprintln!(
-        "[storm-guard] 8 圈 attach 全成功：洪峰 {window_frames_total} 帧送达 {delivered}"
-    );
+    eprintln!("[storm-guard] 8 圈 attach 全成功：洪峰 {window_frames_total} 帧送达 {delivered}");
 }
 
 /// 守卫③：慢消费者（前端卡死 300ms 不 poll）期间 1500 帧洪峰灌入 →

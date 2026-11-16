@@ -118,11 +118,12 @@ pub(super) fn validate(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
         for (route_method, route_path) in
             expand_routes(method, path).map_err(|problem| format!("{id}: {problem}"))?
         {
-            let known = qaqh_ringing::RINGING_V2_HTTP_ROUTES
-                .iter()
-                .any(|(known_method, known_path)| {
-                    *known_method == route_method && *known_path == route_path
-                });
+            let known =
+                qaqh_ringing::RINGING_V2_HTTP_ROUTES
+                    .iter()
+                    .any(|(known_method, known_path)| {
+                        *known_method == route_method && *known_path == route_path
+                    });
             if !known {
                 return Err(format!(
                     "coverage capability {id} declares route {route_method} {route_path} that is not in RINGING_V2_HTTP_ROUTES"
@@ -198,15 +199,23 @@ fn expand_routes(method: &str, path: &str) -> Result<Vec<(String, String)>, Stri
     }
     let methods = split_terms(method);
     if methods.is_empty() {
-        return Err(format!("route path {path:?} is declared without any method"));
+        return Err(format!(
+            "route path {path:?} is declared without any method"
+        ));
     }
     // 一对一、或一对多;其它组合一律判为含糊声明,不自作聪明猜笛卡尔积。
     let pairs: Vec<(String, String)> = if methods.len() == 1 {
         let verb = methods[0].clone();
-        paths.into_iter().map(|route| (verb.clone(), route)).collect()
+        paths
+            .into_iter()
+            .map(|route| (verb.clone(), route))
+            .collect()
     } else if paths.len() == 1 {
         let route = paths[0].clone();
-        methods.into_iter().map(|verb| (verb, route.clone())).collect()
+        methods
+            .into_iter()
+            .map(|verb| (verb, route.clone()))
+            .collect()
     } else if methods.len() == paths.len() {
         methods.into_iter().zip(paths).collect()
     } else {

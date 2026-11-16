@@ -32,7 +32,8 @@ impl QaqhService {
         let mut config = qaqh_config::Config::load().unwrap_or_default();
         // PR-M3-2 路线 A：用户级外部 MCP 配置只读合并（Codex/Claude/opencode，
         // import_external 默认开）。只改运行时视图，不回写 config；报告落日志。
-        // 注意 enabled 总闸不变：外部合并的 server 也受 [mcp].enabled 管辖。
+        // 总闸不在本处算死：effective_enabled() 按合并后的 servers 推导，
+        // 只有外部 server 也能自动开（ADR-0025）。
         {
             let paths = qaqh_config::mcp_import::default_user_paths();
             if let Some(report) = qaqh_config::mcp_import::merge_external(&mut config.mcp, &paths) {
@@ -51,8 +52,9 @@ impl QaqhService {
         }
         // MCP manager 装配（设计 §10-6 / PR-M1-5）：daemon 进程级单例（actor
         // 线程与其工具线程同进程，全局槽位可见）；装配不做同步网络操作，
-        // 连接由下方预热（后台）+ lazy（工具执行路径）双入口拉起。secret
-        // store 用默认位置（[secrets.mcp] 段）；禁用配置时 manager 以
+        // 连接全由 lazy 路径（工具执行 / 聚合工具 list_tools）拉起，启动
+        // 不预热（ADR-0025）。secret store 用默认位置（[secrets.mcp] 段）；
+        // 禁用配置时 manager 以
         // disabled 形态拒绝一切调用（MCP_DISABLED）。
         qaqh_mcp::install_manager(qaqh_mcp::McpManager::new(config.mcp.clone()));
         // LSP manager 装配（；与 MCP 同款单例；
@@ -74,11 +76,8 @@ impl QaqhService {
             spawn_config_file_poller();
             spawn_exec_env_reloader();
         }
-        // 投影预热（PR-M1-5 冒烟修正）：lazy 连接的唯一触发点是工具执行，
-        // 而工具要先投影才会被调用——不预热则全新 daemon 上模型首回合永远
-        // 看不到 MCP 工具（鸡生蛋死锁）。fire-and-forget：逐 server 连接
-        // + 缓存 tools/list + 置脏，不阻塞启动；未启用时内部 no-op。
-        qaqh_mcp::prime_all_async();
+        // 不预热（ADR-0025）：启动不拉起任何三方进程。可见性改由聚合工具
+        // 的 list_tools action 按需连接 + 投影代数重建闭环。
         // daemon 进程的工具注册表（供 `skills.list_tools` 等查询；worker 各自
         // 独立 init_tools，本进程只提供注册表快照，不参与工具执行）。
         // 不带会话工具注册器：spawn_subagent 等属于会话工具面，不在 daemon
@@ -105,6 +104,7 @@ impl QaqhService {
         // 与 send_input 的入队语义无死锁）。
         let router_service = service.clone();
         let fork_service = service.clone();
+        let notify_service = service.clone();
         if let Ok(mut registry) = service.registry() {
             registry.set_terminal_router(Some(Arc::new(move |notice| {
                 // ADR-0016 切片 1：封箱终态挂钩调度内核 fork（阅读窗
@@ -118,6 +118,16 @@ impl QaqhService {
                     registry.route_turn_terminal(notice);
                 }
             })));
+            // ADR-0026：exec 订阅终态端口——manager finalize 回调进 registry
+            // （route_turn_terminal 同款短临界区、无 await；watcher 线程回调时
+            // 不持任何会话 core 锁，与 send_input 的入队语义无死锁）。
+            registry
+                .exec_sessions()
+                .set_notify_port(Some(Arc::new(move |notice| {
+                    if let Ok(mut registry) = notify_service.registry() {
+                        registry.route_exec_terminal(&notice);
+                    }
+                })));
         }
         service
     }
@@ -301,6 +311,15 @@ impl QaqhService {
             return Vec::new();
         };
         registry.sweep_active_goals()
+    }
+
+    /// ADR-0026：exec 订阅终态兜底补投（daemon 周期任务调用）。主路径是
+    /// finalize 端口回调；这里只补投 armed+terminal+未送达 的残留。
+    pub fn sweep_exec_notices(&self) -> Vec<String> {
+        let Ok(mut registry) = self.registry() else {
+            return Vec::new();
+        };
+        registry.sweep_armed_exec_sessions()
     }
 
     /// ADR-0016 切片 3：handoff fork 兜底扫描（daemon 周期任务调用）。封箱
@@ -833,14 +852,8 @@ fn spawn_mcp_reloader() {
                 report.removed,
                 report.kept.len()
             );
-            // P2-1 缺口修复（用户实测发现）：热重载新增/变更的 server 无预热
-            // 触发点——启动 prime 在 enabled=false 时是 no-op 且 reloader 不在
-            // 启动路径，鸡生蛋重现（模型面永远看不到新 server 工具）。
-            // apply 后补发幂等预热（已连接 skip；新增连接+缓存+置脏 → 下回合
-            // 投影可见）。
-            if !report.added.is_empty() || !report.updated.is_empty() {
-                qaqh_mcp::prime_all_async();
-            }
+            // 不预热：新增/变更 server 由模型按需调 list_tools 触发连接
+            // （ADR-0025）。apply_config 已 bump 投影代数，聚合工具重新在场。
         })
         .await;
         log::warn!("[mcp] hot-reload watcher channel closed; exiting");
@@ -1252,7 +1265,9 @@ mod exec_env_overlay_tests {
         unsafe { std::env::set_var("QAQH_DATA_DIR", root.path().join(".qaqh")) };
 
         let secrets = qaqh_config::secrets::SecretStore::default_location();
-        secrets.set_mcp("demo_key", "s3cret-value").expect("set mcp secret");
+        secrets
+            .set_mcp("demo_key", "s3cret-value")
+            .expect("set mcp secret");
 
         // ① 解析成功：占位符 → 真值写入覆盖层。
         let mut config = qaqh_config::Config::default();

@@ -21,19 +21,19 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::core::{GUID, PCWSTR, HRESULT};
 use windows::Win32::Foundation::FILETIME;
 use windows::Win32::Storage::ProjectedFileSystem::{
     PRJ_CALLBACK_DATA, PRJ_CALLBACKS, PRJ_CB_DATA_FLAG_ENUM_RESTART_SCAN,
-    PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO, PRJ_FILE_STATE, PRJ_NOTIFICATION,
-    PRJ_NOTIFICATION_FILE_OVERWRITTEN, PRJ_NOTIFICATION_FILE_RENAMED,
-    PRJ_NOTIFICATION_MAPPING, PRJ_NOTIFICATION_NEW_FILE_CREATED, PRJ_NOTIFICATION_PRE_DELETE,
-    PRJ_NOTIFICATION_PRE_RENAME, PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT,
-    PRJ_NOTIFY_FILE_OVERWRITTEN, PRJ_NOTIFY_FILE_RENAMED, PRJ_NOTIFY_NEW_FILE_CREATED,
-    PRJ_NOTIFY_PRE_DELETE, PRJ_NOTIFY_PRE_RENAME, PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO,
-    PRJ_PLACEHOLDER_VERSION_INFO, PRJ_STARTVIRTUALIZING_OPTIONS, PRJ_UPDATE_TYPES,
+    PRJ_DIR_ENTRY_BUFFER_HANDLE, PRJ_FILE_BASIC_INFO, PRJ_FILE_STATE,
+    PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT, PRJ_NOTIFICATION, PRJ_NOTIFICATION_FILE_OVERWRITTEN,
+    PRJ_NOTIFICATION_FILE_RENAMED, PRJ_NOTIFICATION_MAPPING, PRJ_NOTIFICATION_NEW_FILE_CREATED,
+    PRJ_NOTIFICATION_PRE_DELETE, PRJ_NOTIFICATION_PRE_RENAME, PRJ_NOTIFY_FILE_OVERWRITTEN,
+    PRJ_NOTIFY_FILE_RENAMED, PRJ_NOTIFY_NEW_FILE_CREATED, PRJ_NOTIFY_PRE_DELETE,
+    PRJ_NOTIFY_PRE_RENAME, PRJ_NOTIFY_TYPES, PRJ_PLACEHOLDER_INFO, PRJ_PLACEHOLDER_VERSION_INFO,
+    PRJ_STARTVIRTUALIZING_OPTIONS, PRJ_UPDATE_TYPES,
 };
 use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+use windows::core::{GUID, HRESULT, PCWSTR};
 
 const S_OK: HRESULT = HRESULT(0);
 const E_FILE_NOT_FOUND: HRESULT = HRESULT(0x8007_0002_u32 as i32);
@@ -81,8 +81,7 @@ type PrjMarkDirectoryAsPlaceholderFn = unsafe extern "system" fn(
     versioninfo: *const PRJ_PLACEHOLDER_VERSION_INFO,
     virtualizationinstanceid: *const GUID,
 ) -> HRESULT;
-type PrjFileNameMatchFn =
-    unsafe extern "system" fn(filenametocheck: PCWSTR, pattern: PCWSTR) -> u8;
+type PrjFileNameMatchFn = unsafe extern "system" fn(filenametocheck: PCWSTR, pattern: PCWSTR) -> u8;
 type PrjFileNameCompareFn = unsafe extern "system" fn(filename1: PCWSTR, filename2: PCWSTR) -> i32;
 type PrjDeleteFileFn = unsafe extern "system" fn(
     ctx: PRJ_NAMESPACE_VIRTUALIZATION_CONTEXT,
@@ -90,9 +89,10 @@ type PrjDeleteFileFn = unsafe extern "system" fn(
     updateflags: PRJ_UPDATE_TYPES,
     failurereason: *mut windows::Win32::Storage::ProjectedFileSystem::PRJ_UPDATE_FAILURE_CAUSES,
 ) -> HRESULT;
-type PrjGetOnDiskFileStateFn =
-    unsafe extern "system" fn(destinationfilename: PCWSTR, filestate: *mut PRJ_FILE_STATE)
-        -> HRESULT;
+type PrjGetOnDiskFileStateFn = unsafe extern "system" fn(
+    destinationfilename: PCWSTR,
+    filestate: *mut PRJ_FILE_STATE,
+) -> HRESULT;
 
 #[derive(Clone)]
 struct Prj {
@@ -300,7 +300,10 @@ unsafe extern "system" fn cb_end_enum(
 ) -> HRESULT {
     unsafe {
         let p = provider_of(&*cbdata);
-        p.sessions.lock().unwrap().remove(&guid_key(&*enumeration_id));
+        p.sessions
+            .lock()
+            .unwrap()
+            .remove(&guid_key(&*enumeration_id));
         S_OK
     }
 }
@@ -668,24 +671,14 @@ impl View {
                 std::ptr::null_mut(),
             )
         };
-        if hr.0 >= 0 {
-            Ok(())
-        } else {
-            Err(hr.0)
-        }
+        if hr.0 >= 0 { Ok(()) } else { Err(hr.0) }
     }
 
     fn on_disk_state(&self, rel: &str) -> Option<PRJ_FILE_STATE> {
         let full = wide(&self.full(rel));
         let mut state = PRJ_FILE_STATE(0);
-        let hr = unsafe {
-            (self.prj.get_on_disk_file_state)(PCWSTR(full.as_ptr()), &mut state)
-        };
-        if hr.0 < 0 {
-            None
-        } else {
-            Some(state)
-        }
+        let hr = unsafe { (self.prj.get_on_disk_file_state)(PCWSTR(full.as_ptr()), &mut state) };
+        if hr.0 < 0 { None } else { Some(state) }
     }
 
     /// 递归收集 `base`(视图或 store)下的相对文件路径。
@@ -860,9 +853,7 @@ impl View {
         for change in self.diff()? {
             let ok = match &change {
                 Change::New(rel) => std::fs::remove_file(self.view_path(rel)).is_ok(),
-                Change::Modified(rel) | Change::Deleted(rel) => {
-                    self.delete_view_file(rel).is_ok()
-                }
+                Change::Modified(rel) | Change::Deleted(rel) => self.delete_view_file(rel).is_ok(),
             };
             if ok {
                 match change {

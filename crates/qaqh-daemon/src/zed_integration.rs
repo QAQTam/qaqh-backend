@@ -34,13 +34,17 @@ pub fn settings_path() -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     let dir = if cfg!(windows) {
-        std::env::var("APPDATA").ok().map(|root| PathBuf::from(root).join("Zed"))
+        std::env::var("APPDATA")
+            .ok()
+            .map(|root| PathBuf::from(root).join("Zed"))
     } else if cfg!(target_os = "macos") {
         std::env::var("HOME")
             .ok()
             .map(|root| PathBuf::from(root).join("Library/Application Support/Zed"))
     } else {
-        std::env::var("HOME").ok().map(|root| PathBuf::from(root).join(".config/zed"))
+        std::env::var("HOME")
+            .ok()
+            .map(|root| PathBuf::from(root).join(".config/zed"))
     }?;
     if !dir.is_dir() {
         return None;
@@ -112,7 +116,9 @@ pub fn install(command_exe: &Path) -> Result<String, String> {
     Ok(match action {
         Action::Already => unreachable!("Already 已提前返回"),
         Action::Inserted => format!("已创建 {}", path.display()),
-        Action::InsertedNested | Action::Updated => format!("已更新 {}(备份 {})", path.display(), backup.display()),
+        Action::InsertedNested | Action::Updated => {
+            format!("已更新 {}(备份 {})", path.display(), backup.display())
+        }
     })
 }
 
@@ -187,10 +193,7 @@ fn classify(text: &str) -> Vec<Class> {
                 classes.push(Class::BlockComment);
                 index += 2;
                 while index < bytes.len() {
-                    if bytes[index] == b'*'
-                        && index + 1 < bytes.len()
-                        && bytes[index + 1] == b'/'
-                    {
+                    if bytes[index] == b'*' && index + 1 < bytes.len() && bytes[index + 1] == b'/' {
                         classes.push(Class::BlockComment);
                         classes.push(Class::BlockComment);
                         index += 2;
@@ -229,9 +232,7 @@ fn strip_comments(text: &str, classes: &[Class]) -> String {
     }
     // 尾逗号:`,` 后跳过空白,紧跟 `}`/`]` → 替换为空格。
     for index in 0..out.len() {
-        if out[index] == b','
-            && classes.get(index).copied().unwrap_or(Class::Code) == Class::Code
-        {
+        if out[index] == b',' && classes.get(index).copied().unwrap_or(Class::Code) == Class::Code {
             let mut probe = index + 1;
             while probe < out.len() && out[probe].is_ascii_whitespace() {
                 probe += 1;
@@ -466,17 +467,11 @@ fn wire_entry(text: &str, command: &str) -> Result<(String, Action), String> {
     // 拼接一律走字节:所有边界都是扫描器标出的 ASCII 结构位,`&str` 切片
     // 形式会被 `-D clippy::string-slice` 拒绝,字节版还顺带免除边界疑虑。
     let bytes = text.as_bytes();
-    let from_utf8 = |out: Vec<u8>| {
-        String::from_utf8(out).expect("只在结构符边界拼接,UTF-8 边界不变")
-    };
+    let from_utf8 =
+        |out: Vec<u8>| String::from_utf8(out).expect("只在结构符边界拼接,UTF-8 边界不变");
     match member_value_span(text, &classes, 0..text.len(), "agent_servers") {
         Some((value_start, value_end)) => {
-            match member_value_span(
-                text,
-                &classes,
-                value_start..value_end + 1,
-                AGENT_KEY,
-            ) {
+            match member_value_span(text, &classes, value_start..value_end + 1, AGENT_KEY) {
                 Some((existing_start, existing_end)) => {
                     let mut out = Vec::with_capacity(text.len() + entry.len());
                     out.extend_from_slice(&bytes[..existing_start]);
@@ -487,7 +482,11 @@ fn wire_entry(text: &str, command: &str) -> Result<(String, Action), String> {
                 None => {
                     // 插在 agent_servers 对象闭合 `}` 之前(value_end 即该括号)。
                     let at = value_end;
-                    let comma = if needs_comma(text, &classes, at) { ", " } else { "" };
+                    let comma = if needs_comma(text, &classes, at) {
+                        ", "
+                    } else {
+                        ""
+                    };
                     let mut out = Vec::with_capacity(text.len() + entry.len() + 4);
                     out.extend_from_slice(&bytes[..at]);
                     out.extend_from_slice(comma.as_bytes());
@@ -506,7 +505,11 @@ fn wire_entry(text: &str, command: &str) -> Result<(String, Action), String> {
             while insert_at > 0 && bytes[insert_at - 1].is_ascii_whitespace() {
                 insert_at -= 1;
             }
-            let comma = if needs_comma(text, &classes, insert_at) { "," } else { "" };
+            let comma = if needs_comma(text, &classes, insert_at) {
+                ","
+            } else {
+                ""
+            };
             let mut out = Vec::with_capacity(text.len() + entry.len() + 32);
             out.extend_from_slice(&bytes[..insert_at]);
             out.extend_from_slice(comma.as_bytes());
@@ -549,8 +552,7 @@ mod tests {
 
     #[test]
     fn top_level_insert_adds_missing_comma() {
-        let (out, action) =
-            wire_entry("{\n  \"theme\": \"one-dark\"\n}", COMMAND).expect("wire");
+        let (out, action) = wire_entry("{\n  \"theme\": \"one-dark\"\n}", COMMAND).expect("wire");
         assert_eq!(action, Action::Inserted);
         let value = parse(&out);
         assert_eq!(value["theme"].as_str(), Some("one-dark"));
@@ -559,8 +561,7 @@ mod tests {
 
     #[test]
     fn trailing_comma_is_not_doubled() {
-        let (out, action) =
-            wire_entry("{\n  \"theme\": \"one-dark\",\n}", COMMAND).expect("wire");
+        let (out, action) = wire_entry("{\n  \"theme\": \"one-dark\",\n}", COMMAND).expect("wire");
         assert_eq!(action, Action::Inserted);
         parse(&out);
     }

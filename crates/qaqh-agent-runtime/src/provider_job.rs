@@ -88,6 +88,10 @@ pub struct ProviderOutcome {
     /// True only when run_round observed and acted on this turn's cancel signal.
     pub cancelled: bool,
     pub failure_kind: Option<ProviderFailureKind>,
+    /// gate 的稳定错误类别([`qaqh_gate::ErrorKind`])。请求类失败时填充,
+    /// 是 turn 级重发判定([`retryable_failure`])的分类依据;不按错误字符串
+    /// 重分类——类别表在 SDK 一处维护,镜像第二份只会漂移。
+    pub error_kind: Option<qaqh_gate::ErrorKind>,
 }
 
 impl ProviderRequestSpec {
@@ -210,6 +214,7 @@ fn stream_once(
     let mut final_event = None;
     let mut stream_usage = None;
     let mut stream_error = None;
+    let mut stream_error_kind = None;
     let mut duplicate_done = false;
     let mut partial_text = String::new();
     let mut partial_reasoning = String::new();
@@ -240,116 +245,117 @@ fn stream_once(
                 last_output_at = Some(at);
             }
             match event {
-            qaqh_gate::StreamEvent::Done {
-                raw_message,
-                usage,
-                stop_reason,
-            } => {
-                if final_event.is_some() {
-                    duplicate_done = true;
+                qaqh_gate::StreamEvent::Done {
+                    raw_message,
+                    usage,
+                    stop_reason,
+                } => {
+                    if final_event.is_some() {
+                        duplicate_done = true;
+                    }
+                    final_event = Some((raw_message, usage, stop_reason));
                 }
-                final_event = Some((raw_message, usage, stop_reason));
-            }
-            qaqh_gate::StreamEvent::UsageUpdate(usage) => {
-                stream_usage = Some(usage);
-            }
-            qaqh_gate::StreamEvent::Error { message, .. } => {
-                stream_error = Some(message);
-            }
-            qaqh_gate::StreamEvent::ContentDelta(text) => {
-                if partial_text.len() < MAX_PARTIAL_TEXT_BYTES {
-                    partial_text.push_str(&text);
+                qaqh_gate::StreamEvent::UsageUpdate(usage) => {
+                    stream_usage = Some(usage);
                 }
-                if let Some(display) = &display
-                    && due(&mut last_emit)
-                {
-                    publish_block(display, ProgressBlockKind::Answer, &partial_text);
+            qaqh_gate::StreamEvent::Error { kind, message } => {
+                stream_error_kind = Some(kind);
+                    stream_error = Some(message);
                 }
-            }
-            qaqh_gate::StreamEvent::ReasoningDelta { kind, text } => {
-                if !kind.is_displayable() {
-                    return;
+                qaqh_gate::StreamEvent::ContentDelta(text) => {
+                    if partial_text.len() < MAX_PARTIAL_TEXT_BYTES {
+                        partial_text.push_str(&text);
+                    }
+                    if let Some(display) = &display
+                        && due(&mut last_emit)
+                    {
+                        publish_block(display, ProgressBlockKind::Answer, &partial_text);
+                    }
                 }
-                if partial_reasoning.len() < MAX_PARTIAL_TEXT_BYTES {
-                    partial_reasoning.push_str(&text);
+                qaqh_gate::StreamEvent::ReasoningDelta { kind, text } => {
+                    if !kind.is_displayable() {
+                        return;
+                    }
+                    if partial_reasoning.len() < MAX_PARTIAL_TEXT_BYTES {
+                        partial_reasoning.push_str(&text);
+                    }
+                    if let Some(display) = &display
+                        && due(&mut last_emit)
+                    {
+                        publish_block(display, ProgressBlockKind::Reasoning, &partial_reasoning);
+                    }
                 }
-                if let Some(display) = &display
-                    && due(&mut last_emit)
-                {
-                    publish_block(display, ProgressBlockKind::Reasoning, &partial_reasoning);
+                qaqh_gate::StreamEvent::ToolCallProgress {
+                    index,
+                    id,
+                    name,
+                    args_chunk,
+                } => {
+                    if id.is_empty() {
+                        return;
+                    }
+                    let entry = tool_args
+                        .entry(index)
+                        .or_insert_with(|| ToolInputStream::new(id, false));
+                    if entry.name != name {
+                        entry.rebind(name);
+                    }
+                    // 每一片都喂：节流只管发布频率，管不着计数。
+                    entry.push_fragment(&args_chunk);
+                    // 参数一吐完就抢发一帧（不等下一个窗）：这是"第一个工具到手即可
+                    // 解析"的那一帧，仍然只是展示旁路。
+                    if let Some(display) = &display
+                        && (entry.mark_complete() || due(&mut last_emit))
+                    {
+                        publish_tool_input(display, entry);
+                    }
                 }
-            }
-            qaqh_gate::StreamEvent::ToolCallProgress {
-                index,
-                id,
-                name,
-                args_chunk,
-            } => {
-                if id.is_empty() {
-                    return;
+                qaqh_gate::StreamEvent::NativeToolProgress {
+                    index,
+                    call_id,
+                    name,
+                    input_so_far,
+                    ..
+                } => {
+                    let Some(call_id) = call_id.filter(|id| !id.is_empty()) else {
+                        return;
+                    };
+                    let name = name.unwrap_or_default();
+                    // 原生面是**累计快照**语义（替换），不是增量：同一身份换正文时
+                    // 保留估算器状态，只做快照吸收。
+                    let entry = tool_args
+                        .entry(index)
+                        .or_insert_with(|| ToolInputStream::new(call_id.clone(), true));
+                    entry.call_id = call_id;
+                    if entry.name != name {
+                        entry.rebind(name);
+                    }
+                    entry.absorb_snapshot(&input_so_far);
+                    if let Some(display) = &display
+                        && (entry.mark_complete() || due(&mut last_emit))
+                    {
+                        publish_tool_input(display, entry);
+                    }
                 }
-                let entry = tool_args
-                    .entry(index)
-                    .or_insert_with(|| ToolInputStream::new(id, false));
-                if entry.name != name {
-                    entry.rebind(name);
+                qaqh_gate::StreamEvent::WebSearchStatus(_) => {}
+                // 重试可见性(此前整类被吞,UI 永远看不到"正在重试"):原样透传
+                // attempt/max/delay/原因,display 缺席时按无展示旁路处理。
+                qaqh_gate::StreamEvent::Retrying {
+                    attempt,
+                    max_retries,
+                    delay_secs,
+                    error,
+                } => {
+                    if let Some(display) = &display {
+                        display.sink.retrying(crate::progress::RetryingProgress {
+                            turn_id: &display.blocks.turn_id,
+                            attempt,
+                            max_attempts: max_retries,
+                            delay_secs,
+                            error: &error,
+                        });
+                    }
                 }
-                // 每一片都喂：节流只管发布频率，管不着计数。
-                entry.push_fragment(&args_chunk);
-                // 参数一吐完就抢发一帧（不等下一个窗）：这是"第一个工具到手即可
-                // 解析"的那一帧，仍然只是展示旁路。
-                if let Some(display) = &display
-                    && (entry.mark_complete() || due(&mut last_emit))
-                {
-                    publish_tool_input(display, entry);
-                }
-            }
-            qaqh_gate::StreamEvent::NativeToolProgress {
-                index,
-                call_id,
-                name,
-                input_so_far,
-                ..
-            } => {
-                let Some(call_id) = call_id.filter(|id| !id.is_empty()) else {
-                    return;
-                };
-                let name = name.unwrap_or_default();
-                // 原生面是**累计快照**语义（替换），不是增量：同一身份换正文时
-                // 保留估算器状态，只做快照吸收。
-                let entry = tool_args
-                    .entry(index)
-                    .or_insert_with(|| ToolInputStream::new(call_id.clone(), true));
-                entry.call_id = call_id;
-                if entry.name != name {
-                    entry.rebind(name);
-                }
-                entry.absorb_snapshot(&input_so_far);
-                if let Some(display) = &display
-                    && (entry.mark_complete() || due(&mut last_emit))
-                {
-                    publish_tool_input(display, entry);
-                }
-            }
-            qaqh_gate::StreamEvent::WebSearchStatus(_) => {}
-            // 重试可见性(此前整类被吞,UI 永远看不到"正在重试"):原样透传
-            // attempt/max/delay/原因,display 缺席时按无展示旁路处理。
-            qaqh_gate::StreamEvent::Retrying {
-                attempt,
-                max_retries,
-                delay_secs,
-                error,
-            } => {
-                if let Some(display) = &display {
-                    display.sink.retrying(crate::progress::RetryingProgress {
-                        turn_id: &display.blocks.turn_id,
-                        attempt,
-                        max_attempts: max_retries,
-                        delay_secs,
-                        error: &error,
-                    });
-                }
-            }
             }
         },
     );
@@ -358,20 +364,23 @@ fn stream_once(
     flush_tool_input_tails(&display, &mut tool_args);
     if let Err(error) = result {
         let detail = stream_error.unwrap_or_else(|| error.to_string());
-        let mut outcome = failed_after_start(&detail);
+        let mut outcome = failed_after_start(&detail, stream_error_kind);
         outcome.partial_text = (!partial_text.is_empty()).then_some(partial_text);
         outcome.partial_reasoning = (!partial_reasoning.is_empty()).then_some(partial_reasoning);
         outcome.generated_ms = output_window_ms(first_output_at, last_output_at);
+        // 失败 attempt 已见的使用量不丢:重发后的 usage 累计与账本都以此
+        // 为准(此前直接丢弃,上游实际消耗无法入账)。
+        outcome.usage = stream_usage;
         return outcome;
     }
     if duplicate_done {
-        return failed_after_start("provider emitted multiple terminal Done events");
+        return failed_after_start("provider emitted multiple terminal Done events", None);
     }
     let Some((raw_message, done_usage, stop_reason)) = final_event else {
-        return failed_after_start("missing terminal provider response");
+        return failed_after_start("missing terminal provider response", None);
     };
     if raw_message.role != "assistant" {
-        return failed_after_start("provider response role is not assistant");
+        return failed_after_start("provider response role is not assistant", None);
     }
 
     let mut neutral_blocks = Vec::with_capacity(raw_message.content.len());
@@ -403,6 +412,7 @@ fn stream_once(
         error: None,
         cancelled: false,
         failure_kind: None,
+        error_kind: None,
     }
 }
 
@@ -762,9 +772,7 @@ fn classify(stop_reason: Option<&str>, message: &Message) -> (ProviderFinish, Op
 /// (端点单 chunk 冲刷)→ `0`,消费方据此如实判定"窗口测不出",不得伪造分母。
 fn output_window_ms(first: Option<Instant>, last: Option<Instant>) -> Option<u64> {
     match (first, last) {
-        (Some(first), Some(last)) => {
-            Some(last.saturating_duration_since(first).as_millis() as u64)
-        }
+        (Some(first), Some(last)) => Some(last.saturating_duration_since(first).as_millis() as u64),
         _ => None,
     }
 }
@@ -785,11 +793,12 @@ fn not_started(message: &str) -> ProviderOutcome {
         error: Some(message.chars().take(512).collect()),
         cancelled: false,
         failure_kind: Some(ProviderFailureKind::Request),
+        error_kind: None,
     }
 }
 
 /// The request may have reached the upstream service; a result is missing.
-fn failed_after_start(message: &str) -> ProviderOutcome {
+fn failed_after_start(message: &str, kind: Option<qaqh_gate::ErrorKind>) -> ProviderOutcome {
     ProviderOutcome {
         evidence: Evidence::StartedUnknown,
         message: None,
@@ -804,18 +813,36 @@ fn failed_after_start(message: &str) -> ProviderOutcome {
         error: Some(message.chars().take(512).collect()),
         cancelled: false,
         failure_kind: Some(ProviderFailureKind::Request),
+        error_kind: kind,
     }
 }
 
+/// turn 级重发判定:已出发、未终态、请求类失败,且错误类别是 SDK 认定的
+/// 瞬态类(RateLimited/Overloaded/Timeout/Connection/ProviderInternal)。
+/// 鉴权/请求构造/内容审查类失败重发注定同样失败;上下文超限有 handoff
+/// 收口,这里显式排除。判定只依据类别,不匹配错误字符串。
+pub fn retryable_failure(outcome: &ProviderOutcome) -> bool {
+    outcome.evidence == Evidence::StartedUnknown
+        && outcome.failure_kind == Some(ProviderFailureKind::Request)
+        && !outcome.cancelled
+        && outcome
+            .error_kind
+            .is_some_and(qaqh_gate::ErrorKind::is_retryable)
+        && !outcome
+            .error
+            .as_deref()
+            .is_some_and(crate::handoff::is_context_overflow)
+}
+
 fn worker_crashed(message: &str) -> ProviderOutcome {
-    let mut outcome = failed_after_start(message);
+    let mut outcome = failed_after_start(message, None);
     outcome.failure_kind = Some(ProviderFailureKind::WorkerCrash);
     outcome
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, ContentBlock, Message, ProviderFinish, ToolInputStream};
+    use super::{ContentBlock, Message, ProviderFinish, ToolInputStream, classify};
 
     /// 损坏参数 + 长度型 stop：报错文本要指向真因（输出预算耗尽），而不是
     /// 泛化的「参数流损坏」——两者的排查方向完全不同（调预算 vs 查代理）。
@@ -917,7 +944,10 @@ mod tests {
         native.absorb_snapshot("*** Begin Patch\n*** Add File: a.txt\n+one");
         assert!(!native.mark_complete(), "补丁没写到 End Patch 不算吐完");
         native.absorb_snapshot("*** Begin Patch\n*** Add File: a.txt\n+one\n*** End Patch\n");
-        assert!(native.mark_complete(), "原生 freeform 面的终态是 End Patch 行");
+        assert!(
+            native.mark_complete(),
+            "原生 freeform 面的终态是 End Patch 行"
+        );
         native.absorb_snapshot("*** Begin Patch\n*** Update File: b.txt\n@@\n-x\n+Y\n");
         assert!(
             !native.mark_complete(),

@@ -138,7 +138,9 @@ fn init_android_logger() {}
 
 // ── 工具 ────────────────────────────────────────────────────────────────
 
-async fn with_timeout<T>(future: impl Future<Output = Result<T, ClientError>>) -> Result<T, CoreError> {
+async fn with_timeout<T>(
+    future: impl Future<Output = Result<T, ClientError>>,
+) -> Result<T, CoreError> {
     match tokio::time::timeout(CALL_TIMEOUT, future).await {
         Ok(result) => result.map_err(CoreError::from),
         Err(_) => Err(CoreError::Transport {
@@ -205,8 +207,8 @@ pub async fn connect_client(
         on_v2_event: {
             let handlers = Arc::clone(&handlers);
             Arc::new(move |seed, frame| {
-                let event_json = serde_json::to_string(&frame.event)
-                    .unwrap_or_else(|_| "{}".to_string());
+                let event_json =
+                    serde_json::to_string(&frame.event).unwrap_or_else(|_| "{}".to_string());
                 handlers.on_event(seed, frame.seq, event_json);
             })
         },
@@ -300,9 +302,11 @@ impl QaqhClient {
     }
 
     pub async fn session_activity_json(&self) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::SessionActivity))
-            .await?
-            .to_string())
+        Ok(
+            with_timeout(self.inner.query(QueryRequest::SessionActivity))
+                .await?
+                .to_string(),
+        )
     }
 
     pub async fn workspace_list_json(&self) -> Result<String, CoreError> {
@@ -318,54 +322,69 @@ impl QaqhClient {
     }
 
     pub async fn skills_list_tools_json(&self) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::SkillsListTools))
-            .await?
-            .to_string())
+        Ok(
+            with_timeout(self.inner.query(QueryRequest::SkillsListTools))
+                .await?
+                .to_string(),
+        )
     }
 
     pub async fn skills_catalog_json(&self, cwd: Option<String>) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::SkillsCatalog { cwd }))
-            .await?
-            .to_string())
+        Ok(
+            with_timeout(self.inner.query(QueryRequest::SkillsCatalog { cwd }))
+                .await?
+                .to_string(),
+        )
     }
 
     pub async fn fs_list_json(&self, path: String) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::FsList { path }))
-            .await?
-            .to_string())
+        Ok(
+            with_timeout(self.inner.query(QueryRequest::FsList { path }))
+                .await?
+                .to_string(),
+        )
     }
 
     pub async fn fs_read_json(&self, path: String, max_bytes: u64) -> Result<String, CoreError> {
-        Ok(with_timeout(
-            self.inner
-                .query(QueryRequest::FsRead { path, max_bytes: Some(max_bytes) }),
-        )
-            .await?
-            .to_string())
+        Ok(with_timeout(self.inner.query(QueryRequest::FsRead {
+            path,
+            max_bytes: Some(max_bytes),
+        }))
+        .await?
+        .to_string())
     }
 
     pub async fn session_dashboard_json(&self, session_id: String) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::SessionDashboard { session_id }))
-            .await?
-            .to_string())
+        Ok(with_timeout(
+            self.inner
+                .query(QueryRequest::SessionDashboard { session_id }),
+        )
+        .await?
+        .to_string())
     }
 
     pub async fn todo_status_json(&self, session_id: String) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::TodoStatus { session_id }))
-            .await?
-            .to_string())
+        Ok(
+            with_timeout(self.inner.query(QueryRequest::TodoStatus { session_id }))
+                .await?
+                .to_string(),
+        )
     }
 
     pub async fn session_meta_json(&self, session_id: String) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::SessionMeta { session_id }))
-            .await?
-            .to_string())
+        Ok(
+            with_timeout(self.inner.query(QueryRequest::SessionMeta { session_id }))
+                .await?
+                .to_string(),
+        )
     }
 
     pub async fn plan_read_json(&self, session_id: String) -> Result<String, CoreError> {
-        Ok(with_timeout(self.inner.query(QueryRequest::PlanRead { session_id }))
-            .await?
-            .to_string())
+        Ok(
+            with_timeout(self.inner.query(QueryRequest::PlanRead { session_id }))
+                .await?
+                .to_string(),
+        )
     }
 
     // ── 命令 ──
@@ -436,20 +455,26 @@ impl QaqhClient {
     }
 
     /// `conversation.send_message`（纯文本便捷面；富内容用 `send_command_json`）。
-    pub async fn send_message(&self, session_id: String, text: String) -> Result<String, CoreError> {
+    pub async fn send_message(
+        &self,
+        session_id: String,
+        text: String,
+    ) -> Result<String, CoreError> {
         self.send_command_json(
             Some(session_id),
-            to_json_string(&RingingCommand::ConversationSendMessage(ConversationSendMessage {
-                text,
-                images: Vec::new(),
-                attachments: None,
-                message_id: None,
-                input_purpose: Default::default(),
-                as_system: false,
-                inter_agent: None,
-                subagent_terminal: None,
-                widget_context: None,
-            }))?,
+            to_json_string(&RingingCommand::ConversationSendMessage(
+                ConversationSendMessage {
+                    text,
+                    images: Vec::new(),
+                    attachments: None,
+                    message_id: None,
+                    input_purpose: Default::default(),
+                    as_system: false,
+                    inter_agent: None,
+                    subagent_terminal: None,
+                    widget_context: None,
+                },
+            ))?,
         )
         .await
     }
@@ -487,17 +512,14 @@ impl QaqhClient {
             Some(raw) => parse_json(&raw)?,
             None => Value::Null,
         };
-        let ack = with_timeout(
-            self.inner
-                .respond_device_approval(
-                    &session_id,
-                    RingingV2ApprovalRespondRequest {
-                        challenge_id,
-                        decision,
-                        payload,
-                    },
-                ),
-        )
+        let ack = with_timeout(self.inner.respond_device_approval(
+            &session_id,
+            RingingV2ApprovalRespondRequest {
+                challenge_id,
+                decision,
+                payload,
+            },
+        ))
         .await?;
         to_json_string(&ack)
     }
@@ -555,9 +577,11 @@ mod tests {
     #[test]
     fn tool_permission_command_json_roundtrips() {
         let raw = r#"{"type":"tool.permission.respond","tool_call_id":"call_01","approved":true}"#;
-        let command: RingingCommand =
-            serde_json::from_value(parse_json(raw).unwrap()).unwrap();
-        assert!(matches!(command, RingingCommand::ToolPermissionRespond { approved: true, .. }));
+        let command: RingingCommand = serde_json::from_value(parse_json(raw).unwrap()).unwrap();
+        assert!(matches!(
+            command,
+            RingingCommand::ToolPermissionRespond { approved: true, .. }
+        ));
     }
 
     #[test]
@@ -604,8 +628,13 @@ mod tests {
             code: "lease_required".into(),
             message: "m".into(),
         });
-        assert!(matches!(api, CoreError::Api { code, status: 403, .. } if code == "lease_required"));
-        let http = CoreError::from(ClientError::Http { status: 401, path: "/p".into() });
+        assert!(
+            matches!(api, CoreError::Api { code, status: 403, .. } if code == "lease_required")
+        );
+        let http = CoreError::from(ClientError::Http {
+            status: 401,
+            path: "/p".into(),
+        });
         assert!(matches!(http, CoreError::Http { status: 401, .. }));
     }
 
@@ -623,7 +652,14 @@ mod tests {
 
     #[tokio::test]
     async fn pair_device_rejects_bad_base_url_before_network() {
-        let result = pair_device("nope".into(), "t".into(), "d".into(), "android".into(), None).await;
+        let result = pair_device(
+            "nope".into(),
+            "t".into(),
+            "d".into(),
+            "android".into(),
+            None,
+        )
+        .await;
         assert!(matches!(result, Err(CoreError::Discovery { .. })));
     }
 

@@ -31,6 +31,61 @@ pub(crate) enum Outcome {
     Fatal(anyhow::Error),
 }
 
+/// 跨轮图片丢弃判据（read_image 工具图重放语义）。
+///
+/// 无状态 API 每轮重放全部历史；工具图只在消化它的那一轮内有像素价值，
+/// 其后的轮次以 [`STALE_IMAGE_STUB`] 说明行替代——像素不再重发（省图片
+/// token 与上下文窗口），顺带消除 stale 图的每轮 `load_image_b64` 磁盘重读。
+/// 返回最后一条 user 消息的下标；工具消息位于它之前 ⇒ stale。
+/// 历史中没有 user 消息时返回 None（保守不丢弃，兼容最小重放）。
+pub(crate) fn stale_image_boundary(messages: &[Message]) -> Option<usize> {
+    messages.iter().rposition(|message| message.role == "user")
+}
+
+/// stale 工具图被丢弃时补进 tool 结果正文的说明行（模型据此知道图存在过、
+/// 需要时可重调 read_image 取回像素）。
+pub(crate) const STALE_IMAGE_STUB: &str = "[image removed from replay to save context — it was visible when produced; call read_image again if you need the pixels]";
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    /// 把 `QAQH_DATA_DIR` 串行地指向临时目录；Drop 时恢复环境并清理。
+    /// 同一测试二进制内多个用例共用一把锁排队，避免进程级环境互相踩踏。
+    pub(crate) struct DataDirGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        _dir: std::path::PathBuf,
+    }
+
+    impl DataDirGuard {
+        pub(crate) fn acquire() -> Self {
+            static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = LOCK.lock().unwrap_or_else(|error| error.into_inner());
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before epoch")
+                .as_nanos();
+            let dir = std::env::temp_dir()
+                .join(format!("qaqh-gate-image-{}-{nanos}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create temp data dir");
+            // SAFETY: 测试独占进程环境；锁内串行执行，acquire/drop 成对设置/恢复。
+            unsafe { std::env::set_var("QAQH_DATA_DIR", &dir) };
+            Self {
+                _lock: lock,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for DataDirGuard {
+        fn drop(&mut self) {
+            // SAFETY: 与 acquire 成对；字段 MutexGuard 在 Drop 体之后才释放，
+            // 环境恢复仍处于锁保护窗口内。
+            unsafe { std::env::remove_var("QAQH_DATA_DIR") };
+            let _ = std::fs::remove_dir_all(&self._dir);
+        }
+    }
+}
+
 /// Accumulating buffers behind the unified `StreamEvent` contract. The gate
 /// assembles `Done.raw_message` from these buffers (not from the SDK
 /// response) so the anthropic/chat paths keep byte-identical semantics.
@@ -839,10 +894,9 @@ mod tests {
         // 回合冤判成「truncated or invalid tool call arguments」。
         let args = r#"{"max_results":30,"pattern":"truncated or invalid tool call arguments"}"#;
         let mut state = StreamState::new();
-        state.tools.insert(
-            0,
-            ("call_1".into(), "grep".into(), format!("{args}{args}")),
-        );
+        state
+            .tools
+            .insert(0, ("call_1".into(), "grep".into(), format!("{args}{args}")));
         let mut events = Vec::new();
         state.finalize(false, &mut |e| events.push(e));
         let StreamEvent::Done { raw_message, .. } = &events[0] else {

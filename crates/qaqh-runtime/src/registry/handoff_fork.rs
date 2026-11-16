@@ -16,8 +16,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use qaqh_ringing::ConversationSendMessage;
 use qaqh_agent_runtime::handoff::FORK_DELAY_MS;
+use qaqh_ringing::ConversationSendMessage;
 use qaqh_ringing_contract::events::SessionEvent;
 use qaqh_ringing_contract::fact::InputPurpose;
 use qaqh_ringing_contract::ulid::generate_ulid;
@@ -56,7 +56,10 @@ fn now_unix_ms() -> i64 {
 
 /// 后继标题：摘要优先，空则回退文档首个非空行；72 字截断加省略号。
 fn successor_title(work_summary: &str, doc: &str) -> String {
-    let summary = work_summary.split_whitespace().collect::<Vec<_>>().join(" ");
+    let summary = work_summary
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     let base = if summary.is_empty() {
         doc.lines()
             .map(str::trim)
@@ -96,12 +99,11 @@ fn pick_sealing_call(calls: &[store::HandoffCallTrace]) -> Option<SealingCall> {
             .and_then(|value| value.as_str())
             .unwrap_or("")
             .to_string();
-        let completed = serde_json::from_str::<serde_json::Value>(
-            trace.state_json.as_deref().unwrap_or(""),
-        )
-        .ok()
-        .and_then(|state| state["outcome"]["kind"].as_str().map(str::to_string))
-        .is_some_and(|kind| kind == "completed");
+        let completed =
+            serde_json::from_str::<serde_json::Value>(trace.state_json.as_deref().unwrap_or(""))
+                .ok()
+                .and_then(|state| state["outcome"]["kind"].as_str().map(str::to_string))
+                .is_some_and(|kind| kind == "completed");
         Some((trace.turn_id.clone(), doc, work_summary, completed))
     };
     let mut fallback = None;
@@ -165,9 +167,7 @@ impl AgentRegistry {
             .write_blocking({
                 let from_session = snapshot.sealed.clone();
                 let chain_root = snapshot.root.clone();
-                move |conn| {
-                    store::create_handoff_successor(conn, &row, &from_session, &chain_root)
-                }
+                move |conn| store::create_handoff_successor(conn, &row, &from_session, &chain_root)
             })
             .map_err(|error| error.to_string())?;
         if !created {

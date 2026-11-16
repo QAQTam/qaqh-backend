@@ -249,11 +249,24 @@ mod tests {
         let p = policy();
         let split = split_plan(&p, &[1, 2], Path::new("C:\\ws"), Path::new("C:\\view")).unwrap();
         let rels: Vec<&str> = split.view.iter().map(|v| v.rel.as_str()).collect();
-        assert_eq!(rels, vec![".git", "target", "a.txt"], "工作区内 → 视图(按策略序)");
+        assert_eq!(
+            rels,
+            vec![".git", "target", "a.txt"],
+            "工作区内 → 视图(按策略序)"
+        );
         // 视图内路径重写
-        assert_eq!(split.view[0].op.path, std::path::PathBuf::from("C:\\view\\.git"));
-        assert_eq!(split.view[1].op.path, std::path::PathBuf::from("C:\\view\\target"));
-        assert_eq!(split.view[2].op.path, std::path::PathBuf::from("C:\\view\\a.txt"));
+        assert_eq!(
+            split.view[0].op.path,
+            std::path::PathBuf::from("C:\\view\\.git")
+        );
+        assert_eq!(
+            split.view[1].op.path,
+            std::path::PathBuf::from("C:\\view\\target")
+        );
+        assert_eq!(
+            split.view[2].op.path,
+            std::path::PathBuf::from("C:\\view\\a.txt")
+        );
         // 视图侧写授权恒 FULL 掩码
         for v in &split.view {
             if v.op.mode == AceMode::Allow {
@@ -283,9 +296,18 @@ mod tests {
             workspace_rel(Path::new("C:\\ws"), Path::new("C:\\ws\\sub\\f.txt")).as_deref(),
             Some("sub\\f.txt")
         );
-        assert_eq!(workspace_rel(Path::new("C:\\ws"), Path::new("C:\\ws")).as_deref(), Some(""));
-        assert_eq!(workspace_rel(Path::new("C:\\ws"), Path::new("C:\\ws2\\f")), None);
-        assert_eq!(workspace_rel(Path::new("C:\\ws"), Path::new("C:\\other\\f")), None);
+        assert_eq!(
+            workspace_rel(Path::new("C:\\ws"), Path::new("C:\\ws")).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            workspace_rel(Path::new("C:\\ws"), Path::new("C:\\ws2\\f")),
+            None
+        );
+        assert_eq!(
+            workspace_rel(Path::new("C:\\ws"), Path::new("C:\\other\\f")),
+            None
+        );
         assert_eq!(
             workspace_rel(Path::new("C:\\ws\\"), Path::new("c:/ws/x")).as_deref(),
             Some("x")

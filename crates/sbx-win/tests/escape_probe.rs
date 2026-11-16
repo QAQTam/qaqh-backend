@@ -49,7 +49,13 @@ fn escape_probe_must_not_write_outside_writable_roots() {
 
     // 沙箱环境:与 hardening::setup 同构(scratch 带 cap ACE,私有桌面,受限令牌)
     let sid = sid::capability_sid().unwrap();
-    acl::add_ace(&base.join("scratch"), &sid, sbx_win::policy::AceMode::Allow, true).unwrap();
+    acl::add_ace(
+        &base.join("scratch"),
+        &sid,
+        sbx_win::policy::AceMode::Allow,
+        true,
+    )
+    .unwrap();
     let tok = token::create_restricted_token(&[sid.clone(), sid::everyone_sid()]).unwrap();
     let desk = desktop::create_private_desktop(&sid::sid_to_string(&sid)).unwrap();
 
@@ -66,8 +72,16 @@ fn escape_probe_must_not_write_outside_writable_roots() {
         c2.display(),
         c3.display(),
     );
-    let child = spawn::spawn(&spawn::Isolation::RestrictedToken { token: tok.handle() }, &cmdline, &base.join("scratch"), &pairs, Some(desk.name()))
-        .expect("spawn probe");
+    let child = spawn::spawn(
+        &spawn::Isolation::RestrictedToken {
+            token: tok.handle(),
+        },
+        &cmdline,
+        &base.join("scratch"),
+        &pairs,
+        Some(desk.name()),
+    )
+    .expect("spawn probe");
     let exit = child.wait().unwrap();
 
     eprintln!("probe exit code: {} (0x{:08X})", exit.code, exit.code);

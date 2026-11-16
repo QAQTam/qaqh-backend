@@ -71,7 +71,9 @@ impl CallbackListener {
         })?;
         let port = listener
             .local_addr()
-            .map_err(|e| SiwcError::new(SiwcCode::CallbackFailed, format!("读取本地端口失败: {e}")))?
+            .map_err(|e| {
+                SiwcError::new(SiwcCode::CallbackFailed, format!("读取本地端口失败: {e}"))
+            })?
             .port();
         Ok(Self {
             listener,
@@ -172,8 +174,8 @@ impl CallbackListener {
             .filter(|(k, _)| k == "state")
             .map(|(_, v)| v.as_str())
             .collect();
-        let state_ok = states.len() == 1
-            && constant_time_eq(states[0].as_bytes(), state.as_bytes());
+        let state_ok =
+            states.len() == 1 && constant_time_eq(states[0].as_bytes(), state.as_bytes());
         if !state_ok {
             // 不消费事务：可能只是一个无关的后台请求或过期标签页。
             respond(
@@ -284,13 +286,11 @@ fn read_request(stream: &mut TcpStream) -> Option<RawRequest> {
     let mut parts = request_line.split_whitespace();
     let method = parts.next()?.to_owned();
     let target = parts.next()?.to_owned();
-    let host = lines
-        .take_while(|line| !line.is_empty())
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("host")
-                .then(|| value.trim().to_owned())
-        });
+    let host = lines.take_while(|line| !line.is_empty()).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("host")
+            .then(|| value.trim().to_owned())
+    });
     Some(RawRequest {
         method,
         target,
@@ -371,21 +371,35 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let uri = listener.redirect_uri().to_owned();
 
-        let worker = std::thread::spawn(move || {
-            listener.wait(state, None, Duration::from_secs(5), &cancel)
-        });
+        let worker =
+            std::thread::spawn(move || listener.wait(state, None, Duration::from_secs(5), &cancel));
 
         // 1) 错误 Host：拒绝且不消费。
-        assert!(get(port, &format!("/auth/callback?code=x&state={state}"), Some("evil.example")).contains("400"));
+        assert!(
+            get(
+                port,
+                &format!("/auth/callback?code=x&state={state}"),
+                Some("evil.example")
+            )
+            .contains("400")
+        );
         // 2) 错误路径（文档：`/callback` 不等于 `/auth/callback`）：404，不消费。
         assert!(
-            get(port, &format!("/callback?code=x&state={state}"), Some(&format!("127.0.0.1:{port}")))
-                .contains("404")
+            get(
+                port,
+                &format!("/callback?code=x&state={state}"),
+                Some(&format!("127.0.0.1:{port}"))
+            )
+            .contains("404")
         );
         // 3) state 不匹配：400，不消费。
         assert!(
-            get(port, "/auth/callback?code=x&state=wrong", Some(&format!("127.0.0.1:{port}")))
-                .contains("400")
+            get(
+                port,
+                "/auth/callback?code=x&state=wrong",
+                Some(&format!("127.0.0.1:{port}"))
+            )
+            .contains("400")
         );
         // 4) 正确回调：拿到结果。
         let response = get(
@@ -411,7 +425,11 @@ mod tests {
             let worker = std::thread::spawn(move || {
                 listener.wait("s1", None, Duration::from_secs(5), &cancel)
             });
-            let _ = get(port, &format!("/auth/callback?code=c&state=s1{suffix}"), Some(&format!("127.0.0.1:{port}")));
+            let _ = get(
+                port,
+                &format!("/auth/callback?code=c&state=s1{suffix}"),
+                Some(&format!("127.0.0.1:{port}")),
+            );
             let error = worker.join().expect("join").expect_err("must fail");
             assert_eq!(error.code(), SiwcCode::RegistrationIncomplete, "{suffix}");
         }
@@ -426,7 +444,11 @@ mod tests {
         let worker = std::thread::spawn(move || {
             listener.wait("s2", Some("oaiapp_saved"), Duration::from_secs(5), &cancel)
         });
-        let _ = get(port, "/auth/callback?code=c&state=s2", Some(&format!("127.0.0.1:{port}")));
+        let _ = get(
+            port,
+            "/auth/callback?code=c&state=s2",
+            Some(&format!("127.0.0.1:{port}")),
+        );
         let result = worker.join().expect("join").expect("callback");
         assert_eq!(result.client_id, "oaiapp_saved");
 
@@ -443,7 +465,11 @@ mod tests {
             Some(&format!("127.0.0.1:{port}")),
         );
         assert_eq!(
-            worker.join().expect("join").expect_err("must reject").code(),
+            worker
+                .join()
+                .expect("join")
+                .expect_err("must reject")
+                .code(),
             SiwcCode::AccountMismatch
         );
     }
@@ -453,10 +479,13 @@ mod tests {
         let listener = CallbackListener::bind(0).expect("bind");
         let port = listener.port();
         let cancel = AtomicBool::new(false);
-        let worker = std::thread::spawn(move || {
-            listener.wait("s4", None, Duration::from_secs(5), &cancel)
-        });
-        let _ = get(port, "/auth/callback?error=access_denied&state=s4", Some(&format!("127.0.0.1:{port}")));
+        let worker =
+            std::thread::spawn(move || listener.wait("s4", None, Duration::from_secs(5), &cancel));
+        let _ = get(
+            port,
+            "/auth/callback?error=access_denied&state=s4",
+            Some(&format!("127.0.0.1:{port}")),
+        );
         let error = worker.join().expect("join").expect_err("declined");
         assert_eq!(error.code(), SiwcCode::SharingNotEnabled);
         assert!(!error.code().requires_reauth(), "拒绝授权不等于凭据失效");

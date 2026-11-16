@@ -492,9 +492,10 @@ fn load_timeline(conn: &Connection, session_id: &str) -> Result<Vec<TimelineEntr
 /// block 行 → TimelineEntry;ord 列是权威落库序,payload_json 里的 ord 只是
 /// 占位,读取时一律回填。
 fn parse_block_entry(block: &store::BlockRow) -> Result<TimelineEntry, DbError> {
-    let text = block.payload_json.as_deref().ok_or_else(|| {
-        DbError::Corrupt(format!("block {} has no payload_json", block.block_id))
-    })?;
+    let text = block
+        .payload_json
+        .as_deref()
+        .ok_or_else(|| DbError::Corrupt(format!("block {} has no payload_json", block.block_id)))?;
     let mut entry: TimelineEntry = serde_json::from_str(text)
         .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))?;
     if let TimelineEntry::AssistantBlock { ord, .. } = &mut entry {
@@ -519,10 +520,12 @@ fn load_timeline_tail(
         return Ok((Vec::new(), None));
     };
     // 未取满窗口或首块之下再无块:快照本来完整。
-    if page.len() < tail_blocks as usize
-        || !store::has_blocks_before(conn, session_id, first.ord)?
+    if page.len() < tail_blocks as usize || !store::has_blocks_before(conn, session_id, first.ord)?
     {
-        let timeline = page.iter().map(parse_block_entry).collect::<Result<Vec<_>, _>>()?;
+        let timeline = page
+            .iter()
+            .map(parse_block_entry)
+            .collect::<Result<Vec<_>, _>>()?;
         return Ok((timeline, None));
     }
     // 截断已发生:回退到回合边界。整窗均无锚点块的病理形态按窗口原样输出。
@@ -608,15 +611,15 @@ pub fn exec_session_view(row: store::ExecSessionRow) -> Result<ExecSessionView, 
     let state = parse_typed::<ExecSessionState>(&who, "state", &row.state_json)?;
     // 库内 content_id 为裸 hex(schema 6→7 契约);wire ref 在此边界组装 `sha256:` 前缀。
     let output =
-        row.output_content_id.map(|content_id| {
-            qaqh_ringing_contract::fact::ContentValue::Ref {
+        row.output_content_id.map(
+            |content_id| qaqh_ringing_contract::fact::ContentValue::Ref {
                 content_ref: qaqh_ringing_contract::fact::ContentRef::new(
                     qaqh_ringing_contract::fact::ContentHash::new(store::canonical_content_ref(
                         &content_id,
                     )),
                 ),
-            }
-        });
+            },
+        );
     Ok(ExecSessionView {
         id: qaqh_ringing_contract::fact::ExecSessionId::new(row.exec_session_id),
         owner_session_id: SessionId::new(row.session_id),

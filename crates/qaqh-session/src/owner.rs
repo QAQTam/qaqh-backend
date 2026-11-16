@@ -81,9 +81,9 @@ fn event_heap_bytes(event: &SessionEvent) -> usize {
         SessionEvent::ExecSessionStarted { session }
         | SessionEvent::ExecSessionStateChanged { session }
         | SessionEvent::ExecSessionFinished { session } => session.output_preview.len(),
-        SessionEvent::TimelineAppended { entry } => {
-            serde_json::to_string(entry).map(|json| json.len()).unwrap_or_default()
-        }
+        SessionEvent::TimelineAppended { entry } => serde_json::to_string(entry)
+            .map(|json| json.len())
+            .unwrap_or_default(),
         SessionEvent::TimelineTruncated {
             removed_turn_ids, ..
         } => removed_turn_ids
@@ -97,13 +97,18 @@ fn event_heap_bytes(event: &SessionEvent) -> usize {
 impl ReplayRing {
     fn push(&self, frame: SessionEventFrame) {
         let footprint = frame_footprint(&frame);
-        let mut ring = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut ring = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         ring.bytes += footprint;
         ring.frames.push_back(frame);
         while ring.frames.len() > REPLAY_FRAME_CAP
             || (ring.frames.len() > 1 && ring.bytes > REPLAY_BYTE_CAP)
         {
-            let Some(evicted) = ring.frames.pop_front() else { break };
+            let Some(evicted) = ring.frames.pop_front() else {
+                break;
+            };
             ring.bytes = ring.bytes.saturating_sub(frame_footprint(&evicted));
         }
     }
@@ -112,7 +117,10 @@ impl ReplayRing {
     /// 头注:「跳过 `seq < state.seq`,处理 `seq >= state.seq`」)。
     /// `None` = 无游标 live 直推(不回放既有帧)。
     fn slice_after(&self, after_seq: Option<u64>) -> ReplaySlice {
-        let ring = self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let ring = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(after) = after_seq else {
             return ReplaySlice {
                 frames: Vec::new(),
@@ -136,8 +144,12 @@ impl ReplayRing {
                 gap: true,
             };
         }
-        let frames: Vec<SessionEventFrame> =
-            ring.frames.iter().filter(|frame| frame.seq >= after).cloned().collect();
+        let frames: Vec<SessionEventFrame> = ring
+            .frames
+            .iter()
+            .filter(|frame| frame.seq >= after)
+            .cloned()
+            .collect();
         let watermark = frames.last().map(|frame| frame.seq);
         debug_assert!(watermark.is_none_or(|last| last == back.seq));
         ReplaySlice {
@@ -365,11 +377,7 @@ impl SessionOwner {
     }
 
     /// 开回合:turn 行(phase=running)+ TurnStarted/TurnPhaseChanged/ActivityChanged。
-    pub async fn start_turn(
-        &self,
-        turn_id: &str,
-        input_id: Option<String>,
-    ) -> Result<(), DbError> {
+    pub async fn start_turn(&self, turn_id: &str, input_id: Option<String>) -> Result<(), DbError> {
         let turn_id = turn_id.to_string();
         let session_id = self.session_id.clone();
         let input_id_for_row = input_id.clone();
@@ -887,6 +895,7 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             call_id,
             turn_id,
             content,
+            ..
         } => (
             // ToolCall 与 ToolResult 是两条独立的 RingingV2 timeline 事实,
             // 不能共用 block_id;blocks.block_id 是 PRIMARY KEY。
@@ -1469,11 +1478,7 @@ impl OwnerPump {
 /// `<data_dir>/sessions/<session_id>/exec/<exec_session_id>.log`。data_dir 由业务库
 /// 路径派生(`qaqh.db` 的父目录);两类 id 都是内核生成的单段路径组件。
 /// owner pump 写入与 runtime `exec_session.output` 区间读共用此定位。
-pub fn exec_output_log_path(
-    db: &Db,
-    session_id: &str,
-    exec_session_id: &str,
-) -> Option<PathBuf> {
+pub fn exec_output_log_path(db: &Db, session_id: &str, exec_session_id: &str) -> Option<PathBuf> {
     let data_dir = db.path().parent()?;
     Some(
         data_dir
@@ -1527,10 +1532,7 @@ pub fn read_exec_output_log_range(
         Err(error) => return Err(error),
     };
     // 终点最多前探 3 字节补全被 max_bytes 切进的多字节字符;探查不越过水位。
-    let read_end = end_cap
-        .saturating_add(3)
-        .min(watermark)
-        .min(file_len);
+    let read_end = end_cap.saturating_add(3).min(watermark).min(file_len);
     if from_offset >= read_end {
         return Ok((from_offset, String::new()));
     }

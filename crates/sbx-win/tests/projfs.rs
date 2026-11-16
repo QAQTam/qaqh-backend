@@ -88,7 +88,10 @@ fn projfs_view_read_through_and_upper_semantics() {
     // tombstone:视图内删除 → diff 报 Deleted,store 仍在
     std::fs::remove_file(view.join("sub").join("inner.txt")).unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    assert!(changes_contains(&v, &Change::Deleted("sub\\inner.txt".into())));
+    assert!(changes_contains(
+        &v,
+        &Change::Deleted("sub\\inner.txt".into())
+    ));
 
     drop(v);
     let _ = std::fs::remove_dir_all(&base);
@@ -117,9 +120,18 @@ fn projfs_merge_applies_changes_to_store() {
     assert!(report.applied >= 2, "merge 报告异常: {report:?}");
 
     // store 侧生效
-    assert_eq!(std::fs::read_to_string(store.join("added.txt")).unwrap(), "added-in-view");
-    assert_eq!(std::fs::read_to_string(store.join("edit.txt")).unwrap(), "new-content");
-    assert!(!store.join("keep.txt").exists(), "视图内删除未在 merge 时落回 store");
+    assert_eq!(
+        std::fs::read_to_string(store.join("added.txt")).unwrap(),
+        "added-in-view"
+    );
+    assert_eq!(
+        std::fs::read_to_string(store.join("edit.txt")).unwrap(),
+        "new-content"
+    );
+    assert!(
+        !store.join("keep.txt").exists(),
+        "视图内删除未在 merge 时落回 store"
+    );
 
     // 合并后 diff 归零(视图侧已还原为按新 store 投影)
     assert!(v.diff().unwrap().is_empty(), "merge 后 diff 未归零");
@@ -172,7 +184,13 @@ fn projfs_sandboxed_child_reads_projection_and_writes_view() {
     if !skip_unless_available() {
         return;
     }
-    use sbx_win::{acl, desktop, env, policy::AceMode, sid, spawn::{self, Isolation}, token};
+    use sbx_win::{
+        acl, desktop, env,
+        policy::AceMode,
+        sid,
+        spawn::{self, Isolation},
+        token,
+    };
 
     let (base, store, view) = fresh_dirs("sandbox");
     std::fs::write(store.join("child-read.txt"), "hello-from-lower-child").unwrap();
@@ -195,7 +213,9 @@ fn projfs_sandboxed_child_reads_projection_and_writes_view() {
         std::env::var("ComSpec").unwrap()
     );
     let child = spawn::spawn(
-        &Isolation::RestrictedToken { token: tok.handle() },
+        &Isolation::RestrictedToken {
+            token: tok.handle(),
+        },
         &cmdline,
         &view,
         &pairs,
@@ -203,7 +223,12 @@ fn projfs_sandboxed_child_reads_projection_and_writes_view() {
     )
     .expect("沙箱 spawn 失败");
     let exit = child.wait().unwrap();
-    assert_eq!(exit.code, 0, "子进程命令失败 stderr={}", String::from_utf8_lossy(&exit.stderr));
+    assert_eq!(
+        exit.code,
+        0,
+        "子进程命令失败 stderr={}",
+        String::from_utf8_lossy(&exit.stderr)
+    );
 
     // 子进程读投影文件(水合由本测试进程服务)且写落在视图
     assert_eq!(
@@ -211,12 +236,18 @@ fn projfs_sandboxed_child_reads_projection_and_writes_view() {
         b"hello-from-lower-child",
         "子进程读投影文件失败(跨进程水合)"
     );
-    assert!(view.join("child-new.txt").exists(), "子进程新建文件未落在视图");
+    assert!(
+        view.join("child-new.txt").exists(),
+        "子进程新建文件未落在视图"
+    );
     // 变更只存在于视图:diff 可见,store 干净
     assert!(!store.join("got.txt").exists(), "子进程变更穿透到了 store");
     let changes = v.diff().unwrap();
     assert!(
-        changes.contains(&Change::New("got.txt".into())) && changes.iter().any(|c| matches!(c, Change::New(r) if r.starts_with("child-new"))),
+        changes.contains(&Change::New("got.txt".into()))
+            && changes
+                .iter()
+                .any(|c| matches!(c, Change::New(r) if r.starts_with("child-new"))),
         "diff 缺子进程变更: {changes:?}"
     );
 
@@ -245,4 +276,3 @@ fn projfs_start_rejects_non_empty_root() {
 fn drop_paths(base: &Path) {
     let _ = std::fs::remove_dir_all(base);
 }
-

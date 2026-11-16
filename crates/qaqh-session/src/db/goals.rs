@@ -65,11 +65,7 @@ const SELECT_COLS: &str = "goal_id, session_id, objective, status, token_budget,
 fn row_to_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<GoalRow> {
     let status_text: String = row.get(3)?;
     let status = status_from_str(&status_text).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            3,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
     })?;
     Ok(GoalRow {
         goal_id: row.get(0)?,
@@ -191,7 +187,9 @@ pub fn update_goal(
     }
     // 预算收紧可能当场触发熔断(与记账同律)。
     if row.status == GoalStatus::Active
-        && row.token_budget.is_some_and(|budget| row.tokens_used >= budget)
+        && row
+            .token_budget
+            .is_some_and(|budget| row.tokens_used >= budget)
     {
         row.status = GoalStatus::BudgetLimited;
     }
@@ -251,7 +249,9 @@ pub fn account_usage(
     row.tokens_used = row.tokens_used.saturating_add(tokens);
     row.time_used_ms = row.time_used_ms.saturating_add(time_ms);
     if row.status == GoalStatus::Active
-        && row.token_budget.is_some_and(|budget| row.tokens_used >= budget)
+        && row
+            .token_budget
+            .is_some_and(|budget| row.tokens_used >= budget)
     {
         row.status = GoalStatus::BudgetLimited;
     }
@@ -405,7 +405,11 @@ mod tests {
     fn stale_goal_id_is_not_accounted() {
         let mut conn = open_db();
         create_goal(&mut conn, "s1", "g1", "ship it", None).expect("create");
-        assert!(account_usage(&mut conn, "s1", "stale", 10, 0).expect("account").is_none());
+        assert!(
+            account_usage(&mut conn, "s1", "stale", 10, 0)
+                .expect("account")
+                .is_none()
+        );
         let row = get_goal(&conn, "s1").expect("get").expect("row");
         assert_eq!(row.tokens_used, 0);
     }
@@ -455,7 +459,10 @@ mod tests {
         )
         .expect("update");
         assert!(outcome.is_none());
-        assert_eq!(get_goal(&conn, "s1").expect("get").expect("row").status, GoalStatus::Active);
+        assert_eq!(
+            get_goal(&conn, "s1").expect("get").expect("row").status,
+            GoalStatus::Active
+        );
     }
 
     /// 切片F：goal 行留在链根,后继会话沿链解析到同一个 goal;
@@ -490,8 +497,10 @@ mod tests {
             .expect("account")
             .expect("row");
         assert_eq!(row.tokens_used, 10);
-        assert!(account_usage(&mut conn, "s3", "g1", 10, 0)
-            .expect("account")
-            .is_none());
+        assert!(
+            account_usage(&mut conn, "s3", "g1", 10, 0)
+                .expect("account")
+                .is_none()
+        );
     }
 }

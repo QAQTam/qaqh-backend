@@ -22,7 +22,7 @@ Use the current worktree and external state as authoritative. Previous conversat
 
 No-progress check:
 - Classify the previous goal turn as progress, a verified wait, or no progress. Progress changes authoritative state, completes work, or yields evidence that changes the next action; status restatements and unexecuted plans are no progress.
-- A verified wait polls a specific process, exec session, or tool handle confirmed live now (write_stdin on a running exec_session counts). Conversation, intent, prior output, or a lock file alone is insufficient. An observation timeout or transient polling failure is not terminal: re-poll the same handle or inspect other authoritative state; never restart solely because observation expired.
+- A verified wait polls a specific process, exec session, or tool handle confirmed live now (write_stdin on a running exec_session counts; so does an armed notify_on_exit subscription — ending the turn to await its harness-delivered terminal notice is a verified wait). Conversation, intent, prior output, or a lock file alone is insufficient. An observation timeout or transient polling failure is not terminal: re-poll the same handle or inspect other authoritative state; never restart solely because observation expired.
 - Revalidate a no-progress turn and take the next available safe action. If none exists because the same genuine blocker remains, report it and leave the goal active until the blocked audit threshold is met. Treat equivalent blockers as the same condition across turns even when their wording changes.
 
 Progress visibility:

@@ -37,6 +37,22 @@ pub struct ExecCommandArgs {
     /// Maximum model output budget in tokens.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    /// Subscribe the terminal notification at launch — the right choice for
+    /// long builds, test suites, and installs:
+    /// - Command still running when the initial wait window closes → the call
+    ///   returns `yielded` with the session armed. End your turn; the harness
+    ///   delivers the terminal result (exit code + stop reason, no output
+    ///   body) as a one-shot system message when the process exits. Do not
+    ///   poll afterwards; once the notice arrives, one write_stdin drains the
+    ///   buffered output if needed.
+    /// - Command exits within the window → the terminal result is delivered
+    ///   right in this call and nothing is armed.
+    /// - Not for servers/daemons meant to keep running (dev servers, vite,
+    ///   watchers): they never exit, so nothing would ever notify. Omit this
+    ///   flag for them (and omit timeout_ms too).
+    /// - Combined with timeout_ms, a force-stop is delivered as `timed_out`.
+    #[serde(default)]
+    pub notify_on_exit: Option<bool>,
 }
 
 /// exec_command `shell` 字段的白名单——这个 enum **就是**模型面 schema：
@@ -89,6 +105,18 @@ pub struct WriteStdinArgs {
     pub yield_time_ms: Option<u32>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
+    /// Arm the terminal notification for an already-running session (empty
+    /// chars only): the call returns immediately — end your turn, and the
+    /// harness delivers the terminal result (exit code + stop reason, no
+    /// output body) as a one-shot system message when the process exits.
+    /// - Session already exited → the normal terminal read comes back in this
+    ///   call and nothing is armed.
+    /// - While armed, do not poll; after the notice, one write_stdin drains
+    ///   the buffered output.
+    /// - For new commands prefer exec_command(notify_on_exit=true) — one
+    ///   round trip arms at launch.
+    #[serde(default)]
+    pub notify_on_exit: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -281,6 +309,7 @@ impl TypedTool for ExecCommandTool {
                 yield_time_ms,
                 timeout_ms: args.timeout_ms,
                 max_output_tokens,
+                notify_on_exit: args.notify_on_exit.unwrap_or(false),
             },
         );
         if result.is_err() {
@@ -288,7 +317,16 @@ impl TypedTool for ExecCommandTool {
                 let _ = std::fs::remove_file(path);
             }
         }
-        result.map(Into::into).map_err(Into::into)
+        let mut result = result?;
+        if result.notify_armed {
+            let id = result
+                .exec_session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            append_subscribe_notice(&mut result.output, &id);
+        }
+        Ok(result.into())
     }
 }
 
@@ -301,7 +339,7 @@ impl TypedTool for WriteStdinTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "write_stdin",
-            "Read new output from an execution session, send terminal input, or interrupt it with exactly Ctrl-C.",
+            "Read new output from an execution session, send terminal input, or interrupt it with exactly Ctrl-C. With notify_on_exit=true (empty chars) detach instead: the call returns immediately, end your turn, and the harness delivers the terminal result as a one-shot system message when the process exits.",
             crate::permission::ToolCategory::Exec,
             crate::ToolRisk::Destructive,
             Duration::from_secs(30),
@@ -333,6 +371,15 @@ impl TypedTool for WriteStdinTool {
             ))
             .into());
         }
+        // ADR-0026：订阅是纯 detach 动作，与写输入互斥；manager 侧同样只在
+        // 空 chars 时生效（纵深防御），此处给出确定性报错。
+        let notify_on_exit = args.notify_on_exit.unwrap_or(false);
+        if notify_on_exit && !args.chars.is_empty() {
+            return Err(ToolError::invalid_arguments(
+                "notify_on_exit requires empty chars — subscribing is a pure detach, not an input write",
+            )
+            .into());
+        }
         let max_output_tokens = output_budget(args.max_output_tokens)?;
         let host = context.exec_host.as_ref().ok_or_else(|| {
             ToolExecutionError::from(ToolError::new(
@@ -340,18 +387,41 @@ impl TypedTool for WriteStdinTool {
                 "execution session host was not injected for this conversation",
             ))
         })?;
-        host.write_stdin(
+        let mut result = host.write_stdin(
             context,
             WriteStdinRequest {
                 exec_session_id: ExecSessionId::new(args.exec_session_id),
                 chars: args.chars,
                 yield_time_ms,
                 max_output_tokens,
+                notify_on_exit,
             },
-        )
-        .map(Into::into)
-        .map_err(Into::into)
+        )?;
+        if result.notify_armed {
+            let id = result
+                .exec_session_id
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "<unknown>".to_owned());
+            append_subscribe_notice(&mut result.output, &id);
+        }
+        Ok(result.into())
     }
+}
+
+/// ADR-0026：订阅成功时附加的行为契约文本（进模型面 output，不进 JSON 字段）。
+fn append_subscribe_notice(output: &mut String, exec_session_id: &str) {
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "[exec session subscribed] Terminal notification for {exec_session_id} is now owned \
+         by the harness: end your turn now — when the process exits, a one-shot system \
+         message (<qaqh_exec_session_terminal>) will deliver the terminal result (exit \
+         code + stop reason). Do not keep polling this session; if you need its output \
+         afterwards, a single write_stdin on {exec_session_id} after the terminal notice \
+         drains the buffered output."
+    ));
 }
 
 fn output_budget(requested: Option<u32>) -> Result<u32, ToolExecutionError> {

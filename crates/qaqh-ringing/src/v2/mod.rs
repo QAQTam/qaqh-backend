@@ -5,20 +5,18 @@
 mod types;
 
 pub use types::{
-    COMMAND_CONTRACT_REVISION, SESSION_CONTRACT_REVISION, CommandPrecondition, CommandRejection,
-    CommandTarget,
-    ProviderUpsertDto, RingingV2ApprovalRespondRequest, RingingV2AskOutcome,
-    RingingV2Capabilities, RingingV2ClientKind, RingingV2ClientView, RingingV2CommandAck,
-    RingingV2CommandEnvelope, RingingV2CommandResult,
-    RingingV2CommandStatus, RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind,
-    RingingV2DeviceChallenge, RingingV2DeviceChallenges, RingingV2DeviceWire,
-    RingingV2DevicesResponse, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest,
-    RingingV2OpenResponse, RingingV2PairRequest, RingingV2PairResponse,
-    RingingV2PairTokenRequest, RingingV2PairTokenResponse, RingingV2PendingApprovals,
-    RingingV2PendingInteractionView, RingingV2PendingPermissionView, RingingV2ResyncRequired,
-    RingingV2SyncResult, SecretWrite, SessionCreateResult, SessionSettingsPatch, SettingValue,
-    ToolsSettingPatch, events_path, open_path,
+    COMMAND_CONTRACT_REVISION, CommandPrecondition, CommandRejection, CommandTarget,
+    ProviderUpsertDto, RingingV2ApprovalRespondRequest, RingingV2AskOutcome, RingingV2Capabilities,
+    RingingV2ClientKind, RingingV2ClientView, RingingV2CommandAck, RingingV2CommandEnvelope,
+    RingingV2CommandResult, RingingV2CommandStatus, RingingV2ContentUploadResponse,
+    RingingV2DeviceApprovalKind, RingingV2DeviceChallenge, RingingV2DeviceChallenges,
+    RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2ExistingResult,
+    RingingV2LeaseRenewResponse, RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PairRequest,
+    RingingV2PairResponse, RingingV2PairTokenRequest, RingingV2PairTokenResponse,
+    RingingV2PendingApprovals, RingingV2PendingInteractionView, RingingV2PendingPermissionView,
+    RingingV2ResyncRequired, RingingV2SyncResult, SESSION_CONTRACT_REVISION, SecretWrite,
+    SessionCreateResult, SessionSettingsPatch, SettingValue, ToolsSettingPatch, events_path,
+    open_path,
 };
 
 /// Ringing v2 wire version.
@@ -43,7 +41,10 @@ pub const RINGING_V2_HTTP_ROUTES: &[(&str, &str)] = &[
     ("POST", "/ringing/v2/commands"),
     ("GET", "/ringing/v2/commands/{command_id}"),
     ("GET", "/ringing/v2/sessions/{session_id}/approvals"),
-    ("POST", "/ringing/v2/sessions/{session_id}/approvals/respond"),
+    (
+        "POST",
+        "/ringing/v2/sessions/{session_id}/approvals/respond",
+    ),
     ("POST", "/ringing/v2/content"),
     ("GET", "/ringing/v2/content/{content_id}"),
     ("POST", "/ringing/v2/service/{method}"),

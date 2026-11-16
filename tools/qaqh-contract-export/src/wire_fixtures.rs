@@ -5,9 +5,9 @@ use std::path::Path;
 use qaqh_ringing::{
     RingingCommandAckStatus, RingingCommandState, RingingV2AskOutcome, RingingV2CommandAck,
     RingingV2CommandResult, RingingV2CommandStatus, RingingV2DeviceWire, RingingV2DevicesResponse,
-    RingingV2ExistingResult,
-    RingingV2LeaseRenewResponse, RingingV2PairRequest, RingingV2PairResponse,
-    RingingV2PairTokenRequest, RingingV2PairTokenResponse, RingingV2SyncResult,
+    RingingV2ExistingResult, RingingV2LeaseRenewResponse, RingingV2PairRequest,
+    RingingV2PairResponse, RingingV2PairTokenRequest, RingingV2PairTokenResponse,
+    RingingV2SyncResult,
 };
 
 pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {

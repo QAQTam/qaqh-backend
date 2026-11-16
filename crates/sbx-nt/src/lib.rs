@@ -5,7 +5,6 @@
 //! 卷形态识别为未解析,调用方按 deny(PathUnresolved) 处置(spec §4.2 规则 1)。
 //! 卷符号映射(QueryDosDeviceW)待 hook 平面接入时补齐。
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use std::fmt;
 
@@ -93,7 +92,8 @@ pub fn is_within(root: &str, path: &str) -> bool {
         return true;
     }
     let r = root.trim_end_matches('\\');
-    path.strip_prefix(r).is_some_and(|rest| rest.starts_with('\\'))
+    path.strip_prefix(r)
+        .is_some_and(|rest| rest.starts_with('\\'))
 }
 
 fn strip_prefix_forms(s: &str) -> String {
@@ -154,14 +154,23 @@ mod tests {
 
     #[test]
     fn unresolved_forms() {
-        assert!(matches!(normalize("C:\\PROGRA~1\\x"), Err(NormalizeError::Unresolved(_))));
-        assert!(matches!(normalize("\\Device\\HarddiskVolume3\\a"), Err(NormalizeError::Unresolved(_))));
+        assert!(matches!(
+            normalize("C:\\PROGRA~1\\x"),
+            Err(NormalizeError::Unresolved(_))
+        ));
+        assert!(matches!(
+            normalize("\\Device\\HarddiskVolume3\\a"),
+            Err(NormalizeError::Unresolved(_))
+        ));
     }
 
     #[test]
     fn malformed() {
         assert!(matches!(normalize(""), Err(NormalizeError::Malformed(_))));
-        assert!(matches!(normalize("relative\\path"), Err(NormalizeError::Malformed(_))));
+        assert!(matches!(
+            normalize("relative\\path"),
+            Err(NormalizeError::Malformed(_))
+        ));
     }
 
     #[test]

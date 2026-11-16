@@ -165,8 +165,7 @@ fn literal_think_tag_in_content_stays_in_answer() {
     );
     let msg = events.iter().find_map(event_done).unwrap();
     assert!(
-        !msg
-            .content
+        !msg.content
             .iter()
             .any(|b| matches!(b, ContentBlock::Reasoning { .. })),
         "Done must not carry a Reasoning block for literal <think> text"
@@ -1331,7 +1330,9 @@ fn responses_stream_without_terminal_event_is_a_failure_not_a_salvaged_done() {
         "failure must carry the real cause: {error}"
     );
     assert!(
-        !events.iter().any(|event| matches!(event, StreamEvent::Done { .. })),
+        !events
+            .iter()
+            .any(|event| matches!(event, StreamEvent::Done { .. })),
         "no fabricated Done for an interrupted stream"
     );
     assert!(
@@ -1379,13 +1380,22 @@ fn responses_tool_progress_precedes_later_output_and_never_replays_arguments() {
         }})),
     ]);
     let mock = MockServer::new(scenario);
-    let events = collect_events(&make_responses_provider(&mock), vec![Message::user("write")], None);
+    let events = collect_events(
+        &make_responses_provider(&mock),
+        vec![Message::user("write")],
+        None,
+    );
     let mut received = String::new();
     let mut markers = 0;
     let mut opened = false;
     for event in &events {
         match event {
-            StreamEvent::ToolCallProgress { id, name, args_chunk, .. } => {
+            StreamEvent::ToolCallProgress {
+                id,
+                name,
+                args_chunk,
+                ..
+            } => {
                 assert_eq!(id, "call_write", "item id must not become the timeline key");
                 assert_eq!(name, "write");
                 opened = true;
@@ -1400,7 +1410,10 @@ fn responses_tool_progress_precedes_later_output_and_never_replays_arguments() {
         }
     }
     assert_eq!(markers, chunks.len());
-    assert_eq!(received, args, "cumulative/Done frames must not duplicate deltas");
+    assert_eq!(
+        received, args,
+        "cumulative/Done frames must not duplicate deltas"
+    );
 }
 
 #[test]
@@ -1422,13 +1435,20 @@ fn responses_added_without_argument_deltas_still_delivers_terminal_arguments() {
             "id":"resp_no_delta","status":"completed","output":[item]
         }})),
     ]);
-    let events = collect_events(&make_responses_provider(&mock), vec![Message::user("write")], None);
-    let args: String = events.iter().filter_map(|e| match e {
-        StreamEvent::ToolCallProgress { id, args_chunk, .. } if id == "call_no_delta" => {
-            Some(args_chunk.as_str())
-        }
-        _ => None,
-    }).collect();
+    let events = collect_events(
+        &make_responses_provider(&mock),
+        vec![Message::user("write")],
+        None,
+    );
+    let args: String = events
+        .iter()
+        .filter_map(|e| match e {
+            StreamEvent::ToolCallProgress { id, args_chunk, .. } if id == "call_no_delta" => {
+                Some(args_chunk.as_str())
+            }
+            _ => None,
+        })
+        .collect();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&args).expect("terminal arguments"),
         json!({"path":"a.txt", "content":"hello"})
@@ -1536,7 +1556,11 @@ fn responses_completed_output_missing_function_call_is_backfilled_from_stream() 
         .collect();
     assert_eq!(
         tool_uses,
-        vec![("call_x".to_string(), "read".to_string(), json!({"path": "/x.txt"}))],
+        vec![(
+            "call_x".to_string(),
+            "read".to_string(),
+            json!({"path": "/x.txt"})
+        )],
         "终态漏掉的 function_call 必须按流补齐，且只补一次: {:?}",
         done.content
     );
@@ -2376,6 +2400,9 @@ fn siwc_plan_sync_runs_over_the_streaming_route() {
         "background",
         "conversation",
     ] {
-        assert!(request.get(field).is_none(), "plan 请求体不得出现 {field}: {request}");
+        assert!(
+            request.get(field).is_none(),
+            "plan 请求体不得出现 {field}: {request}"
+        );
     }
 }

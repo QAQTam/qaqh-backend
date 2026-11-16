@@ -36,7 +36,7 @@ use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, StreamState, apply_management_headers,
+    CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, StreamState, apply_management_headers,
     empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
     tool_names_by_id, tool_result_name, uuid_simple,
 };
@@ -70,7 +70,8 @@ pub(crate) fn project_messages(
     let mut pending_media: Vec<WireMessage> = Vec::new();
     let mut img_idx = image_index_base;
 
-    for msg in messages {
+    let stale_boundary = super::sdk_common::stale_image_boundary(&messages);
+    for (msg_index, msg) in messages.iter().enumerate() {
         if msg.role != "tool" && !pending_media.is_empty() {
             out.append(&mut pending_media);
         }
@@ -138,7 +139,11 @@ pub(crate) fn project_messages(
                             );
                             // 0.4.0 rejects an empty explicit id; leave it unset so
                             // the SDK's normalizer assigns a collision-free one.
-                            call.id = if id.is_empty() { None } else { Some(id.clone()) };
+                            call.id = if id.is_empty() {
+                                None
+                            } else {
+                                Some(id.clone())
+                            };
                             calls.push(call);
                         }
                         _ => {}
@@ -160,6 +165,10 @@ pub(crate) fn project_messages(
                 }
             }
             "tool" => {
+                // 跨轮丢弃：位于最后一条 user 消息之前的工具图属于已消化回合，
+                // 不再重发（见 sdk_common::stale_image_boundary）。
+                let stale = stale_boundary.is_some_and(|boundary| msg_index < boundary);
+                let mut dropped = 0usize;
                 let mut parts: Vec<Part> = Vec::new();
                 for block in &msg.content {
                     if let ContentBlock::ToolResult {
@@ -182,11 +191,18 @@ pub(crate) fn project_messages(
                     }
                     match block {
                         ContentBlock::Image { mime_type, data } => {
+                            if stale {
+                                dropped += 1;
+                                continue;
+                            }
                             pending_media.push(media_message(mime_type, data));
                         }
                         ContentBlock::ImageRef {
                             sha256, mime_type, ..
                         } => match qaqh_types::image_store::load_image_b64(sha256, mime_type) {
+                            _ if stale => {
+                                dropped += 1;
+                            }
                             Ok(data) => pending_media.push(media_message(mime_type, &data)),
                             Err(e) => log::warn!(
                                 "[gate] image {sha256} load failed, dropped from gemini request: {e}"
@@ -196,6 +212,12 @@ pub(crate) fn project_messages(
                     }
                 }
                 if !parts.is_empty() {
+                    if dropped > 0
+                        && let Some(Part::ToolResult(tr)) = parts.last_mut()
+                    {
+                        tr.content.push('\n');
+                        tr.content.push_str(super::sdk_common::STALE_IMAGE_STUB);
+                    }
                     out.push(WireMessage::new(Role::Tool, parts));
                 }
             }
@@ -407,7 +429,9 @@ async fn consume(
         hub.drain(&mut *on_event);
         match next {
             Ok(SdkEvent::NativeToolProgress { .. } | SdkEvent::NativeToolCompleted { .. }) => {
-                return Outcome::Fatal(anyhow::anyhow!("native tool events are unsupported on Gemini"));
+                return Outcome::Fatal(anyhow::anyhow!(
+                    "native tool events are unsupported on Gemini"
+                ));
             }
             Ok(SdkEvent::Start { .. }) => {}
             Ok(SdkEvent::TextDelta { text }) => {
@@ -485,8 +509,7 @@ async fn consume(
                 // ADR-0018：finish_reason 缺席 = SDK 在 EOF 的合成收口
                 // （candidate.finishReason 从未到达）——上游掐流按失败处理。
                 let Some(fr) = finish_reason else {
-                    interrupted =
-                        Some("upstream closed stream before terminal event".to_string());
+                    interrupted = Some("upstream closed stream before terminal event".to_string());
                     break;
                 };
                 state.stop = Some(fr);
@@ -502,6 +525,11 @@ async fn consume(
                 if matches!(e, SdkError::Cancelled) {
                     return Outcome::Fatal(anyhow::anyhow!("cancelled by user"));
                 }
+                // 流中传输断裂与建连前同律:类别随 Error 事件上抛。
+                on_event(StreamEvent::Error {
+                    kind: e.kind(),
+                    message: e.to_string(),
+                });
                 interrupted = Some(e.to_string());
                 break;
             }
@@ -697,6 +725,74 @@ mod tests {
         };
         assert_eq!(tr.name, "exec", "functionResponse.name must match the call");
         assert_eq!(tr.call_id.as_deref(), Some("toolu_abc"));
+    }
+
+    /// 跨轮丢弃：边界之前的工具图不重发像素（不产生 pending media），
+    /// 工具结果正文带说明行；当轮的图原样投影。
+    #[test]
+    fn stale_tool_images_are_stubbed_across_user_boundary() {
+        let _guard = crate::sdk_common::test_support::DataDirGuard::acquire();
+        let b64 = "Zm9vYmFy";
+        let sha =
+            qaqh_types::image_store::store_image_b64(b64, "image/png").expect("store image b64");
+        let tool_use = |id: &str| Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: "read_image".into(),
+                input: serde_json::json!({"path": "a.png"}),
+            }],
+        };
+        let tool = |id: &str| Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    result: ToolResult::ok("image attached"),
+                },
+                ContentBlock::ImageRef {
+                    sha256: sha.clone(),
+                    mime_type: "image/png".into(),
+                    bytes_len: b64.len(),
+                },
+            ],
+        };
+        let history = vec![
+            Message::user("round 1"),
+            tool_use("toolu_1"),
+            tool("toolu_1"),
+            Message::user("round 2"),
+            tool_use("toolu_2"),
+            tool("toolu_2"),
+        ];
+        let projected = project_messages(history, 0);
+        let tools: Vec<_> = projected.iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(tools.len(), 2);
+        let Part::ToolResult(stale) = &tools[0].parts[0] else {
+            panic!("expected tool result part");
+        };
+        assert!(
+            stale.content.contains("image removed from replay"),
+            "stale 工具结果必须带说明行"
+        );
+        let Part::ToolResult(fresh) = &tools[1].parts[0] else {
+            panic!("expected tool result part");
+        };
+        assert!(
+            !fresh.content.contains("image removed from replay"),
+            "当轮工具结果不得带说明行"
+        );
+        let media = projected
+            .iter()
+            .filter(|m| {
+                m.role == Role::User && m.parts.iter().any(|p| matches!(p, Part::Image { .. }))
+            })
+            .count();
+        assert_eq!(media, 1, "只有当轮的图产生 pending media 消息");
     }
 
     #[test]

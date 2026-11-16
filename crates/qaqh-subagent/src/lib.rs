@@ -38,17 +38,16 @@ mod board_tools;
 mod host;
 mod task_tools;
 pub use host::{
-    AgentOutcome, BoardChannel, BoardChannelCreateRequest, BoardHost,
-    BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
-    BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
-    BoardSubscriptionTarget, BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
-    InterruptAgentRequest,
+    AgentOutcome, BoardChannel, BoardChannelCreateRequest, BoardHost, BoardListRequest,
+    BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest, BoardSnapshot,
+    BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest, BoardSubscriptionTarget,
+    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest, InterruptAgentRequest,
     InterruptedAgent, ListedAgent, ListedAgentResidency, ListedAgentStatus,
-    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent,
-    SubagentHost, TaskBoardArtifact, TaskBoardHost, TaskBoardTask,
-    TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
-    TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
-    board_host, host, install_board_host, install_host, install_task_host, task_host,
+    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, SubagentHost,
+    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
+    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
+    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, board_host, host, install_board_host,
+    install_host, install_task_host, task_host,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -738,7 +737,9 @@ fn build_subagent_task(task_description: &str, context: &str, fork: bool) -> Str
     } else {
         "You are a fresh subagent: you do not see the parent conversation."
     };
-    let mut parts = vec![format!("[SYSTEM]\n{SUBAGENT_IDENTITY_PROMPT}\n{visibility}")];
+    let mut parts = vec![format!(
+        "[SYSTEM]\n{SUBAGENT_IDENTITY_PROMPT}\n{visibility}"
+    )];
     if !context.trim().is_empty() {
         parts.push(format!(
             "[CONTEXT]\n<main_subagent_message>\n{}\n</main_subagent_message>",
@@ -1178,7 +1179,8 @@ mod tests {
 
         // 有 context：必须包裹在 <main_subagent_message> 内，防止子代理把
         // 传入内容误判为自身 user 消息而直接修改项目。
-        let with_ctx = build_subagent_task("review the diff", "repo at F:\\proj\nbranch main", false);
+        let with_ctx =
+            build_subagent_task("review the diff", "repo at F:\\proj\nbranch main", false);
         assert!(with_ctx.contains(
             "<main_subagent_message>\nrepo at F:\\proj\nbranch main\n</main_subagent_message>"
         ));

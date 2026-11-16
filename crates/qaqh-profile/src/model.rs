@@ -6,10 +6,10 @@
 //! 3. 全局默认选择是一枚 `default_model_selection` 指针（provider_id + model_id），
 //!    不存在第二层「预设组合」——按 Spec §3.1，providers + active 就是全部。
 
-use std::collections::BTreeMap;
 use qaqh_types::{CredentialSource, EndpointCompat, Wire};
 pub use qaqh_types::{ModelCapabilities, ModelSelection, ModelSelectionOptions};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 #[cfg(feature = "ts")]
 use ts_rs::TS;
 
@@ -58,7 +58,9 @@ fn default_context_window() -> u32 {
     383_000
 }
 
-fn default_enabled() -> bool { true }
+fn default_enabled() -> bool {
+    true
+}
 
 impl Default for ModelDef {
     fn default() -> Self {
@@ -119,17 +121,27 @@ pub struct ProfilesDocument {
 
 impl Default for ProfilesDocument {
     fn default() -> Self {
-        Self { schema_version: 1, revision: 0, default_model_selection: None,
-            providers: BTreeMap::new() }
+        Self {
+            schema_version: 1,
+            revision: 0,
+            default_model_selection: None,
+            providers: BTreeMap::new(),
+        }
     }
 }
 
-fn default_schema_version() -> u32 { 1 }
+fn default_schema_version() -> u32 {
+    1
+}
 
 impl ProfilesDocument {
-    pub fn is_empty(&self) -> bool { self.providers.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.providers.is_empty()
+    }
 
     pub fn model_is_referenced(&self, provider_id: &str, model_id: &str) -> bool {
-        self.default_model_selection.as_ref().is_some_and(|s| s.provider_id == provider_id && s.model_id == model_id)
+        self.default_model_selection
+            .as_ref()
+            .is_some_and(|s| s.provider_id == provider_id && s.model_id == model_id)
     }
 }

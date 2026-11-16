@@ -73,11 +73,9 @@ pub fn resolve_windows_backend(spec: &SandboxSpec) -> Result<Option<SandboxBacke
                 ));
             }
             if !sbx_win::projfs::available() {
-                return Err(
-                    "WindowsRedirect requires ProjFS. Enable once (admin): \
+                return Err("WindowsRedirect requires ProjFS. Enable once (admin): \
                      DISM /Online /Enable-Feature /FeatureName:Client-ProjFS /NoRestart"
-                        .into(),
-                );
+                    .into());
             }
             Ok(Some(SandboxBackend::WindowsRedirect))
         }

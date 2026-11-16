@@ -8,6 +8,8 @@
 
 pub mod agent;
 pub mod handoff;
+#[cfg(test)]
+mod permission_reject_verify_tests;
 pub mod progress;
 pub mod provider_job;
 pub mod quota_ledger;
@@ -15,10 +17,10 @@ pub mod session_agent;
 pub mod session_loop;
 #[cfg(test)]
 mod session_loop_tests;
-#[cfg(test)]
-mod permission_reject_verify_tests;
 pub mod session_title;
 pub mod tool_job;
 
 pub use progress::{AttemptBlocks, ProgressSink, ProgressStream};
-pub use qaqh_process_tools::exec_session::{ExecSessionManager, StopResult as ExecSessionStopResult};
+pub use qaqh_process_tools::exec_session::{
+    ExecNotifyPort, ExecSessionManager, ExecTerminalNotice, StopResult as ExecSessionStopResult,
+};

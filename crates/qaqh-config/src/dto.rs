@@ -30,7 +30,8 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
             max_token_budget: cfg.goals.max_token_budget,
         },
         mcp: McpDto {
-            enabled: cfg.mcp.enabled,
+            // DTO 仍为 boolean（零 wire 变化）：读运行时有效值。
+            enabled: cfg.mcp.effective_enabled(),
             idle_shutdown_secs: cfg.mcp.idle_shutdown_secs,
             servers: cfg
                 .mcp
@@ -252,5 +253,4 @@ mod tests {
         assert!(apply_patch(&mut cfg, &bad).is_err());
         assert!((cfg.auto_compact_threshold - 0.75).abs() < f64::EPSILON);
     }
-
 }

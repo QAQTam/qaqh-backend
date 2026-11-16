@@ -42,7 +42,8 @@ impl AgentRegistry {
                     .len()
                     .saturating_add(self.quota_ledgers.len())
                     .saturating_add(self.outbound_attempts.len())
-                    .saturating_add(self.outbound_attempts.len()) as u64,
+                    .saturating_add(self.outbound_attempts.len())
+                    as u64,
                 payload_bytes: None,
                 heap_estimate_bytes: None,
                 ..Default::default()
@@ -276,7 +277,11 @@ impl AgentRegistry {
             .unwrap_or_else(|| {
                 format!(
                     "sub_{}",
-                    session_id.replace('-', "").chars().take(12).collect::<String>()
+                    session_id
+                        .replace('-', "")
+                        .chars()
+                        .take(12)
+                        .collect::<String>()
                 )
             });
         let child_path = parent_meta

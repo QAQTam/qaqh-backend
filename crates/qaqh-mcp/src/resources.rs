@@ -23,8 +23,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use qaqh_config::config::McpServerConfig;
-use qaqh_types::{ToolDef, ToolFunction, ToolResult};
 use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_types::{ToolDef, ToolFunction, ToolResult};
 use qaqh_workspace::{DynamicTool, ToolRisk};
 
 use crate::bridge::{DEFAULT_TIMEOUT_SECS, error_result};
@@ -45,7 +45,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// `BTreeMap`（有序），保证同一配置下逐字节稳定。
 fn aggregate_description(cfg: &qaqh_config::config::McpConfig) -> String {
     let mut description = String::from(
-        "MCP resources: list_servers, list_resources, read_resource, list_prompts, read_prompt.",
+        "MCP: list_tools (connect & discover tools), list_servers, list_resources, read_resource, list_prompts, read_prompt.",
     );
     if cfg.servers.is_empty() {
         description.push_str(
@@ -55,7 +55,7 @@ fn aggregate_description(cfg: &qaqh_config::config::McpConfig) -> String {
     }
     let names: Vec<&str> = cfg.servers.keys().map(String::as_str).collect();
     description.push_str(&format!(
-        " {} MCP server(s) configured: {}. Call list_resources to discover resources and URI templates.",
+        " {} MCP server(s) configured: {}. Call list_tools with a server name to connect it and expose its tools in the next turn; list_resources for resources and URI templates.",
         names.len(),
         names.join(", ")
     ));
@@ -78,17 +78,18 @@ pub fn aggregate_entry(
             "action": {
                 "type": "string",
                 "enum": [
+                    "list_tools",
                     "list_servers",
                     "list_resources",
                     "read_resource",
                     "list_prompts",
                     "read_prompt"
                 ],
-                "description": "list_servers = server status; list_resources = resources and URI templates (server optional); read_resource = read one resource (server+uri required); list_prompts = prompt templates (server optional); read_prompt = render a prompt (server+name required, arguments optional)"
+                    "description": "list_tools = connect a server & list its tools (server optional; needed before per-server tools appear); list_servers = server status; list_resources = resources and URI templates (server optional); read_resource = read one resource (server+uri required); list_prompts = prompt templates (server optional); read_prompt = render a prompt (server+name required, arguments optional)"
             },
             "server": {
                 "type": "string",
-                "description": "Limit list_resources/list_prompts to one server; required for read_resource/read_prompt"
+                "description": "Limit list_tools/list_resources/list_prompts to one server; required for read_resource/read_prompt"
             },
             "uri": {
                 "type": "string",
@@ -154,7 +155,7 @@ pub fn aggregate_dispatch_with(
     cancel: &AtomicBool,
     timeout_hint: Option<u64>,
 ) -> ToolResult {
-    if !manager.config().enabled {
+    if !manager.config().effective_enabled() {
         return error_result(
             McpErrorKind::Disabled,
             "[mcp].enabled=false — enable MCP in config.toml to use MCP resources".to_owned(),
@@ -163,12 +164,13 @@ pub fn aggregate_dispatch_with(
     let Some(action) = args.get("action").and_then(|value| value.as_str()) else {
         return error_result(
             McpErrorKind::Protocol,
-            "missing required parameter `action` (list_servers | list_resources | read_resource | list_prompts | read_prompt)"
+            "missing required parameter `action` (list_tools | list_servers | list_resources | read_resource | list_prompts | read_prompt)"
                 .to_owned(),
         );
     };
     match action {
         "list_servers" => list_servers(manager),
+        "list_tools" => list_tools(manager, cancel, timeout_hint, args.get("server")),
         "list_resources" => list_resources(manager, args.get("server")),
         "read_resource" => read_resource(manager, cancel, timeout_hint, args),
         "list_prompts" => list_prompts(manager, args.get("server")),
@@ -176,7 +178,7 @@ pub fn aggregate_dispatch_with(
         other => error_result(
             McpErrorKind::Protocol,
             format!(
-                "unknown action {other:?} (expected list_servers | list_resources | read_resource | list_prompts | read_prompt)"
+                "unknown action {other:?} (expected list_tools | list_servers | list_resources | read_resource | list_prompts | read_prompt)"
             ),
         ),
     }
@@ -189,6 +191,90 @@ fn list_servers(manager: &Arc<McpManager>) -> ToolResult {
         return ToolResult::ok("no MCP servers configured in config.toml ([mcp.servers])");
     }
     ToolResult::ok(lines.join("\n"))
+}
+
+/// `list_tools`：按需连接 + 发现（不预热架构的可见性入口，ADR-0025）。
+///
+/// 启动不预热 ⇒ 新 daemon 上模型首回合只看到钉底的 `mcp` 聚合工具；调本
+/// action 才触发 `get_or_connect(server)` → `tools/list` 缓存 → bump 投影代数
+/// → 下回合 per-server 动态工具进模型面。不写转换层：仍走既有 lazy connect
+/// 与投影管线；`server` 缺省 = 逐个连接全部已声明 server。
+fn list_tools(
+    manager: &Arc<McpManager>,
+    cancel: &AtomicBool,
+    timeout_hint: Option<u64>,
+    server: Option<&serde_json::Value>,
+) -> ToolResult {
+    let wanted = server.and_then(|value| value.as_str());
+    let cfg_snapshot = manager.config();
+    if let Some(name) = wanted
+        && !cfg_snapshot.servers.contains_key(name)
+    {
+        let available: Vec<&str> = cfg_snapshot.servers.keys().map(String::as_str).collect();
+        return error_result(
+            McpErrorKind::NotFound,
+            format!("unknown MCP server {name:?}; configured: {available:?}"),
+        );
+    }
+    let names: Vec<String> = match wanted {
+        Some(name) => vec![name.to_owned()],
+        None => cfg_snapshot.servers.keys().cloned().collect(),
+    };
+    if names.is_empty() {
+        return ToolResult::ok("no MCP servers configured in config.toml ([mcp.servers])");
+    }
+    let timeout_secs = timeout_hint.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 3600);
+    let (tx, rx) = std::sync::mpsc::channel();
+    let manager_task = Arc::clone(manager);
+    crate::bridge::runtime_handle().spawn(async move {
+        let mut lines = Vec::new();
+        for name in &names {
+            match manager_task.get_or_connect(name).await {
+                Ok(conn) => match conn.cached_tools() {
+                    Some(tools) => {
+                        lines.push(format!("## {name} ({} tool(s))", tools.len()));
+                        for tool in tools.iter() {
+                            lines.push(format!("  - {}", tool.name));
+                        }
+                    }
+                    None => lines.push(format!(
+                        "## {name} (connected; tools/list unavailable this round)"
+                    )),
+                },
+                Err(error) => lines.push(format!("## {name} (connect failed: {})", error.message)),
+            }
+        }
+        // 桥接方超时/取消后提前放弃等待 → rx 已 drop，send 失败属预期。
+        let _ = tx.send(lines.join("\n"));
+    });
+    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
+    loop {
+        match rx.recv_timeout(POLL_INTERVAL) {
+            Ok(text) => return ToolResult::ok(text),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                if cancel.load(Ordering::Relaxed) {
+                    return error_result(
+                        McpErrorKind::Cancelled,
+                        "list_tools cancelled; in-flight result discarded".to_owned(),
+                    );
+                }
+                if Instant::now() >= deadline {
+                    return error_result(
+                        McpErrorKind::Timeout,
+                        format!(
+                            "list_tools timed out after {timeout_secs}s; some servers may still be connecting"
+                        ),
+                    );
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return error_result(
+                    McpErrorKind::Protocol,
+                    "bridge task dropped the list_tools result channel".to_owned(),
+                );
+            }
+        }
+    }
 }
 
 /// `list_resources`：资源清单 + URI 模板（缓存快照，不触发连接）。
@@ -438,7 +524,7 @@ pub fn resource_env_block() -> Option<String> {
 #[doc(hidden)]
 pub fn resource_env_block_with(manager: &Arc<McpManager>) -> Option<String> {
     let cfg = manager.config();
-    if !cfg.enabled || !cfg.inject_resource_env_block {
+    if !cfg.effective_enabled() || !cfg.inject_resource_env_block {
         return None;
     }
     let mut lines: Vec<String> = Vec::new();

@@ -8,8 +8,8 @@
 use qaqh_ringing_contract::state::{GoalStatus, GoalView};
 use qaqh_session::db::goals::{self, GoalUpdate};
 
-use crate::service::handlers::goal::{goals_config, publish_goal};
 use crate::service::QaqhService;
+use crate::service::handlers::goal::{goals_config, publish_goal};
 
 impl qaqh_goal::GoalHost for QaqhService {
     fn create_goal(
@@ -86,7 +86,9 @@ impl qaqh_goal::GoalHost for QaqhService {
         let row = self
             .owners()
             .db()
-            .write_blocking(move |conn| goals::update_goal(conn, &session, &update, Some(&expected)))
+            .write_blocking(move |conn| {
+                goals::update_goal(conn, &session, &update, Some(&expected))
+            })
             .map_err(|error| error.to_string())?
             .ok_or_else(|| format!("session {session_id} goal changed concurrently"))?;
         let view = goals::goal_view(&row);

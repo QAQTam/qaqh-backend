@@ -76,7 +76,13 @@ fn base_registry_omits_subagent_and_collaboration_tools() {
             "{name} must not be discoverable through tool_search"
         );
     }
-    for name in ["read", "exec_command", "tool_search", "todo_write", "todo_update"] {
+    for name in [
+        "read",
+        "exec_command",
+        "tool_search",
+        "todo_write",
+        "todo_update",
+    ] {
         assert!(
             manager.lookup(name).is_some(),
             "{name} must remain available"

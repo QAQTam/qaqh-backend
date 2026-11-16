@@ -307,13 +307,25 @@ mod tests {
                 )
             };
             mk_session(conn, "SES-P", None)?;
-            for child in ["SES-FAILED", "SES-CANCELLED", "SES-OK", "SES-ACTIVE", "SES-INTERRUPTED"] {
+            for child in [
+                "SES-FAILED",
+                "SES-CANCELLED",
+                "SES-OK",
+                "SES-ACTIVE",
+                "SES-INTERRUPTED",
+            ] {
                 mk_session(conn, child, Some("SES-P"))?;
             }
             // 父会话为每个子代理留一条 spawn 工具调用（effects 是血缘权威）。
-            for (i, child) in ["SES-FAILED", "SES-CANCELLED", "SES-OK", "SES-ACTIVE", "SES-INTERRUPTED"]
-                .iter()
-                .enumerate()
+            for (i, child) in [
+                "SES-FAILED",
+                "SES-CANCELLED",
+                "SES-OK",
+                "SES-ACTIVE",
+                "SES-INTERRUPTED",
+            ]
+            .iter()
+            .enumerate()
             {
                 let call_id = format!("C-SPAWN-{i}");
                 store::upsert_tool_call(
@@ -613,23 +625,24 @@ mod tests {
             delivery: qaqh_ringing_contract::fact::InterAgentDelivery::Queue,
             created_at_ms: 1,
         };
-        let input = |id: &str, inter: Option<qaqh_ringing_contract::commands::InterAgentEnvelope>| {
-            TimelineEntry::Input {
-                block_id: qaqh_ringing_contract::fact::BlockId::new(id),
-                turn_id: None,
-                purpose: Default::default(),
-                content: ContentValue::Inline { text: "hi".into() },
-                attachments: vec![],
-                images: vec![],
-                inter_agent: inter,
-                subagent_terminal: None,
-                actor: qaqh_ringing_contract::fact::ActorRef {
-                    kind: qaqh_ringing_contract::fact::ActorKind::User,
-                    id: "user".into(),
-                    display_name: None,
-                },
-            }
-        };
+        let input =
+            |id: &str, inter: Option<qaqh_ringing_contract::commands::InterAgentEnvelope>| {
+                TimelineEntry::Input {
+                    block_id: qaqh_ringing_contract::fact::BlockId::new(id),
+                    turn_id: None,
+                    purpose: Default::default(),
+                    content: ContentValue::Inline { text: "hi".into() },
+                    attachments: vec![],
+                    images: vec![],
+                    inter_agent: inter,
+                    subagent_terminal: None,
+                    actor: qaqh_ringing_contract::fact::ActorRef {
+                        kind: qaqh_ringing_contract::fact::ActorKind::User,
+                        id: "user".into(),
+                        display_name: None,
+                    },
+                }
+            };
         db.write_blocking(move |conn| {
             store::create_session(
                 conn,
@@ -666,13 +679,7 @@ mod tests {
         .expect("seed");
 
         let hits = db
-            .read_blocking(|conn| {
-                view::inter_agent_deliveries(
-                    conn,
-                    &["SES-ROOT".to_string()],
-                    10,
-                )
-            })
+            .read_blocking(|conn| view::inter_agent_deliveries(conn, &["SES-ROOT".to_string()], 10))
             .expect("projection");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].message_id, "msg_1");
@@ -750,7 +757,9 @@ mod tests {
                     text: None,
                     call_id: None,
                     payload_json: serde_json::to_string(&TimelineEntry::Compaction {
-                        summary: ContentValue::Inline { text: summary.into() },
+                        summary: ContentValue::Inline {
+                            text: summary.into(),
+                        },
                     })
                     .expect("serialize compaction"),
                 },

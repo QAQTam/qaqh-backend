@@ -7,7 +7,6 @@
 //! 3. 权威解析：会话/子代理按 ModelSelection 从目录 fail-fast 解析端点与凭据；
 //! 4. 内置预设是一张代码静态表（[`presets`]），选择预设即复制默认值进目录。
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod model;
 pub mod presets;
@@ -15,9 +14,9 @@ pub mod resolver;
 pub mod store;
 
 pub use model::{ModelDef, ModelDefaults, ModelSelection, ProfilesDocument, ProviderDef};
-pub use presets::{provider_preset, ProviderPreset, PROVIDER_PRESETS};
-pub use resolver::{resolve_model_selection, EffectiveModelConfig, ModelResolveError};
-pub use store::{ProfilesStore, ProfileStoreError};
+pub use presets::{PROVIDER_PRESETS, ProviderPreset, provider_preset};
+pub use resolver::{EffectiveModelConfig, ModelResolveError, resolve_model_selection};
+pub use store::{ProfileStoreError, ProfilesStore};
 
 use std::path::PathBuf;
 

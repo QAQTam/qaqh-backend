@@ -35,9 +35,8 @@ mod tests {
             let mut queue = bodies.into_iter();
             for request in server.incoming_requests() {
                 let body = queue.next().unwrap_or_else(|| STOP_SSE.to_string());
-                let _ = request.respond(
-                    tiny_http::Response::from_string(body).with_header(header.clone()),
-                );
+                let _ = request
+                    .respond(tiny_http::Response::from_string(body).with_header(header.clone()));
             }
         });
     }
@@ -250,13 +249,11 @@ mod tests {
         send_trigger(&loop_, "需要执行命令").await;
         wait_permission_card(&owners).await;
 
-        let turn_id = wait_for(&owners, |v| {
-            v["current_turn_id"].as_str().is_some()
-        })
-        .await["current_turn_id"]
-            .as_str()
-            .expect("active turn id")
-            .to_string();
+        let turn_id =
+            wait_for(&owners, |v| v["current_turn_id"].as_str().is_some()).await["current_turn_id"]
+                .as_str()
+                .expect("active turn id")
+                .to_string();
 
         // 取消先落地:清扫把挂起交互按 Cancelled 结算、丢弃 oneshot。
         assert!(loop_.cancel_turn(Some(&turn_id)));

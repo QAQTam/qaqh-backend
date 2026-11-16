@@ -7,7 +7,7 @@
 //! local 型市场不 clone，直接引用磁盘路径（本地随磁盘实时，update 是 no-op）。
 //! git 操作走子进程——不引 git2，资源受限机不添重依赖。
 
-use crate::manifest::{load_manifest, validate_name, MarketplaceManifest};
+use crate::manifest::{MarketplaceManifest, load_manifest, validate_name};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -59,13 +59,18 @@ pub fn save(home: &Path, registry: &Registry) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
-    let text = toml::to_string_pretty(registry)
-        .map_err(|error| format!("serialize registry: {error}"))?;
+    let text =
+        toml::to_string_pretty(registry).map_err(|error| format!("serialize registry: {error}"))?;
     std::fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 /// 注册市场。url 型当场 clone 并校验正典清单可读；local 型校验目录与清单。
-pub fn add(home: &Path, name: &str, url: &str, local: &str) -> Result<RegisteredMarketplace, String> {
+pub fn add(
+    home: &Path,
+    name: &str,
+    url: &str,
+    local: &str,
+) -> Result<RegisteredMarketplace, String> {
     validate_name(name, "marketplace name")?;
     if url.is_empty() == local.is_empty() {
         return Err("marketplace add: 需要 url 或 local 二选一".to_string());
@@ -180,7 +185,9 @@ fn git(args: &[&str]) -> Result<String, String> {
 }
 
 /// 列出全部市场与其清单（清单不可读的市场带错误占位，不断整表）。
-pub fn list_with_manifests(home: &Path) -> Vec<(RegisteredMarketplace, Result<MarketplaceManifest, String>)> {
+pub fn list_with_manifests(
+    home: &Path,
+) -> Vec<(RegisteredMarketplace, Result<MarketplaceManifest, String>)> {
     let Ok(registry) = load(home) else {
         return Vec::new();
     };
@@ -251,12 +258,14 @@ mod tests {
     fn add_rejects_market_without_manifest() {
         let home = tempfile::tempdir().unwrap();
         let market = tempfile::tempdir().unwrap();
-        assert!(add(
-            home.path(),
-            "m",
-            "",
-            market.path().to_string_lossy().as_ref()
-        )
-        .is_err());
+        assert!(
+            add(
+                home.path(),
+                "m",
+                "",
+                market.path().to_string_lossy().as_ref()
+            )
+            .is_err()
+        );
     }
 }

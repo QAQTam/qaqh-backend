@@ -42,7 +42,7 @@ fn load_toml_with_secrets(
 #[test]
 fn absent_section_defaults_to_disabled() {
     let cfg = load_toml("absent", "lang = \"zh-CN\"\n").expect("load 应成功");
-    assert!(!cfg.mcp.enabled, "未配置 [mcp] → 默认关闭");
+    assert!(!cfg.mcp.effective_enabled(), "未配置 [mcp] → 默认关闭");
     assert!(cfg.mcp.servers.is_empty());
     assert_eq!(cfg.mcp.idle_shutdown_secs, 300, "默认 idle 300s");
     assert!(
@@ -105,7 +105,7 @@ max_concurrent_calls = 2
 "#;
     let cfg = load_toml_with_secrets("parse", toml_text, &[("context7_key", "sk-test-1234")])
         .expect("load 应成功");
-    assert!(cfg.mcp.enabled);
+    assert!(cfg.mcp.effective_enabled());
     assert_eq!(cfg.mcp.idle_shutdown_secs, 120);
     assert_eq!(cfg.mcp.servers.len(), 2, "两个 server 都应解析");
 
@@ -271,7 +271,11 @@ fn persistent_roundtrip_keeps_mcp_section() {
 #[test]
 fn runtime_default_matches_design() {
     let d = McpConfig::default();
-    assert!(!d.enabled);
+    assert_eq!(
+        d.enabled, None,
+        "默认 = 未显式声明（由 effective_enabled 推导）"
+    );
+    assert!(!d.effective_enabled());
     assert_eq!(d.idle_shutdown_secs, 300);
     assert!(d.servers.is_empty());
 }

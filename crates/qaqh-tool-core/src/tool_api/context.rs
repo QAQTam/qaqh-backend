@@ -51,6 +51,8 @@ pub struct ExecCommandRequest {
     pub yield_time_ms: u32,
     pub timeout_ms: Option<u64>,
     pub max_output_tokens: u32,
+    /// ADR-0026（切片 2）：启动即订阅终态通知。
+    pub notify_on_exit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +61,9 @@ pub struct WriteStdinRequest {
     pub chars: String,
     pub yield_time_ms: u32,
     pub max_output_tokens: u32,
+    /// ADR-0026：订阅终态通知（仅 chars 为空时生效）。armed 后本调用立即
+    /// 返回，终态由 harness 经 canonical system 消息恰一次推送。
+    pub notify_on_exit: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +77,9 @@ pub struct ExecCommandResult {
     pub timed_out: bool,
     pub cancelled: bool,
     pub input_bytes_written: Option<usize>,
+    /// ADR-0026：本次调用是否为「订阅即返回」（工具面据此附加指引文本，
+    /// 不进模型面 JSON）。
+    pub notify_armed: bool,
 }
 
 /// Per-call bridge to the session-owned execution manager.

@@ -14,7 +14,9 @@ use super::shell::PS_UTF8_PREAMBLE;
 
 /// 待拆除的内置别名：与已装 applet **同名**且对象管道价值低。
 /// `sort/tee/where/select/diff` 等对象管道高频词刻意不拆（ADR-0012 §被否选项）。
-const SHADOWED_ALIASES: &[&str] = &["ls", "cp", "mv", "rm", "cat", "echo", "pwd", "sleep", "kill"];
+const SHADOWED_ALIASES: &[&str] = &[
+    "ls", "cp", "mv", "rm", "cat", "echo", "pwd", "sleep", "kill",
+];
 
 /// pwsh 把 `mkdir` 定义为函数（`New-Item -ItemType Directory` 包装），不是别名。
 const SHADOWED_FUNCTIONS: &[&str] = &["mkdir"];

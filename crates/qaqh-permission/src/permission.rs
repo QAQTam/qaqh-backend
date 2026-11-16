@@ -484,13 +484,21 @@ pub fn needs_permission(
         };
     }
 
-    // `write_stdin` 的空输入只续读输出；带输入时会改变执行会话状态。
+    // `write_stdin` 的空输入只续读输出（纯读降 Read）；但 notify_on_exit
+    // 订阅虽同为空输入，却转移终态通知所有权并预约一次回合注入（ADR-0026），
+    // 按 Exec 档计。带输入时会改变执行会话状态，恒为 Exec。
+    let subscribe = tool_name == "write_stdin"
+        && args
+            .get("notify_on_exit")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
     let category = match tool_name {
         "write_stdin"
-            if args
-                .get("chars")
-                .and_then(serde_json::Value::as_str)
-                .is_none_or(str::is_empty) =>
+            if !subscribe
+                && args
+                    .get("chars")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(str::is_empty) =>
         {
             ToolCategory::Read
         }

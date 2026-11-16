@@ -146,9 +146,8 @@ impl AcpAgent {
                     data: image.data,
                 }),
                 _ => {
-                    return Err(
-                        Error::invalid_params().data("This agent accepts text and image prompts only")
-                    )
+                    return Err(Error::invalid_params()
+                        .data("This agent accepts text and image prompts only"));
                 }
             }
         }
@@ -353,10 +352,8 @@ impl AcpAgent {
                             ToolCallUpdateFields::new().title(title),
                         ))
                     };
-                    connection.send_notification(SessionNotification::new(
-                        session_id.clone(),
-                        update,
-                    ))?;
+                    connection
+                        .send_notification(SessionNotification::new(session_id.clone(), update))?;
                 }
                 SessionEvent::ToolStateChanged {
                     call_id,
@@ -368,8 +365,7 @@ impl AcpAgent {
                             session_id.clone(),
                             SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
                                 AcpToolCallId::new(call_id.to_string()),
-                                ToolCallUpdateFields::new()
-                                    .status(ToolCallStatus::InProgress),
+                                ToolCallUpdateFields::new().status(ToolCallStatus::InProgress),
                             )),
                         ))?;
                     }
@@ -452,10 +448,8 @@ impl AcpAgent {
                     }
                     let mut fields = ToolCallUpdateFields::new().status(status);
                     if let Some(delta) = &code_delta {
-                        let mut title = format!(
-                            "+{} −{} lines",
-                            delta.lines_added, delta.lines_removed
-                        );
+                        let mut title =
+                            format!("+{} −{} lines", delta.lines_added, delta.lines_removed);
                         if delta.files_created > 0 {
                             title.push_str(&format!(", {} created", delta.files_created));
                         }
@@ -464,18 +458,16 @@ impl AcpAgent {
                         }
                         if let Some(file) = &delta.file {
                             title.push_str(&format!(" ({file})"));
-                            fields = fields
-                                .locations(vec![ToolCallLocation::new(PathBuf::from(file))]);
+                            fields =
+                                fields.locations(vec![ToolCallLocation::new(PathBuf::from(file))]);
                         }
                         fields = fields.title(title);
                     }
                     if !text.is_empty() {
                         fields = fields.content(vec![ToolCallContent::Content(Content::new(
-                            ContentBlock::Text(TextContent::new(output_tail(
-                                &text,
-                                OUTPUT_TAIL_LIMIT,
-                            )
-                            .to_owned())),
+                            ContentBlock::Text(TextContent::new(
+                                output_tail(&text, OUTPUT_TAIL_LIMIT).to_owned(),
+                            )),
                         ))]);
                     }
                     connection.send_notification(SessionNotification::new(
@@ -563,7 +555,11 @@ impl PermissionPrompt {
             .ok_or_else(|| backend_error("Permission interaction without a tool call"))?;
         let details: PermissionRequestDetails = match &interaction.request {
             ContentValue::Inline { text } => serde_json::from_str(text).map_err(backend_error)?,
-            _ => return Err(backend_error("Permission request payload is not inline JSON")),
+            _ => {
+                return Err(backend_error(
+                    "Permission request payload is not inline JSON",
+                ));
+            }
         };
         let mut title = details.tool_name.clone();
         if let Some(summary) = &details.action_summary {
@@ -573,9 +569,9 @@ impl PermissionPrompt {
         let mut fields = ToolCallUpdateFields::new()
             .status(ToolCallStatus::Pending)
             .title(title)
-            .content(vec![ToolCallContent::Content(Content::new(ContentBlock::Text(
-                TextContent::new(permission_text(&details)),
-            )))]);
+            .content(vec![ToolCallContent::Content(Content::new(
+                ContentBlock::Text(TextContent::new(permission_text(&details))),
+            ))]);
         if !details.paths.is_empty() {
             fields = fields.locations(
                 details
@@ -660,13 +656,14 @@ fn command_result<T: serde::de::DeserializeOwned>(ack: RingingV2CommandAck) -> R
 async fn resolve_output(client: &Client, output: Option<ContentValue>) -> String {
     match output {
         Some(ContentValue::Inline { text }) => text,
-        Some(ContentValue::Ref { content_ref }) => match client.download_content(&content_ref).await
-        {
-            Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|error| {
-                format!("[binary output: {} bytes]", error.into_bytes().len())
-            }),
-            Err(_) => "[output unavailable]".to_owned(),
-        },
+        Some(ContentValue::Ref { content_ref }) => {
+            match client.download_content(&content_ref).await {
+                Ok(bytes) => String::from_utf8(bytes).unwrap_or_else(|error| {
+                    format!("[binary output: {} bytes]", error.into_bytes().len())
+                }),
+                Err(_) => "[output unavailable]".to_owned(),
+            }
+        }
         Some(ContentValue::Unavailable(_)) | None => String::new(),
     }
 }
@@ -684,7 +681,10 @@ fn output_tail(text: &str, limit: usize) -> &str {
 
 fn tool_kind(tool_name: &str) -> ToolKind {
     let name = tool_name.to_ascii_lowercase();
-    if name.contains("search") || name.contains("grep") || name.contains("glob") || name.contains("find")
+    if name.contains("search")
+        || name.contains("grep")
+        || name.contains("glob")
+        || name.contains("find")
     {
         ToolKind::Search
     } else if name.contains("read") || name.contains("list") || name.contains("open") {
@@ -717,7 +717,9 @@ fn tool_kind(tool_name: &str) -> ToolKind {
     }
 }
 
-const TITLE_KEYS: [&str; 7] = ["path", "command", "file", "url", "query", "pattern", "skill"];
+const TITLE_KEYS: [&str; 7] = [
+    "path", "command", "file", "url", "query", "pattern", "skill",
+];
 
 fn tool_title(tool_name: &str, args: Option<&serde_json::Value>) -> String {
     let Some(serde_json::Value::Object(fields)) = args else {

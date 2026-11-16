@@ -46,15 +46,12 @@ pub fn parse_jwks(raw: &str) -> Result<Vec<Jwk>, SiwcError> {
 }
 
 pub fn parse_jwks_value(value: &Value) -> Result<Vec<Jwk>, SiwcError> {
-    let keys = value
-        .get("keys")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            SiwcError::new(
-                SiwcCode::IdentityVerificationUnavailable,
-                "JWKS 缺 keys 数组",
-            )
-        })?;
+    let keys = value.get("keys").and_then(Value::as_array).ok_or_else(|| {
+        SiwcError::new(
+            SiwcCode::IdentityVerificationUnavailable,
+            "JWKS 缺 keys 数组",
+        )
+    })?;
     let mut parsed = Vec::new();
     for key in keys {
         if key.get("kty").and_then(Value::as_str) != Some("RSA") {
@@ -105,23 +102,27 @@ pub fn split_id_token(token: &str) -> Result<IdTokenParts, SiwcError> {
     if segments.len() != 3 {
         return Err(invalid("ID token 不是三段式 JWT"));
     }
-    let (header_raw, payload_raw, signature_raw) = match (segments.first(), segments.get(1), segments.get(2)) {
-        (Some(h), Some(p), Some(s)) => (*h, *p, *s),
-        _ => return Err(invalid("ID token 段缺失")),
-    };
+    let (header_raw, payload_raw, signature_raw) =
+        match (segments.first(), segments.get(1), segments.get(2)) {
+            (Some(h), Some(p), Some(s)) => (*h, *p, *s),
+            _ => return Err(invalid("ID token 段缺失")),
+        };
     if signature_raw.is_empty() {
         return Err(invalid("ID token 无签名"));
     }
-    let header_bytes = base64url_decode(header_raw).map_err(|e| invalid(&format!("header 解码失败: {e}")))?;
-    let header: Value = serde_json::from_slice(&header_bytes)
-        .map_err(|e| invalid(&format!("header 非法: {e}")))?;
+    let header_bytes =
+        base64url_decode(header_raw).map_err(|e| invalid(&format!("header 解码失败: {e}")))?;
+    let header: Value =
+        serde_json::from_slice(&header_bytes).map_err(|e| invalid(&format!("header 非法: {e}")))?;
     if header.get("alg").and_then(Value::as_str) != Some("RS256") {
         return Err(invalid("ID token alg 不是 RS256"));
     }
-    let payload_bytes = base64url_decode(payload_raw).map_err(|e| invalid(&format!("payload 解码失败: {e}")))?;
+    let payload_bytes =
+        base64url_decode(payload_raw).map_err(|e| invalid(&format!("payload 解码失败: {e}")))?;
     let claims: Value = serde_json::from_slice(&payload_bytes)
         .map_err(|e| invalid(&format!("claims 非法: {e}")))?;
-    let signature = base64url_decode(signature_raw).map_err(|e| invalid(&format!("签名解码失败: {e}")))?;
+    let signature =
+        base64url_decode(signature_raw).map_err(|e| invalid(&format!("签名解码失败: {e}")))?;
     Ok(IdTokenParts {
         kid: header.get("kid").and_then(Value::as_str).map(str::to_owned),
         signing_input: format!("{header_raw}.{payload_raw}").into_bytes(),
@@ -204,7 +205,11 @@ pub fn validate_claims(
         .get("exp")
         .and_then(Value::as_u64)
         .ok_or_else(|| invalid("ID token 缺 exp".into()))?;
-    if exp_seconds.saturating_mul(1000).saturating_add(CLOCK_SKEW_MS) <= now_ms {
+    if exp_seconds
+        .saturating_mul(1000)
+        .saturating_add(CLOCK_SKEW_MS)
+        <= now_ms
+    {
         return Err(invalid("ID token 已过期".into()));
     }
     if claims.get("iat").and_then(Value::as_u64).is_none() {
@@ -283,33 +288,90 @@ mod tests {
     fn audience_and_nonce_are_enforced() {
         let wrong_aud = claims();
         assert!(
-            validate_claims(&wrong_aud, "https://auth.openai.com", "oaiapp_other", Some("n-1"), 1_700_000_000_000)
-                .is_err()
+            validate_claims(
+                &wrong_aud,
+                "https://auth.openai.com",
+                "oaiapp_other",
+                Some("n-1"),
+                1_700_000_000_000
+            )
+            .is_err()
         );
         assert!(
-            validate_claims(&claims(), "https://auth.openai.com", "oaiapp_test", Some("n-2"), 1_700_000_000_000)
-                .is_err(),
+            validate_claims(
+                &claims(),
+                "https://auth.openai.com",
+                "oaiapp_test",
+                Some("n-2"),
+                1_700_000_000_000
+            )
+            .is_err(),
             "nonce 不匹配必须拒"
         );
         // 多 aud 且 azp 缺失 → 拒。
         let mut multi = claims();
         multi["aud"] = serde_json::json!(["oaiapp_test", "oaiapp_other"]);
-        assert!(validate_claims(&multi, "https://auth.openai.com", "oaiapp_test", Some("n-1"), 1_700_000_000_000).is_err());
+        assert!(
+            validate_claims(
+                &multi,
+                "https://auth.openai.com",
+                "oaiapp_test",
+                Some("n-1"),
+                1_700_000_000_000
+            )
+            .is_err()
+        );
         multi["azp"] = serde_json::json!("oaiapp_test");
-        assert!(validate_claims(&multi, "https://auth.openai.com", "oaiapp_test", Some("n-1"), 1_700_000_000_000).is_ok());
+        assert!(
+            validate_claims(
+                &multi,
+                "https://auth.openai.com",
+                "oaiapp_test",
+                Some("n-1"),
+                1_700_000_000_000
+            )
+            .is_ok()
+        );
         multi["azp"] = serde_json::json!("oaiapp_other");
-        assert!(validate_claims(&multi, "https://auth.openai.com", "oaiapp_test", Some("n-1"), 1_700_000_000_000).is_err());
+        assert!(
+            validate_claims(
+                &multi,
+                "https://auth.openai.com",
+                "oaiapp_test",
+                Some("n-1"),
+                1_700_000_000_000
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn expiry_and_subject_are_enforced() {
         let mut expired = claims();
         expired["exp"] = serde_json::json!(1_600_000_000u64);
-        assert!(validate_claims(&expired, "https://auth.openai.com", "oaiapp_test", Some("n-1"), 1_700_000_000_000).is_err());
+        assert!(
+            validate_claims(
+                &expired,
+                "https://auth.openai.com",
+                "oaiapp_test",
+                Some("n-1"),
+                1_700_000_000_000
+            )
+            .is_err()
+        );
 
         let mut no_sub = claims();
         no_sub["sub"] = serde_json::json!("");
-        assert!(validate_claims(&no_sub, "https://auth.openai.com", "oaiapp_test", Some("n-1"), 1_700_000_000_000).is_err());
+        assert!(
+            validate_claims(
+                &no_sub,
+                "https://auth.openai.com",
+                "oaiapp_test",
+                Some("n-1"),
+                1_700_000_000_000
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -337,7 +399,10 @@ mod tests {
         // header 里 alg=none 必须拒。
         let header = crate::util::base64url_encode(br#"{"alg":"none","kid":"k1"}"#);
         let payload = crate::util::base64url_encode(br#"{"sub":"s"}"#);
-        let token = format!("{header}.{payload}.{}", crate::util::base64url_encode(b"sig"));
+        let token = format!(
+            "{header}.{payload}.{}",
+            crate::util::base64url_encode(b"sig")
+        );
         assert_eq!(
             split_id_token(&token).expect_err("alg none").code(),
             SiwcCode::InvalidIdToken
@@ -377,7 +442,10 @@ mod tests {
             .expect("signature segment")
             .to_string();
         let flipped = match signature.get(1..) {
-            Some(rest) => format!("{}{rest}", if signature.starts_with('A') { "B" } else { "A" }),
+            Some(rest) => format!(
+                "{}{rest}",
+                if signature.starts_with('A') { "B" } else { "A" }
+            ),
             None => signature,
         };
         tampered.replace_range(separator + 1.., &flipped);

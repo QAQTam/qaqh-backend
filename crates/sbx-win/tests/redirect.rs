@@ -8,7 +8,9 @@
 use sbx_win::projfs::Change;
 use sbx_win::redirect::{self, split_plan};
 use sbx_win::{
-    desktop, env, policy::SbxPolicy, spawn::{self, Isolation},
+    desktop, env,
+    policy::SbxPolicy,
+    spawn::{self, Isolation},
 };
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -63,12 +65,13 @@ fn run_in_view(view: &Path, cap: &[u8], inner: &str) -> sbx_win::spawn::Exit {
         sbx_win::token::create_restricted_token(&[cap.to_vec(), sbx_win::sid::everyone_sid()])
             .unwrap();
     // 参数是 SID 文本(嵌入桌面 SDDL),不是桌面名
-    let desk =
-        desktop::create_private_desktop(&sbx_win::sid::sid_to_string(cap)).unwrap();
+    let desk = desktop::create_private_desktop(&sbx_win::sid::sid_to_string(cap)).unwrap();
     let pairs = env::minimal_child_env(&view.join(".sbx-tmp"), &view.join(".sbx-home"));
     let cmdline = format!("\"{}\" /c {}", std::env::var("ComSpec").unwrap(), inner);
     let child = spawn::spawn(
-        &Isolation::RestrictedToken { token: tok.handle() },
+        &Isolation::RestrictedToken {
+            token: tok.handle(),
+        },
         &cmdline,
         view,
         &pairs,
@@ -130,7 +133,11 @@ fn redirect_turn_merge_end_to_end() {
             secret_real.display()
         ),
     );
-    eprintln!("child exit={} stderr={}", e.code, String::from_utf8_lossy(&e.stderr));
+    eprintln!(
+        "child exit={} stderr={}",
+        e.code,
+        String::from_utf8_lossy(&e.stderr)
+    );
     std::thread::sleep(Duration::from_millis(100));
 
     let changes = turn.diff().unwrap();
@@ -150,7 +157,10 @@ fn redirect_turn_merge_end_to_end() {
         "readme-v1",
         "store 的 README.md 被穿透"
     );
-    assert!(!ws.join("target").join("out.txt").exists(), "store 的 target 被穿透");
+    assert!(
+        !ws.join("target").join("out.txt").exists(),
+        "store 的 target 被穿透"
+    );
 
     // 未授权写被内核拒绝:secret 无痕迹(视图与 store)、.git deny 生效
     assert!(
@@ -164,13 +174,18 @@ fn redirect_turn_merge_end_to_end() {
         "untouched",
         "按真实路径的直捣写入穿透到了 store"
     );
-    assert!(!view.join(".git").join("hack").exists() && !contains_ci(&changes, "new", r".git\hack"), "deny carveout(.git)被写穿");
+    assert!(
+        !view.join(".git").join("hack").exists() && !contains_ci(&changes, "new", r".git\hack"),
+        "deny carveout(.git)被写穿"
+    );
 
     // merge 落回 store(turn 边界审批流)
     let report = turn.merge().unwrap();
     eprintln!("merge: {report:?}");
     assert!(
-        std::fs::read_to_string(ws.join("target").join("out.txt")).unwrap().contains("built"),
+        std::fs::read_to_string(ws.join("target").join("out.txt"))
+            .unwrap()
+            .contains("built"),
         "merge 未落盘 target\\out.txt"
     );
     assert!(
@@ -276,7 +291,10 @@ fn redirect_notifications_flow_to_parent() {
     );
 
     // 取走后清空(幂等)
-    assert!(turn.take_notifications().is_empty(), "take_notifications 后未清空");
+    assert!(
+        turn.take_notifications().is_empty(),
+        "take_notifications 后未清空"
+    );
 
     drop(turn);
     let _ = std::fs::remove_dir_all(&base);
@@ -304,7 +322,10 @@ fn redirect_merge_deletions_require_explicit_confirmation() {
     // 默认 merge:Deleted 项被跳过(需显式确认),store 文件仍在;
     // 视图侧 tombstone 被撤销 → diff 归零,文件重新投影
     let report = turn.merge().unwrap();
-    assert_eq!(report.skipped_deletions, 1, "默认 merge 应跳过删除: {report:?}");
+    assert_eq!(
+        report.skipped_deletions, 1,
+        "默认 merge 应跳过删除: {report:?}"
+    );
     assert_eq!(report.deleted, 0, "默认 merge 不应执行删除: {report:?}");
     assert!(
         ws.join("secret.txt").exists(),
@@ -323,10 +344,7 @@ fn redirect_merge_deletions_require_explicit_confirmation() {
         .merge_with(sbx_win::projfs::MergePolicy::AllowDeletions)
         .unwrap();
     assert_eq!(report2.deleted, 1, "确认后的 merge 应执行删除: {report2:?}");
-    assert!(
-        !ws.join("secret.txt").exists(),
-        "确认后的删除应落回 store"
-    );
+    assert!(!ws.join("secret.txt").exists(), "确认后的删除应落回 store");
     assert!(turn.diff().unwrap().is_empty(), "确认 merge 后 diff 未归零");
 
     drop(turn);

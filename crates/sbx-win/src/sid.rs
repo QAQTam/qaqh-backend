@@ -44,7 +44,10 @@ pub fn capability_sid() -> std::result::Result<Vec<u8>, String> {
         w
     };
     let rid = 1000 + (word(16) % 60000);
-    Ok(build_sid(&NT_AUTHORITY, &[21, word(0), word(4), word(8), rid]))
+    Ok(build_sid(
+        &NT_AUTHORITY,
+        &[21, word(0), word(4), word(8), rid],
+    ))
 }
 
 /// "S-1-5-21-a-b-c-r" 字符串解析(供 --cap-sid 复用)。

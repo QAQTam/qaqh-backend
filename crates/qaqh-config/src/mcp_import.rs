@@ -32,6 +32,9 @@ pub enum ExternalSource {
     /// 插件市场安装投影（qaqh-marketplace）：来自市场插件包的 `.mcp.json`。
     /// 只走 B 路线显式导入，从不进只读合并（市场内容是第三方供应链面）。
     Marketplace,
+    /// 通用 JSON 源（[`scan_generic_json`]）：更多 IDE 的声明式接入面。
+    /// 前缀 `ext-generic-`；后续按已核实的用户级路径接线即可，不改扫描逻辑。
+    Generic,
 }
 
 impl ExternalSource {
@@ -43,6 +46,7 @@ impl ExternalSource {
             ExternalSource::ClaudeProject => "ext-claproj-",
             ExternalSource::Opencode => "ext-opencode-",
             ExternalSource::Marketplace => "ext-market-",
+            ExternalSource::Generic => "ext-generic-",
         }
     }
 
@@ -54,6 +58,7 @@ impl ExternalSource {
             ExternalSource::ClaudeProject => "claude-project",
             ExternalSource::Opencode => "opencode",
             ExternalSource::Marketplace => "marketplace",
+            ExternalSource::Generic => "generic",
         }
     }
 }
@@ -66,7 +71,7 @@ pub struct ExternalServer {
     pub command: String,
     pub args: Vec<String>,
     pub env: BTreeMap<String, String>,
-    /// http/sse 类型的 endpoint（Claude Code `type: "http"|"sse"`；Codex 无）。
+    /// http/streamable-http 类型的 endpoint（有 `url` 即 remote，ADR-0025）。
     pub url: String,
     pub headers: BTreeMap<String, String>,
     pub source: ExternalSource,
@@ -107,10 +112,148 @@ impl ExternalServer {
 
 // ── 扫描 ──
 
-/// Codex CLI：`~/.codex/config.toml` 的 `[mcp_servers.<name>]`。
+/// 单一 entry 收口（ADR-0025）：所有外部源共用，**不写 per-IDE adapter**。
 ///
-/// 字段（以 Codex 当前文档为准）：`command`（必填）、`args`（可选）、
-/// `env`（可选，明文）。解析失败/缺文件 → 空（外部配置缺失不是错误）。
+/// 判定优先级：`url`（字符串）→ remote（Streamable HTTP）；否则 `command`
+/// （字符串或数组首项）→ stdio；两者皆无 → warn 后跳过（不再静默 `?` 丢弃）。
+fn build_external(
+    name: String,
+    source: ExternalSource,
+    command: Option<String>,
+    args: Vec<String>,
+    env: BTreeMap<String, String>,
+    url: String,
+    headers: BTreeMap<String, String>,
+) -> Option<ExternalServer> {
+    if !url.trim().is_empty() {
+        return Some(ExternalServer {
+            name,
+            command: String::new(),
+            args: vec![],
+            env: BTreeMap::new(),
+            url,
+            headers,
+            source,
+        });
+    }
+    if let Some(command) = command.filter(|command| !command.trim().is_empty()) {
+        return Some(ExternalServer {
+            name,
+            command,
+            args,
+            env,
+            url: String::new(),
+            headers: BTreeMap::new(),
+            source,
+        });
+    }
+    log::warn!("[mcp import] {source:?} server {name:?}: 缺 url 与 command，跳过（不再静默丢弃）");
+    None
+}
+
+/// JSON 文件读取（缺文件/解析失败 → None，不是错误）。
+fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return None;
+    };
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => Some(value),
+        Err(_) => {
+            log::warn!("[mcp import] {} 解析失败，跳过 JSON 源", path.display());
+            None
+        }
+    }
+}
+
+/// serde_json entry → [`ExternalServer`]（通用；Claude/opencode/IDE 共用）。
+///
+/// 有 `url` 即 remote —— 覆盖 `streamable-http`/`streamableHttp`/无 type 等
+/// 新形态；`command` 支持字符串或数组（数组首项为 binary、余项为 args）；
+/// `env` 与 `environment` 都认。
+fn parse_json_entry(
+    name: &str,
+    entry: &serde_json::Value,
+    source: ExternalSource,
+) -> Option<ExternalServer> {
+    let obj = entry.as_object()?;
+    let server_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if server_type.eq_ignore_ascii_case("sse") {
+        // MCP 官方已把 HTTP+SSE 标为 deprecated（2026-07-28 仅 stdio +
+        // Streamable HTTP）；本期不写 SSE 转换层，明确告警而非假装能用。
+        log::warn!(
+            "[mcp import] {source:?} server {name:?}: 旧版 HTTP+SSE 未支持，将按 Streamable HTTP 尝试（可能连不上）"
+        );
+    }
+    let url = obj
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let headers = string_map(obj.get("headers"));
+    let (command, args) = match obj.get("command") {
+        Some(value) if value.is_array() => {
+            let parts: Vec<String> = value
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part.as_str().map(str::to_owned))
+                .collect();
+            let mut iter = parts.into_iter();
+            (iter.next(), iter.collect())
+        }
+        Some(value) if value.is_string() => (
+            value.as_str().map(str::to_owned),
+            obj.get("args")
+                .and_then(|v| v.as_array())
+                .map(|args| {
+                    args.iter()
+                        .filter_map(|arg| arg.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        ),
+        _ => (None, Vec::new()),
+    };
+    let env = string_map(obj.get("env").or_else(|| obj.get("environment")));
+    build_external(name.to_owned(), source, command, args, env, url, headers)
+}
+
+/// 通用键收集（单一实现，所有 JSON 源复用）。
+fn collect_json_entries(
+    value: &serde_json::Value,
+    key: &str,
+    source: ExternalSource,
+    opencode_semantics: bool,
+) -> Vec<ExternalServer> {
+    let Some(servers) = value.get(key).and_then(|v| v.as_object()) else {
+        return Vec::new();
+    };
+    servers
+        .iter()
+        .filter_map(|(name, entry)| {
+            if opencode_semantics {
+                if entry.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+                    return None;
+                }
+                let server_type = entry
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("local");
+                if server_type != "local" && server_type != "remote" {
+                    log::warn!(
+                        "[mcp import] opencode server {name:?}: 未知 type {server_type:?}，跳过"
+                    );
+                    return None;
+                }
+            }
+            parse_json_entry(name, entry, source)
+        })
+        .collect()
+}
+
+/// Codex CLI：`~/.codex/config.toml` 的 `[mcp_servers.<name>]`（官方
+/// config-reference 确认用户级路径）。stdio 用 `command`/`args`/`env`；
+/// remote 用 `url`/`headers`（通用写法，ADR-0025）。
 pub fn scan_codex(path: &Path) -> Vec<ExternalServer> {
     let Ok(text) = std::fs::read_to_string(path) else {
         return Vec::new();
@@ -125,157 +268,75 @@ pub fn scan_codex(path: &Path) -> Vec<ExternalServer> {
     servers
         .iter()
         .filter_map(|(name, entry)| {
-            let command = entry.get("command").and_then(|v| v.as_str())?.to_owned();
-            Some(ExternalServer {
-                name: name.clone(),
+            let command = entry
+                .get("command")
+                .and_then(|v| v.as_str())
+                .map(str::to_owned);
+            let args = entry
+                .get("args")
+                .and_then(|v| v.as_array())
+                .map(|args| {
+                    args.iter()
+                        .filter_map(|arg| arg.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let url = entry
+                .get("url")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned();
+            build_external(
+                name.clone(),
+                ExternalSource::Codex,
                 command,
-                args: entry
-                    .get("args")
-                    .and_then(|v| v.as_array())
-                    .map(|args| {
-                        args.iter()
-                            .filter_map(|a| a.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                env: toml_string_map(entry.get("env")),
-                url: String::new(),
-                headers: BTreeMap::new(),
-                source: ExternalSource::Codex,
-            })
+                args,
+                toml_string_map(entry.get("env")),
+                url,
+                toml_string_map(entry.get("headers")),
+            )
         })
         .collect()
 }
 
-/// Claude Code：JSON 里的 `mcpServers` 键（`~/.claude.json` 用户级顶层；
-/// 项目级 `.mcp.json` 整个文件即 `{ "mcpServers": … }`）。
-///
-/// stdio：`{ command, args?, env? }`；http/sse：`{ type: "http"|"sse", url,
-/// headers? }`。s起 server 的 trust/approve 语义在源侧，这里只做结构解析。
+/// Claude Code：`mcpServers` 键（`~/.claude.json` 用户级 / 项目级 `.mcp.json`）。
+/// 有 `url` 即 remote —— 覆盖 `streamable-http`/`streamableHttp` 等新形态，
+/// 不再因未知 `type` 静默丢弃（ADR-0025）。
 pub fn scan_claude(path: &Path, source: ExternalSource) -> Vec<ExternalServer> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(value) = read_json(path) else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        log::warn!("[mcp import] {} 解析失败，跳过 claude 源", path.display());
-        return Vec::new();
-    };
-    let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
-    servers
-        .iter()
-        .filter_map(|(name, entry)| {
-            let server_type = entry
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("stdio");
-            if server_type == "http" || server_type == "sse" {
-                let url = entry.get("url").and_then(|v| v.as_str())?.to_owned();
-                Some(ExternalServer {
-                    name: name.clone(),
-                    command: String::new(),
-                    args: vec![],
-                    env: BTreeMap::new(),
-                    url,
-                    headers: string_map(entry.get("headers")),
-                    source,
-                })
-            } else {
-                let command = entry.get("command").and_then(|v| v.as_str())?.to_owned();
-                Some(ExternalServer {
-                    name: name.clone(),
-                    command,
-                    args: entry
-                        .get("args")
-                        .and_then(|v| v.as_array())
-                        .map(|args| {
-                            args.iter()
-                                .filter_map(|a| a.as_str().map(str::to_owned))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                    env: string_map(entry.get("env")),
-                    url: String::new(),
-                    headers: BTreeMap::new(),
-                    source,
-                })
-            }
-        })
-        .collect()
+    collect_json_entries(&value, "mcpServers", source, false)
 }
 
 /// opencode：`~/.config/opencode/opencode.json` 顶层 `mcp` 段（用户级）。
-///
-/// 形态（以本机实测 opencode.json + 官方 MCP 文档为准）：
-/// - local：`{ "type": "local", "command": ["bin", "args..."],
-///   "environment"?: {...}, "enabled"?: bool }` —— `command[0]` 为 binary，
-///   余项为 args（与 Codex/Claude 的 command+args 字符串形态不同）；
-/// - remote：`{ "type": "remote", "url", "headers"?, "enabled"? }`；
-/// - `enabled: false` → 跳过（与 opencode“启动时禁用”语义对齐）；
-/// - 未知 type / 缺 command[0] / 缺 url → 跳过（merge 计入 skipped_invalid，
-///   import 直接过滤——外部配置缺失/畸形不是错误）。
-///
-/// `cwd`/`environment` 以外字段（`timeout`/`oauth`）不映射：timeout 走 server
-/// 级默认 60s（外部源统一口径）；oauth 另立项。
+/// `local`/`remote` 语义与 `enabled:false` 跳过保留；entry 复用通用解析器。
 pub fn scan_opencode(path: &Path) -> Vec<ExternalServer> {
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(value) = read_json(path) else {
         return Vec::new();
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        log::warn!("[mcp import] {} 解析失败，跳过 opencode 源", path.display());
+    collect_json_entries(&value, "mcp", ExternalSource::Opencode, true)
+}
+
+/// 通用 JSON 源（ADR-0025）：自动识别 `mcpServers` / `mcp` /
+/// `context_servers` / `servers` 四个顶层键，entry 走同一解析器。这是
+/// 「更多 IDE」的声明式接入面 —— 新 IDE 只要给出用户级文件路径即可，
+/// 不需要再写一份 adapter。
+///
+/// 本期**不硬编码未核实的用户级路径**：官方搜索工具在当前 profile 未启用，
+/// 抓到的官方文档只确认了 Codex `~/.codex/config.toml`、Zed 的
+/// `context_servers` 结构，未给出 Cursor/VS Code/Windsurf/Cline 的用户级路径。
+/// 本函数作为公开 API 供 B 路线/后续接线使用，并由测试覆盖。
+pub fn scan_generic_json(path: &Path, source: ExternalSource) -> Vec<ExternalServer> {
+    let Some(value) = read_json(path) else {
         return Vec::new();
     };
-    let Some(servers) = value.get("mcp").and_then(|v| v.as_object()) else {
-        return Vec::new();
-    };
-    servers
-        .iter()
-        .filter_map(|(name, entry)| {
-            if entry.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
-                return None;
-            }
-            let server_type = entry
-                .get("type")
-                .and_then(|v| v.as_str())
-                .unwrap_or("local");
-            if server_type == "remote" {
-                let url = entry.get("url").and_then(|v| v.as_str())?.to_owned();
-                Some(ExternalServer {
-                    name: name.clone(),
-                    command: String::new(),
-                    args: vec![],
-                    env: BTreeMap::new(),
-                    url,
-                    headers: string_map(entry.get("headers")),
-                    source: ExternalSource::Opencode,
-                })
-            } else if server_type == "local" {
-                let command_arr = entry.get("command").and_then(|v| v.as_array())?;
-                let mut parts = command_arr
-                    .iter()
-                    .filter_map(|a| a.as_str().map(str::to_owned));
-                let command = parts.next()?;
-                if command.trim().is_empty() {
-                    return None;
-                }
-                Some(ExternalServer {
-                    name: name.clone(),
-                    command,
-                    args: parts.collect(),
-                    env: string_map(entry.get("environment")),
-                    url: String::new(),
-                    headers: BTreeMap::new(),
-                    source: ExternalSource::Opencode,
-                })
-            } else {
-                log::warn!(
-                    "[mcp import] opencode server {name:?}: 未知 type {server_type:?}，跳过"
-                );
-                None
-            }
-        })
-        .collect()
+    for key in ["mcpServers", "mcp", "context_servers", "servers"] {
+        if value.get(key).and_then(|v| v.as_object()).is_some() {
+            return collect_json_entries(&value, key, source, false);
+        }
+    }
+    Vec::new()
 }
 
 /// 默认用户级扫描路径组（A 路线用；文件缺失 → 空结果，不报错）。
@@ -417,6 +478,7 @@ pub fn import_servers(
         config.servers.insert(external.name.clone(), server_cfg);
         report.imported.push(external.name.clone());
     }
-    config.enabled = true;
+    // 显式导入 = 用户明确启用（Some 而非推导值），不受后续外部合并改写。
+    config.enabled = Some(true);
     Ok(report)
 }

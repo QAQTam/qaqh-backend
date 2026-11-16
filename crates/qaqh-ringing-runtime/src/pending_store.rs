@@ -392,11 +392,7 @@ impl PendingCommandStore {
     /// 同步命令终态（B05）：完整 result/operation/revision 落 receipt，
     /// ACK 丢失后重放原 command_id 或轮询 status 都能恢复原结果。
     /// `succeeded` 且不调用此方法 = 引擎类命令（无同步结果，不伪造）。
-    pub fn mark_terminal_sync(
-        &mut self,
-        command_id: &str,
-        sync_result: RingingV2SyncResult,
-    ) {
+    pub fn mark_terminal_sync(&mut self, command_id: &str, sync_result: RingingV2SyncResult) {
         if let Some(receipt) = self.accepted.get_mut(command_id) {
             receipt.state = RingingCommandState::Succeeded;
             receipt.terminal_event_id = None;

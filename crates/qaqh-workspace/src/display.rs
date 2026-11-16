@@ -365,7 +365,6 @@ mod tests {
         let ask = ask.display(&json!({}));
         assert_eq!(ask.summary.as_deref(), Some("asked 2 questions"));
         assert_eq!(ask.body, ToolBody::None);
-
     }
 
     #[test]

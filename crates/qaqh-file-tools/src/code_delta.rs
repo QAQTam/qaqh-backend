@@ -48,11 +48,7 @@ pub fn from_display(
 }
 
 fn count_op(display: &qaqh_types::ToolResultDisplay, op: &str) -> usize {
-    display
-        .files
-        .iter()
-        .filter(|file| file.op == op)
-        .count()
+    display.files.iter().filter(|file| file.op == op).count()
 }
 
 #[cfg(test)]
@@ -108,7 +104,8 @@ mod tests {
     fn created_and_deleted_files_come_from_file_ops() {
         let created = from_display(&display(Some(5), Some(0), vec![("new.txt", "add")])).unwrap();
         assert_eq!((created.files_created, created.files_deleted), (1, 0));
-        let deleted = from_display(&display(Some(0), Some(5), vec![("gone.txt", "delete")])).unwrap();
+        let deleted =
+            from_display(&display(Some(0), Some(5), vec![("gone.txt", "delete")])).unwrap();
         assert_eq!((deleted.files_created, deleted.files_deleted), (0, 1));
         assert_eq!(deleted.lines_removed, 5, "delete 不再是恒 0");
     }
@@ -124,7 +121,11 @@ mod tests {
         .unwrap();
         assert_eq!(record.file, None);
         assert_eq!(
-            (record.files_created, record.files_deleted, record.lines_added),
+            (
+                record.files_created,
+                record.files_deleted,
+                record.lines_added
+            ),
             (1, 1, 3)
         );
     }

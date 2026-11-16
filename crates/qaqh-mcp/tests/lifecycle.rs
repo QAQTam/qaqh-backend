@@ -37,7 +37,8 @@ use qaqh_mcp::{ConnStatus, McpManager, install_manager, manager_slot};
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
 use rmcp::model::{
-    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig, Tool,
+    ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+    Tool,
 };
 use rmcp::service::{ClientLifecycleMode, ClientServiceExt, RequestContext, ServiceExt};
 use serde_json::json;
@@ -168,7 +169,7 @@ fn mock_cfg(idle_secs: u64) -> McpConfig {
     McpConfig {
         import_external: false,
         inject_resource_env_block: false,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: idle_secs,
         servers: BTreeMap::from([("mock".to_owned(), mock_server_cfg())]),
     }
@@ -214,7 +215,7 @@ fn subprocess_cfg(tag: &str, mode: &str, idle_secs: u64) -> McpConfig {
     McpConfig {
         import_external: false,
         inject_resource_env_block: false,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: idle_secs,
         servers: BTreeMap::from([(tag.to_owned(), server)]),
     }
@@ -582,7 +583,7 @@ async fn apply_config_diff_semantics() {
     // ④ enabled=false：全停（配置面保留，重开即恢复）。基于当前配置派生
     // （保留 other），只动总闸。
     let mut off = manager.config();
-    off.enabled = false;
+    off.enabled = Some(false);
     let _report = manager.apply_config(off).await;
     assert!(manager.config().servers.contains_key("other"), "配置面保留");
     let error = match manager.get_or_connect("other").await {

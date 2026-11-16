@@ -29,8 +29,7 @@ pub mod sanitize;
 pub mod adapter;
 
 pub use bridge::{
-    dispatch, prime_all_async, projection_batch, projection_generation, runtime_handle,
-    shutdown_global,
+    dispatch, projection_batch, projection_generation, runtime_handle, shutdown_global,
 };
 
 pub use connection::{

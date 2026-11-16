@@ -20,7 +20,7 @@ use crate::usage;
 use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
-    CancelWatch, Outcome, RetryHub, REQUEST_TOTAL_TIMEOUT, StreamState, ToolCallAnnouncer,
+    CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, StreamState, ToolCallAnnouncer,
     adopt_identity, apply_management_headers, empty_stream_retry, insert_header,
     roomy_response_limits, sdk_error_detail, sdk_retry_policy, tool_names_by_id, tool_result_name,
 };
@@ -119,11 +119,12 @@ pub(crate) fn project_messages(
     image_index_base: usize,
 ) -> Vec<WireMessage> {
     let names = tool_names_by_id(&messages);
+    let stale_boundary = super::sdk_common::stale_image_boundary(&messages);
     let mut system_parts: Vec<String> = Vec::new();
     let mut projected: Vec<WireMessage> = Vec::new();
     let mut img_idx = image_index_base;
 
-    for msg in messages {
+    for (msg_index, msg) in messages.iter().enumerate() {
         match msg.role.as_str() {
             "system" | "developer" => {
                 if let Some(t) = extract_text(&msg.content) {
@@ -193,7 +194,11 @@ pub(crate) fn project_messages(
                             );
                             // 0.4.0 rejects an empty explicit id; leave it unset so
                             // the SDK's normalizer assigns a collision-free one.
-                            call.id = if id.is_empty() { None } else { Some(id.clone()) };
+                            call.id = if id.is_empty() {
+                                None
+                            } else {
+                                Some(id.clone())
+                            };
                             parts.push(Part::ToolCall(call));
                         }
                         _ => {}
@@ -204,6 +209,10 @@ pub(crate) fn project_messages(
                 }
             }
             "tool" => {
+                // 跨轮丢弃：位于最后一条 user 消息之前的工具图属于已消化回合，
+                // 像素不再重发，改写一条说明行（见 sdk_common::stale_image_boundary）。
+                let stale = stale_boundary.is_some_and(|boundary| msg_index < boundary);
+                let mut dropped = 0usize;
                 // 去重：工具图在存储层是「内联 result.images + 兄弟 ImageRef」
                 // 双份（BUG-2026-09-16-03），同一份字节只投影一次。
                 let ref_count = msg
@@ -236,6 +245,10 @@ pub(crate) fn project_messages(
                                     skip_inline -= 1;
                                     continue;
                                 }
+                                if stale {
+                                    dropped += 1;
+                                    continue;
+                                }
                                 tr.parts.push(ToolResultPart::Image {
                                     image: ImagePart::base64(&img.mime_type, &img.data),
                                 });
@@ -246,6 +259,10 @@ pub(crate) fn project_messages(
                         ContentBlock::Image { mime_type, data } => {
                             if skip_inline > 0 {
                                 skip_inline -= 1;
+                                continue;
+                            }
+                            if stale {
+                                dropped += 1;
                                 continue;
                             }
                             if let Some(idx) = last_result {
@@ -259,6 +276,10 @@ pub(crate) fn project_messages(
                         ContentBlock::ImageRef {
                             sha256, mime_type, ..
                         } => {
+                            if stale {
+                                dropped += 1;
+                                continue;
+                            }
                             // A-2 L0：按需读盘后走同一 base64 路径。
                             match qaqh_types::image_store::load_image_b64(sha256, mime_type) {
                                 Ok(data) => {
@@ -277,6 +298,12 @@ pub(crate) fn project_messages(
                         }
                         _ => {}
                     }
+                }
+                if dropped > 0
+                    && let Some(Part::ToolResult(tr)) = parts.last_mut()
+                {
+                    tr.content.push('\n');
+                    tr.content.push_str(super::sdk_common::STALE_IMAGE_STUB);
                 }
                 if !parts.is_empty() {
                     projected.push(WireMessage::new(mutil_ai::Role::Tool, parts));
@@ -497,7 +524,9 @@ async fn consume(
         hub.drain(&mut *on_event);
         match next {
             Ok(SdkEvent::NativeToolProgress { .. } | SdkEvent::NativeToolCompleted { .. }) => {
-                return Outcome::Fatal(anyhow::anyhow!("native tool events are unsupported on Messages"));
+                return Outcome::Fatal(anyhow::anyhow!(
+                    "native tool events are unsupported on Messages"
+                ));
             }
             Ok(SdkEvent::Start { .. }) => {}
             Ok(SdkEvent::TextDelta { text }) => {
@@ -588,8 +617,7 @@ async fn consume(
                 // （message_delta 的 stop_reason 从未到达）——上游掐流按
                 // 失败处理。真实终态恒带 stop_reason。
                 let Some(fr) = finish_reason else {
-                    interrupted =
-                        Some("upstream closed stream before terminal event".to_string());
+                    interrupted = Some("upstream closed stream before terminal event".to_string());
                     break;
                 };
                 state.stop = Some(map_anthropic_stop_reason(&fr));
@@ -611,6 +639,11 @@ async fn consume(
                 if matches!(e, SdkError::Cancelled) {
                     return Outcome::Fatal(anyhow::anyhow!("cancelled by user"));
                 }
+                // 流中传输断裂与建连前同律:类别随 Error 事件上抛。
+                on_event(StreamEvent::Error {
+                    kind: e.kind(),
+                    message: e.to_string(),
+                });
                 interrupted = Some(e.to_string());
                 break;
             }
@@ -668,11 +701,7 @@ fn reconcile_absent_tool_calls(
         };
         tools.insert(
             next_index,
-            (
-                call.id.clone().unwrap_or_default(),
-                call.name.clone(),
-                args,
-            ),
+            (call.id.clone().unwrap_or_default(), call.name.clone(), args),
         );
         next_index += 1;
     }
@@ -861,9 +890,17 @@ mod tests {
             parts: vec![
                 Part::text("narration"),
                 // 已流条目：对账让位。
-                wire_tool_call(Some("call_streamed"), "grep", serde_json::json!({"pattern":"a"})),
+                wire_tool_call(
+                    Some("call_streamed"),
+                    "grep",
+                    serde_json::json!({"pattern":"a"}),
+                ),
                 // 一次性条目：事件流从未出现，补齐。
-                wire_tool_call(Some("call_oneshot"), "grep", serde_json::json!({"pattern":"b"})),
+                wire_tool_call(
+                    Some("call_oneshot"),
+                    "grep",
+                    serde_json::json!({"pattern":"b"}),
+                ),
                 // id 缺席：以空 id 收口（finalize 合成 toolu_…）。
                 wire_tool_call(None, "exec", serde_json::json!({"command":"ls"})),
                 // 无名条目不可执行：丢弃。
@@ -872,10 +909,16 @@ mod tests {
         };
         reconcile_absent_tool_calls(&mut tools, &message);
         assert_eq!(tools.len(), 3, "无名条目丢弃，缺席条目补齐: {tools:?}");
-        let oneshot = tools.values().find(|(id, _, _)| id == "call_oneshot").expect("oneshot");
+        let oneshot = tools
+            .values()
+            .find(|(id, _, _)| id == "call_oneshot")
+            .expect("oneshot");
         assert_eq!(oneshot.1, "grep");
         assert_eq!(oneshot.2, r#"{"pattern":"b"}"#);
-        let anonymous = tools.values().find(|(id, _, _)| id.is_empty()).expect("anonymous");
+        let anonymous = tools
+            .values()
+            .find(|(id, _, _)| id.is_empty())
+            .expect("anonymous");
         assert_eq!(anonymous.1, "exec");
         assert_eq!(anonymous.2, r#"{"command":"ls"}"#);
     }
@@ -888,7 +931,11 @@ mod tests {
         let doubled = r#"{"a":1}{"a":1}"#;
         let message = WireMessage {
             role: mutil_ai::Role::Assistant,
-            parts: vec![wire_tool_call(Some("call_x"), "grep", serde_json::Value::String(doubled.into()))],
+            parts: vec![wire_tool_call(
+                Some("call_x"),
+                "grep",
+                serde_json::Value::String(doubled.into()),
+            )],
         };
         reconcile_absent_tool_calls(&mut tools, &message);
         let entry = tools.values().next().expect("entry");
@@ -1052,6 +1099,135 @@ mod tests {
             .filter(|p| matches!(p, ToolResultPart::Image { .. }))
             .collect();
         assert_eq!(images.len(), 1, "同一张图只应投影一次");
+    }
+
+    /// 跨轮丢弃回归：位于最后一条 user 消息之前的工具图不再重发像素，
+    /// 工具结果正文追加说明行；当轮（边界之后）的图原样投影。
+    #[test]
+    fn stale_tool_images_are_stubbed_across_user_boundary() {
+        let _guard = crate::sdk_common::test_support::DataDirGuard::acquire();
+        let b64 = "Zm9vYmFy";
+        let sha =
+            qaqh_types::image_store::store_image_b64(b64, "image/png").expect("store image b64");
+        let image_blocks = |id: &str| {
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: id.into(),
+                    result: qaqh_types::ToolResult::ok("image attached"),
+                },
+                ContentBlock::ImageRef {
+                    sha256: sha.clone(),
+                    mime_type: "image/png".into(),
+                    bytes_len: b64.len(),
+                },
+            ]
+        };
+        let tool_use = |id: &str| {
+            vec![ContentBlock::ToolUse {
+                id: id.into(),
+                name: "read_image".into(),
+                input: serde_json::json!({"path": "a.png"}),
+            }]
+        };
+        let msgs = vec![
+            Message::user("round 1"),
+            qa_msg("assistant", tool_use("toolu_1")),
+            qa_msg("tool", image_blocks("toolu_1")),
+            Message::user("round 2"),
+            qa_msg("assistant", tool_use("toolu_2")),
+            qa_msg("tool", image_blocks("toolu_2")),
+        ];
+        let request = ChatRequest::new(project_messages(msgs, 0));
+        let norm = normalized(&request);
+        let tool_msgs: Vec<_> = norm
+            .messages
+            .iter()
+            .filter(|m| m.role == mutil_ai::ExternalRole::Tool)
+            .collect();
+        assert_eq!(tool_msgs.len(), 2);
+
+        // 第一条在边界之前：像素丢弃，stub 落进工具结果正文。
+        let Part::ToolResult(stale) = &tool_msgs[0].parts[0] else {
+            panic!("expected tool result part");
+        };
+        assert!(
+            stale
+                .parts
+                .iter()
+                .all(|p| !matches!(p, ToolResultPart::Image { .. })),
+            "stale 工具图不得重发像素"
+        );
+        assert!(
+            stale.content.contains("image removed from replay"),
+            "stale 工具结果必须带说明行，实际: {}",
+            stale.content
+        );
+
+        // 第二条在边界之后（本轮消化）：真图原样投影。
+        let Part::ToolResult(fresh) = &tool_msgs[1].parts[0] else {
+            panic!("expected tool result part");
+        };
+        let images = fresh
+            .parts
+            .iter()
+            .filter(|p| matches!(p, ToolResultPart::Image { .. }))
+            .count();
+        assert_eq!(images, 1, "当轮工具图必须投影");
+        assert!(
+            !fresh.content.contains("image removed from replay"),
+            "当轮工具结果不得带说明行"
+        );
+    }
+
+    /// 历史中没有 user 消息时保守不丢弃（最小重放不受影响）。
+    #[test]
+    fn tool_images_without_user_boundary_are_kept() {
+        let _guard = crate::sdk_common::test_support::DataDirGuard::acquire();
+        let b64 = "Zm9vYmFy";
+        let sha =
+            qaqh_types::image_store::store_image_b64(b64, "image/png").expect("store image b64");
+        let msgs = vec![
+            qa_msg(
+                "assistant",
+                vec![ContentBlock::ToolUse {
+                    id: "toolu_1".into(),
+                    name: "read_image".into(),
+                    input: serde_json::json!({"path": "a.png"}),
+                }],
+            ),
+            qa_msg(
+                "tool",
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "toolu_1".into(),
+                        result: qaqh_types::ToolResult::ok("image attached"),
+                    },
+                    ContentBlock::ImageRef {
+                        sha256: sha,
+                        mime_type: "image/png".into(),
+                        bytes_len: b64.len(),
+                    },
+                ],
+            ),
+        ];
+        let request = ChatRequest::new(project_messages(msgs, 0));
+        let norm = normalized(&request);
+        let tool_msg = norm
+            .messages
+            .iter()
+            .find(|m| m.role == mutil_ai::ExternalRole::Tool)
+            .expect("tool message");
+        let Part::ToolResult(tr) = &tool_msg.parts[0] else {
+            panic!("expected tool result part");
+        };
+        assert_eq!(
+            tr.parts
+                .iter()
+                .filter(|p| matches!(p, ToolResultPart::Image { .. }))
+                .count(),
+            1,
+            "无 user 边界时保守保留像素"
+        );
     }
 
     /// 回归 BUG-2026-09-13-27：零信息 user 消息必须丢弃而不是兜底空 text。
@@ -1258,8 +1434,11 @@ mod tests {
     fn tool_result_pairs_by_id_even_when_name_is_blank() {
         let mut call = WireToolCall::new("lookup".to_string(), serde_json::json!({}));
         call.id = Some("call_1".to_string());
-        let mut result =
-            WireToolResult::new(Some("call_1".to_string()), String::new(), "real output".to_string());
+        let mut result = WireToolResult::new(
+            Some("call_1".to_string()),
+            String::new(),
+            "real output".to_string(),
+        );
         result.is_error = false;
         let request = ChatRequest::new(vec![
             WireMessage::new(mutil_ai::Role::Assistant, vec![Part::ToolCall(call)]),

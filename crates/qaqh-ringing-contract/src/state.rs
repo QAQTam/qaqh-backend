@@ -222,10 +222,31 @@ pub enum TimelineEntry {
         call_id: ToolCallId,
         turn_id: Option<TurnId>,
         content: ContentValue,
+        /// 工具产出的图片外置引用(A-2 L0):结算时字节落盘
+        /// `{data_dir}/images/{sha256}.{ext}`,timeline 只持索引;模型上下文
+        /// 回放时重建为兄弟 `ImageRef` 内容块,gate 请求构建期按需读盘。
+        /// additive:旧行缺席即空。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ToolImageRef>,
     },
     Compaction {
         summary: ContentValue,
     },
+}
+
+/// 工具结果图片的外置引用(A-2 L0)。
+///
+/// `bytes_len` 是 base64 文本长度,与 `[Image #N]` 占位符的显示语义一致;
+/// sha256 对 base64 文本求哈希,内容寻址天然去重。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+pub struct ToolImageRef {
+    /// 内容寻址 id = sha256(base64 文本) 的 hex。
+    pub sha256: String,
+    /// MIME type(如 "image/png")。
+    pub mime_type: String,
+    /// base64 文本长度。
+    pub bytes_len: u64,
 }
 
 /// 一次工具调用从参数到结果的单份业务状态。

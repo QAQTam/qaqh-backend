@@ -10,11 +10,7 @@
 #![cfg(windows)]
 
 use sbx_win::{
-    acl,
-    appcontainer,
-    desktop,
-    env,
-    events,
+    acl, appcontainer, desktop, env, events,
     policy::{AceMode, AceOp, IsolationKind, NetworkPolicy, Precreate, SbxPolicy, build_ace_plan},
     spawn::{self, Isolation},
     token,
@@ -79,7 +75,9 @@ fn ac_writes_follow_policy_and_reads_are_isolated() {
     let pairs = env::minimal_child_env(&scratch.join("tmp"), &scratch.join("home"));
     let run = |inner: String| -> spawn::Exit {
         let child = spawn::spawn(
-            &Isolation::AppContainer { token: lowbox.handle() },
+            &Isolation::AppContainer {
+                token: lowbox.handle(),
+            },
             &format!("\"{}\" /c {}", std::env::var("ComSpec").unwrap(), inner),
             &scratch,
             &pairs,
@@ -92,11 +90,21 @@ fn ac_writes_follow_policy_and_reads_are_isolated() {
     // a) scratch 可写
     let t = scratch.join("tmp").join("ok.txt");
     let e = run(format!("echo y > {}", q(&t)));
-    assert!(e.code == 0 && t.exists(), "scratch 写失败 exit={} stderr={}", e.code, String::from_utf8_lossy(&e.stderr));
+    assert!(
+        e.code == 0 && t.exists(),
+        "scratch 写失败 exit={} stderr={}",
+        e.code,
+        String::from_utf8_lossy(&e.stderr)
+    );
 
     // b) writable_files 授权写:目标不存在 → 模拟预创建(Low 标签)→ 可写
     let e = run(format!("echo x >> {}", q(&allowed)));
-    assert!(e.code == 0, "授权文件(模拟预创建)写失败 exit={} stderr={}", e.code, String::from_utf8_lossy(&e.stderr));
+    assert!(
+        e.code == 0,
+        "授权文件(模拟预创建)写失败 exit={} stderr={}",
+        e.code,
+        String::from_utf8_lossy(&e.stderr)
+    );
     assert!(std::fs::read_to_string(&allowed).unwrap().contains("x"));
 
     // b2) 已存在文件:v0.2 限制 —— Low 标签 unelevated 不可写,改写被拒(M2 overlay 解)
@@ -167,7 +175,11 @@ fn ac_impersonation_chain_breaks_at_token_open() {
         .arg(&probe_exe)
         .output()
         .expect("spawn rustc");
-    assert!(compiled.status.success(), "probe compile failed: {}", String::from_utf8_lossy(&compiled.stderr));
+    assert!(
+        compiled.status.success(),
+        "probe compile failed: {}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
 
     let c1 = base.join("canary1.txt");
     let c2 = base.join("canary2.txt");
@@ -181,7 +193,9 @@ fn ac_impersonation_chain_breaks_at_token_open() {
         c3.display()
     );
     let child = spawn::spawn(
-        &Isolation::AppContainer { token: lowbox.handle() },
+        &Isolation::AppContainer {
+            token: lowbox.handle(),
+        },
         &cmdline,
         &scratch,
         &pairs,
@@ -201,7 +215,10 @@ fn ac_impersonation_chain_breaks_at_token_open() {
             || out.contains("RESULT: FAIL"),
         "探针既未断链也未报阻断,实际输出:{out}"
     );
-    assert!(!c1.exists() && !c2.exists() && !c3.exists(), "canary 落盘 = 逃逸");
+    assert!(
+        !c1.exists() && !c2.exists() && !c3.exists(),
+        "canary 落盘 = 逃逸"
+    );
 
     let _ = appcontainer::delete_profile(&name);
     let _ = std::fs::remove_dir_all(&base);

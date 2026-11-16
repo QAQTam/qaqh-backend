@@ -18,7 +18,7 @@ qaqh-tool-core = { path = "../qaqh-tool-core" }
 async-lsp = { workspace = true, features = ["tracing"] }
 lsp-types = { workspace = true }
 # 进程组/Job 隔离（mcp adapter 同款：rmcp 只开 tokio1 须自引并与 rmcp 对齐；
-# 2026-10-15 随 rmcp 3.5.1 对齐到 process-wrap 10，保持全图单一版本）。
+# process-wrap 10 与 rmcp 3.10.0 全图单一版本，见 ADR-0025）。
 process-wrap = { version = "10.0", default-features = false, features = [
     "tokio1",
     "process-group",

@@ -51,11 +51,7 @@ impl HttpResponse {
     /// 诊断文本：优先 `error.message` / `detail`，其次裸体。
     pub fn error_message(&self) -> String {
         if let Ok(value) = serde_json::from_str::<Value>(&self.body) {
-            for path in [
-                ["error", "message"],
-                ["detail", ""],
-                ["message", ""],
-            ] {
+            for path in [["error", "message"], ["detail", ""], ["message", ""]] {
                 let target = if path[1].is_empty() {
                     value.get(path[0])
                 } else {
@@ -96,11 +92,7 @@ impl Http {
     }
 
     /// form-urlencoded POST（OAuth token / revocation 端点的唯一形态）。
-    pub fn post_form(
-        &self,
-        url: &str,
-        form: &[(&str, &str)],
-    ) -> Result<HttpResponse, SiwcError> {
+    pub fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<HttpResponse, SiwcError> {
         let request = self
             .agent
             .post(url)
@@ -109,7 +101,10 @@ impl Http {
         self.finish(request.send_form(form.iter().copied()))
     }
 
-    fn finish(&self, result: Result<ureq::http::Response<ureq::Body>, ureq::Error>) -> Result<HttpResponse, SiwcError> {
+    fn finish(
+        &self,
+        result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+    ) -> Result<HttpResponse, SiwcError> {
         match result {
             Ok(mut response) => {
                 let status = response.status().as_u16();
@@ -122,10 +117,9 @@ impl Http {
                             .and_then(|v| v.to_str().ok())
                             .map(str::to_owned)
                     });
-                let body = response
-                    .body_mut()
-                    .read_to_string()
-                    .map_err(|e| SiwcError::new(SiwcCode::Transport, format!("读取响应失败: {e}")))?;
+                let body = response.body_mut().read_to_string().map_err(|e| {
+                    SiwcError::new(SiwcCode::Transport, format!("读取响应失败: {e}"))
+                })?;
                 Ok(HttpResponse {
                     status,
                     body,

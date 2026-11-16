@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use crate::fixture::MockOidc;
-use crate::manager::{SiwcConfig, SiwcManager, SignInOptions};
+use crate::manager::{SignInOptions, SiwcConfig, SiwcManager};
 use crate::store::{CredentialStore, ProfileStatus};
 use crate::{SiwcCode, util};
 
@@ -27,9 +27,8 @@ impl Harness {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
         let mock = MockOidc::start();
-        let manager = Arc::new(
-            SiwcManager::new(dir.path().to_path_buf(), mock.config()).expect("manager"),
-        );
+        let manager =
+            Arc::new(SiwcManager::new(dir.path().to_path_buf(), mock.config()).expect("manager"));
         Self {
             mock,
             manager,
@@ -72,7 +71,10 @@ impl Harness {
         let flow_id = self.sign_in(SignInOptions::default(), Some("oaiapp_mock"));
         let status = self.wait_flow(&flow_id);
         assert_eq!(status["state"], "completed", "{status}");
-        status["profileId"].as_str().expect("profile id").to_string()
+        status["profileId"]
+            .as_str()
+            .expect("profile id")
+            .to_string()
     }
 
     fn active_profile(&self) -> crate::store::StoredProfile {
@@ -132,10 +134,15 @@ fn registers_a_new_client_and_connects() {
     assert!(start.redirect_uri.starts_with("http://127.0.0.1:"));
     assert_eq!(params["redirect_uri"], start.redirect_uri);
 
-    harness.mock.with_state(|state| state.nonce = params["nonce"].clone());
     harness
         .mock
-        .deliver_callback(&start.redirect_uri, &params["state"], Some("oaiapp_mock"), None);
+        .with_state(|state| state.nonce = params["nonce"].clone());
+    harness.mock.deliver_callback(
+        &start.redirect_uri,
+        &params["state"],
+        Some("oaiapp_mock"),
+        None,
+    );
     let status = harness.wait_flow(&start.flow_id);
     assert_eq!(status["state"], "completed", "{status}");
 
@@ -172,11 +179,7 @@ fn registers_a_new_client_and_connects() {
             assert!(!disk.contains(banned), "磁盘出现 {banned}: {disk}");
         }
     }
-    let projected = format!(
-        "{}{}",
-        harness.manager.status(),
-        harness.manager.profiles()
-    );
+    let projected = format!("{}{}", harness.manager.status(), harness.manager.profiles());
     for banned in ["access_token", "refresh_token", "id_token", "at-1", "rt-1"] {
         assert!(!projected.contains(banned), "投影泄漏 {banned}");
     }
@@ -235,8 +238,14 @@ fn authorize_url_for_returning_sign_in_omits_agent_name_hint() {
     assert_eq!(params["client_id"], "oaiapp_mock");
     assert!(!params.contains_key("agent_name_hint"), "{url}");
     assert_eq!(params["login_hint"], "user@example.com");
-    assert!(params.contains_key("id_token_hint"), "回访应带保留的 id_token 作为 hint");
-    harness.manager.cancel_sign_in(&start.flow_id).expect("cancel");
+    assert!(
+        params.contains_key("id_token_hint"),
+        "回访应带保留的 id_token 作为 hint"
+    );
+    harness
+        .manager
+        .cancel_sign_in(&start.flow_id)
+        .expect("cancel");
 }
 
 #[test]
@@ -279,20 +288,30 @@ fn invalid_grant_clears_credentials_but_keeps_registration() {
         state.token_error_code = Some("invalid_grant".into());
     });
 
-    let error = harness.manager.access_token(None).expect_err("invalid grant");
+    let error = harness
+        .manager
+        .access_token(None)
+        .expect_err("invalid grant");
     assert_eq!(error.code(), SiwcCode::InvalidGrant);
     assert!(error.code().requires_reauth());
 
     let profile = harness.active_profile();
     assert_eq!(profile.status, ProfileStatus::ReauthRequired);
     assert!(!profile.has_credentials(), "凭据必须清掉");
-    assert_eq!(profile.client_id, "oaiapp_mock", "注册必须保留以复用 client_id");
+    assert_eq!(
+        profile.client_id, "oaiapp_mock",
+        "注册必须保留以复用 client_id"
+    );
     assert_eq!(profile.subject, "sub-fixture");
     assert_eq!(harness.manager.status()["status"], "reauth_required");
     assert_eq!(harness.manager.status()["sharing"], false);
     // 清凭据后取 token 是「需重新登录」而不是「限流/传输错误」。
     assert_eq!(
-        harness.manager.access_token(None).expect_err("need sign in").code(),
+        harness
+            .manager
+            .access_token(None)
+            .expect_err("need sign in")
+            .code(),
         SiwcCode::SignInRequired
     );
 }
@@ -353,10 +372,15 @@ fn declined_consent_maps_to_sharing_not_enabled() {
         .query_pairs()
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
         .collect();
-    harness.mock.with_state(|state| state.nonce = params["nonce"].clone());
     harness
         .mock
-        .deliver_callback(&start.redirect_uri, &params["state"], None, Some("access_denied"));
+        .with_state(|state| state.nonce = params["nonce"].clone());
+    harness.mock.deliver_callback(
+        &start.redirect_uri,
+        &params["state"],
+        None,
+        Some("access_denied"),
+    );
 
     let status = harness.wait_flow(&start.flow_id);
     assert_eq!(status["state"], "failed", "{status}");
@@ -383,9 +407,15 @@ fn identity_only_sign_in_is_connected_but_not_sharing() {
     assert_eq!(status["sharing"], false, "但套餐用量未授权");
     assert_eq!(harness.active_profile().id, profile_id);
 
-    let error = harness.manager.access_token(None).expect_err("no plan usage");
+    let error = harness
+        .manager
+        .access_token(None)
+        .expect_err("no plan usage");
     assert_eq!(error.code(), SiwcCode::SharingNotEnabled);
-    assert!(!error.code().requires_reauth(), "这不是登录失效，别让用户重登");
+    assert!(
+        !error.code().requires_reauth(),
+        "这不是登录失效，别让用户重登"
+    );
 }
 
 #[test]
@@ -407,8 +437,10 @@ fn sign_out_revokes_remotely_and_keeps_the_registration() {
 
     let revoke = harness.mock.revoke_requests();
     assert_eq!(revoke.len(), 1);
-    let form: std::collections::HashMap<&str, &str> =
-        revoke[0].iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let form: std::collections::HashMap<&str, &str> = revoke[0]
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
     assert_eq!(form["token_type_hint"], "refresh_token");
     assert_eq!(form["client_id"], "oaiapp_mock");
     assert_eq!(form["token"], "rt-1");
@@ -437,7 +469,10 @@ fn concurrent_sign_in_is_rejected_and_pending_state_is_visible() {
         .expect_err("busy");
     assert_eq!(error.code(), SiwcCode::ConnectionBusy);
 
-    harness.manager.cancel_sign_in(&start.flow_id).expect("cancel");
+    harness
+        .manager
+        .cancel_sign_in(&start.flow_id)
+        .expect("cancel");
     let status = harness.wait_flow(&start.flow_id);
     assert_eq!(status["state"], "failed", "{status}");
     assert_eq!(status["error"]["code"], SiwcCode::SignInCancelled.as_str());
@@ -454,7 +489,9 @@ fn wrong_account_on_returning_sign_in_is_rejected() {
     let harness = Harness::new();
     let profile_id = harness.connect();
     // 让 mock 下一次签出另一个 sub（模拟用户选了别的账户）。
-    harness.mock.with_state(|state| state.subject = "sub-somebody-else".into());
+    harness
+        .mock
+        .with_state(|state| state.subject = "sub-somebody-else".into());
     let flow_id = harness.sign_in(
         SignInOptions {
             profile_id: Some(profile_id),

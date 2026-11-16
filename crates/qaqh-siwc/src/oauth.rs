@@ -104,10 +104,7 @@ impl TokenResponse {
             .get("scope")
             .and_then(Value::as_str)
             .ok_or_else(|| invalid("token 响应缺 scope：无法确认实际授予的权限".into()))?;
-        let scopes: Vec<String> = scope
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
+        let scopes: Vec<String> = scope.split_whitespace().map(str::to_owned).collect();
 
         let access_token = value
             .get("access_token")
@@ -147,7 +144,9 @@ impl TokenResponse {
                     _ => return Err(invalid("token 响应缺有效的 expires_in".into())),
                 }
                 if expects_refresh && refresh_token.is_none() {
-                    return Err(invalid("授予了 offline_access 但未返回 refresh_token".into()));
+                    return Err(invalid(
+                        "授予了 offline_access 但未返回 refresh_token".into(),
+                    ));
                 }
             }
             None => {
@@ -188,7 +187,10 @@ fn parse_rfc3339_ms(text: &str) -> Option<u64> {
         return None;
     }
     let days = days_from_civil(year, month, day);
-    let secs = days as u64 * 86_400 + (hour.max(0) as u64) * 3_600 + (minute.max(0) as u64) * 60 + second.max(0) as u64;
+    let secs = days as u64 * 86_400
+        + (hour.max(0) as u64) * 3_600
+        + (minute.max(0) as u64) * 60
+        + second.max(0) as u64;
     Some(secs.saturating_mul(1000))
 }
 
@@ -251,10 +253,17 @@ pub fn refresh(
 
 fn token_response_from(response: crate::http::HttpResponse) -> Result<TokenResponse, SiwcError> {
     if !response.is_success() {
-        let code = crate::error::classify_provider_error(response.status, response.error_code().as_deref());
+        let code = crate::error::classify_provider_error(
+            response.status,
+            response.error_code().as_deref(),
+        );
         return Err(SiwcError::new(
             code,
-            format!("token 端点 HTTP {}: {}", response.status, response.error_message()),
+            format!(
+                "token 端点 HTTP {}: {}",
+                response.status,
+                response.error_message()
+            ),
         )
         .with_request_id(response.request_id.clone()));
     }
@@ -282,7 +291,8 @@ pub fn revoke(
     if response.is_success() {
         return Ok(());
     }
-    let code = crate::error::classify_provider_error(response.status, response.error_code().as_deref());
+    let code =
+        crate::error::classify_provider_error(response.status, response.error_code().as_deref());
     Err(
         SiwcError::new(code, format!("撤销会话 HTTP {}", response.status))
             .with_request_id(response.request_id.clone()),
@@ -297,7 +307,10 @@ mod tests {
     fn pkce_matches_rfc7636_appendix_b() {
         // RFC 7636 Appendix B 的官方示例向量。
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-        assert_eq!(pkce_challenge(verifier), "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM");
+        assert_eq!(
+            pkce_challenge(verifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     #[test]
@@ -329,7 +342,10 @@ mod tests {
         assert_eq!(pairs["redirect_uri"], "http://127.0.0.1:1455/auth/callback");
         assert_eq!(pairs["resource"], "https://api.openai.com/v1");
         assert_eq!(pairs["agent_name_hint"], "QAQ-Harness");
-        assert_eq!(pairs["ext_agent_host_id"], "urn:uuid:0191f0a0-1111-4222-8333-444455556666");
+        assert_eq!(
+            pairs["ext_agent_host_id"],
+            "urn:uuid:0191f0a0-1111-4222-8333-444455556666"
+        );
         assert!(pairs["scope"].contains("chatgpt.tokens.use.direct"));
         assert!(!pairs.contains_key("prompt"), "普通登录不得强制同意");
     }
@@ -383,15 +399,22 @@ mod tests {
         let mut no_scope = good.clone();
         no_scope.as_object_mut().expect("obj").remove("scope");
         assert_eq!(
-            TokenResponse::from_json(&no_scope).expect_err("no scope").code(),
+            TokenResponse::from_json(&no_scope)
+                .expect_err("no scope")
+                .code(),
             SiwcCode::InvalidTokenResponse
         );
 
         // offline_access 已授予却无 refresh_token → 不完整。
         let mut no_refresh = good.clone();
-        no_refresh.as_object_mut().expect("obj").remove("refresh_token");
+        no_refresh
+            .as_object_mut()
+            .expect("obj")
+            .remove("refresh_token");
         assert_eq!(
-            TokenResponse::from_json(&no_refresh).expect_err("no refresh").code(),
+            TokenResponse::from_json(&no_refresh)
+                .expect_err("no refresh")
+                .code(),
             SiwcCode::InvalidTokenResponse
         );
 

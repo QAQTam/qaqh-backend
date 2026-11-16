@@ -43,4 +43,3 @@ pub fn install_manager(manager: Arc<LspManager>) -> Arc<LspManager> {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     std::mem::replace(&mut *slot, manager)
 }
-

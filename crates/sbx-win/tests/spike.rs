@@ -19,7 +19,12 @@ fn spike_restricted_token_end_to_end() {
     eprintln!("elevated: {}", report.elevated);
     eprintln!("cap_sid:  {}", report.cap_sid);
     for c in &report.checks {
-        eprintln!("  [{}] {} ({})", if c.passed { "PASS" } else { "FAIL" }, c.name, c.detail);
+        eprintln!(
+            "  [{}] {} ({})",
+            if c.passed { "PASS" } else { "FAIL" },
+            c.name,
+            c.detail
+        );
     }
     assert!(
         !report.elevated,

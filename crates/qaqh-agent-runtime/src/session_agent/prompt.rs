@@ -22,7 +22,11 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
     // 路径零反斜杠转义，模型可原样复制（widget-directive §5 合规最大故障源）。
     prompt.push_str(&format!(
         "widgets_dir: {}\n",
-        cwd.join(".qaqh").join("widgets").join(session_id).to_string_lossy().replace('\\', "/")
+        cwd.join(".qaqh")
+            .join("widgets")
+            .join(session_id)
+            .to_string_lossy()
+            .replace('\\', "/")
     ));
     prompt.push_str(&format!("model: {}\n", spec.provider.model));
     if let Some(tools) = &spec.tools {
@@ -67,10 +71,10 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
     }
     // 命名指令与工具声明同进同退：用户命名或子代理会话都不出现；auto 标题
     // 保留修订能力，指令随之常驻。
-    let can_name_session = spec
-        .tools
-        .as_ref()
-        .is_some_and(|list| list.iter().any(|tool| tool.function.name == crate::session_title::TOOL_NAME));
+    let can_name_session = spec.tools.as_ref().is_some_and(|list| {
+        list.iter()
+            .any(|tool| tool.function.name == crate::session_title::TOOL_NAME)
+    });
     if can_name_session {
         prompt.push_str(
             "\n[Session title]\n\

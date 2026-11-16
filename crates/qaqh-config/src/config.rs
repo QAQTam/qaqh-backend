@@ -1,8 +1,8 @@
 use crate::error::{ConfigError, ConfigResult};
 use crate::secrets::SecretStore;
 use qaqh_types::{
-    ConfigStore, PersistentConfig, PersistentExecConfig, PersistentGoalsConfig, PersistentLspConfig,
-    PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
+    ConfigStore, PersistentConfig, PersistentExecConfig, PersistentGoalsConfig,
+    PersistentLspConfig, PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
     PersistentSandboxConfig,
 };
 use std::sync::{Mutex, OnceLock};
@@ -167,7 +167,12 @@ pub struct McpServerConfig {
 /// MCP 客户端运行时配置。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct McpConfig {
-    pub enabled: bool,
+    /// `[mcp].enabled` 持久层原值：`None` = 用户未显式声明。
+    /// 运行时一律经 [`McpConfig::effective_enabled`] 读取，禁止直接读本字段。
+    /// 保留 `Option` 而非在 load 时折叠成 `bool`：用户级外部 MCP 配置在
+    /// `merge_external` 之后才并入 `servers`，load 时算死会把「只有外部 server」
+    /// 的场景误判为关闭（ADR-0025）。
+    pub enabled: Option<bool>,
     /// idle 回收阈值（秒）；0 = 常驻不回收。判定口径：`inflight == 0` 连续该时长。
     pub idle_shutdown_secs: u64,
     /// server 名（已校验 `[a-z0-9_-]+`）→ 配置。
@@ -184,6 +189,16 @@ pub struct McpConfig {
     pub inject_resource_env_block: bool,
 }
 
+impl McpConfig {
+    /// 总闸有效值：显式声明优先；未声明时「有 server 即开、零配置仍关」。
+    ///
+    /// 纯函数，随时按当前 `servers` 计算 —— 外部合并与热重载天然一致，
+    /// 不存在「load 时折叠、合并后失效」的状态漂移。
+    pub fn effective_enabled(&self) -> bool {
+        self.enabled.unwrap_or(!self.servers.is_empty())
+    }
+}
+
 fn default_import_external() -> bool {
     true
 }
@@ -191,7 +206,7 @@ fn default_import_external() -> bool {
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: None,
             idle_shutdown_secs: 300,
             servers: std::collections::BTreeMap::new(),
             import_external: default_import_external(),
@@ -342,7 +357,9 @@ pub(crate) fn map_mcp_config(
         );
     }
     Ok(McpConfig {
-        enabled: mcp.enabled.unwrap_or(!servers.is_empty()),
+        // 保留持久层原值：总闸由 effective_enabled() 在运行时按「合并后的
+        // servers」推导，见 ADR-0025。
+        enabled: mcp.enabled,
         idle_shutdown_secs: mcp.idle_shutdown_secs.unwrap_or(300),
         servers,
         import_external: mcp.import_external.unwrap_or(true),
@@ -936,7 +953,9 @@ falling back to 1 (read-only)"
             tool_allowlist_enabled: Some(self.tool_allowlist_enabled),
             tool_allowlist: Some(self.tool_allowlist.clone()),
             mcp: Some(PersistentMcpConfig {
-                enabled: Some(self.mcp.enabled),
+                // 回写原值而非推导值：未声明的配置保存后仍是未声明，
+                // 避免把一次性的推导结果固化成用户的显式意图。
+                enabled: self.mcp.enabled,
                 import_external: Some(self.mcp.import_external),
                 idle_shutdown_secs: (self.mcp.idle_shutdown_secs > 0)
                     .then_some(self.mcp.idle_shutdown_secs),
@@ -1011,7 +1030,6 @@ falling back to 1 (read-only)"
 
         Ok(())
     }
-
 }
 
 #[cfg(test)]
@@ -1045,8 +1063,7 @@ mod secret_tests {
 
         let store = ConfigStore::new(config_path);
         let secrets = SecretStore::new(dir.join("secrets.toml"));
-        let error = Config::load_from_paths_with(store, secrets)
-            .expect_err("旧格式配置必须被拒绝");
+        let error = Config::load_from_paths_with(store, secrets).expect_err("旧格式配置必须被拒绝");
         assert!(
             error.to_string().contains("重新配置"),
             "报错必须提示重新配置: {error}"
@@ -1123,8 +1140,10 @@ mod c3_migration_tests {
 
     #[test]
     fn exec_env_unknown_secret_ref_fails_load() {
-        let (dir, store, secrets) =
-            setup("exec-env-bad", "[exec.env]\nTOKEN = \"${secret:nope_key}\"\n");
+        let (dir, store, secrets) = setup(
+            "exec-env-bad",
+            "[exec.env]\nTOKEN = \"${secret:nope_key}\"\n",
+        );
         let error = Config::load_from_paths_with(store, secrets).unwrap_err();
         assert!(error.to_string().contains("nope_key"), "{error}");
         let _ = std::fs::remove_dir_all(dir);
@@ -1211,5 +1230,4 @@ mod c3_migration_tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
-
 }

@@ -8,8 +8,8 @@
 //! facts），不新增未接通的厂商；ChatGPT plan 走 credential=chatgpt_plan 的
 //! 专用路由，不在 BYOK 预设之列。
 
-use serde::Serialize;
 use qaqh_types::{CredentialSource, Wire};
+use serde::Serialize;
 
 /// 一条 provider 预设：默认 endpoint + 协议 + 凭据类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -107,14 +107,18 @@ mod tests {
             assert!(
                 !preset.id.is_empty()
                     && preset.id.len() <= 64
-                    && preset
-                        .id
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-'),
+                    && preset.id.chars().all(|c| c.is_ascii_lowercase()
+                        || c.is_ascii_digit()
+                        || c == '_'
+                        || c == '-'),
                 "preset id {:?} must satisfy the provider id charset",
                 preset.id
             );
-            assert!(seen.insert(preset.id), "duplicate preset id {:?}", preset.id);
+            assert!(
+                seen.insert(preset.id),
+                "duplicate preset id {:?}",
+                preset.id
+            );
             assert!(preset.base_url.starts_with("https://"), "{:?}", preset.id);
         }
     }

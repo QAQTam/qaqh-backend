@@ -29,9 +29,7 @@ use crate::loopback::CallbackListener;
 use crate::models::{self, ModelInfo};
 use crate::oauth::{self, AuthorizeParams, TokenResponse};
 use crate::protocol::{self, Discovery};
-use crate::store::{
-    CredentialStore, PendingRegistration, ProfileStatus, StoredProfile, TokenSet,
-};
+use crate::store::{CredentialStore, PendingRegistration, ProfileStatus, StoredProfile, TokenSet};
 use crate::util::{now_ms, random_transaction_value};
 
 /// discovery / JWKS 的缓存时长（都对**可用性**敏感，不对正确性敏感：
@@ -301,7 +299,10 @@ impl SiwcManager {
 
     /// 开工一次登录：绑定回环端口、生成 state/nonce/PKCE、起流程线程、
     /// 返回需要由宿主用系统浏览器打开的授权 URL。
-    pub fn begin_sign_in(self: &Arc<Self>, options: SignInOptions) -> Result<SignInStart, SiwcError> {
+    pub fn begin_sign_in(
+        self: &Arc<Self>,
+        options: SignInOptions,
+    ) -> Result<SignInStart, SiwcError> {
         if options.new_profile && options.profile_id.is_some() {
             return Err(SiwcError::new(
                 SiwcCode::InvalidConfig,
@@ -857,7 +858,9 @@ impl SiwcManager {
         self.store.save(&file)?;
         log::info!(
             "[siwc] 账户已连接（profile={profile_id}, sharing={}）",
-            file.profile(profile_id).map(|p| p.sharing()).unwrap_or(false)
+            file.profile(profile_id)
+                .map(|p| p.sharing())
+                .unwrap_or(false)
         );
         Ok(())
     }
@@ -883,11 +886,7 @@ impl SiwcManager {
     }
 
     /// 判定凭据不可用 → 清 token、保留注册。
-    fn clear_credentials(
-        &self,
-        profile_id: &str,
-        status: ProfileStatus,
-    ) -> Result<(), SiwcError> {
+    fn clear_credentials(&self, profile_id: &str, status: ProfileStatus) -> Result<(), SiwcError> {
         let _guard = self.lock_writes()?;
         let mut file = self.store.load();
         let Some(profile) = file.profile_mut(profile_id) else {
@@ -1004,7 +1003,10 @@ impl SiwcManager {
             now_ms(),
         )?;
         if returning {
-            log::debug!("[siwc] 回访身份已校验（sub={}…）", &identity.subject.chars().take(6).collect::<String>());
+            log::debug!(
+                "[siwc] 回访身份已校验（sub={}…）",
+                &identity.subject.chars().take(6).collect::<String>()
+            );
         }
         Ok(identity)
     }
@@ -1034,7 +1036,8 @@ mod tests {
             issuer: "http://127.0.0.1:9".to_string(),
             ..SiwcConfig::default()
         };
-        let manager = Arc::new(SiwcManager::new(dir.path().to_path_buf(), config).expect("manager"));
+        let manager =
+            Arc::new(SiwcManager::new(dir.path().to_path_buf(), config).expect("manager"));
         (dir, manager)
     }
 
@@ -1049,14 +1052,23 @@ mod tests {
         for banned in ["access_token", "refresh_token", "id_token"] {
             assert!(!text.contains(banned), "状态投影泄漏 {banned}: {text}");
         }
-        assert_eq!(manager.profiles()["profiles"].as_array().expect("array").len(), 0);
+        assert_eq!(
+            manager.profiles()["profiles"]
+                .as_array()
+                .expect("array")
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn access_token_requires_sign_in() {
         let (_dir, manager) = manager();
         assert_eq!(
-            manager.access_token(None).expect_err("not signed in").code(),
+            manager
+                .access_token(None)
+                .expect_err("not signed in")
+                .code(),
             SiwcCode::SignInRequired
         );
     }
@@ -1074,10 +1086,7 @@ mod tests {
     fn select_profile_rejects_unknown_ids() {
         let (_dir, manager) = manager();
         assert_eq!(
-            manager
-                .select_profile("nope")
-                .expect_err("unknown")
-                .code(),
+            manager.select_profile("nope").expect_err("unknown").code(),
             SiwcCode::ProfileNotFound
         );
     }

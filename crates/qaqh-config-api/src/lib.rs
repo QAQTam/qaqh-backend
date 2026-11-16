@@ -21,7 +21,6 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use serde::{Deserialize, Serialize};
 
-
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
 /// TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见 crate 级兼容策略）。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -359,7 +358,10 @@ mod tests {
             "goals": { "max_token_budget": 60 }
         }))
         .expect("未知键不报错");
-        assert_eq!(legacy.auto_compact_threshold, None, "snake_case 键已不再生效");
+        assert_eq!(
+            legacy.auto_compact_threshold, None,
+            "snake_case 键已不再生效"
+        );
         // 外层 goals 键合法 → Some(全 None)；内层 snake 键被忽略 = 什么都没改。
         assert_eq!(legacy.goals, Some(GoalsPatch::default()));
     }

@@ -306,7 +306,7 @@ impl TypedTool for ReadImageTool {
         let mime_type = normalized.mime.to_string();
         let data = image_utils::encode_base64(&normalized.bytes);
         let model_text = format!(
-            "Image read successfully: {display} ({mime_type}, {}×{}, {} bytes base64 after normalization). The image is attached to this tool result and visible to you.",
+            "Image read successfully: {display} ({mime_type}, {}×{}, {} bytes base64 after normalization). The image is attached to this tool result.",
             normalized.width,
             normalized.height,
             data.len()

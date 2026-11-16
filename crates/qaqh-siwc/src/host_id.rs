@@ -112,7 +112,10 @@ mod tests {
         )
         .expect("seed corrupt");
         let host_id = store.load_or_create().expect("recover");
-        assert!(host_id.starts_with("urn:uuid:"), "不得沿用非法形态: {host_id}");
+        assert!(
+            host_id.starts_with("urn:uuid:"),
+            "不得沿用非法形态: {host_id}"
+        );
         // 二次读取拿到的是修复后的值。
         assert_eq!(store.load_or_create().expect("stable"), host_id);
     }
@@ -122,7 +125,10 @@ mod tests {
         assert!(validate_host_id("urn:uuid:0191f0a0-1111-4222-8333-444455556666").is_ok());
         assert!(validate_host_id("urn:ietf:params:oauth:jwk-thumbprint:sha-256:abc").is_ok());
         assert!(validate_host_id("did:key:z6Mkexample").is_ok());
-        assert!(validate_host_id("did:web:example.com").is_err(), "只允许 did:key");
+        assert!(
+            validate_host_id("did:web:example.com").is_err(),
+            "只允许 did:key"
+        );
         assert!(validate_host_id("0191f0a0-1111-4222-8333-444455556666").is_err());
         assert!(validate_host_id("urn:uuid:short").is_err());
         assert!(validate_host_id("").is_err());

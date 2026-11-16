@@ -595,7 +595,6 @@ impl ProviderConfig {
         self.require_provider_parameters = true;
         self
     }
-
 }
 
 // ── StreamEvent ──

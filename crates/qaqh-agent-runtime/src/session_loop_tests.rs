@@ -23,6 +23,28 @@ mod tests {
         "data: [DONE]\n\n",
     );
 
+    /// 图片用例专用串行锁：QAQH_DATA_DIR 是进程级环境，测试互斥期间不得
+    /// 有其他图片用例并发改写。自旋获取（等待方不阻塞持锁方的推进）。
+    static IMAGE_TEST_SERIAL: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    struct ImageTestSerialGuard;
+
+    impl ImageTestSerialGuard {
+        fn acquire() -> Self {
+            while IMAGE_TEST_SERIAL.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Self
+        }
+    }
+
+    impl Drop for ImageTestSerialGuard {
+        fn drop(&mut self) {
+            IMAGE_TEST_SERIAL.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     fn sse_server() -> (tiny_http::Server, String) {
         let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
         let addr = format!("http://{}", server.server_addr());
@@ -40,6 +62,47 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// 逐请求回放脚本并捕获请求体：第 i 个请求回放 bodies[i]（越界回放最后
+    /// 一份），请求体推入 captured 供断言。
+    fn spawn_sse_script(
+        server: tiny_http::Server,
+        bodies: Vec<String>,
+        captured: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        std::thread::spawn(move || {
+            let header =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                    .expect("header");
+            let mut served = 0usize;
+            for mut request in server.incoming_requests() {
+                let mut body = String::new();
+                let _ = std::io::Read::read_to_string(request.as_reader(), &mut body);
+                captured
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(body);
+                let index = served.min(bodies.len().saturating_sub(1));
+                let reply = bodies.get(index).cloned().unwrap_or_default();
+                served += 1;
+                let _ = request
+                    .respond(tiny_http::Response::from_string(reply).with_header(header.clone()));
+            }
+        });
+    }
+
+    /// 最小合法 PNG（1×1，68 字节 → base64 92 字符，System.Drawing 验证可解码）。
+    const TINY_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    fn tiny_png() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
+            0x00, 0xB5, 0x1C, 0x0C, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xDA, 0x63, 0x64, 0x60, 0x00, 0x00, 0x00, 0x06, 0x00, 0x02, 0x30, 0x81, 0xD0, 0x2F,
+            0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ]
     }
 
     async fn test_loop(
@@ -204,6 +267,217 @@ mod tests {
             qaqh_ringing_contract::fact::ActivityState::Idle
         );
         let _ = owners;
+    }
+
+    /// 回归 2026-11-17-01：read_image 的图片必须真正到达 provider 请求与
+    /// 时间线重放。旧实现里图片止步于 tool_job 边界（execute 只回传文本），
+    /// 模型永远收不到像素——zhipuai 计费侧图片 token 恒为 0。
+    #[tokio::test]
+    async fn tool_image_reaches_provider_request_and_replay() {
+        let _serial = ImageTestSerialGuard::acquire();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("mkdir data dir");
+        // SAFETY: 测试独占进程环境；串行锁内成对设置/恢复。
+        unsafe { std::env::set_var("QAQH_DATA_DIR", &data_dir) };
+
+        let ws = dir.path().join("ws");
+        std::fs::create_dir_all(&ws).expect("mkdir ws");
+        let png = tiny_png();
+        std::fs::write(ws.join("img.png"), &png).expect("write png");
+
+        let tool_call_sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_img\",",
+            "\"type\":\"function\",\"function\":{\"name\":\"read_image\",\"arguments\":\"{\\\"path\\\":\\\"img.png\\\"}\"}}]},",
+            "\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_string();
+        let (server, base_url) = sse_server();
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        spawn_sse_script(
+            server,
+            vec![tool_call_sse, CHAT_SSE.to_string()],
+            std::sync::Arc::clone(&captured),
+        );
+
+        let owners =
+            Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open owners db"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: "SES-LOOP".into(),
+                parent_session_id: None,
+                title: "loop".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let mut rx = owner.subscribe();
+        let manager = Arc::new(std::sync::Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(&[]),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            "SES-LOOP",
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.path().join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+        let mut provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        provider.retry = Some(qaqh_types::RetrySpec {
+            max_retries: 1,
+            ..Default::default()
+        });
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        let loop_ = SessionLoop::new("SES-LOOP", owner, port, spec, dir.path().to_path_buf());
+
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-IMG".into()),
+                text: "读一下这张图".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                widget_context: None,
+            })
+            .expect("send input");
+        loop {
+            match recv_event(&mut rx).await {
+                SessionEvent::TurnEnded { .. } => break,
+                _ => {}
+            }
+        }
+
+        // 第二次请求（工具结果回传轮）必须携带图片像素。
+        let captured = captured.lock().unwrap_or_else(|error| error.into_inner());
+        assert!(
+            captured.len() >= 2,
+            "工具轮必须触发第二次请求，实际 {} 次",
+            captured.len()
+        );
+        // 回归 2026-11-17-01 断言：第二次请求（工具结果回传轮）必须携带图片像素。
+        let body = &captured[1];
+        let tail: String = body
+            .chars()
+            .skip(body.chars().count().saturating_sub(1500))
+            .collect();
+        assert!(
+            body.contains("iVBORw0KGgo"),
+            "第二次请求必须携带 read_image 的像素（PNG base64 前缀）\n请求体（尾 1500 字）: {tail}"
+        );
+        drop(captured);
+
+        // 时间线持久化外置引用；重放组装出兄弟 ImageRef 块。
+        let state = owners
+            .get_or_create("SES-LOOP")
+            .snapshot()
+            .await
+            .expect("snapshot");
+        let refs = state
+            .timeline
+            .iter()
+            .find_map(|entry| match entry {
+                TimelineEntry::ToolResult { images, .. } if !images.is_empty() => {
+                    Some(images.clone())
+                }
+                _ => None,
+            })
+            .expect("timeline must carry tool image refs");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].bytes_len, 92);
+        assert_eq!(refs[0].sha256.len(), 64);
+        let messages = loop_.assemble_context().await.expect("assemble context");
+        let tool_msg = messages
+            .iter()
+            .find(|message| message.role == "tool")
+            .expect("tool message");
+        assert!(matches!(
+            &tool_msg.content[1],
+            qaqh_types::ContentBlock::ImageRef { bytes_len, .. } if *bytes_len == 92
+        ));
+
+        // SAFETY: 与开头的 set_var 成对恢复。
+        unsafe { std::env::remove_var("QAQH_DATA_DIR") };
+    }
+
+    /// 上传图片注册（read_image(image_index) 的真相源）：输入图按序登记，
+    /// gate 的 [Image #N] 占位符编号与注册表索引对齐。
+    #[tokio::test]
+    async fn input_images_are_registered_for_read_image_index() {
+        let _serial = ImageTestSerialGuard::acquire();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data_dir = dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("mkdir data dir");
+        // SAFETY: 测试独占进程环境；串行锁内成对设置/恢复。
+        unsafe { std::env::set_var("QAQH_DATA_DIR", &data_dir) };
+
+        let (loop_, _owners, mut rx) = test_loop(dir.path()).await;
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-UPLOAD".into()),
+                text: "看这张图".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: None,
+                images: vec![qaqh_ringing_contract::commands::ImageBlock {
+                    mime_type: "image/png".into(),
+                    data: "aW1hZ2U=".into(),
+                }],
+                inter_agent: None,
+                subagent_terminal: None,
+                widget_context: None,
+            })
+            .expect("send input");
+        loop {
+            match recv_event(&mut rx).await {
+                SessionEvent::TurnEnded { .. } => break,
+                _ => {}
+            }
+        }
+
+        let messages = loop_.assemble_context().await.expect("assemble context");
+        let user = messages
+            .iter()
+            .find(|message| message.role == "user")
+            .expect("user message");
+        assert!(
+            user.content.iter().any(|block| matches!(
+                block,
+                qaqh_types::ContentBlock::Image { mime_type, data }
+                    if mime_type == "image/png" && data == "aW1hZ2U="
+            )),
+            "上传图必须以 Image 块进入模型上下文（gate 投影为占位符）"
+        );
+        assert_eq!(
+            qaqh_workspace::read_image::peek_image("SES-LOOP", 0),
+            Some(("image/png".to_string(), "aW1hZ2U=".to_string())),
+            "read_image(image_index=0) 必须能取回上传图"
+        );
+
+        // SAFETY: 与开头的 set_var 成对恢复。
+        unsafe { std::env::remove_var("QAQH_DATA_DIR") };
     }
 
     /// 取消契约:stale/错目标的 turn_id 不取消任何东西;无目标取消生效。
@@ -485,7 +759,7 @@ mod handoff_tests {
     use qaqh_session::db::store;
     use qaqh_session::owner::OwnerDirectory;
 
-    use crate::handoff::{FOLD_NOTE, self};
+    use crate::handoff::{self, FOLD_NOTE};
     use crate::provider_job::ProviderRequestSpec;
     use crate::session_loop::SessionLoop;
     use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
@@ -516,8 +790,7 @@ mod handoff_tests {
     }
 
     fn text_body(text: &str) -> String {
-        let head =
-            serde_json::json!({"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
+        let head = serde_json::json!({"choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]});
         let done = serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]});
         format!("data: {}\n\ndata: {}\n\ndata: [DONE]\n\n", head, done)
     }
@@ -535,7 +808,16 @@ mod handoff_tests {
         window: u32,
         threshold: f64,
     ) -> Harness {
-        harness_titled(dir, script, tools, window, threshold, "handoff", Some("user")).await
+        harness_titled(
+            dir,
+            script,
+            tools,
+            window,
+            threshold,
+            "handoff",
+            Some("user"),
+        )
+        .await
     }
 
     async fn harness_titled(
@@ -701,21 +983,21 @@ mod handoff_tests {
         });
         let h = harness(
             dir.path(),
-            vec![(200, tool_call_body("handoff", &doc, "call-h1", &cache_usage()))],
+            vec![(
+                200,
+                tool_call_body("handoff", &doc, "call-h1", &cache_usage()),
+            )],
             vec![handoff::tool_def()],
             10_000,
             0.5,
         )
         .await;
-        h.loop_
-            .send_input(input("开始干活"))
-            .expect("send input");
+        h.loop_.send_input(input("开始干活")).expect("send input");
 
         let state = wait_until(&h.owners, idle_with_turns).await;
         assert_eq!(state["turns"][0]["outcome"]["kind"], "finished");
         assert_eq!(
-            state["turns"][0]["outcome"]["data"]["terminal"],
-            "completed",
+            state["turns"][0]["outcome"]["data"]["terminal"], "completed",
             "TurnTerminal 冻结三值，交接只能报 completed"
         );
         assert_eq!(state["tools"][0]["state"]["kind"], "finished");
@@ -876,7 +1158,10 @@ mod handoff_tests {
         let h = harness_titled(
             dir.path(),
             vec![
-                (200, tool_call_body("session_title", &doc, "call-t1", &cache_usage())),
+                (
+                    200,
+                    tool_call_body("session_title", &doc, "call-t1", &cache_usage()),
+                ),
                 (200, text_body("命名完成，继续干活")),
             ],
             vec![crate::session_title::tool_def()],
@@ -923,9 +1208,7 @@ mod handoff_tests {
                 .map(|tools| {
                     tools
                         .iter()
-                        .map(|tool| {
-                            tool["function"]["name"].as_str().unwrap_or("").to_string()
-                        })
+                        .map(|tool| tool["function"]["name"].as_str().unwrap_or("").to_string())
                         .collect()
                 })
                 .unwrap_or_default()
@@ -948,8 +1231,14 @@ mod handoff_tests {
         let h = harness_titled(
             dir.path(),
             vec![
-                (200, tool_call_body("session_title", &old, "call-t1", &cache_usage())),
-                (200, tool_call_body("session_title", &new, "call-t2", &cache_usage())),
+                (
+                    200,
+                    tool_call_body("session_title", &old, "call-t1", &cache_usage()),
+                ),
+                (
+                    200,
+                    tool_call_body("session_title", &new, "call-t2", &cache_usage()),
+                ),
                 (200, text_body("改题完成")),
             ],
             vec![crate::session_title::tool_def()],
@@ -959,9 +1248,7 @@ mod handoff_tests {
             None,
         )
         .await;
-        h.loop_
-            .send_input(input("任务变了"))
-            .expect("send input");
+        h.loop_.send_input(input("任务变了")).expect("send input");
 
         let state = wait_until(&h.owners, |value| {
             value["activity"] == "idle" && value["title"] == "新任务排查"
@@ -993,13 +1280,14 @@ mod handoff_tests {
                 .map(|tools| {
                     tools
                         .iter()
-                        .map(|tool| {
-                            tool["function"]["name"].as_str().unwrap_or("").to_string()
-                        })
+                        .map(|tool| tool["function"]["name"].as_str().unwrap_or("").to_string())
                         .collect()
                 })
                 .unwrap_or_default();
-            assert!(names.contains(&"session_title".to_string()), "每轮都应声明: {names:?}");
+            assert!(
+                names.contains(&"session_title".to_string()),
+                "每轮都应声明: {names:?}"
+            );
         }
     }
 
@@ -1012,7 +1300,10 @@ mod handoff_tests {
         let h = harness(
             dir.path(),
             vec![
-                (200, tool_call_body("session_title", &doc, "call-t1", &cache_usage())),
+                (
+                    200,
+                    tool_call_body("session_title", &doc, "call-t1", &cache_usage()),
+                ),
                 (200, text_body("明白，不覆盖用户命名")),
             ],
             vec![crate::session_title::tool_def()],
@@ -1020,9 +1311,7 @@ mod handoff_tests {
             0.0,
         )
         .await;
-        h.loop_
-            .send_input(input("给会话改名"))
-            .expect("send input");
+        h.loop_.send_input(input("给会话改名")).expect("send input");
 
         let state = wait_until(&h.owners, |value| {
             timeline_tool_result(value).contains("用户命名")
@@ -1113,8 +1402,7 @@ mod handoff_tests {
 
         let state = wait_until(&h.owners, idle_with_turns).await;
         assert_eq!(
-            state["turns"][0]["outcome"]["data"]["error"]["code"],
-            "context_overflow",
+            state["turns"][0]["outcome"]["data"]["error"]["code"], "context_overflow",
             "超限不得伪装成一般 provider 失败"
         );
         assert_eq!(
@@ -1148,14 +1436,8 @@ mod handoff_tests {
         let state = wait_until(&h.owners, idle_with_turns).await;
         let requests = h.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 2);
-        assert!(
-            !requests[0].contains(FOLD_NOTE),
-            "第一轮没有任何东西可折叠"
-        );
-        assert!(
-            requests[1].contains(FOLD_NOTE),
-            "第二轮必须折叠工具结果"
-        );
+        assert!(!requests[0].contains(FOLD_NOTE), "第一轮没有任何东西可折叠");
+        assert!(requests[1].contains(FOLD_NOTE), "第二轮必须折叠工具结果");
         assert!(
             !requests[1].contains("不能为空"),
             "折叠后原文不该再进模型上下文"
@@ -1307,11 +1589,9 @@ mod handoff_tests {
         {
             let t0 = Arc::clone(&upstream_written_at);
             std::thread::spawn(move || {
-                let header = tiny_http::Header::from_bytes(
-                    &b"Content-Type"[..],
-                    &b"text/event-stream"[..],
-                )
-                .expect("header");
+                let header =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                        .expect("header");
                 let mut n = 0usize;
                 for request in server.incoming_requests() {
                     let payload = if n == 0 {
@@ -1366,7 +1646,10 @@ mod handoff_tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let mut probe = outbound_probe(dir.path()).await;
-        probe.loop_.send_input(input("开始调查")).expect("send input");
+        probe
+            .loop_
+            .send_input(input("开始调查"))
+            .expect("send input");
 
         let mut frames: Vec<(SessionEventFrame, std::time::Instant)> = Vec::new();
         loop {
@@ -1388,7 +1671,10 @@ mod handoff_tests {
             .lock()
             .unwrap()
             .expect("上游未写出 SSE");
-        eprintln!("=== 出站口观测：t0 = 上游首个 SSE respond（共 {} 帧）===", frames.len());
+        eprintln!(
+            "=== 出站口观测：t0 = 上游首个 SSE respond（共 {} 帧）===",
+            frames.len()
+        );
         for (frame, at) in &frames {
             eprintln!(
                 "seq={:<3} +{:<5}ms {}",
@@ -1416,17 +1702,24 @@ mod handoff_tests {
             .saturating_duration_since(t0)
             .as_millis();
         eprintln!("[延迟] 首帧 {first_ms}ms / 回合收口 {last_ms}ms（下界，不含 axum+网络）");
-        assert!(first_ms < 5_000, "上游内容到出站口首帧超过 5s：{first_ms}ms");
+        assert!(
+            first_ms < 5_000,
+            "上游内容到出站口首帧超过 5s：{first_ms}ms"
+        );
         assert!(last_ms < 8_000, "回合收口超过 8s：{last_ms}ms");
 
         // ② 信息完整度：区分「上游丢信息」与「流式通道丢信息」。
-        eprintln!("[上游] content 分片顺序 = {ANSWER_CHUNKS:?}（全部在 tool_calls 之前，时间顺序正常）");
+        eprintln!(
+            "[上游] content 分片顺序 = {ANSWER_CHUNKS:?}（全部在 tool_calls 之前，时间顺序正常）"
+        );
         let expected: String = ANSWER_CHUNKS.concat();
         let seal_text = frames.iter().find_map(|(f, _)| match &f.event {
             SessionEvent::TimelineAppended {
                 entry:
                     TimelineEntry::AssistantBlock {
-                        block_kind, content, ..
+                        block_kind,
+                        content,
+                        ..
                     },
             } if *block_kind == AssistantBlockKind::Answer => match content {
                 ContentValue::Inline { text } => Some(text.as_str()),
@@ -1454,7 +1747,9 @@ mod handoff_tests {
             _ => None,
         });
         eprintln!("[完整度] answer MessageDelta 序列 = {answer_deltas:?}");
-        eprintln!("[完整度] seal 全文 = {seal_text:?} / 首个 ToolDeclared seq = {tool_declared_seq:?}");
+        eprintln!(
+            "[完整度] seal 全文 = {seal_text:?} / 首个 ToolDeclared seq = {tool_declared_seq:?}"
+        );
 
         // 替换语义的终值必须等于上游完整回答，不能停在半句等 seal 事后补。
         assert_eq!(

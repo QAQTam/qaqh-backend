@@ -248,7 +248,11 @@ mod tests {
         }"#;
         let p: SbxPolicy = serde_json::from_str(json).unwrap();
         assert_eq!(p.writable_roots.len(), 1);
-        assert_eq!(p.isolation, IsolationKind::Token, "缺省隔离 = token(向后兼容)");
+        assert_eq!(
+            p.isolation,
+            IsolationKind::Token,
+            "缺省隔离 = token(向后兼容)"
+        );
 
         // 全部字段可省
         let p2: SbxPolicy = serde_json::from_str("{}").unwrap();

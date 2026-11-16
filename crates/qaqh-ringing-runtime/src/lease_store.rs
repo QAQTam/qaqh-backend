@@ -257,11 +257,7 @@ mod tests {
     #[test]
     fn lease_lifecycle_ttl_renew_expiry() {
         let mut store = RingingLeaseStore::new();
-        store.open(
-            "cs-1".into(),
-            "ci-1".into(),
-            Some(RingingV2ClientKind::Tui),
-        );
+        store.open("cs-1".into(), "ci-1".into(), Some(RingingV2ClientKind::Tui));
         assert_eq!(
             store
                 .active_clients()

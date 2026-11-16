@@ -310,6 +310,22 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
                             })
                             .await;
                         }
+                        // ADR-0026：exec 订阅终态兜底补投——finalize 端口回调
+                        // 失败的残留(armed 未送达)周期补投；通常为空。
+                        {
+                            let service = service.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let delivered = service.sweep_exec_notices();
+                                if !delivered.is_empty() {
+                                    log::info!(
+                                        "[daemon] exec notify sweep delivered {} session(s): {:?}",
+                                        delivered.len(),
+                                        delivered
+                                    );
+                                }
+                            })
+                            .await;
+                        }
                         // ADR-0016 切片 3：handoff fork 兜底扫描——封箱超窗
                         // (FORK_DELAY_MS) 且链头未前进的链立即补 fork,覆盖
                         // 定时任务失败/丢失与 daemon 窗口内重启。

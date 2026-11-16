@@ -92,7 +92,10 @@ impl Discovery {
         }
         let required = |key: &str| -> Result<String, SiwcError> {
             let raw = value.get(key).and_then(Value::as_str).ok_or_else(|| {
-                SiwcError::new(SiwcCode::DiscoveryUnavailable, format!("discovery 缺 {key}"))
+                SiwcError::new(
+                    SiwcCode::DiscoveryUnavailable,
+                    format!("discovery 缺 {key}"),
+                )
             })?;
             if !same_origin(raw, expected_issuer) {
                 return Err(SiwcError::new(

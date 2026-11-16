@@ -7,11 +7,11 @@
 #![cfg(windows)]
 
 use sbx_win::{
-    acl,
-    desktop,
-    env,
-    events,
-    policy::{self, AceMode, AceTarget, IsolationKind, NetworkPolicy, Precreate, SbxPolicy, build_ace_plan},
+    acl, desktop, env, events,
+    policy::{
+        self, AceMode, AceTarget, IsolationKind, NetworkPolicy, Precreate, SbxPolicy,
+        build_ace_plan,
+    },
     sid,
     spawn::{self, Isolation},
     token,
@@ -67,7 +67,10 @@ fn registry_writes_follow_policy_and_cleanup_restores() {
     });
     let snaps = acl::apply_ops(&plan, &events::NullSink).unwrap();
     assert_eq!(snaps.len(), plan.len());
-    assert!(snaps[0].is_some(), "注册表键应有可快照 DACL(apply 已预创建)");
+    assert!(
+        snaps[0].is_some(),
+        "注册表键应有可快照 DACL(apply 已预创建)"
+    );
 
     // 授权键上 cap-ACE 就位(幂等复查也走同一探测路径)
     assert!(
@@ -80,7 +83,9 @@ fn registry_writes_follow_policy_and_cleanup_restores() {
     let pairs = env::minimal_child_env(&scratch.join("tmp"), &scratch.join("home"));
     let run = |inner: String| -> spawn::Exit {
         let child = spawn::spawn(
-            &Isolation::RestrictedToken { token: tok.handle() },
+            &Isolation::RestrictedToken {
+                token: tok.handle(),
+            },
             &format!("\"{}\" /c {}", std::env::var("ComSpec").unwrap(), inner),
             &scratch,
             &pairs,
@@ -91,7 +96,10 @@ fn registry_writes_follow_policy_and_cleanup_restores() {
     };
 
     // 授权写:reg add 成功(reg.exe 以受限令牌运行,KEY_SET_VALUE 落在授权键)
-    let e = run(format!("reg add \"{}\" /v probe /t REG_SZ /d hello /f", key));
+    let e = run(format!(
+        "reg add \"{}\" /v probe /t REG_SZ /d hello /f",
+        key
+    ));
     assert!(
         e.code == 0,
         "授权注册表写失败 exit={} stderr={}",
@@ -105,7 +113,12 @@ fn registry_writes_follow_policy_and_cleanup_restores() {
     assert!(e.code != 0, "未授权注册表写竟成功");
 
     // cleanup 语义:按 SDDL 快照恢复 → cap ACE 消失,此后连授权操作也被拒
-    acl::restore_sddl_for(AceTarget::Registry, reg_path(&key), snaps[0].as_ref().unwrap()).unwrap();
+    acl::restore_sddl_for(
+        AceTarget::Registry,
+        reg_path(&key),
+        snaps[0].as_ref().unwrap(),
+    )
+    .unwrap();
     assert!(
         !acl::has_ace_for(reg_path(&key), AceTarget::Registry, &cap, AceMode::Allow).unwrap(),
         "恢复后注册表键仍见 cap-ACE"
@@ -114,6 +127,8 @@ fn registry_writes_follow_policy_and_cleanup_restores() {
     assert!(e.code != 0, "恢复后注册表删除竟成功");
 
     // 环境卫生:全令牌删除测试键(残留键对其他用户无意义)
-    let _ = std::process::Command::new("reg").args(["delete", &key, "/f"]).output();
+    let _ = std::process::Command::new("reg")
+        .args(["delete", &key, "/f"])
+        .output();
     let _ = std::fs::remove_dir_all(&base);
 }

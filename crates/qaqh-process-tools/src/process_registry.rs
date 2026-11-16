@@ -986,8 +986,8 @@ impl ProcessRegistry {
         let pid = child.id();
         #[cfg(windows)]
         {
-            use std::process::Command;
             use std::os::windows::process::CommandExt as _;
+            use std::process::Command;
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             let tree_killed = Command::new("taskkill")
                 .args(["/pid", &pid.to_string(), "/T", "/F"])

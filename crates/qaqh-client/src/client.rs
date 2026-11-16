@@ -18,13 +18,13 @@ use crate::session::RingingSession;
 use crate::types::{CommandOptions, ContentRef, RingingCommand, RingingCommandAckStatus};
 use crate::v2::ClientV2SessionState;
 use crate::v2_stream::{V2Stream, V2StreamHandlers};
+use qaqh_ringing::RINGING_V2_BASE_PATH;
 use qaqh_ringing::v2::{
     RingingV2ClientKind, RingingV2CommandAck, RingingV2CommandStatus,
     RingingV2ContentUploadResponse, RingingV2DeviceWire, RingingV2DevicesResponse,
     RingingV2PairRequest, RingingV2PairResponse, RingingV2PairTokenRequest,
     RingingV2PairTokenResponse,
 };
-use qaqh_ringing::RINGING_V2_BASE_PATH;
 use qaqh_ringing_contract::fact::ContentHash;
 
 /// `reqwest` 以 `rustls-no-provider` 特征编译（换掉 `rustls` 是为绕开 OHOS 上
@@ -47,8 +47,7 @@ pub(crate) fn ensure_crypto_provider() {
 /// crypto provider（`rustls-no-provider` 的硬契约）。
 pub(crate) fn build_http_client(tls_fp: Option<&str>) -> Result<reqwest::Client> {
     ensure_crypto_provider();
-    let mut builder = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(5));
+    let mut builder = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5));
     if let Some(fp) = tls_fp {
         let expected = crate::tls_pin::parse_fingerprint(fp).ok_or_else(|| {
             ClientError::Protocol(format!(
@@ -316,8 +315,7 @@ impl Client {
             }
         };
 
-        let http =
-            build_http_client(options.remote.as_ref().and_then(|r| r.tls_fp.as_deref()))?;
+        let http = build_http_client(options.remote.as_ref().and_then(|r| r.tls_fp.as_deref()))?;
         let session = Arc::new(RingingSession::new(
             base_url.clone(),
             token.clone(),
@@ -467,7 +465,11 @@ impl Client {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            return Err(crate::service::response_error(status.as_u16(), &path, &body));
+            return Err(crate::service::response_error(
+                status.as_u16(),
+                &path,
+                &body,
+            ));
         }
         Ok(response.json().await?)
     }
@@ -674,7 +676,9 @@ impl Client {
         media_type: &str,
         data: Vec<u8>,
     ) -> Result<ContentRef> {
-        let uploaded = self.upload_content_raw(session_id, media_type, data).await?;
+        let uploaded = self
+            .upload_content_raw(session_id, media_type, data)
+            .await?;
         Ok(ContentRef::new(ContentHash::new(format!(
             "sha256:{}",
             uploaded.content_id
@@ -937,8 +941,11 @@ impl Client {
 
     /// `POST /marketplace/v1/remove` —— 注销市场（url 型缓存一并删除）。
     pub async fn marketplace_remove(&self, name: &str) -> Result<serde_json::Value> {
-        self.control_post("/marketplace/v1/remove", serde_json::json!({ "name": name }))
-            .await
+        self.control_post(
+            "/marketplace/v1/remove",
+            serde_json::json!({ "name": name }),
+        )
+        .await
     }
 
     async fn control_get(&self, path: &str) -> Result<serde_json::Value> {

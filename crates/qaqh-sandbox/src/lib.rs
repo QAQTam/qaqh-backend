@@ -408,7 +408,12 @@ pub fn prepare_pty_launch(
                 let root = root.to_string_lossy().into_owned();
                 bwrap_argv.extend(["--bind".into(), root.clone(), root]);
             }
-            bwrap_argv.extend(["--dev".into(), "/dev".into(), "--proc".into(), "/proc".into()]);
+            bwrap_argv.extend([
+                "--dev".into(),
+                "/dev".into(),
+                "--proc".into(),
+                "/proc".into(),
+            ]);
             if let Some(cwd) = cwd {
                 bwrap_argv.extend(["--chdir".into(), cwd.to_string()]);
             }

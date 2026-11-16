@@ -322,9 +322,7 @@ pub fn truncate_from_turn(
         params![session_id, target_seq],
     )?;
     tx.execute(
-        &format!(
-            "DELETE FROM exec_sessions WHERE session_id = ?1 AND origin_turn_id IN {doomed}"
-        ),
+        &format!("DELETE FROM exec_sessions WHERE session_id = ?1 AND origin_turn_id IN {doomed}"),
         params![session_id, target_seq],
     )?;
     tx.execute(
@@ -794,10 +792,12 @@ pub fn turn_outcome_and_elapsed(
     let Some(outcome_json) = outcome_json else {
         return Ok(None);
     };
-    let outcome = serde_json::from_str(&outcome_json).map_err(|error| {
-        DbError::Corrupt(format!("turn {turn_id} outcome_json: {error}"))
-    })?;
-    let elapsed = finished.unwrap_or_else(now_ms).saturating_sub(started).max(0);
+    let outcome = serde_json::from_str(&outcome_json)
+        .map_err(|error| DbError::Corrupt(format!("turn {turn_id} outcome_json: {error}")))?;
+    let elapsed = finished
+        .unwrap_or_else(now_ms)
+        .saturating_sub(started)
+        .max(0);
     Ok(Some((outcome, elapsed)))
 }
 
@@ -1415,11 +1415,10 @@ pub fn finish_exec_session(
     // (`exec_session_view` / `exec_session_view_from_row`)组装。此前这里生成
     // 带前缀形态并落入 (session_id, content_id) 主键,而读取端按剥前缀后的
     // 裸 hex 精确匹配,执行会话输出引用因此永远 404。
-    let generated_content_id = output_text
-        .map(|text| {
-            use sha2::Digest as _;
-            hex::encode(sha2::Sha256::digest(text.as_bytes()))
-        });
+    let generated_content_id = output_text.map(|text| {
+        use sha2::Digest as _;
+        hex::encode(sha2::Sha256::digest(text.as_bytes()))
+    });
     let content_id = output_content_id.or(generated_content_id.as_deref());
     if let (Some(content_id), Some(text)) = (content_id, output_text) {
         put_session_content(
@@ -1673,7 +1672,13 @@ pub fn put_session_content(
              media_type = excluded.media_type,
              bytes = excluded.bytes,
              truncated = excluded.truncated",
-        params![session_id, bare_content_id(content_id), media_type, bytes, truncated],
+        params![
+            session_id,
+            bare_content_id(content_id),
+            media_type,
+            bytes,
+            truncated
+        ],
     )?;
     Ok(())
 }
@@ -1912,23 +1917,26 @@ pub fn fork_session_prefix(
             continue;
         };
         let new_block = format!("block_{}", generate_ulid());
-        let payload = block
-            .payload_json
-            .as_deref()
-            .ok_or_else(|| DbError::Corrupt(format!("block {} has no payload_json", block.block_id)))?;
+        let payload = block.payload_json.as_deref().ok_or_else(|| {
+            DbError::Corrupt(format!("block {} has no payload_json", block.block_id))
+        })?;
         let mut entry: TimelineEntry = serde_json::from_str(payload)
             .map_err(|error| DbError::Corrupt(format!("block {}: {error}", block.block_id)))?;
         let map_turn = |t: &TurnId| -> Result<TurnId, DbError> {
             turn_map
                 .get(t.as_str())
                 .map(|id| TurnId::new(id.clone()))
-                .ok_or_else(|| DbError::Corrupt(format!("fork: turn {} outside prefix", t.as_str())))
+                .ok_or_else(|| {
+                    DbError::Corrupt(format!("fork: turn {} outside prefix", t.as_str()))
+                })
         };
         let map_call = |c: &ToolCallId| -> Result<ToolCallId, DbError> {
             call_map
                 .get(c.as_str())
                 .map(|id| ToolCallId::new(id.clone()))
-                .ok_or_else(|| DbError::Corrupt(format!("fork: call {} outside prefix", c.as_str())))
+                .ok_or_else(|| {
+                    DbError::Corrupt(format!("fork: call {} outside prefix", c.as_str()))
+                })
         };
         match &mut entry {
             TimelineEntry::Input {
@@ -1967,6 +1975,7 @@ pub fn fork_session_prefix(
                 call_id,
                 turn_id,
                 content,
+                ..
             } => {
                 *call_id = map_call(call_id)?;
                 if let Some(t) = turn_id {
@@ -1982,9 +1991,10 @@ pub fn fork_session_prefix(
             .call_id
             .as_deref()
             .map(|c| {
-                call_map.get(c).cloned().ok_or_else(|| {
-                    DbError::Corrupt(format!("fork: call {c} outside prefix"))
-                })
+                call_map
+                    .get(c)
+                    .cloned()
+                    .ok_or_else(|| DbError::Corrupt(format!("fork: call {c} outside prefix")))
             })
             .transpose()?;
         ord += 1;
@@ -2058,15 +2068,18 @@ mod fork_tests {
 
     fn block(session: &str, turn: &str, entry: TimelineEntry, kind: &'static str) -> NewBlock {
         let (block_id, call_id) = match &entry {
-            TimelineEntry::Input { block_id, .. } | TimelineEntry::AssistantBlock { block_id, .. } => {
+            TimelineEntry::Input { block_id, .. }
+            | TimelineEntry::AssistantBlock { block_id, .. } => {
                 (block_id.as_str().to_string(), None)
             }
-            TimelineEntry::ToolCall { call_id, .. } => {
-                (format!("blk_call_{call_id}"), Some(call_id.as_str().to_string()))
-            }
-            TimelineEntry::ToolResult { call_id, .. } => {
-                (format!("blk_result_{call_id}"), Some(call_id.as_str().to_string()))
-            }
+            TimelineEntry::ToolCall { call_id, .. } => (
+                format!("blk_call_{call_id}"),
+                Some(call_id.as_str().to_string()),
+            ),
+            TimelineEntry::ToolResult { call_id, .. } => (
+                format!("blk_result_{call_id}"),
+                Some(call_id.as_str().to_string()),
+            ),
             TimelineEntry::Compaction { .. } => unreachable!(),
         };
         NewBlock {
@@ -2159,13 +2172,43 @@ mod fork_tests {
         let mut conn = Connection::open_in_memory().expect("open");
         crate::db::schema::initialize(&mut conn).expect("schema");
         new_session(&mut conn, "s", None);
-        handoff_call(&mut conn, "s", "t1", "c1", "旧文档", "completed", "finished", 1);
-        handoff_call(&mut conn, "s", "t2", "c2", "失败参数", "failed", "finished", 2);
-        handoff_call(&mut conn, "s", "t3", "c3", "崩溃窗文档", "completed", "running", 3);
+        handoff_call(
+            &mut conn,
+            "s",
+            "t1",
+            "c1",
+            "旧文档",
+            "completed",
+            "finished",
+            1,
+        );
+        handoff_call(
+            &mut conn,
+            "s",
+            "t2",
+            "c2",
+            "失败参数",
+            "failed",
+            "finished",
+            2,
+        );
+        handoff_call(
+            &mut conn,
+            "s",
+            "t3",
+            "c3",
+            "崩溃窗文档",
+            "completed",
+            "running",
+            3,
+        );
 
         let calls = recent_handoff_calls(&conn, "s", 8).unwrap();
         assert_eq!(
-            calls.iter().map(|trace| trace.call_id.as_str()).collect::<Vec<_>>(),
+            calls
+                .iter()
+                .map(|trace| trace.call_id.as_str())
+                .collect::<Vec<_>>(),
             vec!["c3", "c2", "c1"],
             "新→旧,崩溃窗的 running 行必须在读面里"
         );
@@ -2181,7 +2224,11 @@ mod fork_tests {
             images: vec![],
             inter_agent: None,
             subagent_terminal: None,
-            actor: ActorRef { kind: ActorKind::User, id: "user".into(), display_name: None },
+            actor: ActorRef {
+                kind: ActorKind::User,
+                id: "user".into(),
+                display_name: None,
+            },
         }
     }
 
@@ -2195,48 +2242,104 @@ mod fork_tests {
 
         // 父回合1（已完成）：input + assistant + tool call/result。
         start_turn(&mut conn, "turn_p1", "parent", Some("input_p1")).unwrap();
-        append_block(&mut conn, &block("parent", "turn_p1", input("block_p1", "turn_p1", "hello"), "input")).unwrap();
-        append_block(&mut conn, &block("parent", "turn_p1", TimelineEntry::AssistantBlock {
-            block_id: BlockId::new("block_p2"),
-            turn_id: TurnId::new("turn_p1"),
-            ord: 0,
-            block_kind: AssistantBlockKind::Answer,
-            content: ContentValue::Inline { text: "world".into() },
-            model: "m".into(),
-            usage: None,
-            generated_ms: None,
-            opaque: vec![],
-        }, "assistant")).unwrap();
-        upsert_tool_call(&mut conn, &ToolCallUpsert {
-            call_id: "call_p1".into(),
-            session_id: "parent".into(),
-            turn_id: Some("turn_p1".into()),
-            tool_name: "read".into(),
-            args_json: Some("{\"path\":\"a.rs\"}".into()),
-            state_json: serde_json::to_string(&ToolCallState::Declared).unwrap(),
-            state_kind: "declared",
-        }).unwrap();
-        append_block(&mut conn, &block("parent", "turn_p1", TimelineEntry::ToolCall {
-            call_id: ToolCallId::new("call_p1"),
-            turn_id: Some(TurnId::new("turn_p1")),
-        }, "tool_call")).unwrap();
-        append_block(&mut conn, &block("parent", "turn_p1", TimelineEntry::ToolResult {
-            call_id: ToolCallId::new("call_p1"),
-            turn_id: Some(TurnId::new("turn_p1")),
-            content: ContentValue::Inline { text: "file body".into() },
-        }, "tool_result")).unwrap();
+        append_block(
+            &mut conn,
+            &block(
+                "parent",
+                "turn_p1",
+                input("block_p1", "turn_p1", "hello"),
+                "input",
+            ),
+        )
+        .unwrap();
+        append_block(
+            &mut conn,
+            &block(
+                "parent",
+                "turn_p1",
+                TimelineEntry::AssistantBlock {
+                    block_id: BlockId::new("block_p2"),
+                    turn_id: TurnId::new("turn_p1"),
+                    ord: 0,
+                    block_kind: AssistantBlockKind::Answer,
+                    content: ContentValue::Inline {
+                        text: "world".into(),
+                    },
+                    model: "m".into(),
+                    usage: None,
+                    generated_ms: None,
+                    opaque: vec![],
+                },
+                "assistant",
+            ),
+        )
+        .unwrap();
+        upsert_tool_call(
+            &mut conn,
+            &ToolCallUpsert {
+                call_id: "call_p1".into(),
+                session_id: "parent".into(),
+                turn_id: Some("turn_p1".into()),
+                tool_name: "read".into(),
+                args_json: Some("{\"path\":\"a.rs\"}".into()),
+                state_json: serde_json::to_string(&ToolCallState::Declared).unwrap(),
+                state_kind: "declared",
+            },
+        )
+        .unwrap();
+        append_block(
+            &mut conn,
+            &block(
+                "parent",
+                "turn_p1",
+                TimelineEntry::ToolCall {
+                    call_id: ToolCallId::new("call_p1"),
+                    turn_id: Some(TurnId::new("turn_p1")),
+                },
+                "tool_call",
+            ),
+        )
+        .unwrap();
+        append_block(
+            &mut conn,
+            &block(
+                "parent",
+                "turn_p1",
+                TimelineEntry::ToolResult {
+                    call_id: ToolCallId::new("call_p1"),
+                    turn_id: Some(TurnId::new("turn_p1")),
+                    content: ContentValue::Inline {
+                        text: "file body".into(),
+                    },
+                    images: Vec::new(),
+                },
+                "tool_result",
+            ),
+        )
+        .unwrap();
         finish_turn(&mut conn, "turn_p1", "completed", None).unwrap();
 
         // 父回合2（在飞）：不得进入 fork。
         start_turn(&mut conn, "turn_p2", "parent", Some("input_p2")).unwrap();
-        append_block(&mut conn, &block("parent", "turn_p2", input("block_p3", "turn_p2", "in flight"), "input")).unwrap();
+        append_block(
+            &mut conn,
+            &block(
+                "parent",
+                "turn_p2",
+                input("block_p3", "turn_p2", "in flight"),
+                "input",
+            ),
+        )
+        .unwrap();
 
         let seeded = fork_session_prefix(&mut conn, "parent", "child").expect("fork");
         assert_eq!(seeded, 1);
 
         // 子日志：1 回合 4 块，内容逐字保留，id 全重写。
         let child_turns: Vec<(String, i64, String)> = conn
-            .prepare("SELECT turn_id, seq, status FROM turns WHERE session_id = 'child' ORDER BY seq")
+            .prepare(
+                "SELECT turn_id, seq, status FROM turns WHERE session_id = 'child' ORDER BY seq",
+            )
             .unwrap()
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
             .unwrap()
@@ -2288,10 +2391,19 @@ mod fork_tests {
 
         // 父日志原样：2 回合 5 块。
         let parent_turn_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM turns WHERE session_id = 'parent'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM turns WHERE session_id = 'parent'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(parent_turn_count, 2);
-        assert_eq!(read_transcript_page(&conn, "parent", None, 100).unwrap().len(), 5);
+        assert_eq!(
+            read_transcript_page(&conn, "parent", None, 100)
+                .unwrap()
+                .len(),
+            5
+        );
 
         // 空前缀：在飞回合开头的会话 fork 出 0 回合。
         new_session(&mut conn, "child2", Some("parent"));

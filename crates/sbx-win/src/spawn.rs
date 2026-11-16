@@ -9,26 +9,26 @@ use std::io::{self, Read};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::Path;
-use windows::core::{PCWSTR, PWSTR, Result};
 use windows::Win32::Foundation::{
-    CloseHandle, HANDLE, HANDLE_FLAGS, HANDLE_FLAG_INHERIT, SetHandleInformation,
+    CloseHandle, HANDLE, HANDLE_FLAG_INHERIT, HANDLE_FLAGS, SetHandleInformation,
 };
 use windows::Win32::Security::SECURITY_ATTRIBUTES;
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, JOBOBJECT_BASIC_UI_RESTRICTIONS,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     JOB_OBJECT_UILIMIT_GLOBALATOMS, JOB_OBJECT_UILIMIT_HANDLES, JOB_OBJECT_UILIMIT_READCLIPBOARD,
-    JOB_OBJECT_UILIMIT_WRITECLIPBOARD, JobObjectBasicUIRestrictions,
+    JOB_OBJECT_UILIMIT_WRITECLIPBOARD, JOBOBJECT_BASIC_UI_RESTRICTIONS,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicUIRestrictions,
     JobObjectExtendedLimitInformation, SetInformationJobObject,
 };
 use windows::Win32::System::Pipes::CreatePipe;
 use windows::Win32::System::Threading::{
-    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
-    CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST,
+    CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW,
+    DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, INFINITE,
+    InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, ResumeThread, STARTF_USESTDHANDLES,
     STARTUPINFOEXW, TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject,
 };
+use windows::core::{PCWSTR, PWSTR, Result};
 
 /// 隔离后端(ADR-0002)。两种后端都以令牌形态进入 CreateProcessAsUserW:
 /// - RestrictedToken:WRITE_RESTRICTED 受限令牌(只滤写,读透传)
@@ -205,12 +205,7 @@ pub fn spawn(
         let attr_count = 1u32;
         let mut size = 0usize;
         // 探测所需字节数(必须用与真实调用相同的属性数,否则二次初始化报 0x7A)
-        let _ = InitializeProcThreadAttributeList(
-            None,
-            attr_count,
-            Some(0),
-            &mut size,
-        );
+        let _ = InitializeProcThreadAttributeList(None, attr_count, Some(0), &mut size);
         if size == 0 {
             return Err(windows::core::Error::from_hresult(
                 windows::core::HRESULT::from_win32(
@@ -248,8 +243,8 @@ pub fn spawn(
         }
 
         let mut pi = PROCESS_INFORMATION::default();
-        let startupinfo_ptr =
-            &mut si as *mut STARTUPINFOEXW as *const windows::Win32::System::Threading::STARTUPINFOW;
+        let startupinfo_ptr = &mut si as *mut STARTUPINFOEXW
+            as *const windows::Win32::System::Threading::STARTUPINFOW;
         // 两种后端统一走 CreateProcessAsUserW(受限令牌 / lowbox 令牌,
         // 均为进程主令牌的直接子令牌 → 免 SeAssignPrimaryTokenPrivilege)
         let token = match isolation {
@@ -278,7 +273,8 @@ pub fn spawn(
         DeleteProcThreadAttributeList(attr);
         created?;
 
-        AssignProcessToJobObject(job, pi.hProcess).map_err(|e| ctx(e, "AssignProcessToJobObject"))?;
+        AssignProcessToJobObject(job, pi.hProcess)
+            .map_err(|e| ctx(e, "AssignProcessToJobObject"))?;
         ResumeThread(pi.hThread);
 
         Ok(Child {

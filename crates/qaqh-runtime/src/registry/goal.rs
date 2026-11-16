@@ -74,26 +74,24 @@ impl AgentRegistry {
     /// 链头已封箱(handoff 成功、后继未建)→ 跳过,等周期扫描下一轮再探。
     fn deliver_continuation(&mut self, goal: &GoalRow) {
         let root = goal.session_id.clone();
-        let head = self
-            .owners
-            .db()
-            .read_blocking(move |conn| {
-                let head = qaqh_session::db::store::handoff_chain_head(conn, &root)?;
-                let sealed = qaqh_session::db::store::session_handed_off(conn, &head)?;
-                Ok::<_, qaqh_session::db::DbError>((head, sealed))
-            });
+        let head = self.owners.db().read_blocking(move |conn| {
+            let head = qaqh_session::db::store::handoff_chain_head(conn, &root)?;
+            let sealed = qaqh_session::db::store::session_handed_off(conn, &head)?;
+            Ok::<_, qaqh_session::db::DbError>((head, sealed))
+        });
         // 解析失败不降级猜测(宪法 5):跳过本轮,周期扫描下轮再探。
         let (head, sealed) = match head {
             Ok(pair) => pair,
             Err(error) => {
-                log::warn!("[goal] chain head resolve for {} failed: {error}", goal.session_id);
+                log::warn!(
+                    "[goal] chain head resolve for {} failed: {error}",
+                    goal.session_id
+                );
                 return;
             }
         };
         if sealed {
-            log::info!(
-                "[goal] chain head {head} is sealed (handoff); awaiting successor session"
-            );
+            log::info!("[goal] chain head {head} is sealed (handoff); awaiting successor session");
             return;
         }
         if let Err(error) = self.ensure_loaded_for_command(&head) {
@@ -170,11 +168,8 @@ impl AgentRegistry {
         let session_id = notice.session_id.clone();
         let turn_id = notice.turn_id.clone();
         let facts = self.owners.db().read_blocking(move |conn| {
-            let outcome = qaqh_session::db::store::turn_outcome_and_elapsed(
-                conn,
-                &session_id,
-                &turn_id,
-            )?;
+            let outcome =
+                qaqh_session::db::store::turn_outcome_and_elapsed(conn, &session_id, &turn_id)?;
             let tool_count = qaqh_session::db::store::turn_tool_count(conn, &turn_id)?;
             let answer = qaqh_session::db::view::turn_answer_text(conn, &session_id, &turn_id)?;
             let input = qaqh_session::db::view::turn_input_text(conn, &session_id, &turn_id)?;
@@ -205,12 +200,16 @@ impl AgentRegistry {
         // 切片F:goal 行在链根——记账/审计一律按 goal.session_id 定位,
         // 不按触发回合的会话(它可能是 handoff 后继)。
         let tokens = match &outcome {
-            Some((TurnOutcome::Finished { usage, .. }, _)) => {
-                usage.as_ref().map(|u| u64::from(u.total_tokens)).unwrap_or(0)
-            }
+            Some((TurnOutcome::Finished { usage, .. }, _)) => usage
+                .as_ref()
+                .map(|u| u64::from(u.total_tokens))
+                .unwrap_or(0),
             _ => 0,
         };
-        let elapsed_ms = outcome.as_ref().map(|(_, ms)| (*ms).max(0) as u64).unwrap_or(0);
+        let elapsed_ms = outcome
+            .as_ref()
+            .map(|(_, ms)| (*ms).max(0) as u64)
+            .unwrap_or(0);
         let accounted = self.owners.db().write_blocking({
             let session_id = goal.session_id.clone();
             let goal_id = goal.goal_id.clone();
@@ -240,7 +239,10 @@ impl AgentRegistry {
             }
             Ok(None) => return, // goal 已被替换/清除
             Err(error) => {
-                log::warn!("[goal] accounting failed for {}: {error}", notice.session_id);
+                log::warn!(
+                    "[goal] accounting failed for {}: {error}",
+                    notice.session_id
+                );
                 return;
             }
         }
@@ -274,7 +276,10 @@ impl AgentRegistry {
             }
             Ok(None) => return,
             Err(error) => {
-                log::warn!("[goal] empty audit failed for {}: {error}", notice.session_id);
+                log::warn!(
+                    "[goal] empty audit failed for {}: {error}",
+                    notice.session_id
+                );
                 return;
             }
         }
@@ -291,14 +296,16 @@ impl AgentRegistry {
             status: Some(status),
             ..Default::default()
         };
-        let outcome = self
-            .owners
-            .db()
-            .write_blocking(move |conn| goals::update_goal(conn, &session, &update, Some(&expected)));
+        let outcome = self.owners.db().write_blocking(move |conn| {
+            goals::update_goal(conn, &session, &update, Some(&expected))
+        });
         match outcome {
             Ok(Some(row)) => self.publish_goal(&row.session_id.clone(), Some(row)),
             Ok(None) => {}
-            Err(error) => log::warn!("[goal] status update failed for {}: {error}", goal.session_id),
+            Err(error) => log::warn!(
+                "[goal] status update failed for {}: {error}",
+                goal.session_id
+            ),
         }
     }
 

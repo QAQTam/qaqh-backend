@@ -1,0 +1,268 @@
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> crates\sbx-win\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+30 ~ ] }
+31 + [lints]
+32 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+30 ~ ] }
+31 + [lints]
+   |
+warning: `sbx-win` (manifest) generated 1 warning
+warning: missing `[lints]` to inherit `[workspace.lints]`
+  --> D:\Projects\mutil-ai\Cargo.toml
+   = note: `cargo::missing_lints_inheritance` is set to `warn` by default
+help: to inherit `workspace.lints, add:
+   |
+59 ~ path = "examples/streaming.rs"
+60 + [lints]
+61 + workspace = true
+   |
+help: to clarify your intent to not inherit, add:
+   |
+59 ~ path = "examples/streaming.rs"
+60 + [lints]
+   |
+warning: `mutil-ai` (manifest) generated 1 warning
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+   Compiling qaqh-types v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-types)
+   Compiling qaqh-policy v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-policy)
+   Compiling sbx-win v0.1.0 (D:\Projects\qaqh-backend\crates\sbx-win)
+   Compiling qaqh-config-api v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-config-api)
+   Compiling qaqh-pty v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-pty)
+   Compiling qaqh-skills v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-skills)
+   Compiling qaqh-workspace v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-workspace)
+   Compiling mutil-ai v0.7.0 (D:\Projects\mutil-ai)
+   Compiling qaqh-memwatch v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-memwatch)
+   Compiling qaqh-runtime v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-runtime)
+   Compiling qaqh-sandbox v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-sandbox)
+   Compiling qaqh-ptc-core v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ptc-core)
+   Compiling qaqh-daemon v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-daemon)
+   Compiling qaqh-ptc-sdk v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ptc-sdk)
+   Compiling qaqh-ptc-bun v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ptc-bun)
+   Compiling sbx-cli v0.1.0 (D:\Projects\qaqh-backend\crates\sbx-cli)
+warning: unused variable: `base`
+   --> crates\sbx-win\tests\redirect.rs:105:10
+    |
+105 |     let (base, ws, view) = fresh_workspace("diag");
+    |          ^^^^ help: if this is intentional, prefix it with an underscore: `_base`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling qaqh-profile v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-profile)
+   Compiling qaqh-ringing-contract v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ringing-contract)
+   Compiling qaqh-tool-core v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-tool-core)
+warning: `sbx-win` (test "redirect") generated 1 warning (run `cargo fix --test "redirect" -p sbx-win` to apply 1 suggestion)
+   Compiling qaqh-config v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-config)
+   Compiling qaqh-permission v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-permission)
+   Compiling qaqh-dsaccount v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-dsaccount)
+   Compiling qaqh-file-tools v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-file-tools)
+   Compiling qaqh-gate v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-gate)
+   Compiling qaqh-siwc v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-siwc)
+   Compiling qaqh-marketplace v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-marketplace)
+   Compiling qaqh-ptc-tools v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ptc-tools)
+warning: unused import: `qaqh_marketplace::manifest`
+ --> crates\qaqh-marketplace\tests\e2e.rs:5:5
+  |
+5 | use qaqh_marketplace::manifest;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling qaqh-process-tools v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-process-tools)
+   Compiling qaqh-ringing v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ringing)
+warning: `qaqh-marketplace` (test "e2e") generated 1 warning (run `cargo fix --test "e2e" -p qaqh-marketplace` to apply 1 suggestion)
+   Compiling qaqh-client v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-client)
+   Compiling qaqh-mcp v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-mcp)
+   Compiling qaqh-session v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-session)
+   Compiling qaqh-lsp v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-lsp)
+   Compiling qaqh-subagent v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-subagent)
+   Compiling qaqh-goal v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-goal)
+   Compiling qaqh-acp v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-acp)
+   Compiling qaqh-agent-runtime v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-agent-runtime)
+   Compiling qaqh-ringing-runtime v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ringing-runtime)
+   Compiling qaqh-ffi v4.0.1 (D:\Projects\qaqh-backend\crates\qaqh-ffi)
+   Compiling qaqh-contract-export v4.0.1 (D:\Projects\qaqh-backend\tools\qaqh-contract-export)
+warning: unused variable: `other`
+   --> tools\qaqh-contract-export\src\cs_backend.rs:905:17
+    |
+905 |                 other => self.property_type(field, record_name, generic)?,
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_other`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\qaqh-daemon\src\axum_server\axum_impl\v2.rs:219:9
+    |
+219 |     let mut snapshot = match snapshot_result {
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `Result` that must be used
+   --> tools\qaqh-contract-export\src\cs_backend.rs:369:9
+    |
+369 |         c.next();
+    |         ^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+369 |         let _ = c.next();
+    |         +++++++
+
+warning: unused `Result` that must be used
+   --> tools\qaqh-contract-export\src\cs_backend.rs:431:13
+    |
+431 |             c.next();
+    |             ^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+431 |             let _ = c.next();
+    |             +++++++
+
+warning: unused `Result` that must be used
+   --> tools\qaqh-contract-export\src\cs_backend.rs:495:21
+    |
+495 |                     c.next();
+    |                     ^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+495 |                     let _ = c.next();
+    |                     +++++++
+
+warning: unused `Result` that must be used
+   --> tools\qaqh-contract-export\src\cs_backend.rs:505:29
+    |
+505 | ...                   c.next();
+    |                       ^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+505 |                             let _ = c.next();
+    |                             +++++++
+
+error[E0594]: cannot assign to `outcome.usage`, as `outcome` is not declared as mutable
+   --> crates\qaqh-agent-runtime\src\session_loop.rs:680:21
+    |
+680 |                     outcome.usage = accrued_usage.take();
+    |                     ^^^^^^^^^^^^^ cannot assign
+    |
+help: consider changing this to be mutable
+    |
+654 |             let mut outcome = provider_job::run_round(
+    |                 +++
+
+error[E0594]: cannot assign to `outcome.usage`, as `outcome` is not declared as mutable
+   --> crates\qaqh-agent-runtime\src\session_loop.rs:743:33
+    |
+743 | ...                   outcome.usage = accrued_usage.take();
+    |                       ^^^^^^^^^^^^^ cannot assign
+    |
+help: consider changing this to be mutable
+    |
+654 |             let mut outcome = provider_job::run_round(
+    |                 +++
+
+error[E0594]: cannot assign to `outcome.usage`, as `outcome` is not declared as mutable
+   --> crates\qaqh-agent-runtime\src\session_loop.rs:750:21
+    |
+750 |                     outcome.usage = accrued_usage.take();
+    |                     ^^^^^^^^^^^^^ cannot assign
+    |
+help: consider changing this to be mutable
+    |
+654 |             let mut outcome = provider_job::run_round(
+    |                 +++
+
+error[E0594]: cannot assign to `outcome.usage`, as `outcome` is not declared as mutable
+   --> crates\qaqh-agent-runtime\src\session_loop.rs:772:21
+    |
+772 |                     outcome.usage = accrued_usage.take();
+    |                     ^^^^^^^^^^^^^ cannot assign
+    |
+help: consider changing this to be mutable
+    |
+654 |             let mut outcome = provider_job::run_round(
+    |                 +++
+
+For more information about this error, try `rustc --explain E0594`.
+error: could not compile `qaqh-agent-runtime` (lib test) due to 4 previous errors
+warning: build failed, waiting for other jobs to finish...
+warning: `qaqh-contract-export` (bin "qaqh-contract-export" test) generated 5 warnings (run `cargo fix --bin "qaqh-contract-export" -p qaqh-contract-export --tests` to apply 1 suggestion)
+warning: `qaqh-daemon` (bin "qaqh-daemon") generated 1 warning (run `cargo fix --bin "qaqh-daemon" -p qaqh-daemon` to apply 1 suggestion)
+warning: `qaqh-daemon` (bin "qaqh-daemon" test) generated 1 warning (1 duplicate)
+warning: unused dependency `qaqh-memwatch`
+  --> crates\qaqh-agent-runtime\Cargo.toml:15:1
+   |
+15 | qaqh-memwatch = { path = "../qaqh-memwatch" }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `qaqh-memwatch`
+warning: unused dependency `qaqh-subagent`
+  --> crates\qaqh-agent-runtime\Cargo.toml:21:1
+   |
+21 | qaqh-subagent = { path = "../qaqh-subagent" }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `qaqh-subagent`
+help: to still use for development builds, move to `dev-dependencies`
+warning: `qaqh-agent-runtime` (manifest) generated 2 warnings
+warning: unused dependency `qaqh-tool-core`
+  --> crates\qaqh-gate\Cargo.toml:15:1
+   |
+15 | qaqh-tool-core = { path = "../qaqh-tool-core" }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `qaqh-tool-core`
+warning: unused dependency `unicode-normalization`
+  --> crates\qaqh-gate\Cargo.toml:26:1
+   |
+26 | unicode-normalization = "0.1"
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: consider removing the dependency on `unicode-normalization`
+warning: `qaqh-gate` (manifest) generated 2 warnings
+warning: unused dependency `qaqh-memwatch`
+ --> crates\qaqh-ringing-runtime\Cargo.toml:9:1
+  |
+9 | qaqh-memwatch = { path = "../qaqh-memwatch" }
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `qaqh-memwatch`
+warning: `qaqh-ringing-runtime` (manifest) generated 1 warning
+warning: unused dependency `qaqh-ringing`
+  --> crates\qaqh-session\Cargo.toml:17:1
+   |
+17 | qaqh-ringing = { path = "../qaqh-ringing" }
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `qaqh-ringing`
+warning: `qaqh-session` (manifest) generated 1 warning
+warning: unused dependency `unicode-normalization`
+  --> crates\qaqh-workspace\Cargo.toml:34:1
+   |
+34 | unicode-normalization = "0.1"
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `cargo::unused_dependencies` is set to `warn` by default
+help: consider removing the dependency on `unicode-normalization`
+warning: `qaqh-workspace` (manifest) generated 1 warning

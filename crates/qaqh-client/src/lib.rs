@@ -40,7 +40,8 @@ pub use qaqh_ringing::RingingV2ResyncRequired;
 pub use qaqh_ringing::v2::{
     RingingV2ApprovalRespondRequest, RingingV2ClientKind, RingingV2ClientView,
     RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
-    RingingV2DeviceChallenges, RingingV2DeviceWire, RingingV2PairResponse, RingingV2PairTokenResponse,
+    RingingV2DeviceChallenges, RingingV2DeviceWire, RingingV2PairResponse,
+    RingingV2PairTokenResponse,
 };
 pub use qaqh_ringing::{
     COMMAND_CONTRACT_REVISION, CommandPrecondition, CommandTarget, ProviderUpsertDto,

@@ -19,7 +19,11 @@ pub enum CoreError {
     #[error("HTTP {status} on {path}")]
     Http { status: u16, path: String },
     #[error("api {code}: {detail} (HTTP {status})")]
-    Api { status: u16, code: String, detail: String },
+    Api {
+        status: u16,
+        code: String,
+        detail: String,
+    },
 }
 
 impl From<ClientError> for CoreError {

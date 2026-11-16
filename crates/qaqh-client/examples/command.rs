@@ -18,8 +18,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qaqh_client::{
-    Client, ClientHandlers, ClientOptions, CommandOptions, CommandTarget,
-    ConversationSendMessage, QueryRequest, RingingCommand,
+    Client, ClientHandlers, ClientOptions, CommandOptions, CommandTarget, ConversationSendMessage,
+    QueryRequest, RingingCommand,
 };
 
 /// 隔离数据根守卫:`QAQH_DATA_DIR` 必须显式指向非真实根,否则拒绝启动。
@@ -147,10 +147,7 @@ fn main() {
     let handlers = ClientHandlers {
         on_liveness: std::sync::Arc::new(|| {}),
         on_v2_event: Arc::new(|session_id, event| {
-            println!(
-                "[event] seed={session_id} seq={}",
-                event.seq
-            );
+            println!("[event] seed={session_id} seq={}", event.seq);
             if let Ok(v) = serde_json::to_value(&event.event) {
                 let kind = v.get("kind").and_then(|k| k.as_str()).unwrap_or("?");
                 println!("[event]   kind={kind}");

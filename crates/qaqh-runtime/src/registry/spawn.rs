@@ -214,8 +214,7 @@ impl AgentRegistry {
             .read_blocking(move |conn| qaqh_session::db::store::session_row(conn, &parent_id))
             .map_err(QaqhError::message)?
             .ok_or_else(|| QaqhError::not_found("subagent parent session not found"))?
-            .model_selection
-            ;
+            .model_selection;
         // 显式指定的 selection 优先；否则子会话行继承父会话行的选择。
         let child_selection = options
             .selection

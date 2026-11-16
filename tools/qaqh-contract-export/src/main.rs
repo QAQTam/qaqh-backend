@@ -9,9 +9,9 @@ use qaqh_ringing::{
     RingingV2CommandEnvelope, RingingV2CommandResult, RingingV2CommandStatus,
     RingingV2ContentUploadResponse, RingingV2DeviceApprovalKind, RingingV2DeviceChallenge,
     RingingV2DeviceChallenges, RingingV2ExistingResult, RingingV2LeaseRenewResponse,
-    RingingV2OpenRequest,
-    RingingV2OpenResponse, RingingV2PendingApprovals, RingingV2PendingInteractionView,
-    RingingV2PendingPermissionView, RingingV2ResyncRequired, RingingV2SyncResult,
+    RingingV2OpenRequest, RingingV2OpenResponse, RingingV2PendingApprovals,
+    RingingV2PendingInteractionView, RingingV2PendingPermissionView, RingingV2ResyncRequired,
+    RingingV2SyncResult,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -107,8 +107,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ir_diff::run(&target)
             }
             Some(other) => {
-                return Err(format!("ir-diff takes no argument or --against <dir>, got {other:?}")
-                    .into());
+                return Err(
+                    format!("ir-diff takes no argument or --against <dir>, got {other:?}").into(),
+                );
             }
         };
     }
@@ -317,13 +318,12 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         ClientsListParams, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
         ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams,
         ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult,
-        PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams,
-        SessionDashboard, SessionDashboardParams,
-        SessionDashboardTask, SessionGetActivityParams, SessionListParams, SessionMetaParams,
-        SessionToolActivity, SessionTurnParams, SkillCatalogDiagnostic, SkillCatalogEntry,
-        SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoCountsSnapshot,
-        TodoItemSnapshot, TodoListParams, TodoListSnapshot, TodoStatusParams, TodoStatusSnapshot,
-        WorkspaceGetParams, WorkspaceListParams,
+        PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams, SessionDashboard,
+        SessionDashboardParams, SessionDashboardTask, SessionGetActivityParams, SessionListParams,
+        SessionMetaParams, SessionToolActivity, SessionTurnParams, SkillCatalogDiagnostic,
+        SkillCatalogEntry, SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams,
+        TodoCountsSnapshot, TodoItemSnapshot, TodoListParams, TodoListSnapshot, TodoStatusParams,
+        TodoStatusSnapshot, WorkspaceGetParams, WorkspaceListParams,
     };
     let open_request = RingingV2OpenRequest::new("fixture-client");
     write_fixture(stage, "open-request.json", &open_request)?;
@@ -401,7 +401,11 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     )?;
     // `clients.list` 是 daemon 基础设施查询（活跃 lease 视图）；条目形状即
     // `RingingV2ClientView`，与 devices/pair fixtures 同一合成身份。
-    write_fixture(stage, "service-clients-list-params.json", &ClientsListParams {})?;
+    write_fixture(
+        stage,
+        "service-clients-list-params.json",
+        &ClientsListParams {},
+    )?;
     write_fixture(
         stage,
         "service-clients-list-result.json",
@@ -455,7 +459,9 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     write_fixture(
         stage,
         "service-session-list-params.json",
-        &SessionListParams { include_archived: false },
+        &SessionListParams {
+            include_archived: false,
+        },
     )?;
     write_fixture(
         stage,

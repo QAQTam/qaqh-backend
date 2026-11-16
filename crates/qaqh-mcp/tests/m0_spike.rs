@@ -15,7 +15,9 @@ use std::time::Duration;
 
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
-use rmcp::model::{ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool};
+use rmcp::model::{
+    ListToolsResult, PaginatedRequestParams, ServerCapabilities, ServerConfig, Tool,
+};
 use rmcp::service::{RequestContext, ServiceExt};
 use serde_json::json;
 

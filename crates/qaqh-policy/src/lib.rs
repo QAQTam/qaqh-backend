@@ -4,7 +4,6 @@
 //! platform detection. It owns the stable decision types and the canonical
 //! [`SandboxSpec`] that mechanism crates consume.
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use std::path::PathBuf;
 
@@ -353,19 +352,22 @@ mod tests {
         assert_eq!(spec.max_open_files, Some(1024));
 
         // for_permission: disabled toggle produces disabled spec
-        let disabled_spec = SandboxSpec::for_permission(root.clone(), PermissionLevel::WorkspaceWrite, false);
+        let disabled_spec =
+            SandboxSpec::for_permission(root.clone(), PermissionLevel::WorkspaceWrite, false);
         assert!(!disabled_spec.enabled);
         assert_eq!(disabled_spec.network, NetworkPolicy::Allow);
         assert!(disabled_spec.writable_roots.is_empty());
 
         // for_permission: SkipPermissions allows network
-        let skip_spec = SandboxSpec::for_permission(root.clone(), PermissionLevel::SkipPermissions, true);
+        let skip_spec =
+            SandboxSpec::for_permission(root.clone(), PermissionLevel::SkipPermissions, true);
         assert!(skip_spec.enabled);
         assert_eq!(skip_spec.network, NetworkPolicy::Allow);
         assert_eq!(skip_spec.writable_roots, vec![root.clone()]);
 
         // for_permission: WorkspaceWrite denies network
-        let write_spec = SandboxSpec::for_permission(root.clone(), PermissionLevel::WorkspaceWrite, true);
+        let write_spec =
+            SandboxSpec::for_permission(root.clone(), PermissionLevel::WorkspaceWrite, true);
         assert!(write_spec.enabled);
         assert_eq!(write_spec.network, NetworkPolicy::Deny);
 

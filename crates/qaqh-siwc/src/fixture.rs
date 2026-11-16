@@ -60,9 +60,8 @@ fn key_pair() -> ring::signature::RsaKeyPair {
 
 /// 用测试私钥签一段 JWT（RS256）。
 pub fn sign_id_token(claims: &Value) -> String {
-    let header = base64url_encode(
-        format!(r#"{{"alg":"RS256","kid":"{TEST_KID}","typ":"JWT"}}"#).as_bytes(),
-    );
+    let header =
+        base64url_encode(format!(r#"{{"alg":"RS256","kid":"{TEST_KID}","typ":"JWT"}}"#).as_bytes());
     let payload = base64url_encode(
         serde_json::to_string(claims)
             .expect("claims json")
@@ -147,9 +146,7 @@ pub struct MockOidc {
 impl MockOidc {
     pub fn start() -> Self {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock bind");
-        listener
-            .set_nonblocking(true)
-            .expect("mock nonblocking");
+        listener.set_nonblocking(true).expect("mock nonblocking");
         let port = listener.local_addr().expect("addr").port();
         let issuer = format!("http://127.0.0.1:{port}");
         let shutdown = Arc::new(AtomicBool::new(false));
@@ -289,7 +286,17 @@ fn serve(issuer: &str, state: &Arc<Mutex<MockState>>, mut stream: TcpStream) {
         ),
         ("POST", "/api/accounts/oauth/token") => {
             let form = parse_form(&body);
-            let (status, error_code, nonce, grant_sharing, expires_in, earliest, issued, subject, serial) = {
+            let (
+                status,
+                error_code,
+                nonce,
+                grant_sharing,
+                expires_in,
+                earliest,
+                issued,
+                subject,
+                serial,
+            ) = {
                 let mut guard = state.lock().expect("state");
                 guard.token_requests.push(form.clone());
                 guard.token_serial += 1;
@@ -353,7 +360,8 @@ fn serve(issuer: &str, state: &Arc<Mutex<MockState>>, mut stream: TcpStream) {
                 .revoke_requests
                 .push(parse_form(&body));
             // 文档：空 200 即撤销成功。
-            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         }
         ("GET", "/v1/models") => json_response(
             &mut stream,
@@ -365,15 +373,15 @@ fn serve(issuer: &str, state: &Arc<Mutex<MockState>>, mut stream: TcpStream) {
             ]}),
         ),
         _ => {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
         }
     }
 }
 
 fn form_value(form: &[(String, String)], key: &str) -> Option<String> {
-    form.iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.clone())
+    form.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
 }
 
 fn parse_form(body: &str) -> Vec<(String, String)> {

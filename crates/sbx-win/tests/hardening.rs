@@ -2,7 +2,10 @@
 
 #![cfg(windows)]
 
-use sbx_win::{acl, desktop, events, policy::AceOp, policy::AceTarget, policy::Precreate, policy::AceMode, sid, spawn, token};
+use sbx_win::{
+    acl, desktop, events, policy::AceMode, policy::AceOp, policy::AceTarget, policy::Precreate,
+    sid, spawn, token,
+};
 use std::os::windows::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -44,7 +47,9 @@ fn run(env: &Env, inner: &str) -> sbx_win::spawn::Exit {
     let scratch_home = env.cwd.join("home");
     let pairs = sbx_win::env::minimal_child_env(&scratch_tmp, &scratch_home);
     let child = spawn::spawn(
-        &spawn::Isolation::RestrictedToken { token: env.token.handle() },
+        &spawn::Isolation::RestrictedToken {
+            token: env.token.handle(),
+        },
         &format!("\"{}\" /c {}", std::env::var("ComSpec").unwrap(), inner),
         &env.cwd,
         &pairs,
@@ -59,7 +64,9 @@ fn run_no_wait(env: &Env, inner: &str) -> sbx_win::spawn::Child {
     let scratch_home = env.cwd.join("home");
     let pairs = sbx_win::env::minimal_child_env(&scratch_tmp, &scratch_home);
     spawn::spawn(
-        &spawn::Isolation::RestrictedToken { token: env.token.handle() },
+        &spawn::Isolation::RestrictedToken {
+            token: env.token.handle(),
+        },
         &format!("\"{}\" /c {}", std::env::var("ComSpec").unwrap(), inner),
         &env.cwd,
         &pairs,
@@ -74,8 +81,15 @@ fn ace_apply_is_idempotent_and_revocable() {
     let f = base.join("probe.txt");
     std::fs::write(&f, "x").unwrap();
     assert!(acl::add_ace(&f, &env.sid, AceMode::Allow, false).unwrap());
-    assert!(!acl::add_ace(&f, &env.sid, AceMode::Allow, false).unwrap(), "第二次应为跳过");
-    assert_eq!(acl::count_aces(&f, &env.sid, AceMode::Allow).unwrap(), 1, "不允许 ACE 堆积");
+    assert!(
+        !acl::add_ace(&f, &env.sid, AceMode::Allow, false).unwrap(),
+        "第二次应为跳过"
+    );
+    assert_eq!(
+        acl::count_aces(&f, &env.sid, AceMode::Allow).unwrap(),
+        1,
+        "不允许 ACE 堆积"
+    );
     assert!(acl::revoke_ace(&f, &env.sid).unwrap());
     assert_eq!(acl::count_aces(&f, &env.sid, AceMode::Allow).unwrap(), 0);
     let _ = std::fs::remove_dir_all(&base);
@@ -91,7 +105,10 @@ fn kill_tree_terminates_child() {
     // 收割应在数秒内返回(进程被 Job 终结),而不是等 30 秒。
     // Job 终结的退出码不保证非零(实测可为 0),只断言时限。
     let exit = child.wait().unwrap();
-    assert!(start.elapsed() < Duration::from_secs(5), "kill_tree 后应立即退出");
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "kill_tree 后应立即退出"
+    );
     let _ = exit;
     let _ = std::fs::remove_dir_all(&base);
 }
@@ -155,7 +172,10 @@ fn writes_via_restricted_token_use_the_policy() {
     acl::add_ace(&allowed, &env.sid, AceMode::Allow, false).unwrap();
     let ok = run(&env, &format!("echo x >> {}", allowed.display()));
     assert_eq!(ok.code, 0);
-    let denied = run(&env, &format!("echo x > {}", ws.join("other.txt").display()));
+    let denied = run(
+        &env,
+        &format!("echo x > {}", ws.join("other.txt").display()),
+    );
     assert_ne!(denied.code, 0);
     assert!(!ws.join("other.txt").exists(), "未授权新建不应发生");
     let _ = std::fs::remove_dir_all(&base);
@@ -213,8 +233,14 @@ fn junction_intermediate_component_is_rejected_before_ace() {
     let applied = acl::apply_ops(&[op], &events::NullSink);
     assert!(applied.is_err(), "穿透 junction 的路径必须被拒绝");
     // 受害对象上绝不能出现 cap ACE,内容也不能被动过
-    assert_eq!(acl::count_aces(&victim_dir, &env.sid, AceMode::Allow).unwrap(), 0);
-    assert_eq!(acl::count_aces(&victim_file, &env.sid, AceMode::Allow).unwrap(), 0);
+    assert_eq!(
+        acl::count_aces(&victim_dir, &env.sid, AceMode::Allow).unwrap(),
+        0
+    );
+    assert_eq!(
+        acl::count_aces(&victim_file, &env.sid, AceMode::Allow).unwrap(),
+        0
+    );
     assert_eq!(
         std::fs::read_to_string(&victim_file).unwrap(),
         "SECRET",
@@ -252,7 +278,10 @@ fn symlink_final_component_is_rejected_before_ace() {
     };
     let applied = acl::apply_ops(&[op], &events::NullSink);
     assert!(applied.is_err(), "reparse point 目标必须被拒绝");
-    assert_eq!(acl::count_aces(&victim, &env.sid, AceMode::Allow).unwrap(), 0);
+    assert_eq!(
+        acl::count_aces(&victim, &env.sid, AceMode::Allow).unwrap(),
+        0
+    );
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -282,7 +311,11 @@ fn sddl_snapshot_roundtrip_restores_dacl() {
     // cleanup 语义:按快照整树恢复 —— cap ACE 消失,DACL 回到原始形态
     acl::restore_dacl_from_sddl(&f, snaps[0].as_ref().unwrap()).unwrap();
     assert_eq!(acl::count_aces(&f, &env.sid, AceMode::Allow).unwrap(), 0);
-    assert_eq!(acl::dacl_sddl(&f).unwrap(), before, "恢复后 DACL 应与快照前一致");
+    assert_eq!(
+        acl::dacl_sddl(&f).unwrap(),
+        before,
+        "恢复后 DACL 应与快照前一致"
+    );
 
     // 幂等复跑:apply(重新加 ACE)→ restore,再次回到原始形态
     let snaps2 = acl::apply_ops(std::slice::from_ref(&op), &events::NullSink).unwrap();

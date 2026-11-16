@@ -64,9 +64,14 @@ pub fn load_or_create_identity(
     if let Ok(text) = std::fs::read_to_string(&file) {
         if let Some(v) = serde_json::from_str::<serde_json::Value>(&text).ok() {
             let sid_text = v.get("sid").and_then(|s| s.as_str()).map(String::from);
-            let kind = v.get("isolation").and_then(|s| s.as_str()).unwrap_or("token");
+            let kind = v
+                .get("isolation")
+                .and_then(|s| s.as_str())
+                .unwrap_or("token");
             let ac_name = v.get("ac_name").and_then(|s| s.as_str()).map(String::from);
-            if kind == want_kind && ac_name.is_some() == (isolation == crate::policy::IsolationKind::AppContainer) {
+            if kind == want_kind
+                && ac_name.is_some() == (isolation == crate::policy::IsolationKind::AppContainer)
+            {
                 if let Some(sid_text) = sid_text {
                     if let Ok(sid) = crate::sid::parse_sid(&sid_text) {
                         return Ok((

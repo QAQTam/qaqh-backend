@@ -82,22 +82,6 @@ pub fn shutdown_global() {
     runtime_handle().block_on(manager.shutdown_all());
 }
 
-/// 投影预热（fire-and-forget）：装配点调用一次，后台逐 server 连接并缓存
-/// tools/list（置脏）。
-///
-/// 解决 lazy 连接与投影可见性的先有鸡还是先有蛋：连接唯一触发点是工具
-/// 执行，而工具要先投影进工具表才会被调用——全新 daemon 上模型首回合
-/// 看不到任何 MCP 工具，调用永不发生，投影永远为空。预热在后台完成
-/// 连接与缓存，不阻塞装配；未启用时不开专属 runtime、直接 no-op；
-/// 长期无调用的连接由 idle 回收机制收敛。
-pub fn prime_all_async() {
-    let manager = manager_slot();
-    if !manager.config().enabled {
-        return;
-    }
-    runtime_handle().spawn(async move { manager.prime_all().await });
-}
-
 /// E-5 单一 dispatcher：全体 MCP 工具共用的 fn 指针（注册进 `DynamicTool`）。
 ///
 /// typed 外壳：拿显式 [`ToolCallContext`]（工作区/取消/超时都显式），注册全名
@@ -494,7 +478,7 @@ pub fn projection_batch_with(manager: &Arc<McpManager>) -> Vec<(String, DynamicT
     // 零 server 配置时 `mcp list_servers` 也能答"无配置"；schema 与 dispatcher
     // 见 resources.rs）。碰撞拒绝由 replace_dynamic_tools 兜底（与内置工具重名
     // 会被拒绝并计数告警——当前内置面无 `mcp` 名）。
-    if manager.config().enabled {
+    if manager.config().effective_enabled() {
         batch.push(crate::resources::aggregate_entry(
             &manager.config(),
             Duration::from_secs(DEFAULT_TIMEOUT_SECS),

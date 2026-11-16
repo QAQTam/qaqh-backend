@@ -3,17 +3,16 @@
 //! 语义:restricting SID 只参与写访问检查 → 未挂 capability ACE 的路径
 //! 写失败(内核 DACL),读走原始用户权限(全盘可读,spec N2)。
 
-use windows::core::{PCWSTR, Result, w};
 use windows::Win32::Foundation::{CloseHandle, HANDLE, LUID};
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE,
-    GetSidSubAuthorityCount, GetTokenInformation, LUA_TOKEN, LUID_AND_ATTRIBUTES, PSID,
-    LookupPrivilegeValueW, SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES,
-    TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID, TOKEN_APPCONTAINER_INFORMATION,
-    TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION, TOKEN_GROUPS, TOKEN_IMPERSONATE,
-    TOKEN_PRIVILEGES, TOKEN_QUERY, TokenAppContainerSid, TokenCapabilities, TokenElevation,
-    TokenUser, TOKEN_USER, WRITE_RESTRICTED,
+    AdjustTokenPrivileges, CreateRestrictedToken, DISABLE_MAX_PRIVILEGE, GetSidSubAuthorityCount,
+    GetTokenInformation, LUA_TOKEN, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW, PSID,
+    SE_PRIVILEGE_ENABLED, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ADJUST_SESSIONID,
+    TOKEN_APPCONTAINER_INFORMATION, TOKEN_ASSIGN_PRIMARY, TOKEN_DUPLICATE, TOKEN_ELEVATION,
+    TOKEN_GROUPS, TOKEN_IMPERSONATE, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
+    TokenAppContainerSid, TokenCapabilities, TokenElevation, TokenUser, WRITE_RESTRICTED,
 };
+use windows::core::{PCWSTR, Result, w};
 
 /// SE_GROUP_ENABLED(0x4,Win32_System_SystemServices):能力 SID 参与
 /// 访问检查所需属性位。本地定义避免为一个常量引入 cargo feature。
@@ -171,7 +170,9 @@ pub fn create_lowbox_token_with_capabilities(
             std::ptr::null(),
         );
         if nt.0 < 0 {
-            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(nt.0)));
+            return Err(windows::core::Error::from_hresult(windows::core::HRESULT(
+                nt.0,
+            )));
         }
         enable_change_notify(h_low)?;
         Ok(Token(h_low))
@@ -277,7 +278,8 @@ pub fn process_user_sid() -> Result<Vec<u8>> {
 }
 
 /// 当前进程是否提权(测试/自检用:spike 必须在非提权下跑)。
-pub fn is_elevated() -> bool {    unsafe {
+pub fn is_elevated() -> bool {
+    unsafe {
         let mut h = HANDLE::default();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut h).is_err() {
             return false;

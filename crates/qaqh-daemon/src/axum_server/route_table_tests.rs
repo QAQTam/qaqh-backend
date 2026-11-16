@@ -33,10 +33,7 @@ const FALLBACK_BODY: &str = "not found";
 fn synth(path: &str) -> String {
     let mut out = path.to_owned();
     for (placeholder, value) in [
-        (
-            "{session_id}",
-            "0199a0f0-0000-7000-8000-000000000001",
-        ),
+        ("{session_id}", "0199a0f0-0000-7000-8000-000000000001"),
         ("{command_id}", "cmd-synthetic"),
         (
             "{content_id}",
@@ -55,11 +52,11 @@ fn synth(path: &str) -> String {
 }
 
 fn view_token(state: &AppState) -> String {
-    let (_device_id, token) = state
-        .devices
-        .lock()
-        .expect("device registry lock")
-        .issue("route-table-probe", "node", Scope::View);
+    let (_device_id, token) = state.devices.lock().expect("device registry lock").issue(
+        "route-table-probe",
+        "node",
+        Scope::View,
+    );
     token
 }
 
@@ -92,7 +89,9 @@ async fn v2_route_table_equals_the_real_router() {
     let app = build_router(state.clone());
     let token = view_token(&state);
 
-    let declared = CONTROL_PLANE_ROUTES.iter().chain(RINGING_V2_HTTP_ROUTES.iter());
+    let declared = CONTROL_PLANE_ROUTES
+        .iter()
+        .chain(RINGING_V2_HTTP_ROUTES.iter());
     assert_eq!(
         CONTROL_PLANE_ROUTES.len() + RINGING_V2_HTTP_ROUTES.len(),
         // 11 = 4 控制面（health/activity/stop/stop-if-idle）+ 7 市场端点

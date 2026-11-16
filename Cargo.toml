@@ -50,12 +50,15 @@ exclude = ["crates/qaqh-import"]
 
 [workspace.dependencies]
 mutil-ai = { version = "0.7.0", path = "../mutil-ai" }
-rmcp = { version = "3.2", default-features = false, features = ["client", "transport-child-process"] }
+# 精确锁（不用 ^）：避免 cargo update 把 SDK 漂到未验证的版本。3.10.0 为
+# crates.io 最新稳定（2026-11-12）；qaqh-mcp 生产/dev、qaqh-runtime dev 全部
+# 继承本行，见 ADR-0025。reqwest 0.13 / process-wrap 10 与之对齐。
+rmcp = { version = "=3.10.0", default-features = false, features = ["client", "transport-child-process"] }
 async-lsp = { version = "0.2", default-features = false, features = ["tokio", "omni-trait"] }
 lsp-types = "0.95"
 
 [workspace.package]
-version = "4.0.0"
+version = "4.0.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

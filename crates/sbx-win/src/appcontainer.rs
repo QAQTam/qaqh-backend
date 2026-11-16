@@ -9,13 +9,13 @@
 //! 不依赖第三方哈希(仓宪法第 1 条)。SID 落入 sidstore,与 TokenPlane 的
 //! cap-SID 台账/cleanup 机制完全同构(ACLE 恢复按逐行 sid)。
 
-use windows::core::{w, PCWSTR, Result};
 use windows::Win32::Foundation::{HLOCAL, LocalFree};
 use windows::Win32::Security::Cryptography::ProcessPrng;
-use windows::Win32::Security::{GetSidSubAuthorityCount, PSID};
 use windows::Win32::Security::Isolation::{
     CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
 };
+use windows::Win32::Security::{GetSidSubAuthorityCount, PSID};
+use windows::core::{PCWSTR, Result, w};
 
 pub struct AppContainerProfile {
     pub name: String,

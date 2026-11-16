@@ -16,12 +16,12 @@ use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
 use mutil_ai::{
-    ChatRequest, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart,
+    ChatRequest, CustomToolFormat, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart,
     Message as WireMessage, ModelAdapter, Part, ProfileSelector, ProtocolSurface, ProviderProfile,
     ProviderRequestOptions, ReasoningConfig, ReasoningEffort, ReasoningSummary, RequestOptions,
     Role, ScopedToolDeclaration, ServerTool, ServerToolItem, ServerToolState,
-    StreamEvent as SdkEvent, ToolCall as WireToolCall, ToolDeclaration, ToolResult as WireToolResult,
-    ToolSpec, TransportConfig, CustomToolFormat, Usage as WireUsage,
+    StreamEvent as SdkEvent, ToolCall as WireToolCall, ToolDeclaration,
+    ToolResult as WireToolResult, ToolSpec, TransportConfig, Usage as WireUsage,
 };
 #[cfg(feature = "native-tool-plan")]
 use qaqh_tool_core::model_tool_plan::{
@@ -333,7 +333,8 @@ pub(crate) fn project_responses_messages(
     let mut top_taken = false;
     let mut img_idx: usize = 0;
 
-    for msg in messages {
+    let stale_boundary = super::sdk_common::stale_image_boundary(messages);
+    for (msg_index, msg) in messages.iter().enumerate() {
         match msg.role.as_str() {
             "system" => {
                 let text = first_text(&msg.content);
@@ -507,6 +508,10 @@ pub(crate) fn project_responses_messages(
                 }
             }
             "tool" => {
+                // 跨轮丢弃：位于最后一条 user 消息之前的工具图属于已消化回合，
+                // 不再重发（见 sdk_common::stale_image_boundary）。
+                let stale = stale_boundary.is_some_and(|boundary| msg_index < boundary);
+                let mut dropped = 0usize;
                 let mut run: Vec<Part> = Vec::new();
                 let mut attachments: Vec<WireMessage> = Vec::new();
                 for b in &msg.content {
@@ -532,6 +537,10 @@ pub(crate) fn project_responses_messages(
                         // Responses 协议不要求 assistant(tool_calls) 后必须连续
                         // tool item，原位发出即可（与退役前一致）。
                         ContentBlock::Image { mime_type, data } => {
+                            if stale {
+                                dropped += 1;
+                                continue;
+                            }
                             attachments.push(WireMessage::new(
                                 Role::User,
                                 response_media_parts(&mut img_idx, mime_type, data),
@@ -540,6 +549,9 @@ pub(crate) fn project_responses_messages(
                         ContentBlock::ImageRef {
                             sha256, mime_type, ..
                         } => match qaqh_types::image_store::load_image_b64(sha256, mime_type) {
+                            _ if stale => {
+                                dropped += 1;
+                            }
                             Ok(data) => attachments.push(WireMessage::new(
                                 Role::User,
                                 response_media_parts(&mut img_idx, mime_type, &data),
@@ -552,6 +564,12 @@ pub(crate) fn project_responses_messages(
                     }
                 }
                 if !run.is_empty() {
+                    if dropped > 0
+                        && let Some(Part::ToolResult(tr)) = run.last_mut()
+                    {
+                        tr.content.push('\n');
+                        tr.content.push_str(super::sdk_common::STALE_IMAGE_STUB);
+                    }
                     out.push(WireMessage::new(Role::Tool, run));
                 }
                 // Native Responses calls must be paired with their tool output
@@ -1616,8 +1634,7 @@ async fn consume(
                             "native tool plan stream lacks a terminal response"
                         ));
                     }
-                    interrupted =
-                        Some("upstream closed stream before terminal event".to_string());
+                    interrupted = Some("upstream closed stream before terminal event".to_string());
                     break;
                 }
                 // Terminal-only providers still need a card. Streamed calls
@@ -1691,7 +1708,9 @@ async fn consume(
                     for item in output {
                         let has_encrypted = item.get("encrypted_content").is_some();
                         let it_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        if !has_encrypted && matches!(it_type, "function_call" | "custom_tool_call" | "message") {
+                        if !has_encrypted
+                            && matches!(it_type, "function_call" | "custom_tool_call" | "message")
+                        {
                             continue;
                         }
                         let already = blocks.iter().any(|b| {
@@ -1854,6 +1873,12 @@ async fn consume(
                     });
                     return Outcome::Fatal(anyhow::anyhow!(msg));
                 }
+                // Connection/Timeout 容忍路径此前不带类别上抛;turn 级重发
+                // 判定需要 ErrorKind,与上方立即 Fatal 分支同律补发事件。
+                on_event(StreamEvent::Error {
+                    kind: e.kind(),
+                    message: e.to_string(),
+                });
                 interrupted = Some(e.to_string());
                 break;
             }

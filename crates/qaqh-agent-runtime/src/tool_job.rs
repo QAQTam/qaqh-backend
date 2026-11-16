@@ -121,6 +121,7 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                     timeout_ms: request.timeout_ms,
                     yield_time_ms: request.yield_time_ms,
                     max_output_bytes: request.max_output_tokens as usize * 4,
+                    notify_on_exit: request.notify_on_exit,
                     cancellation: context.cancellation.shared_flag(),
                 },
                 self.publisher.clone(),
@@ -143,6 +144,7 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                 chars: request.chars,
                 yield_time_ms: request.yield_time_ms,
                 max_output_bytes: request.max_output_tokens as usize * 4,
+                notify_on_exit: request.notify_on_exit,
                 cancellation: context.cancellation.shared_flag(),
             })
             .map_err(exec_manager_error)?;
@@ -163,6 +165,7 @@ fn exec_result_to_tool_core(
         timed_out: result.timed_out,
         cancelled: result.cancelled,
         input_bytes_written: result.input_bytes_written,
+        notify_armed: result.notify_armed,
     }
 }
 
@@ -204,6 +207,18 @@ pub struct ToolRequest {
     pub read_only: bool,
     /// Effective arguments (JSON bytes).
     pub args: Vec<u8>,
+}
+
+/// 工具执行产出:模型文本 + 工具图。
+///
+/// 图以原始 `ToolImage`(base64 字节)返回,由 session loop 外置落盘
+/// (内容寻址)后以 `ImageRef` 进模型上下文——port 边界不再丢弃工具产出。
+#[derive(Debug, Clone)]
+pub struct ToolExecOutput {
+    /// 模型可见文本(与旧 `content` 字段同源)。
+    pub text: String,
+    /// 工具产出的图片;失败路径恒为空。
+    pub images: Vec<qaqh_types::ToolImage>,
 }
 
 /// The executor's own account of how far it got. Any error that could have
@@ -554,7 +569,7 @@ impl WorkspaceToolPort {
         &self,
         request: &ToolRequest,
         cancel: Arc<AtomicBool>,
-    ) -> Result<String, ToolFailure> {
+    ) -> Result<ToolExecOutput, ToolFailure> {
         let args_json = String::from_utf8(request.args.clone()).ok();
         if cancel.load(Ordering::Acquire) {
             self.lifecycle.settled(
@@ -730,7 +745,10 @@ impl WorkspaceToolPort {
                     effects: effect_infos(&exec_result),
                 },
             );
-            return Ok(exec_result.content);
+            return Ok(ToolExecOutput {
+                text: exec_result.content,
+                images: exec_result.result.images,
+            });
         }
 
         if exec_result.success {
@@ -748,7 +766,10 @@ impl WorkspaceToolPort {
                     effects: effect_infos(&exec_result),
                 },
             );
-            return Ok(exec_result.content);
+            return Ok(ToolExecOutput {
+                text: exec_result.content,
+                images: exec_result.result.images,
+            });
         }
 
         let err_code = exec_result

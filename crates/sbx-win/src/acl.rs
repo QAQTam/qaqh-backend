@@ -9,24 +9,24 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use windows::core::{Error, PCWSTR, PWSTR, Result};
-use windows::Win32::Foundation::{LocalFree, ERROR_SUCCESS, HLOCAL};
+use windows::Win32::Foundation::{ERROR_SUCCESS, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     BuildTrusteeWithSidW, ConvertSecurityDescriptorToStringSecurityDescriptorW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, DENY_ACCESS, EXPLICIT_ACCESS_W,
-    GetNamedSecurityInfoW, GRANT_ACCESS, SE_FILE_OBJECT, SE_OBJECT_TYPE, SE_REGISTRY_KEY,
+    GRANT_ACCESS, GetNamedSecurityInfoW, SE_FILE_OBJECT, SE_OBJECT_TYPE, SE_REGISTRY_KEY,
     SetEntriesInAclW, SetNamedSecurityInfoW,
-};
-use windows::Win32::System::Registry::{
-    RegCloseKey, RegCreateKeyExW, RegOpenKeyExW, HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER,
-    HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_ALL_ACCESS, KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE,
 };
 use windows::Win32::Security::{
     ACL, ACL_SIZE_INFORMATION, AclSizeInformation, DACL_SECURITY_INFORMATION, GetAce,
-    GetAclInformation, MakeAbsoluteSD, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
-    PSECURITY_DESCRIPTOR, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+    GetAclInformation, MakeAbsoluteSD, NO_INHERITANCE, PROTECTED_DACL_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
 use windows::Win32::Storage::FileSystem::FILE_GENERIC_WRITE;
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CLASSES_ROOT, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, HKEY_USERS, KEY_ALL_ACCESS,
+    KEY_READ, KEY_WRITE, REG_OPTION_NON_VOLATILE, RegCloseKey, RegCreateKeyExW, RegOpenKeyExW,
+};
+use windows::core::{Error, PCWSTR, PWSTR, Result};
 
 /// FILE_ATTRIBUTE_REPARSE_POINT(0x400):符号链接 / junction / 一次性占位等。
 pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
@@ -191,7 +191,12 @@ fn count_aces_obj(target: AceTarget, path: &Path, sid: &[u8], mode: AceMode) -> 
                 if *bytes != want_type {
                     continue;
                 }
-                let mask = u32::from_le_bytes([bytes.add(4).read(), bytes.add(5).read(), bytes.add(6).read(), bytes.add(7).read()]);
+                let mask = u32::from_le_bytes([
+                    bytes.add(4).read(),
+                    bytes.add(5).read(),
+                    bytes.add(6).read(),
+                    bytes.add(7).read(),
+                ]);
                 if mask & required != required {
                     continue;
                 }
@@ -236,39 +241,45 @@ pub fn revoke_ace_for(path: &Path, target: AceTarget, sid: &[u8]) -> Result<bool
         }
     }
     let (old_dacl, sd) = get_security(target, path)?;
-    let r = (|| {
-        unsafe {
-            let Some(old) = old_dacl else { return Ok(false) };
-            let mut ea = EXPLICIT_ACCESS_W::default();
-            BuildTrusteeWithSidW(&mut ea.Trustee, Some(PSID(sid.as_ptr() as *mut core::ffi::c_void)));
-            ea.grfAccessMode = windows::Win32::Security::Authorization::REVOKE_ACCESS;
-            ea.grfAccessPermissions = 0;
-            let mut new_dacl: *mut ACL = std::ptr::null_mut();
-            let code =
-                SetEntriesInAclW(Some(std::slice::from_ref(&ea)), Some(old as *const ACL), &mut new_dacl);
-            if code != ERROR_SUCCESS {
-                return Err(win32_err(code));
-            }
-            let name_w = security_name_w(target, path)?;
-            let code = SetNamedSecurityInfoW(
-                PCWSTR(name_w.as_ptr()),
-                se_obj(target),
-                DACL_SECURITY_INFORMATION,
-                None,
-                None,
-                Some(new_dacl),
-                None,
-            );
-            let r = if code != ERROR_SUCCESS {
-                Err(win32_err(code))
-            } else {
-                Ok(true)
-            };
-            if !new_dacl.is_null() {
-                LocalFree(Some(HLOCAL(new_dacl as *mut core::ffi::c_void)));
-            }
-            r
+    let r = (|| unsafe {
+        let Some(old) = old_dacl else {
+            return Ok(false);
+        };
+        let mut ea = EXPLICIT_ACCESS_W::default();
+        BuildTrusteeWithSidW(
+            &mut ea.Trustee,
+            Some(PSID(sid.as_ptr() as *mut core::ffi::c_void)),
+        );
+        ea.grfAccessMode = windows::Win32::Security::Authorization::REVOKE_ACCESS;
+        ea.grfAccessPermissions = 0;
+        let mut new_dacl: *mut ACL = std::ptr::null_mut();
+        let code = SetEntriesInAclW(
+            Some(std::slice::from_ref(&ea)),
+            Some(old as *const ACL),
+            &mut new_dacl,
+        );
+        if code != ERROR_SUCCESS {
+            return Err(win32_err(code));
         }
+        let name_w = security_name_w(target, path)?;
+        let code = SetNamedSecurityInfoW(
+            PCWSTR(name_w.as_ptr()),
+            se_obj(target),
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(new_dacl),
+            None,
+        );
+        let r = if code != ERROR_SUCCESS {
+            Err(win32_err(code))
+        } else {
+            Ok(true)
+        };
+        if !new_dacl.is_null() {
+            LocalFree(Some(HLOCAL(new_dacl as *mut core::ffi::c_void)));
+        }
+        r
     })();
     unsafe {
         if !sd.0.is_null() {
@@ -333,7 +344,15 @@ pub fn add_ace_with_mask_ex(
     mask: u32,
     protected: bool,
 ) -> Result<bool> {
-    add_ace_obj(AceTarget::File, path, sid, mode, inherit_tree, mask, protected)
+    add_ace_obj(
+        AceTarget::File,
+        path,
+        sid,
+        mode,
+        inherit_tree,
+        mask,
+        protected,
+    )
 }
 
 /// 对象种类无关的 ACE 追加核心(文件/注册表共用;SetEntriesInAclW 的
@@ -353,51 +372,55 @@ fn add_ace_obj(
         return Ok(false);
     }
     let (old_dacl, sd) = get_security(target, path)?;
-    let r = (|| {
-        unsafe {
-            let mut ea = EXPLICIT_ACCESS_W::default();
-            BuildTrusteeWithSidW(&mut ea.Trustee, Some(PSID(sid.as_ptr() as *mut core::ffi::c_void)));
-            ea.grfAccessPermissions = mask;
-            ea.grfAccessMode = match mode {
-                AceMode::Allow | AceMode::Read => GRANT_ACCESS,
-                AceMode::Deny => DENY_ACCESS,
-            };
-            ea.grfInheritance = if inherit_tree {
-                SUB_CONTAINERS_AND_OBJECTS_INHERIT
-            } else {
-                NO_INHERITANCE
-            };
-            let mut new_dacl: *mut ACL = std::ptr::null_mut();
-            let code =
-                SetEntriesInAclW(Some(std::slice::from_ref(&ea)), old_dacl.map(|p| p as *const ACL), &mut new_dacl);
-            if code != ERROR_SUCCESS {
-                return Err(win32_err(code));
-            }
-            let name_w = security_name_w(target, path)?;
-            let si = if protected {
-                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
-            } else {
-                DACL_SECURITY_INFORMATION
-            };
-            let code = SetNamedSecurityInfoW(
-                PCWSTR(name_w.as_ptr()),
-                se_obj(target),
-                si,
-                None,
-                None,
-                Some(new_dacl),
-                None,
-            );
-            let r = if code != ERROR_SUCCESS {
-                Err(win32_err(code))
-            } else {
-                Ok(())
-            };
-            if !new_dacl.is_null() {
-                LocalFree(Some(HLOCAL(new_dacl as *mut core::ffi::c_void)));
-            }
-            r
+    let r = (|| unsafe {
+        let mut ea = EXPLICIT_ACCESS_W::default();
+        BuildTrusteeWithSidW(
+            &mut ea.Trustee,
+            Some(PSID(sid.as_ptr() as *mut core::ffi::c_void)),
+        );
+        ea.grfAccessPermissions = mask;
+        ea.grfAccessMode = match mode {
+            AceMode::Allow | AceMode::Read => GRANT_ACCESS,
+            AceMode::Deny => DENY_ACCESS,
+        };
+        ea.grfInheritance = if inherit_tree {
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT
+        } else {
+            NO_INHERITANCE
+        };
+        let mut new_dacl: *mut ACL = std::ptr::null_mut();
+        let code = SetEntriesInAclW(
+            Some(std::slice::from_ref(&ea)),
+            old_dacl.map(|p| p as *const ACL),
+            &mut new_dacl,
+        );
+        if code != ERROR_SUCCESS {
+            return Err(win32_err(code));
         }
+        let name_w = security_name_w(target, path)?;
+        let si = if protected {
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION
+        } else {
+            DACL_SECURITY_INFORMATION
+        };
+        let code = SetNamedSecurityInfoW(
+            PCWSTR(name_w.as_ptr()),
+            se_obj(target),
+            si,
+            None,
+            None,
+            Some(new_dacl),
+            None,
+        );
+        let r = if code != ERROR_SUCCESS {
+            Err(win32_err(code))
+        } else {
+            Ok(())
+        };
+        if !new_dacl.is_null() {
+            LocalFree(Some(HLOCAL(new_dacl as *mut core::ffi::c_void)));
+        }
+        r
     })();
     unsafe {
         if !sd.0.is_null() {
@@ -534,7 +557,9 @@ pub fn restore_sddl_for(target: AceTarget, path: &Path, sddl: &str) -> Result<()
             let mut grp_buf = vec![0u8; grp_len as usize];
             MakeAbsoluteSD(
                 psd,
-                Some(PSECURITY_DESCRIPTOR(abs_buf.as_mut_ptr() as *mut core::ffi::c_void)),
+                Some(PSECURITY_DESCRIPTOR(
+                    abs_buf.as_mut_ptr() as *mut core::ffi::c_void
+                )),
                 &mut abs_len,
                 Some(dacl_buf.as_mut_ptr() as *mut ACL),
                 &mut dacl_len,
@@ -739,8 +764,16 @@ pub fn apply_ops(ops: &[AceOp], sink: &dyn EventSink) -> io::Result<Vec<Option<S
             }
             AceTarget::Registry => REG_FULL_MASK,
         };
-        let applied = add_ace_obj(op.kind, &op.path, &op.sid, op.mode, op.inherit_tree, mask, false)
-            .map_err(|e| io::Error::other(format!("add_ace {}: {e}", op.path.display())))?;
+        let applied = add_ace_obj(
+            op.kind,
+            &op.path,
+            &op.sid,
+            op.mode,
+            op.inherit_tree,
+            mask,
+            false,
+        )
+        .map_err(|e| io::Error::other(format!("add_ace {}: {e}", op.path.display())))?;
         let mode = match op.mode {
             AceMode::Allow => "allow",
             AceMode::Deny => "deny",
@@ -762,8 +795,7 @@ fn ensure_registry_key(path: &Path, precreate: Precreate) -> io::Result<()> {
     let sub_w: Vec<u16> = sub.encode_utf16().chain([0]).collect();
     unsafe {
         let mut hkey = HKEY::default();
-        let code =
-            RegOpenKeyExW(hroot, PCWSTR(sub_w.as_ptr()), Some(0), KEY_READ, &mut hkey);
+        let code = RegOpenKeyExW(hroot, PCWSTR(sub_w.as_ptr()), Some(0), KEY_READ, &mut hkey);
         if code == ERROR_SUCCESS {
             let _ = RegCloseKey(hkey);
             return Ok(());

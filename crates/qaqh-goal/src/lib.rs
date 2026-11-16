@@ -67,8 +67,7 @@ impl GoalToolOutput {
             .and_then(|g| g.token_budget.map(|b| b.saturating_sub(g.tokens_used)));
         let completion_budget_report = if report_complete
             && goal.as_ref().is_some_and(|g| {
-                g.status == GoalStatus::Complete
-                    && (g.token_budget.is_some() || g.time_used_ms > 0)
+                g.status == GoalStatus::Complete && (g.token_budget.is_some() || g.time_used_ms > 0)
             }) {
             Some(
                 "Goal achieved. Report final usage from this tool result's goal fields: \

@@ -431,8 +431,7 @@ mod tests {
     #[test]
     fn unavailable_ask_details_block_submission_but_allow_rejection() {
         let store = ChallengeStore::default();
-        for (kind, blocked_decision, safe_decision) in
-            [(InteractionKind::Ask, "submit", "dismiss")]
+        for (kind, blocked_decision, safe_decision) in [(InteractionKind::Ask, "submit", "dismiss")]
         {
             let pending = RingingV2PendingApprovals {
                 pending_permission: None,

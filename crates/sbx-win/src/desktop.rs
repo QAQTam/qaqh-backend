@@ -5,11 +5,11 @@
 //! 解法:每次运行建一个 DACL 只授 capability SID 的私有桌面,
 //! 子进程的窗口/控制台全部落在里面(顺带获得窗口消息隔离)。
 
-use windows::core::{PCWSTR, Result};
 use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE};
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::System::StationsAndDesktops::{DESKTOP_CONTROL_FLAGS, CreateDesktopW};
+use windows::Win32::System::StationsAndDesktops::{CreateDesktopW, DESKTOP_CONTROL_FLAGS};
+use windows::core::{PCWSTR, Result};
 
 pub struct Desktop {
     handle: HANDLE,
@@ -60,8 +60,14 @@ pub fn create_private_desktop(cap_sid_text: &str) -> Result<Desktop> {
             lpSecurityDescriptor: psd.0,
             bInheritHandle: false.into(),
         };
-        let created =
-            CreateDesktopW(PCWSTR(name_w.as_ptr()), PCWSTR::null(), None, DESKTOP_CONTROL_FLAGS(0), GENERIC_ALL.0, Some(&sa));
+        let created = CreateDesktopW(
+            PCWSTR(name_w.as_ptr()),
+            PCWSTR::null(),
+            None,
+            DESKTOP_CONTROL_FLAGS(0),
+            GENERIC_ALL.0,
+            Some(&sa),
+        );
         local_free_sd(&psd);
         let hdesk = created?;
         Ok(Desktop {

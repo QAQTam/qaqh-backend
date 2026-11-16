@@ -118,10 +118,7 @@ pub fn plan(
     let skills_src = plugin_root.join("skills");
     if skills_src.is_dir() {
         for name in skill_dir_names(&skills_src)? {
-            skill_copies.push((
-                skills_src.join(&name),
-                target.skills_root(home).join(&name),
-            ));
+            skill_copies.push((skills_src.join(&name), target.skills_root(home).join(&name)));
         }
     }
 
@@ -209,8 +206,7 @@ pub fn execute(
     };
 
     if !plan.mcp_servers.is_empty() {
-        let import =
-            mcp_import::import_servers(&plan.mcp_servers, approve, config_mcp, secrets)?;
+        let import = mcp_import::import_servers(&plan.mcp_servers, approve, config_mcp, secrets)?;
         report.imported_servers = import.imported;
         report.skipped_existing = import.skipped_existing;
         report.rejected = import.rejected;
@@ -268,10 +264,9 @@ fn skill_dir_names(skills_dir: &Path) -> Result<Vec<String>, String> {
 }
 
 fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
-    std::fs::create_dir_all(dest)
-        .map_err(|error| format!("create {}: {error}", dest.display()))?;
-    let read = std::fs::read_dir(source)
-        .map_err(|error| format!("read {}: {error}", source.display()))?;
+    std::fs::create_dir_all(dest).map_err(|error| format!("create {}: {error}", dest.display()))?;
+    let read =
+        std::fs::read_dir(source).map_err(|error| format!("read {}: {error}", source.display()))?;
     for item in read {
         let item = item.map_err(|error| format!("read {}: {error}", source.display()))?;
         let from = item.path();
@@ -279,9 +274,8 @@ fn copy_dir_recursive(source: &Path, dest: &Path) -> Result<(), String> {
         if from.is_dir() {
             copy_dir_recursive(&from, &to)?;
         } else {
-            std::fs::copy(&from, &to).map_err(|error| {
-                format!("copy {} -> {}: {error}", from.display(), to.display())
-            })?;
+            std::fs::copy(&from, &to)
+                .map_err(|error| format!("copy {} -> {}: {error}", from.display(), to.display()))?;
         }
     }
     Ok(())
@@ -344,8 +338,8 @@ fn ledger_save(ledger_home: &Path, ledger: InstalledLedger) -> Result<(), String
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
-    let text = toml::to_string_pretty(&ledger)
-        .map_err(|error| format!("serialize ledger: {error}"))?;
+    let text =
+        toml::to_string_pretty(&ledger).map_err(|error| format!("serialize ledger: {error}"))?;
     std::fs::write(&path, text).map_err(|error| format!("write {}: {error}", path.display()))
 }
 
@@ -451,13 +445,8 @@ pub fn uninstall_execute(
         report.removed_secrets.push(key.clone());
     }
     let mut records = installed_list(ledger_home)?;
-    records.retain(|r| {
-        !(r.plugin == plan.plugin && r.target == plan.target.flag())
-    });
-    ledger_save(
-        ledger_home,
-        InstalledLedger { records },
-    )?;
+    records.retain(|r| !(r.plugin == plan.plugin && r.target == plan.target.flag()));
+    ledger_save(ledger_home, InstalledLedger { records })?;
     Ok(report)
 }
 
@@ -496,15 +485,21 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let entry = write_skill_plugin(market.path(), "commit-helper", true);
 
-        let plan = plan(&entry, market.path(), HostTarget::Qaqh, home.path(), "fixture").unwrap();
+        let plan = plan(
+            &entry,
+            market.path(),
+            HostTarget::Qaqh,
+            home.path(),
+            "fixture",
+        )
+        .unwrap();
         assert_eq!(plan.skill_copies.len(), 1);
         assert_eq!(plan.mcp_servers.len(), 1);
         assert_eq!(plan.mcp_servers[0].source, ExternalSource::Marketplace);
         assert_eq!(plan.marketplace, "fixture");
 
         // secrets 落临时路径——测试绝不碰真实用户 secrets 文件。
-        let secrets =
-            qaqh_config::secrets::SecretStore::new(home.path().join("secrets-test.toml"));
+        let secrets = qaqh_config::secrets::SecretStore::new(home.path().join("secrets-test.toml"));
         let mut mcp = qaqh_config::config::McpConfig::default();
         let report = execute(&plan, &|_| true, &mut mcp, &secrets, home.path()).unwrap();
         assert_eq!(report.copied_skills, vec!["commit".to_string()]);
@@ -516,7 +511,10 @@ mod tests {
         // 账本已记录本次投影（含 secrets 键名）。
         let records = installed_list(home.path()).unwrap();
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].secret_keys, vec!["mcp-context7-token".to_string()]);
+        assert_eq!(
+            records[0].secret_keys,
+            vec!["mcp-context7-token".to_string()]
+        );
     }
 
     #[test]
@@ -524,7 +522,16 @@ mod tests {
         let market = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let entry = write_skill_plugin(market.path(), "with-mcp", true);
-        assert!(plan(&entry, market.path(), HostTarget::Codex, home.path(), "fixture").is_err());
+        assert!(
+            plan(
+                &entry,
+                market.path(),
+                HostTarget::Codex,
+                home.path(),
+                "fixture"
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -532,7 +539,14 @@ mod tests {
         let market = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let entry = write_skill_plugin(market.path(), "skill-only", false);
-        let plan = plan(&entry, market.path(), HostTarget::Codex, home.path(), "fixture").unwrap();
+        let plan = plan(
+            &entry,
+            market.path(),
+            HostTarget::Codex,
+            home.path(),
+            "fixture",
+        )
+        .unwrap();
         assert!(plan.mcp_servers.is_empty());
         assert_eq!(
             plan.skill_copies[0].1,

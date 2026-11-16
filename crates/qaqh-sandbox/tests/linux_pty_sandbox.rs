@@ -18,7 +18,10 @@ use qaqh_sandbox::{NetworkPolicy, SandboxBackend, SandboxSpec};
 fn helper_env() -> Vec<(String, String)> {
     vec![
         ("PATH".into(), "/usr/bin:/bin".into()),
-        ("HOME".into(), std::env::temp_dir().to_string_lossy().into_owned()),
+        (
+            "HOME".into(),
+            std::env::temp_dir().to_string_lossy().into_owned(),
+        ),
     ]
 }
 
@@ -109,7 +112,10 @@ fn landlock_write_isolation_survives_pty_helper() {
         .payload_path
         .clone()
         .expect("helper mode must produce a payload path");
-    assert!(payload_path.is_file(), "payload file must exist before spawn");
+    assert!(
+        payload_path.is_file(),
+        "payload file must exist before spawn"
+    );
 
     let mut session_spec = qaqh_pty::SessionSpec::new(launch.argv);
     session_spec.env = helper_env();

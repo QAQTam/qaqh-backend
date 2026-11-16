@@ -277,8 +277,7 @@ impl Client {
         request: RingingV2ApprovalRespondRequest,
     ) -> Result<RingingV2CommandAck> {
         let state = self.require_v2_session().await?;
-        let path =
-            format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/approvals/respond");
+        let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/approvals/respond");
         let response = self
             .inner
             .http
@@ -603,9 +602,7 @@ mod tests {
         assert_eq!(
             response.team.unread_messages[1].author,
             qaqh_ringing_contract::fact::InterAgentActor::Session(
-                qaqh_ringing_contract::fact::SessionId::new(
-                    "0199a0f0-0000-7000-8000-000000000009"
-                )
+                qaqh_ringing_contract::fact::SessionId::new("0199a0f0-0000-7000-8000-000000000009")
             )
         );
     }

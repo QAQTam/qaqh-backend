@@ -296,7 +296,7 @@ fn make_manager_multi_with_injection(
     let cfg = McpConfig {
         import_external: false,
         inject_resource_env_block,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: 0,
         servers,
     };

@@ -134,7 +134,9 @@ pub fn run_all(base: &Path) -> io::Result<Report> {
     let env_pairs = minimal_child_env(&scratch.join("tmp"), &scratch.join("home"));
     let run_in = |cwd: &Path, inner: String| -> io::Result<spawn::Exit> {
         let child = spawn::spawn(
-            &spawn::Isolation::RestrictedToken { token: tok.handle() },
+            &spawn::Isolation::RestrictedToken {
+                token: tok.handle(),
+            },
             &cmd_line(&inner),
             cwd,
             &env_pairs,
@@ -161,14 +163,22 @@ pub fn run_all(base: &Path) -> io::Result<Report> {
     checks.push(check(
         "a2_git_deny_write_denied",
         e.code != 0,
-        format!("exit={} stderr={}", e.code, String::from_utf8_lossy(&e.stderr).trim()),
+        format!(
+            "exit={} stderr={}",
+            e.code,
+            String::from_utf8_lossy(&e.stderr).trim()
+        ),
     ));
 
     let e = run(format!("type {}", quoted(&git_config)))?;
     checks.push(check(
         "a3_git_read_passthrough",
         e.code == 0 && String::from_utf8_lossy(&e.stdout).contains("gitcfg"),
-        format!("exit={} stdout={}", e.code, String::from_utf8_lossy(&e.stdout).trim()),
+        format!(
+            "exit={} stdout={}",
+            e.code,
+            String::from_utf8_lossy(&e.stdout).trim()
+        ),
     ));
 
     // shape B
@@ -288,7 +298,11 @@ pub fn run_all(base: &Path) -> io::Result<Report> {
         let merged = std::fs::read_to_string(target_d.join("out.txt"))?.contains("built")
             && std::fs::read_to_string(ws_d.join("README.md"))?.starts_with("new")
             && std::fs::read_to_string(ws_d.join("secret.txt"))? == "untouched";
-        checks.push(check("d3_merge_applies_to_store", merged, format!("exit={}", e.code)));
+        checks.push(check(
+            "d3_merge_applies_to_store",
+            merged,
+            format!("exit={}", e.code),
+        ));
     }
 
     Ok(Report {

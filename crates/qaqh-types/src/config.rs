@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-
 // ── Config persistence ──
 
 /// 全局策略持久层。deny_unknown_fields：模型配置统一后，config.toml 里的
@@ -312,4 +311,3 @@ impl ConfigStore {
 }
 
 // ── ProfileStore: independent model presets store with atomic writes ──
-

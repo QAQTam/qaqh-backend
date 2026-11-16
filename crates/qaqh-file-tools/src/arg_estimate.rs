@@ -648,7 +648,11 @@ mod tests {
             "逐片段到达与整段喂必须同一个结论"
         );
         assert_eq!(
-            files_of("apply_patch", r#"{"patch":"*** Begin Patch\n*** Update File: a.r"#, usize::MAX),
+            files_of(
+                "apply_patch",
+                r#"{"patch":"*** Begin Patch\n*** Update File: a.r"#,
+                usize::MAX
+            ),
             Vec::<String>::new(),
             "header 还在吐（未收尾的行）不得报半截文件名"
         );

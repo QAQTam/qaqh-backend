@@ -9,8 +9,8 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use qaqh_workspace::DynamicTool;
 use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome};
+use qaqh_workspace::DynamicTool;
 
 use crate::manager::LspManager;
 use crate::manager_slot;

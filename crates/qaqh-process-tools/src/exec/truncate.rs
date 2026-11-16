@@ -316,7 +316,7 @@ fn classify_reflow(input: &str, p: usize, cols: u16, margin_before: Option<char>
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_pty_model_text, strip_ansi, ConptyReflower};
+    use super::{ConptyReflower, clean_pty_model_text, strip_ansi};
 
     /// 回归钉：pwsh/ConPTY 实测泄露进模型侧 tool result 的全部形态——
     /// DEC 私有模式（?9001/?1004/?25）、SGR 彩色、光标定位、OSC 标题——

@@ -92,10 +92,7 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
                 })
                 .map_err(QaqhError::message)?
                 .ok_or_else(|| {
-                    QaqhError::message(format!(
-                        "exec session not found: {}",
-                        args.exec_session_id
-                    ))
+                    QaqhError::message(format!("exec session not found: {}", args.exec_session_id))
                 })?;
             if row.session_id != args.session_id {
                 return Err(QaqhError::Forbidden {

@@ -9,11 +9,10 @@
 //! boundaries.  The clippy `string_slice` lint is allowed at the crate
 //! level (see Cargo.toml).
 
-
 #![cfg_attr(not(test), forbid(unsafe_code))]
-mod messages_sdk;
-mod gemini_sdk;
 mod chat_sdk;
+mod gemini_sdk;
+mod messages_sdk;
 mod request_context;
 mod responses_sdk;
 #[cfg(test)]
@@ -26,11 +25,11 @@ mod usage;
 mod usage_semantics;
 
 pub use anyhow::Error as GateError;
+#[cfg(feature = "native-tool-plan")]
+pub use qaqh_tool_core::model_tool_plan::ModelToolPlan;
 pub use request_context::RequestContext;
 pub use transport::RetryPolicy;
 pub use types::{ErrorKind, ProviderConfig, ProviderKind, ResponsesCompat, StreamEvent};
-#[cfg(feature = "native-tool-plan")]
-pub use qaqh_tool_core::model_tool_plan::ModelToolPlan;
 
 use qaqh_types::{Message, ToolDef};
 use std::sync::Arc;
@@ -56,8 +55,21 @@ pub fn chat_stream_responses_with_plan(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(matches!(provider.kind, ProviderKind::Responses), "native tool plans require Responses");
-    responses_sdk::chat_stream_responses_plan(provider, messages, plan, namespace_descriptions, max_tokens, effort, user_id, cancel, on_event)
+    anyhow::ensure!(
+        matches!(provider.kind, ProviderKind::Responses),
+        "native tool plans require Responses"
+    );
+    responses_sdk::chat_stream_responses_plan(
+        provider,
+        messages,
+        plan,
+        namespace_descriptions,
+        max_tokens,
+        effort,
+        user_id,
+        cancel,
+        on_event,
+    )
 }
 
 /// Send a chat completion request with SSE streaming.

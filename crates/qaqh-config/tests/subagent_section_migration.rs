@@ -60,7 +60,10 @@ message_outbound_per_sender = 1024
     })
     .expect("update");
     let after_save = std::fs::read_to_string(root.join("config.toml")).expect("read after save");
-    assert!(!after_save.contains("subagent"), "save 不得复活退役段: {after_save}");
+    assert!(
+        !after_save.contains("subagent"),
+        "save 不得复活退役段: {after_save}"
+    );
 
     // 4) 其它未知段仍 fail-closed：迁移不是通用兼容层。
     let root = setup("unknown-still-rejected");

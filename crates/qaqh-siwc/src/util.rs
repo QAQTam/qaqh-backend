@@ -48,7 +48,13 @@ pub fn new_host_id() -> String {
     buf[6] = (buf[6] & 0x0f) | 0x40;
     buf[8] = (buf[8] & 0x3f) | 0x80;
     let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    match (hex.get(0..8), hex.get(8..12), hex.get(12..16), hex.get(16..20), hex.get(20..32)) {
+    match (
+        hex.get(0..8),
+        hex.get(8..12),
+        hex.get(12..16),
+        hex.get(16..20),
+        hex.get(20..32),
+    ) {
         (Some(a), Some(b), Some(c), Some(d), Some(e)) => format!("urn:uuid:{a}-{b}-{c}-{d}-{e}"),
         _ => format!("urn:uuid:{hex}"),
     }
@@ -73,7 +79,8 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-const B64URL_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+const B64URL_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
 /// base64url 编码（RFC 4648 §5，无 padding）。
 pub fn base64url_encode(bytes: &[u8]) -> String {
@@ -136,9 +143,18 @@ mod tests {
         assert_eq!(base64url_encode(b"fo"), "Zm8");
         assert_eq!(base64url_encode(b"foo"), "Zm9v");
         assert_eq!(base64url_encode(&[0xfb, 0xff]), "-_8");
-        for raw in [vec![], vec![1u8], vec![0xff, 0x00, 0x7f, 0x80], b"hello world".to_vec()] {
+        for raw in [
+            vec![],
+            vec![1u8],
+            vec![0xff, 0x00, 0x7f, 0x80],
+            b"hello world".to_vec(),
+        ] {
             let encoded = base64url_encode(&raw);
-            assert_eq!(base64url_decode(&encoded).expect("decode"), raw, "{encoded}");
+            assert_eq!(
+                base64url_decode(&encoded).expect("decode"),
+                raw,
+                "{encoded}"
+            );
         }
         // 带 padding 的输入同样接受（JWT/JWKS 常混用）。
         assert_eq!(base64url_decode("Zm9vYg==").expect("padded"), b"foob");
@@ -156,7 +172,10 @@ mod tests {
         assert_eq!(body.len(), 36);
         assert_eq!(body.chars().nth(14), Some('4'), "uuid v4: {body}");
         let variant = body.chars().nth(19).expect("variant");
-        assert!(matches!(variant, '8' | '9' | 'a' | 'b'), "variant 位: {body}");
+        assert!(
+            matches!(variant, '8' | '9' | 'a' | 'b'),
+            "variant 位: {body}"
+        );
     }
 
     #[test]
@@ -173,6 +192,9 @@ mod tests {
         let b = random_transaction_value();
         assert_ne!(a, b);
         assert!(a.len() >= 43, "32 字节 → 43 字符 url-safe: {a}");
-        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 }

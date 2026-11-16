@@ -154,7 +154,7 @@ fn make_manager(url: Option<String>) -> Arc<McpManager> {
     let cfg = McpConfig {
         import_external: false,
         inject_resource_env_block: false,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: 0,
         servers,
     };
@@ -280,7 +280,7 @@ async fn http_url_required() {
         McpConfig {
             import_external: false,
             inject_resource_env_block: false,
-            enabled: true,
+            enabled: Some(true),
             idle_shutdown_secs: 0,
             servers: BTreeMap::from([(
                 "mock".to_owned(),
@@ -347,7 +347,7 @@ async fn unix_socket_round_trip() {
 
     let manager = McpManager::with_settings(
         McpConfig {
-            enabled: true,
+            enabled: Some(true),
             idle_shutdown_secs: 0,
             import_external: false,
             inject_resource_env_block: false,
@@ -401,7 +401,7 @@ async fn unix_socket_missing_path_fails_connect() {
 
     let manager = McpManager::with_settings(
         McpConfig {
-            enabled: true,
+            enabled: Some(true),
             idle_shutdown_secs: 0,
             import_external: false,
             inject_resource_env_block: false,

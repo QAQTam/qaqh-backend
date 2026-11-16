@@ -73,7 +73,8 @@ fn full_marketplace_flow() {
     // 3. dry-run plan：web-tools → qaqh（skills + MCP 双投影）
     let web = manifest.plugins.last().unwrap();
     let market_root = registry::resolve_root(home.path(), "fixture").unwrap();
-    let plan = installer::plan(web, &market_root, HostTarget::Qaqh, home.path(), "fixture").unwrap();
+    let plan =
+        installer::plan(web, &market_root, HostTarget::Qaqh, home.path(), "fixture").unwrap();
     assert_eq!(plan.skill_copies.len(), 1);
     assert_eq!(plan.mcp_servers.len(), 1);
     assert!(!plan.describe().is_empty());
@@ -89,7 +90,10 @@ fn full_marketplace_flow() {
     assert_eq!(server.env["TOKEN"], "${secret:mcp-fixture-server-token}");
     let records = installer::installed_list(home.path()).unwrap();
     assert_eq!(records.len(), 1);
-    assert_eq!(records[0].secret_keys, vec!["mcp-fixture-server-token".to_string()]);
+    assert_eq!(
+        records[0].secret_keys,
+        vec!["mcp-fixture-server-token".to_string()]
+    );
 
     // 5. 重装同名技能必须失败（不静默覆盖）
     let second = installer::execute(&plan, &|_| true, &mut mcp, &secrets, home.path());
@@ -114,12 +118,16 @@ fn full_marketplace_flow() {
     assert_eq!(records.len(), 2);
 
     // 8. 卸载：dry-run plan → execute → 反向投影全部消失
-    let unplan = installer::uninstall_plan(home.path(), "web-tools", HostTarget::Qaqh, home.path()).unwrap();
+    let unplan =
+        installer::uninstall_plan(home.path(), "web-tools", HostTarget::Qaqh, home.path()).unwrap();
     assert!(!unplan.describe().is_empty());
     let unreport = installer::uninstall_execute(&unplan, &mut mcp, &secrets, home.path()).unwrap();
     assert_eq!(unreport.removed_skills, vec!["fetch".to_string()]);
     assert_eq!(unreport.removed_servers, vec!["fixture-server".to_string()]);
-    assert_eq!(unreport.removed_secrets, vec!["mcp-fixture-server-token".to_string()]);
+    assert_eq!(
+        unreport.removed_secrets,
+        vec!["mcp-fixture-server-token".to_string()]
+    );
     assert!(!home.path().join(".qaqh/skills/fetch").exists());
     assert!(mcp.servers.get("fixture-server").is_none());
     assert_eq!(installer::installed_list(home.path()).unwrap().len(), 1);

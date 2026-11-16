@@ -199,9 +199,8 @@ fn shell_derive_args_are_shell_specific() {
     assert_eq!(pwsh.len(), 12);
     // 验证 Base64(UTF-16LE) 可逆且与 ps_encode 一致（脚本正文 = 统一 UTF-8
     // preamble + 退出码重置 + 原命令 + 传播尾，只改脚本内容、不改 argv 形态）。
-    let expected_script = format!(
-        "{PS_UTF8_PREAMBLE}\n$global:LASTEXITCODE = 0\nGet-ChildItem\n{PS_EXIT_CODE_TAIL}"
-    );
+    let expected_script =
+        format!("{PS_UTF8_PREAMBLE}\n$global:LASTEXITCODE = 0\nGet-ChildItem\n{PS_EXIT_CODE_TAIL}");
     assert_eq!(pwsh[11], ps_encode(&expected_script));
     let decoded = {
         let bytes = base64_decode(&pwsh[11]).expect("valid base64");
@@ -277,8 +276,7 @@ fn pwsh_command_with_args_uses_command_with_args() {
         "a\"b".to_string(),
     ];
     let command = "Write-Output $args[0]; Write-Output $args[1]";
-    let pwsh = Shell::PowerShell
-        .derive_exec_args_with_uutils(command, Some(&args), None);
+    let pwsh = Shell::PowerShell.derive_exec_args_with_uutils(command, Some(&args), None);
     // 审计 M2：argv[0] 为绝对路径，壳身份按尾段断言。
     assert!(
         pwsh[0].ends_with("pwsh.exe") || pwsh[0].ends_with("pwsh"),
@@ -332,8 +330,15 @@ fn uutils_pwsh_prefix_composition() {
         "prefix: {prefix}"
     );
     for alias in [
-        "Alias:ls", "Alias:cp", "Alias:mv", "Alias:rm", "Alias:cat", "Alias:echo", "Alias:pwd",
-        "Alias:sleep", "Alias:kill",
+        "Alias:ls",
+        "Alias:cp",
+        "Alias:mv",
+        "Alias:rm",
+        "Alias:cat",
+        "Alias:echo",
+        "Alias:pwd",
+        "Alias:sleep",
+        "Alias:kill",
     ] {
         assert!(prefix.contains(alias), "{alias} missing: {prefix}");
     }
@@ -369,7 +374,9 @@ fn pwsh_derive_matches_coreutils_detection_state() {
         ),
         None => assert_eq!(
             script,
-            format!("{PS_UTF8_PREAMBLE}\n$global:LASTEXITCODE = 0\nGet-ChildItem\n{PS_EXIT_CODE_TAIL}")
+            format!(
+                "{PS_UTF8_PREAMBLE}\n$global:LASTEXITCODE = 0\nGet-ChildItem\n{PS_EXIT_CODE_TAIL}"
+            )
         ),
     }
 }
@@ -1395,7 +1402,7 @@ fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
             workspace_root: crate::permission::resolve_target_path(std::path::PathBuf::from(
                 &workspace,
             )),
-                permission_level: crate::permission::PermissionLevel::ReadOnly,
+            permission_level: crate::permission::PermissionLevel::ReadOnly,
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(
                 workspace,
@@ -1492,11 +1499,9 @@ fn exec_registered_alone_with_shell_param() {
     // powershell；合法名仍由描述文档 + run() 校验（unknown_shell）兜底。
     let shell = &props["shell"];
     assert!(
-        shell["description"]
-            .as_str()
-            .is_some_and(|d| {
-                d.contains("pwsh | bash | bash4windows | zsh | sh") && !d.contains("powershell")
-            }),
+        shell["description"].as_str().is_some_and(|d| {
+            d.contains("pwsh | bash | bash4windows | zsh | sh") && !d.contains("powershell")
+        }),
         "exec.shell description must enumerate accepted shells: {:?}",
         shell["description"]
     );
@@ -1557,8 +1562,14 @@ fn exec_injects_config_env_overlay_and_model_env_wins() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     crate::exec::env_overlay::apply(&std::collections::BTreeMap::from([
-        ("QAQH_OVERLAY_TEST_VAR".to_string(), "from-overlay".to_string()),
-        ("QAQH_OVERLAY_ONLY".to_string(), "only-in-overlay".to_string()),
+        (
+            "QAQH_OVERLAY_TEST_VAR".to_string(),
+            "from-overlay".to_string(),
+        ),
+        (
+            "QAQH_OVERLAY_ONLY".to_string(),
+            "only-in-overlay".to_string(),
+        ),
     ]));
     let ctx = make_ctx(
         "exec",
@@ -1578,7 +1589,8 @@ fn exec_injects_config_env_overlay_and_model_env_wins() {
     assert!(r.is_success(), "model text: {}", r.model_text());
     // 层序：overlay 注入生效（p=），模型显式 env 压过 overlay（o=）。
     assert!(
-        r.model_text().contains("o=from-model p=only-in-overlay m=from-model-env"),
+        r.model_text()
+            .contains("o=from-model p=only-in-overlay m=from-model-env"),
         "overlay 层序失效: {}",
         r.model_text()
     );

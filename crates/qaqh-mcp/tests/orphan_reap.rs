@@ -68,7 +68,7 @@ fn cfg_with(tag: &str, mode: &str, idle_secs: u64) -> McpConfig {
     McpConfig {
         import_external: false,
         inject_resource_env_block: false,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: idle_secs,
         servers: BTreeMap::from([(tag.to_owned(), server_cfg(tag, mode))]),
     }

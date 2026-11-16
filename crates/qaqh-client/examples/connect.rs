@@ -19,10 +19,7 @@ fn main() {
             handlers: ClientHandlers {
                 on_liveness: std::sync::Arc::new(|| {}),
                 on_v2_event: std::sync::Arc::new(|session_id, event| {
-                    println!(
-                        "[event] seed={session_id} seq={}",
-                        event.seq,
-                    );
+                    println!("[event] seed={session_id} seq={}", event.seq,);
                 }),
                 on_v2_reset: std::sync::Arc::new(|session_id, reset| {
                     println!("[reset] seed={session_id} reason={:?}", reset.reason);

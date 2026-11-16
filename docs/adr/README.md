@@ -55,6 +55,9 @@
 | [0018](0018-subagent-terminal-truth.md) | 子代理终态说真话：掐流=失败、预算与父同律、配置面退役（取代 0014 决策 4） | 已采纳 · 投影/gate/清扫/配置面/迁移已落地；wire 实变（ConfigDto/ConfigPatch 删 subagent 段 + 两型）已记 ADR-0010 |
 | [0019](0019-team-inbox-inter-agent-actor.md) | Team inbox 跨根署名：`InterAgentActor` 寻址统一（path/session union），跨根投递入 inbox | 已采纳 · 已实施（2026-11-13 随 LTS-v3.1 切线：读侧 + 死变体退役，含孤儿 InterAgentContent/MAILBOX_TEAM）；wire 实变由 v3.1 金标准机器重切吸收 |
 | [0023](0023-retire-inline-think-split.md) | 退役 gate 的 inline `<think>` 兼容切分：正文只认端点声明的 reasoning 字段 | 已采纳 · 代码已落工作区，发布/标注见落地清单未完成项 |
+| [0024](0024-home-control-mcp-transport.md) | 硬件控制 MCP：Rust 独立进程 + stdio + 2026-07-28 无状态协议 | **已采纳（部分实施）** · server 侧真机闭环（2026-11-17：四工具 + 策略层 + 云侧读写 + 审计/幂等/冷却/带外批准；`cargo test` 22 绿、stdio 冒烟 37 断言绿（含 era 反证 4 项））；**daemon/`qaqh-mcp` 侧未接线**，零 wire 变化验证与 era 反证的**客户端半边**未跑（服务端半边已反证） |
+| [0025](0025-mcp-default-on-and-third-party-compat.md) | MCP 默认开与三方兼容（client 侧）+ rmcp 统一 3.10.0 | 已采纳 · 切片 A–D + R1（精确锁 =3.10.0）+ R2（被否：不砍 qaqh-skills 复用 MCP Skills）已留痕；延后项见落地清单 |
+| [0026](0026-exec-notify-on-exit-subscription.md) | exec 订阅终态推送：`write_stdin notify_on_exit`（订阅制回调决策 8；armed+delivered 恰一次交付、注入不带正文、Exited/TimedOut 可推送白名单） | 已采纳 · 切片 1 + 切片 2（exec_command 起始订阅）已实施（manager/工具面/registry 投递/周期补投/模板措辞/测试/schema 指引）；跨通道恰一次交付已闭合 |
 
 ## 阅读顺序
 

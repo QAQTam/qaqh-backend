@@ -34,9 +34,7 @@ where
     T: Send + 'static,
 {
     match tokio::task::spawn_blocking(task).await {
-        Ok(result) => result.map_err(|message| {
-            error_response(StatusCode::BAD_REQUEST, message)
-        }),
+        Ok(result) => result.map_err(|message| error_response(StatusCode::BAD_REQUEST, message)),
         Err(join) => Err(error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("marketplace task join failed: {join}"),
@@ -59,14 +57,11 @@ pub(crate) async fn handle_marketplace_list(
             "无法定位用户主目录".to_string(),
         );
     };
-    let rows = match blocking(move || {
-        Ok(qaqh_marketplace::registry::list_with_manifests(&home))
-    })
-    .await
-    {
-        Ok(rows) => rows,
-        Err(response) => return response,
-    };
+    let rows =
+        match blocking(move || Ok(qaqh_marketplace::registry::list_with_manifests(&home))).await {
+            Ok(rows) => rows,
+            Err(response) => return response,
+        };
     let mut marketplaces = Vec::new();
     for (entry, manifest) in rows {
         let (plugins, error) = match manifest {
@@ -95,12 +90,18 @@ pub(crate) async fn handle_marketplace_list(
             "error": error,
         }));
     }
-    json_response(StatusCode::OK, serde_json::json!({ "marketplaces": marketplaces }))
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({ "marketplaces": marketplaces }),
+    )
 }
 
 fn parse_body<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Response> {
     serde_json::from_slice(bytes).map_err(|error| {
-        error_response(StatusCode::BAD_REQUEST, format!("invalid JSON body: {error}"))
+        error_response(
+            StatusCode::BAD_REQUEST,
+            format!("invalid JSON body: {error}"),
+        )
     })
 }
 
@@ -114,10 +115,16 @@ pub(crate) async fn handle_marketplace_add(
         return response;
     }
     let Ok(body) = parse_body::<AddBody>(&body) else {
-        return error_response(StatusCode::BAD_REQUEST, "body 需要 { name, url | local }".into());
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "body 需要 { name, url | local }".into(),
+        );
     };
     let Some(home) = home_dir() else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "无法定位用户主目录".into());
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "无法定位用户主目录".into(),
+        );
     };
     match blocking(move || {
         qaqh_marketplace::registry::add(
@@ -159,7 +166,10 @@ pub(crate) async fn handle_marketplace_remove(
         return error_response(StatusCode::BAD_REQUEST, "body 需要 { name }".into());
     };
     let Some(home) = home_dir() else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "无法定位用户主目录".into());
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "无法定位用户主目录".into(),
+        );
     };
     let name = body.name.clone();
     match blocking(move || qaqh_marketplace::registry::remove(&home, &body.name)).await {
@@ -181,7 +191,10 @@ pub(crate) async fn handle_marketplace_update(
         return error_response(StatusCode::BAD_REQUEST, "body 需要 { name }".into());
     };
     let Some(home) = home_dir() else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "无法定位用户主目录".into());
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "无法定位用户主目录".into(),
+        );
     };
     let name = body.name.clone();
     match blocking(move || qaqh_marketplace::registry::update(&home, &body.name)).await {
@@ -215,7 +228,10 @@ pub(crate) async fn handle_marketplace_install(
         );
     };
     let Some(home) = home_dir() else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "无法定位用户主目录".into());
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "无法定位用户主目录".into(),
+        );
     };
     let result = blocking(move || install_sync(&body, home)).await;
     match result {
@@ -265,8 +281,8 @@ fn install_sync(body: &InstallBody, home: std::path::PathBuf) -> Result<serde_js
     let secrets = qaqh_config::secrets::SecretStore::default_location();
     if target == HostTarget::Qaqh {
         let store = qaqh_types::ConfigStore::default_location();
-        let mut config = qaqh_config::Config::load()
-            .map_err(|error| format!("config load failed: {error}"))?;
+        let mut config =
+            qaqh_config::Config::load().map_err(|error| format!("config load failed: {error}"))?;
         let report = installer::execute(&plan, &|_| true, &mut config.mcp, &secrets, &home)?;
         config
             .save_with(&store, &secrets)
@@ -313,10 +329,7 @@ pub(crate) async fn handle_marketplace_installed(
             );
         }
     };
-    json_response(
-        StatusCode::OK,
-        serde_json::json!({ "installed": records }),
-    )
+    json_response(StatusCode::OK, serde_json::json!({ "installed": records }))
 }
 
 /// POST /marketplace/v1/uninstall —— `{ plugin, target, exec? }`（账本驱动反向投影）。
@@ -335,7 +348,10 @@ pub(crate) async fn handle_marketplace_uninstall(
         );
     };
     let Some(home) = home_dir() else {
-        return error_response(StatusCode::INTERNAL_SERVER_ERROR, "无法定位用户主目录".into());
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "无法定位用户主目录".into(),
+        );
     };
     let result = tokio::task::spawn_blocking(move || uninstall_sync(&body, home)).await;
     match result {
@@ -356,7 +372,10 @@ struct UninstallBody {
     exec: bool,
 }
 
-fn uninstall_sync(body: &UninstallBody, home: std::path::PathBuf) -> Result<serde_json::Value, String> {
+fn uninstall_sync(
+    body: &UninstallBody,
+    home: std::path::PathBuf,
+) -> Result<serde_json::Value, String> {
     use qaqh_marketplace::installer::{self, HostTarget};
 
     let target = HostTarget::from_flag(&body.target)?;
@@ -372,8 +391,8 @@ fn uninstall_sync(body: &UninstallBody, home: std::path::PathBuf) -> Result<serd
     let secrets = qaqh_config::secrets::SecretStore::default_location();
     if target == HostTarget::Qaqh {
         let store = qaqh_types::ConfigStore::default_location();
-        let mut config = qaqh_config::Config::load()
-            .map_err(|error| format!("config load failed: {error}"))?;
+        let mut config =
+            qaqh_config::Config::load().map_err(|error| format!("config load failed: {error}"))?;
         let report = installer::uninstall_execute(&plan, &mut config.mcp, &secrets, &home)?;
         config
             .save_with(&store, &secrets)

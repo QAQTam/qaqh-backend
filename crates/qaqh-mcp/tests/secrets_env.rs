@@ -64,7 +64,7 @@ async fn secret_placeholder_resolves_into_child_env() {
     let cfg = McpConfig {
         import_external: false,
         inject_resource_env_block: false,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: 0,
         servers: BTreeMap::from([("echoenv".to_owned(), server)]),
     };

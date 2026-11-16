@@ -96,7 +96,10 @@ mod tests {
         });
         let models = parse_models(&value).expect("models");
         let slugs: Vec<&str> = models.iter().map(|m| m.slug.as_str()).collect();
-        assert_eq!(slugs, vec!["gpt-6.1-sol", "gpt-6.1-mini", "no-visibility-field"]);
+        assert_eq!(
+            slugs,
+            vec!["gpt-6.1-sol", "gpt-6.1-mini", "no-visibility-field"]
+        );
         assert_eq!(models[0].display_name, "GPT-6.1 Sol");
         // display_name 缺失时回退 slug（UI 至少能显示点东西）。
         assert_eq!(models[2].display_name, "no-visibility-field");

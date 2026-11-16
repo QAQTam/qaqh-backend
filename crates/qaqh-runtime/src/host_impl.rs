@@ -19,16 +19,15 @@ use qaqh_ringing_contract::team::{
     TeamBoardSubscription, TeamBoardSubscriptionTarget, TeamBoardThread, ThreadId,
 };
 use qaqh_subagent::{
-    BoardChannel, BoardChannelCreateRequest, BoardHost,
-    BoardListRequest, BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest,
-    BoardSnapshot, BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest,
-    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest,
-    InterruptAgentRequest, InterruptedAgent,
-    ListedAgent, ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest,
-    SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, SubagentHost,
-    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
-    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
-    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest,
+    BoardChannel, BoardChannelCreateRequest, BoardHost, BoardListRequest, BoardNotificationSkip,
+    BoardPost, BoardPostOutcome, BoardPostRequest, BoardSnapshot, BoardSubscription,
+    BoardSubscriptionAction, BoardSubscriptionRequest, BoardSubscriptionTargetKind, BoardThread,
+    BoardThreadCreateRequest, InterruptAgentRequest, InterruptedAgent, ListedAgent,
+    ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage,
+    SpawnSubagentRequest, SpawnedSubagent, SubagentHost, TaskBoardArtifact, TaskBoardHost,
+    TaskBoardTask, TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest,
+    TaskCreateRequest, TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome,
+    WaitAgentRequest,
 };
 
 use super::QaqhService;

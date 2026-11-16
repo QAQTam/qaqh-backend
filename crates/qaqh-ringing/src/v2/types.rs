@@ -1060,7 +1060,9 @@ mod tests {
             command,
         )
         .with_client_identity("instance-1", "session-1");
-        envelope.validate().expect("session-targeted spawn envelope");
+        envelope
+            .validate()
+            .expect("session-targeted spawn envelope");
         let global = RingingV2CommandEnvelope::new(
             "cmd-spawn-global",
             CommandTarget::Global,

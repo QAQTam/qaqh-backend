@@ -305,7 +305,7 @@ pub fn duplicate_output(session_id: &str) -> String {
 pub fn ctx_footer(used_tokens: u32, window_tokens: u32) -> String {
     match ContextUsage::new(used_tokens, window_tokens) {
         Some(usage) => format!(
-            "\n[#ctx {}% · {}k/{}k · 接近阈值请调用 handoff]",
+            "\n[#ctx {}% · {}k/{}k]",
             usage.used_pct(),
             usage.used_tokens / 1000,
             usage.window_tokens / 1000
@@ -476,9 +476,11 @@ mod tests {
             }
         );
         // 模型显式声明不自动接续：照原样解析，不替模型改主意。
-        let paused = serde_json::json!({ FIELD_DOC: "d", FIELD_SUMMARY: "s", FIELD_AUTO_CONTINUE: false });
+        let paused =
+            serde_json::json!({ FIELD_DOC: "d", FIELD_SUMMARY: "s", FIELD_AUTO_CONTINUE: false });
         assert!(!parse_doc(&paused).expect("合法入参").auto_continue);
-        let wrong = serde_json::json!({ FIELD_DOC: "d", FIELD_SUMMARY: "s", FIELD_AUTO_CONTINUE: "no" });
+        let wrong =
+            serde_json::json!({ FIELD_DOC: "d", FIELD_SUMMARY: "s", FIELD_AUTO_CONTINUE: "no" });
         assert!(parse_doc(&wrong).unwrap_err().contains(FIELD_AUTO_CONTINUE));
     }
 

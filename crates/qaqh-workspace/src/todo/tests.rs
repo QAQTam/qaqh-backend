@@ -287,21 +287,15 @@ fn typed_entries_reject_cross_fields() {
     with_isolated_todo(|_session| {
         // write 只认 `list`：旧 items 形态与顶层便利字段一律拒绝
         // （形态锁 = TodoWriteArgs 的 deny_unknown_fields，不再有第二层白名单）。
-        assert!(
-            typed_write(serde_json::json!({"list": "- [ ] t", "items": []})).is_err()
-        );
+        assert!(typed_write(serde_json::json!({"list": "- [ ] t", "items": []})).is_err());
         assert!(
             typed_write(serde_json::json!({"items": [{"title": "t", "status": "pending"}]}))
                 .is_err()
         );
         assert!(typed_write(serde_json::json!({"title": "t"})).is_err());
         // update 只认 {title, status, evidence?}：ids/updates/id 一律拒绝。
-        assert!(
-            typed_update(serde_json::json!({"ids": ["x"], "status": "pending"})).is_err()
-        );
-        assert!(
-            typed_update(serde_json::json!({"id": "x", "status": "pending"})).is_err()
-        );
+        assert!(typed_update(serde_json::json!({"ids": ["x"], "status": "pending"})).is_err());
+        assert!(typed_update(serde_json::json!({"id": "x", "status": "pending"})).is_err());
         assert!(
             typed_update(serde_json::json!({"updates": [{"title": "x", "status": "pending"}]}))
                 .is_err()

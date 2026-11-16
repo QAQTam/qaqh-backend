@@ -343,7 +343,10 @@ pub(crate) async fn handle_team_snapshot_v2(
             return api_error_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "team_inbox_corrupt_signature",
-                &format!("inter-agent envelope {} has a non-addressable signature", envelope.message_id),
+                &format!(
+                    "inter-agent envelope {} has a non-addressable signature",
+                    envelope.message_id
+                ),
             );
         };
         unread_messages.push(qaqh_ringing_contract::team::TeamInboxSummary {
@@ -923,7 +926,9 @@ fn resync_required_sse(session_id: &str, reason: &str) -> Response {
         "reason": reason,
     })
     .to_string();
-    let _ = tx.try_send(Ok(Event::default().event("ringing.resync_required").data(data)));
+    let _ = tx.try_send(Ok(Event::default()
+        .event("ringing.resync_required")
+        .data(data)));
     Sse::new(ReceiverStream::new(rx))
         .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
         .into_response()

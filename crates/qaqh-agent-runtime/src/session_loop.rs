@@ -10,6 +10,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
+use std::time::Duration;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -22,15 +23,17 @@ use qaqh_ringing_contract::fact::{
     ToolCallOutcome, TurnId, TurnTerminal,
 };
 use qaqh_ringing_contract::state::{
-    InteractionView, PermissionRequestDetails, TimelineEntry, ToolCallState, TurnOutcome,
+    InteractionView, PermissionRequestDetails, TimelineEntry, ToolCallState, ToolImageRef,
+    TurnOutcome,
 };
 use qaqh_ringing_contract::ulid::generate_ulid;
 use qaqh_session::owner::{SessionOwner, ToolSettlement};
 use qaqh_types::{ContentBlock, Message, ToolResult as ToolResultPayload, UsageInfo};
 use qaqh_workspace::ask_user::normalize_ask_user;
 use tokio::sync::{oneshot, watch};
+use tokio::time::sleep;
 
-use crate::progress::{AttemptBlocks, ProgressSink, ProgressStream};
+use crate::progress::{AttemptBlocks, ProgressSink, ProgressStream, RetryingProgress};
 use crate::provider_job::{self, Evidence, ProviderOutcome, ProviderRequestSpec};
 use crate::session_agent::prompt;
 use crate::tool_job::{
@@ -59,6 +62,12 @@ enum HandoffPressure {
     /// 已经折叠过一次、模型仍未交接 → 爆错终止，不静默降级。
     DeadEnd(qaqh_types::ContextUsage),
 }
+
+/// turn 级重发预算：同一 turn 内因瞬态 provider 失败（见
+/// [`provider_job::retryable_failure`]）原样重发的额外尝试次数。gate 的
+/// HTTP 层/零产出重试都发生在单次 run_round 内部；这里管的是「流已打开、
+/// 已有产出」的掐流类失败。保守默认 1 次。
+const MAX_TURN_RETRIES: u32 = 1;
 
 /// 回合循环:一个会话一个实例;回合互斥、输入排队、交互登记都在这里。
 pub struct SessionLoop {
@@ -550,6 +559,13 @@ impl SessionLoop {
             },
         );
 
+        let mut turn_retry_budget = MAX_TURN_RETRIES;
+        let mut attempt_no: u32 = 0;
+        // 此前失败 attempt 已消耗的用量:结算时并入最终口径,账本不丢中间
+        // attempt(此前失败轮的 usage 直接丢弃,turn 级重发会放大这个缺口)。
+        let mut accrued_usage: Option<UsageInfo> = None;
+        let mut watchdog_folded = false;
+
         'rounds: loop {
             // Steer/Interject 合并:下一轮请求前注入 user 消息。
             let steers = {
@@ -577,8 +593,8 @@ impl SessionLoop {
                 }
             };
             if !widget_contexts.is_empty() {
-                let payload = serde_json::to_string(&widget_contexts)
-                    .unwrap_or_else(|_| "[]".to_string());
+                let payload =
+                    serde_json::to_string(&widget_contexts).unwrap_or_else(|_| "[]".to_string());
                 messages.push(Message {
                     msg_id: None,
                     role: "user".into(),
@@ -596,6 +612,9 @@ impl SessionLoop {
             match self.handoff_pressure(&turn_id) {
                 HandoffPressure::Idle => {}
                 HandoffPressure::Fold(context) => {
+                    // watchdog Input 是 durable 事实,重发会重复注入:Fold 轮
+                    // 失败不进 turn 级重发预算。
+                    watchdog_folded = true;
                     let folded = fold_tool_results(&mut messages);
                     self.append_watchdog_input(
                         &turn_id,
@@ -623,6 +642,7 @@ impl SessionLoop {
             // (本回合首次请求也要看见已连接的 server 工具)。
             self.refresh_dynamic_projections();
 
+            attempt_no += 1;
             let spec = self.current_spec();
             let blocks = AttemptBlocks::new(&turn_id, &spec.provider.model);
             let progress = ProgressStream {
@@ -640,6 +660,9 @@ impl SessionLoop {
             )
             .await;
             self.note_context(&outcome);
+            // 失败 attempt 的已见 usage 进累计:重发结算与最终账本都以合并
+            // 口径为准。重发分支不取走累计,继续累加;结算分支取走。
+            add_usage(&mut accrued_usage, outcome.usage.clone());
             // 超限不伪装成一般 provider 失败：分母已按实测收敛，原因必须写清。
             let provider_failure_code = if !outcome.cancelled
                 && outcome
@@ -654,6 +677,7 @@ impl SessionLoop {
             match outcome.evidence {
                 // 未出发:确认取消或 provider 准备失败,无任何可见输出。
                 Evidence::NotStarted => {
+                    outcome.usage = accrued_usage.take();
                     if outcome.cancelled {
                         self.finish_cancelled(&turn, outcome.usage.clone()).await;
                     } else {
@@ -670,8 +694,60 @@ impl SessionLoop {
                     }
                     break;
                 }
-                // 已出发但无终态:保留已流出文本,按取消或 provider 失败结算。
+                // 已出发但无终态:瞬态类失败(见 retryable_failure)按 turn
+                // 预算原样重发——重发窗口内 timeline 零写入,同 messages 重入
+                // 轮头即可;否则保留已流出文本,按取消或 provider 失败结算。
                 Evidence::StartedUnknown => {
+                    if turn_retry_budget > 0
+                        && !watchdog_folded
+                        && provider_job::retryable_failure(&outcome)
+                    {
+                        turn_retry_budget -= 1;
+                        let delay_secs = turn_retry_backoff_secs(attempt_no);
+                        log::warn!(
+                            "[loop] {} turn {turn_id} attempt {attempt_no} failed ({}/{}), \
+                             retrying in {delay_secs}s, budget left {turn_retry_budget}",
+                            self.session_id,
+                            outcome
+                                .error_kind
+                                .map_or("unclassified", qaqh_gate::ErrorKind::as_str),
+                            outcome.error.as_deref().unwrap_or("no detail"),
+                        );
+                        let retry_display = ProgressStream {
+                            sink: Arc::new(OwnerSink {
+                                owner: Arc::clone(&self.owner),
+                            }),
+                            blocks: blocks.clone(),
+                        };
+                        // 弃置本 attempt 的在飞 UI 身份(attempt_finished 明文
+                        // 允许 superseded),再公告重发窗口。StartedUnknown 轮
+                        // 从未走到工具面,call_ids 恒空。
+                        retry_display
+                            .sink
+                            .attempt_finished(&turn_id, &blocks.all_block_ids(), &[]);
+                        retry_display.sink.retrying(RetryingProgress {
+                            turn_id: &turn_id,
+                            attempt: attempt_no + 1,
+                            max_attempts: 1 + MAX_TURN_RETRIES,
+                            delay_secs,
+                            error: outcome
+                                .error
+                                .as_deref()
+                                .unwrap_or("provider request failed"),
+                        });
+                        // 退避窗口 cancel-aware:取消即按取消结算,不再重发。
+                        let mut backoff_rx = cancel_rx.clone();
+                        tokio::select! {
+                            _ = sleep(Duration::from_secs(delay_secs)) => {}
+                            _ = wait_for_turn_cancel(&mut backoff_rx) => {
+                                outcome.usage = accrued_usage.take();
+                                self.finish_cancelled(&turn, outcome.usage.clone()).await;
+                                break 'rounds;
+                            }
+                        }
+                        continue 'rounds;
+                    }
+                    outcome.usage = accrued_usage.take();
                     self.seal_partial(&turn, &blocks, &outcome).await;
                     if outcome.failure_kind == Some(provider_job::ProviderFailureKind::WorkerCrash)
                     {
@@ -693,6 +769,7 @@ impl SessionLoop {
                     break;
                 }
                 Evidence::Terminal => {
+                    outcome.usage = accrued_usage.take();
                     self.seal_response(&turn, &blocks, &outcome).await;
                     match outcome.finish {
                         Some(ProviderFinish::Stop) => {
@@ -727,7 +804,7 @@ impl SessionLoop {
                             let mut tool_messages = Vec::with_capacity(tool_uses.len());
                             let mut handed_off = false;
                             for (call_id, name, input) in &tool_uses {
-                                let (ok, text) = match self
+                                let (ok, text, image_refs) = match self
                                     .dispatch_tool(&turn, call_id, name, input, &cancel_rx)
                                     .await
                                 {
@@ -737,7 +814,7 @@ impl SessionLoop {
                                             "[loop] {} tool {name} dispatch failed: {error}",
                                             self.session_id
                                         );
-                                        (false, "tool dispatch failed".to_string())
+                                        (false, "tool dispatch failed".to_string(), Vec::new())
                                     }
                                 };
                                 if name == crate::handoff::TOOL_NAME && ok {
@@ -752,6 +829,7 @@ impl SessionLoop {
                                         call_id: ToolCallId::new(call_id.clone()),
                                         turn_id: Some(turn.clone()),
                                         content: ContentValue::Inline { text: text.clone() },
+                                        images: image_refs.clone(),
                                     })
                                     .await
                                 {
@@ -769,7 +847,12 @@ impl SessionLoop {
                                     .await;
                                     break 'rounds;
                                 }
-                                tool_messages.push(tool_result_message(call_id, &text, ok));
+                                tool_messages.push(tool_result_message(
+                                    call_id,
+                                    &text,
+                                    ok,
+                                    &image_refs,
+                                ));
                             }
                             if handed_off {
                                 // 交接即终局：本会话不再回到模型。tool_result 已作为 durable
@@ -784,11 +867,12 @@ impl SessionLoop {
                             // 尾部，随 render_xml_envelope 原样发出。
                             if let Some(usage) = self.last_context()
                                 && let Some(last) = tool_messages.last_mut()
-                                && let Some(ContentBlock::ToolResult { result, .. }) = last.content.last_mut()
+                                && let Some(ContentBlock::ToolResult { result, .. }) =
+                                    last.content.last_mut()
                             {
                                 result.append_model_tail(&crate::handoff::ctx_footer(
                                     usage.used_tokens,
-                                    usage.window_tokens
+                                    usage.window_tokens,
                                 ));
                             }
                             messages.push(message);
@@ -848,18 +932,27 @@ impl SessionLoop {
         tool_name: &str,
         input: &serde_json::Value,
         cancel_rx: &watch::Receiver<bool>,
-    ) -> Result<(bool, String), LoopError> {
+    ) -> Result<(bool, String, Vec<ToolImageRef>), LoopError> {
         // ask:答案来自交互应答,不走 port。
         if tool_name == "ask" {
-            return self.run_ask(turn, call_id, input, cancel_rx).await;
+            return self
+                .run_ask(turn, call_id, input, cancel_rx)
+                .await
+                .map(|(ok, text)| (ok, text, Vec::new()));
         }
         // handoff 是控制面工具：不走 port，不经权限审批，自己收尾生命周期。
         if tool_name == crate::handoff::TOOL_NAME {
-            return self.run_handoff(turn, call_id, input).await;
+            return self
+                .run_handoff(turn, call_id, input)
+                .await
+                .map(|(ok, text)| (ok, text, Vec::new()));
         }
         // session_title 同为控制面工具：直落 owner 唯一写口，命名后回合照常继续。
         if tool_name == crate::session_title::TOOL_NAME {
-            return self.run_session_title(call_id, input).await;
+            return self
+                .run_session_title(call_id, input)
+                .await
+                .map(|(ok, text)| (ok, text, Vec::new()));
         }
         let args = serde_json::to_vec(input).map_err(|error| {
             LoopError::Db(qaqh_session::db::DbError::Corrupt(error.to_string()))
@@ -877,7 +970,7 @@ impl SessionLoop {
         match self.port.precheck(&request) {
             ToolAdmission::Denied(reason) => {
                 self.settle_failed(call_id, tool_name, args_json, "permission_denied", &reason);
-                return Ok((false, reason));
+                return Ok((false, reason, Vec::new()));
             }
             ToolAdmission::ApprovalRequired { details } => {
                 let Some((interaction_id, answer)) = self
@@ -891,7 +984,7 @@ impl SessionLoop {
                             args_json,
                             qaqh_types::ToolCancellationReason::TurnCancel,
                         );
-                        return Ok((false, "cancelled".into()));
+                        return Ok((false, "cancelled".into(), Vec::new()));
                     }
                     self.settle_failed(
                         call_id,
@@ -900,7 +993,7 @@ impl SessionLoop {
                         "permission_denied",
                         "permission interaction failed",
                     );
-                    return Ok((false, "permission interaction failed".into()));
+                    return Ok((false, "permission interaction failed".into(), Vec::new()));
                 };
                 if answer.trust_folder {
                     let cwd = self
@@ -918,7 +1011,7 @@ impl SessionLoop {
                         "permission_denied",
                         "denied by user",
                     );
-                    return Ok((false, "denied by user".into()));
+                    return Ok((false, "denied by user".into(), Vec::new()));
                 }
                 // 迁移表:权限允许后回到 declared,等真正进入执行再 running。
                 self.owner
@@ -961,9 +1054,29 @@ impl SessionLoop {
                 )))
             });
         Ok(match joined {
-            Ok(output) => (true, output),
+            Ok(output) => {
+                // 工具图外置落盘（A-2 L0）：内容寻址幂等，失败丢弃该图并留痕
+                // ——图缺失只少一张图，不能让整个工具结果翻成失败。
+                let mut images = Vec::with_capacity(output.images.len());
+                for image in &output.images {
+                    match qaqh_types::image_store::store_image_b64(&image.data, &image.mime_type) {
+                        Ok(sha256) => images.push(ToolImageRef {
+                            sha256,
+                            mime_type: image.mime_type.clone(),
+                            bytes_len: image.data.len() as u64,
+                        }),
+                        Err(error) => {
+                            log::error!(
+                                "[loop] {} tool {tool_name} image externalize failed: {error}",
+                                self.session_id
+                            );
+                        }
+                    }
+                }
+                (true, output.text, images)
+            }
             // port 已在 execute 内结算生命周期;这里只取回传文本。
-            Err(failure) => (false, failure_message(&failure)),
+            Err(failure) => (false, failure_message(&failure), Vec::new()),
         })
     }
 
@@ -1469,11 +1582,13 @@ impl SessionLoop {
             );
             return Ok((false, message));
         }
-        let result = self.owner.update_metadata(qaqh_session::db::store::SessionColumnPatch {
-            title: Some(title.clone()),
-            title_source: Some("auto".to_string()),
-            ..Default::default()
-        });
+        let result = self
+            .owner
+            .update_metadata(qaqh_session::db::store::SessionColumnPatch {
+                title: Some(title.clone()),
+                title_source: Some("auto".to_string()),
+                ..Default::default()
+            });
         match result {
             Ok(_) => {
                 let text = crate::session_title::success_output(&title);
@@ -1724,7 +1839,11 @@ impl SessionLoop {
             )
             .await
             .ok();
-        self.notify_terminal(turn, TurnTerminal::Failed, Some(format!("{code}: {message}")));
+        self.notify_terminal(
+            turn,
+            TurnTerminal::Failed,
+            Some(format!("{code}: {message}")),
+        );
     }
 
     async fn resolve_pending_interactions(&self) {
@@ -1809,6 +1928,11 @@ impl SessionLoop {
     /// 分组规则:相邻 AssistantBlock + ToolCall 归并为一条 assistant 消息,
     /// Input/ToolResult/Compaction 是边界。工具名/参数从 tool_calls 表 join。
     pub(crate) async fn assemble_context(&self) -> Result<Vec<Message>, LoopError> {
+        // 重建上传图片注册表（read_image(image_index) 的真相源）。注册表是
+        // 进程本地的（空闲卸载/resume 清空），按 timeline 输入序全量重建，
+        // 保证索引与 gate 投影的 [Image #N] 编号对齐；字节落盘内容寻址幂等。
+        // 系统输入的图不进模型上下文（gate 投影不编号），跳过登记。
+        qaqh_workspace::read_image::reset_images(&self.session_id);
         let state = self.owner.snapshot().await?;
         let tools_by_id: HashMap<String, &qaqh_ringing_contract::state::ToolCallView> = state
             .tools
@@ -1831,6 +1955,28 @@ impl SessionLoop {
                         && !text.is_empty()
                     {
                         content_blocks.push(ContentBlock::Text { text });
+                    }
+                    if actor.kind != ActorKind::System {
+                        for image in &images {
+                            match qaqh_types::image_store::store_image_b64(
+                                &image.data,
+                                &image.mime_type,
+                            ) {
+                                Ok(sha256) => {
+                                    qaqh_workspace::read_image::register_image_ref(
+                                        &self.session_id,
+                                        &image.mime_type,
+                                        &sha256,
+                                    );
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "[loop] {} input image persist failed: {error}",
+                                        self.session_id
+                                    );
+                                }
+                            }
+                        }
                     }
                     content_blocks.extend(images.into_iter().map(|image| ContentBlock::Image {
                         mime_type: image.mime_type,
@@ -1900,7 +2046,10 @@ impl SessionLoop {
                     });
                 }
                 TimelineEntry::ToolResult {
-                    call_id, content, ..
+                    call_id,
+                    content,
+                    images,
+                    ..
                 } => {
                     flush_assistant(&mut messages, group.take());
                     // E06:重放不可变的调用 outcome;yielded 是成功返回,不查
@@ -1916,7 +2065,7 @@ impl SessionLoop {
                         ContentValue::Inline { text } => text,
                         _ => String::new(),
                     };
-                    messages.push(tool_result_message(call_id.as_ref(), &text, ok));
+                    messages.push(tool_result_message(call_id.as_ref(), &text, ok, &images));
                 }
                 TimelineEntry::Compaction { .. } => {
                     // 压缩尚无写入方;出现时按边界刷新。
@@ -2022,19 +2171,29 @@ fn fold_tool_results(messages: &mut [Message]) -> usize {
     folded
 }
 
-fn tool_result_message(call_id: &str, text: &str, ok: bool) -> Message {
+fn tool_result_message(call_id: &str, text: &str, ok: bool, images: &[ToolImageRef]) -> Message {
+    let mut content = vec![ContentBlock::ToolResult {
+        tool_use_id: call_id.to_string(),
+        result: if ok {
+            ToolResultPayload::ok(text)
+        } else {
+            ToolResultPayload::error(text)
+        },
+    }];
+    // 工具图以兄弟 ImageRef 块回传（字节已外置落盘，gate 请求构建期按需读盘）；
+    // messages/chat/responses/gemini 四端点投影共用这一表示。
+    for image in images {
+        content.push(ContentBlock::ImageRef {
+            sha256: image.sha256.clone(),
+            mime_type: image.mime_type.clone(),
+            bytes_len: image.bytes_len as usize,
+        });
+    }
     Message {
         msg_id: None,
         role: "tool".into(),
         name: None,
-        content: vec![ContentBlock::ToolResult {
-            tool_use_id: call_id.to_string(),
-            result: if ok {
-                ToolResultPayload::ok(text)
-            } else {
-                ToolResultPayload::error(text)
-            },
-        }],
+        content,
     }
 }
 
@@ -2043,6 +2202,36 @@ async fn wait_for_turn_cancel(cancel: &mut watch::Receiver<bool>) {
         if cancel.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// turn 级重发退避：2s 起步，指数增长，8s 封顶（默认预算 1，实际只用到首档）。
+fn turn_retry_backoff_secs(attempt: u32) -> u64 {
+    2u64.saturating_pow(attempt.saturating_sub(1)).min(8)
+}
+
+/// 失败 attempt 的已消耗用量累计：结算时并入最终口径，账本不丢中间 attempt。
+/// 字段逐项相加；`cache_usage_reported` 任一上报即视为上报；`extras` 同键
+/// 相加（display-only）。
+fn add_usage(accrued: &mut Option<UsageInfo>, add: Option<UsageInfo>) {
+    let Some(add) = add else {
+        return;
+    };
+    let Some(base) = accrued.as_mut() else {
+        *accrued = Some(add);
+        return;
+    };
+    base.prompt_tokens += add.prompt_tokens;
+    base.completion_tokens += add.completion_tokens;
+    base.total_tokens += add.total_tokens;
+    base.prompt_cache_hit_tokens += add.prompt_cache_hit_tokens;
+    base.prompt_cache_miss_tokens += add.prompt_cache_miss_tokens;
+    base.reasoning_tokens += add.reasoning_tokens;
+    if base.cache_usage_reported.is_none() {
+        base.cache_usage_reported = add.cache_usage_reported;
+    }
+    for (key, value) in add.extras {
+        *base.extras.entry(key).or_insert(0) += value;
     }
 }
 
@@ -2106,11 +2295,39 @@ impl ProgressSink for OwnerSink {
 mod fold_tests {
     use super::*;
 
+    /// 工具图以兄弟 ImageRef 块回传：字节外置，模型上下文只持索引。
+    #[test]
+    fn tool_result_message_appends_image_ref_blocks() {
+        let images = vec![ToolImageRef {
+            sha256: "a".repeat(64),
+            mime_type: "image/png".into(),
+            bytes_len: 92,
+        }];
+        let message = tool_result_message("call_img", "image read", true, &images);
+        assert_eq!(message.content.len(), 2);
+        assert!(matches!(
+            &message.content[0],
+            ContentBlock::ToolResult { tool_use_id, result }
+                if tool_use_id == "call_img" && result.is_success()
+        ));
+        assert!(matches!(
+            &message.content[1],
+            ContentBlock::ImageRef {
+                sha256, mime_type, bytes_len,
+            } if sha256 == &"a".repeat(64)
+                && mime_type == "image/png"
+                && *bytes_len == 92
+        ));
+        // 失败结果与无图路径保持纯文本单块。
+        let failing = tool_result_message("call_x", "boom", false, &[]);
+        assert_eq!(failing.content.len(), 1);
+    }
+
     #[test]
     fn fold_touches_only_tool_projections_and_counts_once() {
         let mut messages = vec![
-            tool_result_message("call_1", &"x".repeat(4000), true),
-            tool_result_message("call_2", "短", false),
+            tool_result_message("call_1", &"x".repeat(4000), true, &[]),
+            tool_result_message("call_2", "短", false, &[]),
         ];
         assert_eq!(fold_tool_results(&mut messages), 2);
         assert_eq!(fold_tool_results(&mut messages), 0, "已折叠的不重复计数");

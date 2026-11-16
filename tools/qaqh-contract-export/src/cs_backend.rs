@@ -27,14 +27,83 @@ const ALIAS_TARGET: &str = "string";
 
 /// C# reserved words that cannot be used as member names.
 const CS_KEYWORDS: &[&str] = &[
-    "abstract", "as", "base", "bool", "break", "byte", "case", "catch", "char", "checked", "class",
-    "const", "continue", "decimal", "default", "delegate", "do", "double", "else", "enum", "event",
-    "explicit", "extern", "false", "finally", "fixed", "float", "for", "foreach", "goto", "if",
-    "implicit", "in", "int", "interface", "internal", "is", "lock", "long", "namespace", "new",
-    "null", "object", "operator", "out", "override", "params", "private", "protected", "public",
-    "readonly", "ref", "return", "sbyte", "sealed", "short", "sizeof", "stackalloc", "static",
-    "string", "struct", "switch", "this", "throw", "true", "try", "typeof", "uint", "ulong",
-    "unchecked", "unsafe", "ushort", "using", "virtual", "void", "volatile", "while",
+    "abstract",
+    "as",
+    "base",
+    "bool",
+    "break",
+    "byte",
+    "case",
+    "catch",
+    "char",
+    "checked",
+    "class",
+    "const",
+    "continue",
+    "decimal",
+    "default",
+    "delegate",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "event",
+    "explicit",
+    "extern",
+    "false",
+    "finally",
+    "fixed",
+    "float",
+    "for",
+    "foreach",
+    "goto",
+    "if",
+    "implicit",
+    "in",
+    "int",
+    "interface",
+    "internal",
+    "is",
+    "lock",
+    "long",
+    "namespace",
+    "new",
+    "null",
+    "object",
+    "operator",
+    "out",
+    "override",
+    "params",
+    "private",
+    "protected",
+    "public",
+    "readonly",
+    "ref",
+    "return",
+    "sbyte",
+    "sealed",
+    "short",
+    "sizeof",
+    "stackalloc",
+    "static",
+    "string",
+    "struct",
+    "switch",
+    "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
+    "uint",
+    "ulong",
+    "unchecked",
+    "unsafe",
+    "ushort",
+    "using",
+    "virtual",
+    "void",
+    "volatile",
+    "while",
 ];
 
 pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -161,7 +230,9 @@ enum Decl {
     },
     /// `{ base } & { [key in string]: ... }` — serde flatten of a map
     /// (DsAccountModel) → [JsonExtensionData].
-    FlattenMap { base: Vec<Field> },
+    FlattenMap {
+        base: Vec<Field>,
+    },
 }
 
 // ── TypeScript lexer (string- and comment-aware) ─────────────────────────────
@@ -359,18 +430,18 @@ fn parse_body(c: &mut Cursor, generic: Option<String>) -> Result<Decl, String> {
         Some(Tok::Ident(id)) => {
             c.next();
             match id.as_str() {
-            "Record" => {
-                c.expect_punct('<')?;
-                let key = c.expect_ident()?;
-                c.expect_punct(',')?;
-                let value = c.expect_ident()?;
-                c.expect_punct('>')?;
-                if key != "symbol" || value != "never" {
-                    return Err(format!("unsupported Record<{key}, {value}>"));
+                "Record" => {
+                    c.expect_punct('<')?;
+                    let key = c.expect_ident()?;
+                    c.expect_punct(',')?;
+                    let value = c.expect_ident()?;
+                    c.expect_punct('>')?;
+                    if key != "symbol" || value != "never" {
+                        return Err(format!("unsupported Record<{key}, {value}>"));
+                    }
+                    Ok(Decl::Empty)
                 }
-                Ok(Decl::Empty)
-            }
-            other => Ok(Decl::Alias(other.to_owned())),
+                other => Ok(Decl::Alias(other.to_owned())),
             }
         }
         Some(Tok::Punct('{')) => {
@@ -392,7 +463,10 @@ fn parse_body(c: &mut Cursor, generic: Option<String>) -> Result<Decl, String> {
                     // only valid as discriminators (see TsType::Literal), so
                     // normalize to a one-variant union — the C# polymorphic shape
                     // then matches the multi-variant case exactly.
-                    if matches!(first_fields.first().map(|f| &f.ty), Some(TsType::Literal(_))) {
+                    if matches!(
+                        first_fields.first().map(|f| &f.ty),
+                        Some(TsType::Literal(_))
+                    ) {
                         let (tag_key, first) = split_variant(first_fields)?;
                         let (tag, variants) = unify_tag(vec![(tag_key, first)], None)?;
                         Ok(Decl::Union {
@@ -423,9 +497,7 @@ fn parse_body(c: &mut Cursor, generic: Option<String>) -> Result<Decl, String> {
                         None => None,
                         Some(Tok::Punct(p)) => Some(*p),
                         Some(other) => {
-                            return Err(format!(
-                                "unexpected token in intersection: {other:?}"
-                            ));
+                            return Err(format!("unexpected token in intersection: {other:?}"));
                         }
                     };
                     match after_intersection {
@@ -441,8 +513,7 @@ fn parse_body(c: &mut Cursor, generic: Option<String>) -> Result<Decl, String> {
                                 Ok(Decl::FlattenMap { base: first_fields })
                             } else {
                                 c.expect_punct('{')?;
-                                let (tag_key, mut first) =
-                                    split_variant(parse_object_inner(c)?)?;
+                                let (tag_key, mut first) = split_variant(parse_object_inner(c)?)?;
                                 if c.eat_punct('&') {
                                     first.payload = VariantPayload::Ref(c.expect_ident()?);
                                 }
@@ -460,9 +531,7 @@ fn parse_body(c: &mut Cursor, generic: Option<String>) -> Result<Decl, String> {
                             parse_flatten_map(c)?;
                             Ok(Decl::FlattenMap { base: first_fields })
                         }
-                        other => {
-                            Err(format!("unsupported intersection after object: {other:?}"))
-                        }
+                        other => Err(format!("unsupported intersection after object: {other:?}")),
                     }
                 }
                 other => Err(format!("unexpected token after object: {other:?}")),
@@ -600,7 +669,9 @@ fn parse_type(c: &mut Cursor) -> Result<TsType, String> {
     while c.eat_punct('|') {
         let rhs = c.expect_ident()?;
         if rhs != "null" {
-            return Err(format!("unsupported union member {rhs:?} in field position"));
+            return Err(format!(
+                "unsupported union member {rhs:?} in field position"
+            ));
         }
         // `Option<Option<T>>` renders as `T | null | null` (缺席/null/设置三态);
         // C# 没有嵌套可空, 一层 `?` 已同时表达两个 null 层级。
@@ -737,13 +808,13 @@ impl Model {
             TsType::Str => "string".into(),
             TsType::Json => "JsonElement".into(),
             TsType::Literal(_) => {
-                return Err("string literal outside discriminator position".into())
+                return Err("string literal outside discriminator position".into());
             }
             TsType::Nullable(inner) => format!("{}?", self.cs_type(inner, generic)?),
             TsType::Array(element) => format!("{}[]", self.cs_type(element, generic)?),
             TsType::Map(value) => format!("Dictionary<string, {}>", self.cs_type(value, generic)?),
             TsType::Inline(_) => {
-                return Err("inline object must be emitted as a named data record".into())
+                return Err("inline object must be emitted as a named data record".into());
             }
             TsType::Ref(name, args) => {
                 if Some(name.as_str()) == generic {
@@ -865,7 +936,9 @@ impl Model {
         out: &mut String,
     ) -> Result<(), String> {
         let type_params = generic.map(|g| format!("<{g}>")).unwrap_or_default();
-        let base = inherits.map(|base| format!(" : {base}")).unwrap_or_default();
+        let base = inherits
+            .map(|base| format!(" : {base}"))
+            .unwrap_or_default();
         if fields.is_empty() {
             out.push_str(&format!("{head} {name}{type_params}{base};\n"));
             return Ok(());
@@ -874,8 +947,13 @@ impl Model {
         let inline = self.emit_properties(fields, name, generic, out)?;
         out.push_str("}\n");
         for (data_name, data_fields) in inline {
-            if data_fields.iter().any(|f| matches!(f.ty, TsType::Inline(_))) {
-                return Err(format!("nested inline objects are not supported ({data_name})"));
+            if data_fields
+                .iter()
+                .any(|f| matches!(f.ty, TsType::Inline(_)))
+            {
+                return Err(format!(
+                    "nested inline objects are not supported ({data_name})"
+                ));
             }
             out.push('\n');
             self.emit_record(
@@ -915,14 +993,7 @@ impl Model {
                 body.push_str("}\n");
             }
             Decl::Object(fields) => {
-                self.emit_record(
-                    name,
-                    None,
-                    "public sealed record",
-                    None,
-                    fields,
-                    &mut body,
-                )?;
+                self.emit_record(name, None, "public sealed record", None, fields, &mut body)?;
             }
             Decl::FlattenMap { base } => {
                 body.push_str(&format!("public sealed record {name}\n{{\n"));
@@ -944,7 +1015,10 @@ impl Model {
                     } => (None, tag.clone(), base.clone(), variants),
                     _ => unreachable!(),
                 };
-                let type_params = generic.as_deref().map(|g| format!("<{g}>")).unwrap_or_default();
+                let type_params = generic
+                    .as_deref()
+                    .map(|g| format!("<{g}>"))
+                    .unwrap_or_default();
                 // System.Text.Json cannot register open generic derived types,
                 // so generic unions get a hand-rolled discriminator converter
                 // instead of JsonPolymorphic/JsonDerivedType.
@@ -956,15 +1030,15 @@ impl Model {
                         VariantPayload::Ref(ref_name) => {
                             if generic.is_some() {
                                 return Err(
-                                    "generic union variants cannot reference payload types".into()
+                                    "generic union variants cannot reference payload types".into(),
                                 );
                             }
                             match self.decl(ref_name)? {
                                 Decl::Object(fields) => fields.clone(),
                                 other => {
                                     return Err(format!(
-                                    "variant payload reference {ref_name} is {other:?}, expected an object"
-                                ))
+                                        "variant payload reference {ref_name} is {other:?}, expected an object"
+                                    ));
                                 }
                             }
                         }

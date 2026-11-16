@@ -119,17 +119,29 @@ impl QueryRequest {
                 path: params.get("path")?.as_str()?.to_string(),
                 max_bytes: params.get("max_bytes").and_then(Value::as_u64),
             },
-            "session.dashboard" => Self::SessionDashboard { session_id: session_id()? },
-            "todo.status" => Self::TodoStatus { session_id: session_id()? },
-            "session.meta" => Self::SessionMeta { session_id: session_id()? },
-            "plan.read" => Self::PlanRead { session_id: session_id()? },
+            "session.dashboard" => Self::SessionDashboard {
+                session_id: session_id()?,
+            },
+            "todo.status" => Self::TodoStatus {
+                session_id: session_id()?,
+            },
+            "session.meta" => Self::SessionMeta {
+                session_id: session_id()?,
+            },
+            "plan.read" => Self::PlanRead {
+                session_id: session_id()?,
+            },
             "session.turn" => Self::SessionTurn {
                 session_id: session_id()?,
                 turn_id: params.get("turn_id")?.as_str()?.to_string(),
             },
             "clients.list" => Self::ClientList,
-            "session.get_activity" => Self::SessionGetActivity { session_id: session_id()? },
-            "workspace.get" => Self::WorkspaceGet { session_id: session_id()? },
+            "session.get_activity" => Self::SessionGetActivity {
+                session_id: session_id()?,
+            },
+            "workspace.get" => Self::WorkspaceGet {
+                session_id: session_id()?,
+            },
             "todo.list" => {
                 let mut forwarded = params.clone();
                 forwarded["session_id"] = json!(session_id()?);
@@ -189,9 +201,13 @@ impl QueryRequest {
                 ("session.meta", json!({ "session_id": session_id }))
             }
             Self::PlanRead { session_id } => ("plan.read", json!({ "session_id": session_id })),
-            Self::SessionTurn { session_id, turn_id } => {
-                ("session.turn", json!({ "session_id": session_id, "turn_id": turn_id }))
-            }
+            Self::SessionTurn {
+                session_id,
+                turn_id,
+            } => (
+                "session.turn",
+                json!({ "session_id": session_id, "turn_id": turn_id }),
+            ),
         }
     }
 }
@@ -225,21 +241,18 @@ mod tests {
             ("skills.list_tools", json!({})),
             ("skills.catalog", json!({ "cwd": "/tmp" })),
             ("fs.list", json!({ "path": "/tmp" })),
-            (
-                "fs.read",
-                json!({ "path": "/tmp", "max_bytes": 64 }),
-            ),
+            ("fs.read", json!({ "path": "/tmp", "max_bytes": 64 })),
             ("session.dashboard", json!({ "session_id": "s1" })),
             ("todo.status", json!({ "session_id": "s1" })),
             ("session.meta", json!({ "session_id": "s1" })),
             ("plan.read", json!({ "session_id": "s1" })),
             ("session.get_activity", json!({ "session_id": "s1" })),
             ("workspace.get", json!({ "session_id": "s1" })),
+            ("todo.list", json!({ "session_id": "s1", "status": "open" })),
             (
-                "todo.list",
-                json!({ "session_id": "s1", "status": "open" }),
+                "diagnostics.memory.snapshot",
+                json!({ "after_sequence": 9 }),
             ),
-            ("diagnostics.memory.snapshot", json!({ "after_sequence": 9 })),
         ];
         for (method, params) in cases {
             let request = QueryRequest::try_from_service(method, &params)
@@ -262,6 +275,8 @@ mod tests {
         assert!(QueryRequest::try_from_service("siwc.status", &json!({})).is_none());
         assert!(QueryRequest::try_from_service("unknown.method", &json!({})).is_none());
         // todo.list 缺 session_id 同样拒绝（透传不等于缺参会话键）。
-        assert!(QueryRequest::try_from_service("todo.list", &json!({ "status": "open" })).is_none());
+        assert!(
+            QueryRequest::try_from_service("todo.list", &json!({ "status": "open" })).is_none()
+        );
     }
 }

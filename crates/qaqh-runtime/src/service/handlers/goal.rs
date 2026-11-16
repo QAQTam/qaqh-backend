@@ -63,7 +63,9 @@ fn db_error(operation: &'static str, error: qaqh_session::db::DbError) -> QaqhEr
     match error {
         qaqh_session::db::DbError::GoalExists { session_id } => QaqhError::rejected(
             CommandRejection::GoalExists,
-            format!("session {session_id} already has an unfinished goal; complete or clear it first"),
+            format!(
+                "session {session_id} already has an unfinished goal; complete or clear it first"
+            ),
         ),
         qaqh_session::db::DbError::NoGoal { session_id } => QaqhError::rejected(
             CommandRejection::NoGoal,
@@ -115,18 +117,14 @@ fn set_goal(
                 None => db
                     .read_blocking({
                         let session_id = session_id.to_string();
-                        move |conn| {
-                            qaqh_session::db::store::handoff_chain_root(conn, &session_id)
-                        }
+                        move |conn| qaqh_session::db::store::handoff_chain_root(conn, &session_id)
                     })
                     .map_err(|error| db_error("goal.set", error))?,
             };
             let objective = objective.to_string();
             // 创建时缺省预算 = config 上限(Codex create_goal 同律);改目标时
             // 未显式给预算则保持原值。
-            let create_budget = token_budget
-                .flatten()
-                .or(config.max_token_budget);
+            let create_budget = token_budget.flatten().or(config.max_token_budget);
             let update = GoalUpdate {
                 objective: Some(objective.clone()),
                 status,

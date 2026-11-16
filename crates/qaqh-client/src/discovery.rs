@@ -234,9 +234,13 @@ pub(crate) fn spawn_daemon_process(executable: &std::path::Path) -> Result<()> {
     // Keep the daemon detached while reaping it when it exits. Dropping Child
     // without wait leaves a zombie under a long-lived desktop client; the
     // stale lock then appears alive and prevents the next daemon launch.
-    std::thread::Builder::new().name("qaqh-daemon-reaper".into()).spawn(move || {
-        if let Err(error) = child.wait() { log::warn!("daemon wait failed: {error}"); }
-    })?;
+    std::thread::Builder::new()
+        .name("qaqh-daemon-reaper".into())
+        .spawn(move || {
+            if let Err(error) = child.wait() {
+                log::warn!("daemon wait failed: {error}");
+            }
+        })?;
     Ok(())
 }
 

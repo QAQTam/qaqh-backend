@@ -13,6 +13,7 @@
 //! | `merge_external_merges_opencode_source` | opencode 源以前缀 `ext-opencode-` 并入 |
 //! | `import_writes_config_and_secretizes_env` | config 写入 + env 占位符化 + secrets 往返 |
 //! | `import_skips_existing_and_respects_rejection` | 碰撞跳过 + 审批拒绝 |
+//! | `external_only_servers_auto_enable_gate` | ADR-0025：无手写 [mcp] 段、只有外部 server 时总闸自动开；显式 false 仍生效 |
 //!
 //! 信任边界用例（D4）：项目级源只能经 import_servers + confirm 回调——
 //! merge_external 的扫描路径永不触碰项目级文件（结构上不可能：只收用户级
@@ -24,7 +25,7 @@ use std::collections::BTreeMap;
 
 use qaqh_config::mcp_import::{
     self, ExternalServer, ExternalSource, UserPaths, import_servers, merge_external, scan_claude,
-    scan_codex, scan_opencode,
+    scan_codex, scan_generic_json, scan_opencode,
 };
 use qaqh_config::secrets::SecretStore;
 use qaqh_types::ConfigStore;
@@ -91,7 +92,7 @@ fn write_claude(dir: &std::path::Path) -> std::path::PathBuf {
 
 fn base_cfg(import_external: bool) -> qaqh_config::config::McpConfig {
     qaqh_config::config::McpConfig {
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: 300,
         servers: BTreeMap::from([(
             "local".to_owned(),
@@ -179,6 +180,102 @@ fn scan_opencode_missing_file_is_empty() {
     let dir = tempfile::tempdir().unwrap();
     let servers = scan_opencode(&dir.path().join("not-exist.json"));
     assert!(servers.is_empty(), "缺文件 → 空结果不报错");
+}
+
+// ── 解析面补全（ADR-0025）：新形态 + 通用 IDE 键 ──
+
+#[test]
+fn scan_claude_accepts_streamable_http_and_url_only_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("claude-new.json");
+    std::fs::write(
+        &path,
+        r#"{
+          "mcpServers": {
+            "modern": { "type": "streamable-http", "url": "https://m.example/mcp", "headers": { "Authorization": "Bearer x" } },
+            "noType": { "url": "https://n.example/mcp" },
+            "broken": { "type": "stdio" }
+          }
+        }"#,
+    )
+    .unwrap();
+    let servers = scan_claude(&path, ExternalSource::ClaudeUser);
+    assert_eq!(servers.len(), 2, "缺 url/command 的条目跳过但不再静默丢弃");
+    let modern = servers.iter().find(|s| s.name == "modern").unwrap();
+    assert_eq!(modern.url, "https://m.example/mcp");
+    assert_eq!(
+        modern.headers.get("Authorization").map(String::as_str),
+        Some("Bearer x")
+    );
+    assert_eq!(
+        servers.iter().find(|s| s.name == "noType").unwrap().url,
+        "https://n.example/mcp"
+    );
+}
+
+#[test]
+fn scan_codex_accepts_url_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("codex-remote.toml");
+    std::fs::write(
+        &path,
+        r#"
+[mcp_servers.remote]
+url = "https://r.example/mcp"
+
+[mcp_servers.remote_auth]
+url = "https://a.example/mcp"
+[mcp_servers.remote_auth.headers]
+Authorization = "Bearer t"
+"#,
+    )
+    .unwrap();
+    let servers = scan_codex(&path);
+    assert_eq!(servers.len(), 2);
+    assert_eq!(
+        servers.iter().find(|s| s.name == "remote").unwrap().url,
+        "https://r.example/mcp"
+    );
+    assert_eq!(
+        servers
+            .iter()
+            .find(|s| s.name == "remote_auth")
+            .unwrap()
+            .headers
+            .get("Authorization")
+            .map(String::as_str),
+        Some("Bearer t")
+    );
+}
+
+#[test]
+fn scan_generic_json_accepts_context_servers() {
+    // Zed settings 的 `context_servers` 结构（官方文档已核实）：command 数组
+    // + environment，或 url + headers。source 仅决定合并前缀。
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zed-context.json");
+    std::fs::write(
+        &path,
+        r#"{
+          "context_servers": {
+            "local": { "command": ["codegraph", "serve", "--mcp"], "environment": { "CG_PORT": "17313" } },
+            "remote": { "url": "https://r.example/mcp", "headers": { "Authorization": "Bearer z" } }
+          }
+        }"#,
+    )
+    .unwrap();
+    let servers = scan_generic_json(&path, ExternalSource::Generic);
+    assert_eq!(servers.len(), 2);
+    let local = servers.iter().find(|s| s.name == "local").unwrap();
+    assert_eq!(local.command, "codegraph");
+    assert_eq!(local.args, vec!["serve", "--mcp"]);
+    assert_eq!(local.env.get("CG_PORT").map(String::as_str), Some("17313"));
+    let remote = servers.iter().find(|s| s.name == "remote").unwrap();
+    assert_eq!(remote.url, "https://r.example/mcp");
+    assert_eq!(
+        remote.headers.get("Authorization").map(String::as_str),
+        Some("Bearer z")
+    );
 }
 
 #[test]
@@ -274,6 +371,43 @@ fn merge_external_missing_files_are_empty() {
         report.merged,
         Vec::<String>::new(),
         "缺文件 → 空合并，不报错"
+    );
+}
+
+// ── 默认开总闸（ADR-0025）──
+
+/// 旧实现把 `enabled` 在 `map_mcp_config` 里按**手写** servers 折叠成 bool，
+/// 而 `merge_external` 在其后只加 servers 不改总闸 ⇒「只有 Codex/Claude
+/// 用户级配置、没手写 [mcp] 段」这一最常见形态下外部 server 全被
+/// `mcp_disabled` 拒绝、prime 直接 return、工具永不投影。
+///
+/// 现在 `enabled` 保留 `Option`，`effective_enabled()` 按合并后的 servers
+/// 推导；本用例是该不变量的配对闸门（反证见 ADR-0025 落地清单）。
+#[test]
+fn external_only_servers_auto_enable_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = UserPaths {
+        codex: write_codex(dir.path()),
+        claude: dir.path().join("missing-claude.json"),
+        opencode: dir.path().join("missing-opencode.json"),
+    };
+
+    // 模拟 Config::load() 在没有 [mcp] 段时的产物
+    let mut cfg = qaqh_config::config::McpConfig::default();
+    assert!(!cfg.effective_enabled(), "零配置仍关");
+
+    let report = merge_external(&mut cfg, &paths).expect("import_external 默认开 → Some");
+    assert!(!report.merged.is_empty(), "外部 server 确实并入");
+    assert!(
+        cfg.effective_enabled(),
+        "有 server（含外部导入）即开 —— 总闸不得在合并前算死"
+    );
+
+    // 显式 kill switch 不被外部合并覆盖
+    cfg.enabled = Some(false);
+    assert!(
+        !cfg.effective_enabled(),
+        "用户显式 [mcp].enabled=false 仍然生效"
     );
 }
 

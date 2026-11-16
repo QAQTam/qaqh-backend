@@ -202,7 +202,7 @@ fn make_manager(max_concurrent: u32, idle_secs: u64) -> (Arc<McpManager>, Arc<Mo
     let cfg = McpConfig {
         import_external: false,
         inject_resource_env_block: false,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: idle_secs,
         servers: BTreeMap::from([("mock".to_owned(), server_cfg(max_concurrent))]),
     };
@@ -285,7 +285,10 @@ async fn echo_round_trip() {
     // （消费游标在各会话 loop，互不抢占）。
     let again = qaqh_mcp::bridge_for_tests::projection_batch_with(&manager);
     assert_eq!(again.len(), batch.len());
-    assert_eq!(qaqh_mcp::McpManager::projection_generation(&manager), gen_before);
+    assert_eq!(
+        qaqh_mcp::McpManager::projection_generation(&manager),
+        gen_before
+    );
 
     // 调用：echo 回声。
     let cancel = AtomicBool::new(false);
@@ -438,7 +441,7 @@ fn subprocess_cfg(tag: &str, slow_ms: u64) -> McpConfig {
     McpConfig {
         import_external: false,
         inject_resource_env_block: false,
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: 0,
         servers: BTreeMap::from([(tag.to_owned(), server)]),
     }

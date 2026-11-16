@@ -21,7 +21,6 @@ use qaqh_ringing_contract::fact::InterAgentDelivery;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-
 /// Result of creating an in-process subagent actor.
 ///
 /// ADR-0014：子代理就是会话——创建即落会话行（血缘/白名单/模型选择）。
@@ -488,7 +487,6 @@ pub trait SubagentHost: Send + Sync {
     /// 进程内直接向指定 seed 的 actor 命令队列发送一条 Ringing 命令
     /// （等价 HTTP attach + send_command，但进程内无 lease/owns 语义）。
     fn send_ringing(&self, session_id: &str, command: RingingCommand) -> Result<(), String>;
-
 }
 
 /// 进程级宿主安装位。多个 actor 并发调用 `host()` 读取；daemon 只安装一次。

@@ -136,9 +136,7 @@ pub(crate) fn resolve_shell(
                     return Err(exec_error(
                         "unknown_shell",
                         format!("shell '{name}' is not selectable here"),
-                        Some(
-                            "Windows PowerShell 5.1 has no `&&` statement separator; use 'pwsh'.",
-                        ),
+                        Some("Windows PowerShell 5.1 has no `&&` statement separator; use 'pwsh'."),
                     ));
                 }
                 Shell::Cmd => {

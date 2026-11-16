@@ -148,8 +148,7 @@ impl RingingSession {
             // rebuild 循环（rebuilding 永不复位，所有请求被拒）。
             .timeout(std::time::Duration::from_secs(OPEN_TIMEOUT_SECS))
             .json(&{
-                let request =
-                    qaqh_ringing::RingingV2OpenRequest::new(client_instance_id.clone());
+                let request = qaqh_ringing::RingingV2OpenRequest::new(client_instance_id.clone());
                 match self.client_kind {
                     Some(kind) => request.with_kind(kind),
                     None => request,

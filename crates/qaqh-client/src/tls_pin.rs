@@ -142,10 +142,7 @@ mod tests {
 
     fn verifier_for(cert: &CertificateDer<'static>) -> PinnedServerCertVerifier {
         let expected = der_fingerprint(cert);
-        PinnedServerCertVerifier::new(
-            expected,
-            Arc::new(rustls::crypto::ring::default_provider()),
-        )
+        PinnedServerCertVerifier::new(expected, Arc::new(rustls::crypto::ring::default_provider()))
     }
 
     fn localhost_cert() -> CertificateDer<'static> {

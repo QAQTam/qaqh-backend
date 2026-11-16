@@ -30,8 +30,8 @@ use qaqh_types::{CacheTokenField, ContentBlock, Message, ThinkingParamMode, Tool
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, StreamState, apply_management_headers,
-    empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail, sdk_retry_policy, split_url,
-    tool_names_by_id, tool_result_name, uuid_simple,
+    empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
+    split_url, tool_names_by_id, tool_result_name, uuid_simple,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
@@ -72,6 +72,7 @@ pub(crate) fn project_chat_messages(
     image_index_base: usize,
 ) -> Vec<WireMessage> {
     let names = tool_names_by_id(&messages);
+    let stale_boundary = super::sdk_common::stale_image_boundary(&messages);
     let mut out: Vec<WireMessage> = Vec::new();
     let mut pending_media: Vec<WireMessage> = Vec::new();
     let mut img_idx = image_index_base;
@@ -97,7 +98,7 @@ pub(crate) fn project_chat_messages(
         })
         .collect();
 
-    for msg in messages {
+    for (msg_index, msg) in messages.iter().enumerate() {
         if msg.role != "tool" && !pending_media.is_empty() {
             out.append(&mut pending_media);
         }
@@ -189,6 +190,10 @@ pub(crate) fn project_chat_messages(
                 }
             }
             "tool" => {
+                // 跨轮丢弃：位于最后一条 user 消息之前的工具图属于已消化回合，
+                // 不再重发（见 sdk_common::stale_image_boundary）。
+                let stale = stale_boundary.is_some_and(|boundary| msg_index < boundary);
+                let mut dropped = 0usize;
                 let mut parts: Vec<Part> = Vec::new();
                 for block in &msg.content {
                     match block {
@@ -213,11 +218,18 @@ pub(crate) fn project_chat_messages(
                         // 消息只接受字符串 content，图片降级为合成 user 消息
                         // （opencode 同款策略），攒到整批 tool 消息之后再落盘。
                         ContentBlock::Image { mime_type, data } => {
+                            if stale {
+                                dropped += 1;
+                                continue;
+                            }
                             pending_media.push(media_message(mime_type, data));
                         }
                         ContentBlock::ImageRef {
                             sha256, mime_type, ..
                         } => match qaqh_types::image_store::load_image_b64(sha256, mime_type) {
+                            _ if stale => {
+                                dropped += 1;
+                            }
                             Ok(data) => pending_media.push(media_message(mime_type, &data)),
                             Err(e) => log::warn!(
                                 "[gate] image {sha256} load failed, dropped from chat request: {e}"
@@ -225,6 +237,12 @@ pub(crate) fn project_chat_messages(
                         },
                         _ => {}
                     }
+                }
+                if dropped > 0
+                    && let Some(Part::ToolResult(tr)) = parts.last_mut()
+                {
+                    tr.content.push('\n');
+                    tr.content.push_str(super::sdk_common::STALE_IMAGE_STUB);
                 }
                 if !parts.is_empty() {
                     out.push(WireMessage::new(Role::Tool, parts));
@@ -605,7 +623,9 @@ async fn consume(
         hub.drain(&mut *on_event);
         match next {
             Ok(SdkEvent::NativeToolProgress { .. } | SdkEvent::NativeToolCompleted { .. }) => {
-                return Outcome::Fatal(anyhow::anyhow!("native tool events are unsupported on Chat"));
+                return Outcome::Fatal(anyhow::anyhow!(
+                    "native tool events are unsupported on Chat"
+                ));
             }
             Ok(SdkEvent::Start { .. }) => {}
             Ok(SdkEvent::TextDelta { text }) => {
@@ -690,8 +710,7 @@ async fn consume(
                 // （真终态帧从未到达）——上游掐流按失败处理，不得把半截
                 // 流洗成完成响应。真实终态恒带 finish_reason。
                 let Some(fr) = finish_reason else {
-                    interrupted =
-                        Some("upstream closed stream before terminal event".to_string());
+                    interrupted = Some("upstream closed stream before terminal event".to_string());
                     break;
                 };
                 state.stop = Some(fr);
@@ -709,6 +728,12 @@ async fn consume(
                 if matches!(e, SdkError::Cancelled) {
                     return Outcome::Fatal(anyhow::anyhow!("cancelled by user"));
                 }
+                // 流中传输断裂与建连前同律:类别随 Error 事件上抛(此前只留
+                // 字符串),runtime 依 ErrorKind 判定 turn 级重发。
+                on_event(StreamEvent::Error {
+                    kind: e.kind(),
+                    message: e.to_string(),
+                });
                 interrupted = Some(e.to_string());
                 break;
             }
@@ -911,7 +936,6 @@ mod tests {
             assistant,
             tool("call-1", true),
             tool("call-2", true),
-            Message::user("after"),
         ];
         let out = project_chat_messages(&provider(), msgs, 0);
         let roles: Vec<&str> = out
@@ -925,10 +949,10 @@ mod tests {
                 Role::Custom(_) => "other",
             })
             .collect();
-        // user, assistant, tool, tool, user(media), user(media), user(after)
+        // user, assistant, tool, tool, user(media), user(media)
         assert_eq!(
             roles,
-            vec!["user", "assistant", "tool", "tool", "user", "user", "user"],
+            vec!["user", "assistant", "tool", "tool", "user", "user"],
             "{roles:?}"
         );
         let Part::ToolResult(_) = &out[2].parts[0] else {
@@ -936,6 +960,75 @@ mod tests {
         };
         let has_image = matches!(&out[4].parts[1], Part::Image { .. });
         assert!(has_image, "media 消息须带 Image part");
+    }
+
+    /// 跨轮丢弃：边界之前的工具图不重发像素，工具结果正文带说明行。
+    #[test]
+    fn stale_tool_images_are_stubbed_across_user_boundary() {
+        let _guard = crate::sdk_common::test_support::DataDirGuard::acquire();
+        let b64 = "Zm9vYmFy";
+        let sha =
+            qaqh_types::image_store::store_image_b64(b64, "image/png").expect("store image b64");
+        let tool = |id: &str| {
+            qa_msg(
+                "tool",
+                vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: id.into(),
+                        result: qaqh_types::ToolResult::ok("image attached"),
+                    },
+                    ContentBlock::ImageRef {
+                        sha256: sha.clone(),
+                        mime_type: "image/png".into(),
+                        bytes_len: b64.len(),
+                    },
+                ],
+            )
+        };
+        let tool_use = |id: &str| {
+            qa_msg(
+                "assistant",
+                vec![ContentBlock::ToolUse {
+                    id: id.into(),
+                    name: "read_image".into(),
+                    input: serde_json::json!({"path": "a.png"}),
+                }],
+            )
+        };
+        let msgs = vec![
+            Message::user("round 1"),
+            tool_use("call-1"),
+            tool("call-1"),
+            Message::user("round 2"),
+            tool_use("call-2"),
+            tool("call-2"),
+        ];
+        let out = project_chat_messages(&provider(), msgs, 0);
+        let tools: Vec<_> = out.iter().filter(|m| m.role == Role::Tool).collect();
+        assert_eq!(tools.len(), 2);
+        let Part::ToolResult(stale) = &tools[0].parts[0] else {
+            panic!("expected tool result part");
+        };
+        assert!(
+            stale.content.contains("image removed from replay"),
+            "stale 工具结果必须带说明行"
+        );
+        let Part::ToolResult(fresh) = &tools[1].parts[0] else {
+            panic!("expected tool result part");
+        };
+        assert!(
+            !fresh.content.contains("image removed from replay"),
+            "当轮工具结果不得带说明行"
+        );
+        // stale 的图不再产生合成 media 消息；fresh 的图在其后（pending_media
+        // 整批 flush 在 out 末尾）。
+        let media: Vec<_> = out
+            .iter()
+            .filter(|m| {
+                m.role == Role::User && m.parts.iter().any(|p| matches!(p, Part::Image { .. }))
+            })
+            .collect();
+        assert_eq!(media.len(), 1, "只有当轮的图产生合成 media 消息");
     }
 
     #[test]

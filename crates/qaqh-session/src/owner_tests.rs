@@ -96,9 +96,8 @@ mod tests {
         let db = owners.db();
 
         // 水位钳制:watermark=7 只到 "中😀",文件里更靠后的 tail 不越过水位。
-        let (next, text) =
-            read_exec_output_log_range(db, session_id, exec_id, 7, 0, 1 << 20)
-                .expect("range behind watermark");
+        let (next, text) = read_exec_output_log_range(db, session_id, exec_id, 7, 0, 1 << 20)
+            .expect("range behind watermark");
         assert_eq!((next, text.as_str()), (7, "中😀"));
 
         // max_bytes 切进多字节字符:终点向前取整到字符边界(😀 的尾字节补全)。
@@ -590,10 +589,7 @@ mod tests {
                 .await
                 .expect("create session");
             let mut rx = owner.subscribe();
-            owner
-                .start_turn("T1", None)
-                .await
-                .expect("start turn");
+            owner.start_turn("T1", None).await.expect("start turn");
             owner
                 .declare_tool_call(
                     &ToolCallId::new("C1"),
@@ -694,17 +690,30 @@ mod tests {
 
             let reasoning_ord = match recv_event(&mut rx) {
                 SessionEvent::TimelineAppended {
-                    entry: TimelineEntry::AssistantBlock { ord, block_kind: AssistantBlockKind::Reasoning, .. },
+                    entry:
+                        TimelineEntry::AssistantBlock {
+                            ord,
+                            block_kind: AssistantBlockKind::Reasoning,
+                            ..
+                        },
                 } => ord,
                 other => panic!("expected reasoning timeline_appended, got {other:?}"),
             };
             let answer_ord = match recv_event(&mut rx) {
                 SessionEvent::TimelineAppended {
-                    entry: TimelineEntry::AssistantBlock { ord, block_kind: AssistantBlockKind::Answer, .. },
+                    entry:
+                        TimelineEntry::AssistantBlock {
+                            ord,
+                            block_kind: AssistantBlockKind::Answer,
+                            ..
+                        },
                 } => ord,
                 other => panic!("expected answer timeline_appended, got {other:?}"),
             };
-            assert!(reasoning_ord > 0, "live 帧必须回填权威 ord, got {reasoning_ord}");
+            assert!(
+                reasoning_ord > 0,
+                "live 帧必须回填权威 ord, got {reasoning_ord}"
+            );
             assert!(
                 reasoning_ord < answer_ord,
                 "reasoning.ord 必须 < answer.ord(落库序), got {reasoning_ord} vs {answer_ord}"

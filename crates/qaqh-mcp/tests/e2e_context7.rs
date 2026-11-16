@@ -26,7 +26,7 @@ async fn e2e_context7_real_server() {
     }
 
     let mut cfg = McpConfig {
-        enabled: true,
+        enabled: Some(true),
         idle_shutdown_secs: 0,
         servers: BTreeMap::new(),
         import_external: false,

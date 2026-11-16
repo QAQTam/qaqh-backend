@@ -8,8 +8,8 @@
 
 use std::time::Duration;
 
-use qaqh_agent_runtime::handoff::FORK_DELAY_MS;
 use crate::service::QaqhService;
+use qaqh_agent_runtime::handoff::FORK_DELAY_MS;
 
 pub(crate) fn schedule_after_terminal(service: &QaqhService, session_id: &str) {
     let eligible = service

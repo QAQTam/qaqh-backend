@@ -135,7 +135,13 @@ pub fn discover_with_home(workspace: &Path, home: Option<&Path>) -> SkillCatalog
     let mut scanned_dirs = 0usize;
 
     for (root, scope) in discovery_roots_with_home(workspace, home) {
-        scan_root(&root, scope, &mut catalog, &mut seen_names, &mut scanned_dirs);
+        scan_root(
+            &root,
+            scope,
+            &mut catalog,
+            &mut seen_names,
+            &mut scanned_dirs,
+        );
         if scanned_dirs >= MAX_SCANNED_DIRS || catalog.skills.len() >= MAX_SKILLS {
             return catalog;
         }
@@ -166,7 +172,9 @@ fn scan_root(
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
-            let Ok(file_type) = entry.file_type() else { continue };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
             let name = entry.file_name().to_string_lossy().into_owned();
             if !file_type.is_dir() || file_type.is_symlink() || should_skip_dir(&name) {
                 continue;
@@ -224,7 +232,9 @@ fn append_embedded(
     let mut files = Vec::new();
     collect_embedded_files(&BUNDLED, &mut files);
     for file in files {
-        let Some(path) = file.path().to_str() else { continue };
+        let Some(path) = file.path().to_str() else {
+            continue;
+        };
         if !path.ends_with("SKILL.md") {
             continue;
         }
@@ -263,7 +273,13 @@ fn should_skip_dir(name: &str) -> bool {
 /// 防注入：元数据压成单行，防止目录/信封被伪造换行拆开。
 fn sanitize_single_line(raw: &str) -> String {
     raw.chars()
-        .map(|character| if character.is_control() { ' ' } else { character })
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -297,8 +313,15 @@ fn split_skill_file(raw: &str) -> Result<(String, String), String> {
         .ok_or("unclosed YAML frontmatter")?;
     // body 按 `normalized` 坐标取：remainder 偏移 4，闭合标记 `\n---\n` 长 5。
     let body_start = close + 4 + 5;
-    let body = normalized.get(body_start..).unwrap_or("").trim().to_string();
-    let frontmatter = remainder.get(..close).ok_or("invalid frontmatter")?.to_string();
+    let body = normalized
+        .get(body_start..)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let frontmatter = remainder
+        .get(..close)
+        .ok_or("invalid frontmatter")?
+        .to_string();
     Ok((frontmatter, body))
 }
 
@@ -355,7 +378,10 @@ fn read_bounded(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("cannot read skill: {error}"))
 }
 
-fn parse_disk_metadata(path: &Path, scope: SkillScope) -> Result<(SkillMetadata, Vec<String>), String> {
+fn parse_disk_metadata(
+    path: &Path,
+    scope: SkillScope,
+) -> Result<(SkillMetadata, Vec<String>), String> {
     let raw = read_bounded(path)?;
     let (name, description) = parse_str_metadata(&raw)?;
     let mut warnings = validate_fields(&name, &description);
@@ -365,7 +391,9 @@ fn parse_disk_metadata(path: &Path, scope: SkillScope) -> Result<(SkillMetadata,
         .and_then(|value| value.to_str())
         && parent_name != name
     {
-        warnings.push(format!("name '{name}' does not match parent directory '{parent_name}'"));
+        warnings.push(format!(
+            "name '{name}' does not match parent directory '{parent_name}'"
+        ));
     }
     Ok((
         SkillMetadata {
@@ -419,7 +447,9 @@ pub fn render_catalog(catalog: &SkillCatalog) -> String {
         }
     }
     if omitted > 0 {
-        output.push_str(&format!("- ... {omitted} skills omitted by catalog budget\n"));
+        output.push_str(&format!(
+            "- ... {omitted} skills omitted by catalog budget\n"
+        ));
     }
     output.push_str("</available_skills>");
     output
@@ -454,12 +484,18 @@ pub fn render_system_section_with_home(workspace: &Path, home: Option<&Path>) ->
     let mut files = Vec::new();
     collect_embedded_files(&BUNDLED, &mut files);
     for file in files {
-        let Some(path) = file.path().to_str() else { continue };
+        let Some(path) = file.path().to_str() else {
+            continue;
+        };
         if !path.ends_with("SKILL.md") {
             continue;
         }
-        let Ok(raw) = std::str::from_utf8(file.contents()) else { continue };
-        let Ok((name, _)) = parse_str_metadata(raw) else { continue };
+        let Ok(raw) = std::str::from_utf8(file.contents()) else {
+            continue;
+        };
+        let Ok((name, _)) = parse_str_metadata(raw) else {
+            continue;
+        };
         if bundled_shadowed.contains(name.as_str()) {
             continue;
         }
@@ -508,8 +544,12 @@ pub fn skill_resources_with_home(
         let mut files = Vec::new();
         collect_embedded_files(&BUNDLED, &mut files);
         for file in files {
-            let Some(path) = file.path().to_str() else { continue };
-            let Ok(relative) = Path::new(path).strip_prefix(&prefix) else { continue };
+            let Some(path) = file.path().to_str() else {
+                continue;
+            };
+            let Ok(relative) = Path::new(path).strip_prefix(&prefix) else {
+                continue;
+            };
             if resources.len() >= MAX_RESOURCES {
                 break;
             }
@@ -532,14 +572,18 @@ pub fn skill_resources_with_home(
     let mut resources = Vec::new();
     let mut stack = vec![(skill_dir.clone(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
         let mut entries: Vec<_> = entries.flatten().collect();
         entries.sort_by_key(|entry| entry.file_name());
         for entry in entries {
             if resources.len() >= MAX_RESOURCES {
                 return Ok(resources);
             }
-            let Ok(file_type) = entry.file_type() else { continue };
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
             let entry_name = entry.file_name().to_string_lossy().into_owned();
             if file_type.is_symlink() {
                 continue;
@@ -551,7 +595,9 @@ pub fn skill_resources_with_home(
                 }
                 continue;
             }
-            let Ok(relative) = path.strip_prefix(&skill_dir) else { continue };
+            let Ok(relative) = path.strip_prefix(&skill_dir) else {
+                continue;
+            };
             resources.push(SkillResource {
                 skill_name: metadata.name.clone(),
                 relative_path: relative.to_string_lossy().replace('\\', "/"),
@@ -612,17 +658,34 @@ mod tests {
     #[test]
     fn workspace_qaqh_root_shadows_agents_root() {
         let temp = tempfile::tempdir().unwrap();
-        write_skill(&temp.path().join(".qaqh/skills"), "alpha", "from qaqh", "QAQH");
-        write_skill(&temp.path().join(".agents/skills"), "alpha", "from agents", "AGENTS");
-        write_skill(&temp.path().join(".agents/skills"), "beta", "only beta", "BETA");
+        write_skill(
+            &temp.path().join(".qaqh/skills"),
+            "alpha",
+            "from qaqh",
+            "QAQH",
+        );
+        write_skill(
+            &temp.path().join(".agents/skills"),
+            "alpha",
+            "from agents",
+            "AGENTS",
+        );
+        write_skill(
+            &temp.path().join(".agents/skills"),
+            "beta",
+            "only beta",
+            "BETA",
+        );
         let catalog = discover_with_home(temp.path(), Some(temp.path()));
         assert_eq!(catalog.skills.len(), 12, "2 disk skills + 10 bundled");
         let alpha = catalog.skills.iter().find(|s| s.name == "alpha").unwrap();
         assert!(alpha.path.to_string_lossy().contains(".qaqh"));
-        assert!(catalog
-            .diagnostics
-            .iter()
-            .any(|d| d.message.contains("shadowed")));
+        assert!(
+            catalog
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("shadowed"))
+        );
     }
 
     #[test]
@@ -633,10 +696,12 @@ mod tests {
         fs::write(dir.join("SKILL.md"), "---\nname: bad\n---\n\nBODY").unwrap();
         let catalog = discover_with_home(temp.path(), Some(temp.path()));
         assert!(catalog.skills.iter().all(|s| s.name != "bad"));
-        assert!(catalog
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == DiagnosticSeverity::Error));
+        assert!(
+            catalog
+                .diagnostics
+                .iter()
+                .any(|d| d.severity == DiagnosticSeverity::Error)
+        );
     }
 
     #[test]
@@ -644,7 +709,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let catalog = discover_with_home(temp.path(), Some(temp.path()));
         assert!(
-            catalog.skills.iter().any(|s| s.name == "qaqh-core" && s.origin == SkillOrigin::Bundled),
+            catalog
+                .skills
+                .iter()
+                .any(|s| s.name == "qaqh-core" && s.origin == SkillOrigin::Bundled),
             "bundled pack must surface"
         );
         let section = render_system_section_with_home(temp.path(), Some(temp.path()));
@@ -655,9 +723,18 @@ mod tests {
     #[test]
     fn disk_skill_shadows_embedded_same_name() {
         let temp = tempfile::tempdir().unwrap();
-        write_skill(&temp.path().join(".qaqh/skills"), "qaqh-core", "user override", "OVERRIDE");
+        write_skill(
+            &temp.path().join(".qaqh/skills"),
+            "qaqh-core",
+            "user override",
+            "OVERRIDE",
+        );
         let catalog = discover_with_home(temp.path(), Some(temp.path()));
-        let core = catalog.skills.iter().find(|s| s.name == "qaqh-core").unwrap();
+        let core = catalog
+            .skills
+            .iter()
+            .find(|s| s.name == "qaqh-core")
+            .unwrap();
         assert_eq!(core.origin, SkillOrigin::Project);
         let section = render_system_section_with_home(temp.path(), Some(temp.path()));
         assert!(
@@ -677,7 +754,8 @@ mod tests {
         };
         assert!(absolute_path.ends_with("SKILL.md"));
 
-        let bundled = skill_resources_with_home(temp.path(), "qaqh-core", Some(temp.path())).unwrap();
+        let bundled =
+            skill_resources_with_home(temp.path(), "qaqh-core", Some(temp.path())).unwrap();
         assert!(!bundled.is_empty());
         assert!(matches!(
             bundled[0].source,

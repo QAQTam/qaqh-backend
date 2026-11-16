@@ -862,14 +862,14 @@ mod tests {
     #[test]
     fn model_tail_append_is_prefix_stable_and_empty_is_noop() {
         let mut result = ToolResult::ok("body");
-        result.append_model_tail("\n[#ctx 96% · 0k/1k · 接近阈值请调用 handoff]");
+        result.append_model_tail("\n[#ctx 96% · 0k/1k]");
         assert!(result.model_text().starts_with("body"), "前缀字节不变");
         assert!(result.model_text().contains("[#ctx 96%"));
         let tokens_after = result.project_for_model()["context_usage"].clone();
         assert!(tokens_after.is_null(), "页脚不等于占用读数,两者互不冒充");
         result.append_model_tail("");
         assert!(
-            result.model_text().ends_with("[#ctx 96% · 0k/1k · 接近阈值请调用 handoff]"),
+            result.model_text().ends_with("[#ctx 96% · 0k/1k]"),
             "空尾巴 no-op"
         );
     }

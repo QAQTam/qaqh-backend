@@ -565,7 +565,9 @@ fn upgrade_7_to_8(tx: &Transaction<'_>) -> Result<(), DbError> {
         )
         .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 read tool_calls: {error}")))?;
     let candidates = statement
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 query: {error}")))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 iterate: {error}")))?;
@@ -574,7 +576,8 @@ fn upgrade_7_to_8(tx: &Transaction<'_>) -> Result<(), DbError> {
     let mut stripped_rows = 0i64;
     let mut stripped_entries = 0i64;
     for (call_id, effects_json) in candidates {
-        let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(&effects_json)
+        let Ok(serde_json::Value::Array(entries)) =
+            serde_json::from_str::<serde_json::Value>(&effects_json)
         else {
             // 不是合法 JSON 数组：非本次裁剪的债，留给读侧如实报 Corrupt。
             continue;
@@ -600,9 +603,7 @@ fn upgrade_7_to_8(tx: &Transaction<'_>) -> Result<(), DbError> {
                 "UPDATE tool_calls SET effects_json = NULL WHERE call_id = ?1",
                 [&call_id],
             )
-            .map_err(|error| {
-                DbError::Corrupt(format!("upgrade 7→8 nullify {call_id}: {error}"))
-            })?;
+            .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 nullify {call_id}: {error}")))?;
         } else {
             let text = serde_json::to_string(&serde_json::Value::Array(kept)).map_err(|error| {
                 DbError::Corrupt(format!("upgrade 7→8 serialize {call_id}: {error}"))
@@ -611,9 +612,7 @@ fn upgrade_7_to_8(tx: &Transaction<'_>) -> Result<(), DbError> {
                 "UPDATE tool_calls SET effects_json = ?1 WHERE call_id = ?2",
                 rusqlite::params![text, call_id],
             )
-            .map_err(|error| {
-                DbError::Corrupt(format!("upgrade 7→8 rewrite {call_id}: {error}"))
-            })?;
+            .map_err(|error| DbError::Corrupt(format!("upgrade 7→8 rewrite {call_id}: {error}")))?;
         }
     }
     log::info!(

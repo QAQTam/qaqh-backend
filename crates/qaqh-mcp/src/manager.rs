@@ -149,7 +149,7 @@ impl McpManager {
     /// - **kept**：server 配置未变 → 连接原样保留（idle 回收/调用中状态不丢）；
     /// - **updated**：配置变了 → 旧连接关闭、以新配置重新纳管（下次调用重连）；
     /// - **removed**：从配置删除 → 关闭并移除；
-    /// - `enabled` 总闸变化：`false` → 全部关闭（配置面保留，重开即恢复）；
+    /// - 总闸有效值（`effective_enabled`）变化：`false` → 全部关闭（配置面保留，重开即恢复）；
     /// - `idle_shutdown_secs` 变化仅更新 manager 层（已有连接的 idle 参数待
     ///   下次自然重连后生效——文档化决策，避免全量重建）。
     ///
@@ -189,7 +189,7 @@ impl McpManager {
         }
 
         // 3) 总闸：enabled=false → 全停（配置面保留；重开闸即恢复 lazy 连接）。
-        if !new_cfg.enabled {
+        if !new_cfg.effective_enabled() {
             let conns: Vec<Arc<ServerConnection>> = {
                 let mut map = self.lock_conns();
                 std::mem::take(&mut *map).into_values().collect()
@@ -212,7 +212,7 @@ impl McpManager {
     /// 失败/超时/冷却 → 对应错误码。
     pub async fn get_or_connect(&self, server: &str) -> Result<Arc<ServerConnection>, McpError> {
         let cfg_snapshot = self.snapshot_cfg();
-        if !cfg_snapshot.enabled {
+        if !cfg_snapshot.effective_enabled() {
             return Err(McpError::new(
                 McpErrorKind::Disabled,
                 "[mcp].enabled=false — enable MCP in config.toml to use MCP tools".to_owned(),
@@ -262,7 +262,7 @@ impl McpManager {
     /// 可用优于全部不可用）；成功连接即缓存 tools/list 并 bump 投影代数，
     /// 下个回合边界会话 loop 按代数游标拉到批次（[`crate::bridge::projection_batch`]）。
     pub async fn prime_all(&self) {
-        if !self.snapshot_cfg().enabled {
+        if !self.snapshot_cfg().effective_enabled() {
             return;
         }
         for name in self.snapshot_cfg().servers.keys() {

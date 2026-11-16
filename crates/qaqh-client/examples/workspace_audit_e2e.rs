@@ -13,8 +13,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use qaqh_client::{
-    Client, ClientHandlers, ClientOptions, CommandOptions, CommandTarget,
-    ConversationSendMessage, QueryRequest, RingingCommand,
+    Client, ClientHandlers, ClientOptions, CommandOptions, CommandTarget, ConversationSendMessage,
+    QueryRequest, RingingCommand,
 };
 
 const PROMPT: &str = concat!(
@@ -84,11 +84,11 @@ fn main() {
                 .cloned()
                 .or_else(|| sessions.get("sessions").and_then(|s| s.as_array()).cloned())
                 .unwrap_or_default();
-            if let Some(first) = arr
-                .iter()
-                .rev()
-                .find_map(|s| s.get("session_id").and_then(|v| v.as_str()).map(String::from))
-            {
+            if let Some(first) = arr.iter().rev().find_map(|s| {
+                s.get("session_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            }) {
                 session_id = Some(first);
                 break;
             }
@@ -100,7 +100,9 @@ fn main() {
         let command_id = uuid::Uuid::new_v4().to_string();
         let ack = client
             .send_command(
-                CommandTarget::Session { session_id: session_id.clone() },
+                CommandTarget::Session {
+                    session_id: session_id.clone(),
+                },
                 RingingCommand::ConversationSendMessage(ConversationSendMessage {
                     text: PROMPT.to_string(),
                     images: vec![],

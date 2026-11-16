@@ -8,7 +8,13 @@
 //!   sbx doctor [--workspace DIR]       capability 上报 + Everyone-writable 扫描 + AC 自检
 //!   sbx sidgen / sbx normalize <path>
 
-use sbx_win::{acceptance, acl, appcontainer, capability, console, desktop, env, events, feedback, policy::{self, IsolationKind}, projfs, redirect, sid, sidstore, spawn::{self, Isolation}, token};
+use sbx_win::{
+    acceptance, acl, appcontainer, capability, console, desktop, env, events, feedback,
+    policy::{self, IsolationKind},
+    projfs, redirect, sid, sidstore,
+    spawn::{self, Isolation},
+    token,
+};
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -163,12 +169,16 @@ fn ac_selftest() -> serde_json::Value {
                 })
                 .map(|t| token::token_capabilities(t.handle()).unwrap_or_default());
             match granted {
-                None => out.insert("granted_capability_present".into(), serde_json::json!(false)),
+                None => out.insert(
+                    "granted_capability_present".into(),
+                    serde_json::json!(false),
+                ),
                 Some(caps) => out.insert(
                     "granted_capability_present".into(),
-                    serde_json::json!(ic
-                        .as_ref()
-                        .is_some_and(|sid| caps.iter().any(|(s, _)| s == sid))),
+                    serde_json::json!(
+                        ic.as_ref()
+                            .is_some_and(|sid| caps.iter().any(|(s, _)| s == sid))
+                    ),
                 ),
             };
             let plain = token::create_lowbox_token(&p.sid)
@@ -291,24 +301,26 @@ fn cmd_cleanup(args: &[String]) -> i32 {
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| {
-            serde_json::from_str::<serde_json::Value>(l).ok().and_then(|v| {
-                let path = v.get("path").and_then(|p| p.as_str()).map(String::from)?;
-                let sddl = v
-                    .get("sddl")
-                    .and_then(|s| s.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(String::from);
-                let line_sid = v
-                    .get("sid")
-                    .and_then(|s| s.as_str())
-                    .and_then(|s| sid::parse_sid(s).ok())
-                    .unwrap_or_else(|| stored_sid.clone());
-                let kind = match v.get("kind").and_then(|s| s.as_str()).unwrap_or("file") {
-                    "reg" => policy::AceTarget::Registry,
-                    _ => policy::AceTarget::File,
-                };
-                Some((path, sddl, line_sid, kind))
-            })
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| {
+                    let path = v.get("path").and_then(|p| p.as_str()).map(String::from)?;
+                    let sddl = v
+                        .get("sddl")
+                        .and_then(|s| s.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(String::from);
+                    let line_sid = v
+                        .get("sid")
+                        .and_then(|s| s.as_str())
+                        .and_then(|s| sid::parse_sid(s).ok())
+                        .unwrap_or_else(|| stored_sid.clone());
+                    let kind = match v.get("kind").and_then(|s| s.as_str()).unwrap_or("file") {
+                        "reg" => policy::AceTarget::Registry,
+                        _ => policy::AceTarget::File,
+                    };
+                    Some((path, sddl, line_sid, kind))
+                })
         })
         .collect();
     entries.sort();
@@ -585,7 +597,12 @@ fn cmd_run(args: &[String]) -> i32 {
                         ws.display()
                     );
                 }
-                (id, o.journal.clone().or_else(|| Some(sidstore::journal_path(ws))))
+                (
+                    id,
+                    o.journal
+                        .clone()
+                        .or_else(|| Some(sidstore::journal_path(ws))),
+                )
             }
             Err(e) => {
                 eprintln!("run: sidstore: {e}");
@@ -629,11 +646,17 @@ fn cmd_run(args: &[String]) -> i32 {
     let cap_text = identity.sid_text.clone();
 
     let scratch = o.scratch.unwrap_or_else(|| {
-        std::env::temp_dir().join(format!("sbx-run-{}-{}", std::process::id(), events::now_millis()))
+        std::env::temp_dir().join(format!(
+            "sbx-run-{}-{}",
+            std::process::id(),
+            events::now_millis()
+        ))
     });
     let scratch_tmp = scratch.join("tmp");
     let scratch_home = scratch.join("home");
-    if let Err(e) = std::fs::create_dir_all(&scratch_tmp).and_then(|_| std::fs::create_dir_all(&scratch_home)) {
+    if let Err(e) =
+        std::fs::create_dir_all(&scratch_tmp).and_then(|_| std::fs::create_dir_all(&scratch_home))
+    {
         eprintln!("run: scratch: {e}");
         return 2;
     }
@@ -666,20 +689,24 @@ fn cmd_run(args: &[String]) -> i32 {
     // 子进程令牌按隔离后端构造(均为进程主令牌的直接子令牌,免提权):
     // token → WRITE_RESTRICTED 受限令牌;appcontainer → NtCreateLowBoxToken lowbox
     let child_token = match isolation_kind {
-        IsolationKind::Token => match token::create_restricted_token(&[cap.clone(), sid::everyone_sid()]) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("run: restricted token: {e}");
-                return 64;
+        IsolationKind::Token => {
+            match token::create_restricted_token(&[cap.clone(), sid::everyone_sid()]) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("run: restricted token: {e}");
+                    return 64;
+                }
             }
-        },
-        IsolationKind::AppContainer => match token::create_lowbox_token_with_capabilities(&cap, &capability_sids) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("run: lowbox token: {e}");
-                return 64;
+        }
+        IsolationKind::AppContainer => {
+            match token::create_lowbox_token_with_capabilities(&cap, &capability_sids) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("run: lowbox token: {e}");
+                    return 64;
+                }
             }
-        },
+        }
     };
 
     // spawn 前 ACL 计划:
@@ -713,7 +740,7 @@ fn cmd_run(args: &[String]) -> i32 {
         full_mask: isolation_kind == IsolationKind::AppContainer,
         kind: policy::AceTarget::File,
     });
-        let snapshots = match acl::apply_ops(&plan, sink.as_ref()) {
+    let snapshots = match acl::apply_ops(&plan, sink.as_ref()) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("run: apply acl plan: {e}");
@@ -763,10 +790,12 @@ fn cmd_run(args: &[String]) -> i32 {
             let ws = o.workspace.as_deref().expect("checked above");
             match redirect::prepare_turn(ws, &view_root, view_ops) {
                 Ok(t) => {
-                    sink.emit(&events::Event::new("view_start").with_detail(serde_json::json!({
-                        "root": t.root().display().to_string(),
-                        "store": ws.display().to_string(),
-                    })));
+                    sink.emit(
+                        &events::Event::new("view_start").with_detail(serde_json::json!({
+                            "root": t.root().display().to_string(),
+                            "store": ws.display().to_string(),
+                        })),
+                    );
                     Some(t)
                 }
                 Err(e) => {
@@ -790,14 +819,13 @@ fn cmd_run(args: &[String]) -> i32 {
     // cwd:redirect 下默认 = 视图根(agent 在工作区视图内工作);显式 --cwd
     // 若位于工作区内则映射进视图,工作区外原样
     let cwd = match (&o.cwd, &turn) {
-        (Some(c), Some(_)) => match redirect::workspace_rel(
-            o.workspace.as_deref().expect("checked above"),
-            c,
-        ) {
-            Some(rel) if !rel.is_empty() => view_root.join(rel),
-            Some(_) => view_root.clone(),
-            None => c.clone(),
-        },
+        (Some(c), Some(_)) => {
+            match redirect::workspace_rel(o.workspace.as_deref().expect("checked above"), c) {
+                Some(rel) if !rel.is_empty() => view_root.join(rel),
+                Some(_) => view_root.clone(),
+                None => c.clone(),
+            }
+        }
         (Some(c), None) => c.clone(),
         (None, Some(_)) => view_root.clone(),
         (None, None) => scratch_tmp.clone(),
@@ -812,7 +840,13 @@ fn cmd_run(args: &[String]) -> i32 {
         },
     };
 
-    let mut child = match spawn::spawn(&spawn_isolation, &o.cmdline, &cwd, &env_pairs, Some(desktop.name())) {
+    let mut child = match spawn::spawn(
+        &spawn_isolation,
+        &o.cmdline,
+        &cwd,
+        &env_pairs,
+        Some(desktop.name()),
+    ) {
         Ok(c) => {
             sink.emit(
                 &events::Event::new("spawn").with_detail(serde_json::json!({ "pid": c.pid })),
@@ -826,7 +860,9 @@ fn cmd_run(args: &[String]) -> i32 {
     };
 
     // 超时:轮询 try_wait,到点 kill_tree(整棵),再收割
-    let deadline = o.timeout_secs.map(|s| Instant::now() + Duration::from_secs(s));
+    let deadline = o
+        .timeout_secs
+        .map(|s| Instant::now() + Duration::from_secs(s));
     let mut code: Option<u32> = None;
     while code.is_none() {
         match child.try_wait() {
@@ -931,10 +967,9 @@ fn cmd_run(args: &[String]) -> i32 {
             },
             ChangesMode::Discard => match turn.discard() {
                 Ok(r) => {
-                    sink.emit(
-                        &events::Event::new("overlay_discard")
-                            .with_detail(serde_json::json!({ "applied": r.applied, "deleted": r.deleted })),
-                    );
+                    sink.emit(&events::Event::new("overlay_discard").with_detail(
+                        serde_json::json!({ "applied": r.applied, "deleted": r.deleted }),
+                    ));
                     eprintln!(
                         "[sbx] changes discarded: applied={} deleted={}",
                         r.applied, r.deleted
@@ -965,5 +1000,8 @@ fn open_journal(p: &PathBuf) -> std::io::Result<std::fs::File> {
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::OpenOptions::new().create(true).append(true).open(p)
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(p)
 }

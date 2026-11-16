@@ -11,7 +11,7 @@
 //! DTO/save 永远只见占位符）。失败 → `mcp_connect_failed`，消息含字段与
 //! secret 名、绝不含值（E-6 红线）。
 //!
-//! ## RAII 链（rmcp 3.2.0 源码实测，PLAN §7）
+//! ## RAII 链（rmcp 3.10.0 源码实测，PLAN §7）
 //!
 //! - `TokioChildProcess` 被 drop 时，其 `ChildWithCleanup::drop` 会 spawn kill
 //!   任务 → 经 `ProcessGroupChild::kill()` 走 `killpg` 整组（含

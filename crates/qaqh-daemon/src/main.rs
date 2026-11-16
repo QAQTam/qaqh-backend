@@ -637,7 +637,7 @@ fn http_post_json(
 // 每个 server 必须逐个确认（供应链面，设计见 mcp_import.rs 头注）。
 //
 // 用法：
-//   qaqh-daemon mcp import --from codex|claude|opencode|claude-project [--root DIR] [--exec]
+//   qaqh-daemon mcp import --from codex|claude|opencode|claude-project|generic [--root DIR] [--exec]
 
 fn mcp_cli(args: &[String]) -> i32 {
     use qaqh_config::mcp_import::{ExternalServer, ExternalSource};
@@ -653,7 +653,7 @@ fn mcp_cli(args: &[String]) -> i32 {
         }
         None => {
             eprintln!(
-                "usage: qaqh-daemon mcp import --from codex|claude|opencode|claude-project [--root DIR] [--exec]"
+                "usage: qaqh-daemon mcp import --from codex|claude|opencode|claude-project|generic [--root DIR] [--exec]"
             );
             return 2;
         }
@@ -668,7 +668,7 @@ fn mcp_cli(args: &[String]) -> i32 {
             "--from" => {
                 let Some(value) = args.get(i + 1) else {
                     eprintln!(
-                        "mcp import: --from requires a value (codex|claude|opencode|claude-project)"
+                        "mcp import: --from requires a value (codex|claude|opencode|claude-project|generic)"
                     );
                     return 2;
                 };
@@ -677,6 +677,7 @@ fn mcp_cli(args: &[String]) -> i32 {
                     "claude" => ExternalSource::ClaudeUser,
                     "opencode" => ExternalSource::Opencode,
                     "claude-project" => ExternalSource::ClaudeProject,
+                    "generic" => ExternalSource::Generic,
                     other => {
                         eprintln!("mcp import: unknown source {other:?}");
                         return 2;
@@ -704,12 +705,16 @@ fn mcp_cli(args: &[String]) -> i32 {
     }
     let Some(source) = from else {
         eprintln!(
-            "usage: qaqh-daemon mcp import --from codex|claude|opencode|claude-project [--root DIR] [--exec]"
+            "usage: qaqh-daemon mcp import --from codex|claude|opencode|claude-project|generic [--root DIR] [--exec]"
         );
         return 2;
     };
     if source == ExternalSource::ClaudeProject && root.is_none() {
         eprintln!("mcp import: claude-project requires --root DIR (project directory)");
+        return 2;
+    }
+    if source == ExternalSource::Generic && root.is_none() {
+        eprintln!("mcp import: generic requires --root <path-to-json> (IDE MCP config file)");
         return 2;
     }
 
@@ -730,6 +735,12 @@ fn mcp_cli(args: &[String]) -> i32 {
         ExternalSource::ClaudeProject => {
             let path = Path::new(root.as_deref().unwrap_or(".")).join(".mcp.json");
             qaqh_config::mcp_import::scan_claude(&path, ExternalSource::ClaudeProject)
+        }
+        ExternalSource::Generic => {
+            // ADR-0025：任意 IDE 的 JSON 配置（mcpServers/mcp/context_servers/
+            // servers 四键自动识别），走 B 路线显式导入 + 逐 server 审批。
+            let path = Path::new(root.as_deref().unwrap_or("."));
+            qaqh_config::mcp_import::scan_generic_json(path, ExternalSource::Generic)
         }
         ExternalSource::Marketplace => {
             eprintln!("mcp import: marketplace 源走 `qaqh-daemon marketplace install`");
@@ -766,12 +777,13 @@ fn mcp_cli(args: &[String]) -> i32 {
 
     // --exec：审批回调 + 写入。
     let confirm = |server: &ExternalServer| -> bool {
-        if source != ExternalSource::ClaudeProject {
+        if source != ExternalSource::ClaudeProject && source != ExternalSource::Generic {
             return true; // 用户级源：文件本就属于当前用户，不重复确认。
         }
         print!(
-            "import {} from PROJECT-level .mcp.json (submitted by repo collaborators)? [y/N] ",
-            server.name
+            "import {} from external config ({}) (may contain third-party commands)? [y/N] ",
+            server.name,
+            source.from_flag()
         );
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
@@ -863,9 +875,7 @@ fn marketplace_cli(args: &[String]) -> i32 {
     }
 
     let Some(sub) = args.first().map(String::as_str) else {
-        eprintln!(
-            "usage: qaqh-daemon marketplace add|list|remove|update|install ...（见模块注）"
-        );
+        eprintln!("usage: qaqh-daemon marketplace add|list|remove|update|install ...（见模块注）");
         return 2;
     };
     let Some(home) = home_dir() else {
@@ -876,12 +886,20 @@ fn marketplace_cli(args: &[String]) -> i32 {
 
     match sub {
         "add" => {
-            let (Some(name), url, local) = (flag(rest, "--name"), flag(rest, "--url"), flag(rest, "--local")) else {
+            let (Some(name), url, local) = (
+                flag(rest, "--name"),
+                flag(rest, "--url"),
+                flag(rest, "--local"),
+            ) else {
                 eprintln!("marketplace add: --name 必填，--url/--local 二选一");
                 return 2;
             };
-            match registry::add(&home, &name, &url.unwrap_or_default(), &local.unwrap_or_default())
-            {
+            match registry::add(
+                &home,
+                &name,
+                &url.unwrap_or_default(),
+                &local.unwrap_or_default(),
+            ) {
                 Ok(entry) => {
                     println!("marketplace {:?} 已注册", entry.name);
                     0
@@ -901,13 +919,29 @@ fn marketplace_cli(args: &[String]) -> i32 {
             for (entry, manifest) in &rows {
                 match manifest {
                     Ok(m) => {
-                        println!("{} [{}]", entry.name, if entry.local.is_empty() { "url" } else { "local" });
+                        println!(
+                            "{} [{}]",
+                            entry.name,
+                            if entry.local.is_empty() {
+                                "url"
+                            } else {
+                                "local"
+                            }
+                        );
                         for plugin in &m.plugins {
                             println!(
                                 "  - {:?} v={} [{}] {}",
                                 plugin.name,
-                                if plugin.version.is_empty() { "-" } else { &plugin.version },
-                                if plugin.category.is_empty() { "-" } else { &plugin.category },
+                                if plugin.version.is_empty() {
+                                    "-"
+                                } else {
+                                    &plugin.version
+                                },
+                                if plugin.category.is_empty() {
+                                    "-"
+                                } else {
+                                    &plugin.category
+                                },
                                 plugin.description,
                             );
                         }
@@ -983,7 +1017,8 @@ fn marketplace_cli(args: &[String]) -> i32 {
                 );
                 return 1;
             };
-            let plan = match installer::plan(entry, &market_root, target, &home, &marketplace_name) {
+            let plan = match installer::plan(entry, &market_root, target, &home, &marketplace_name)
+            {
                 Ok(plan) => plan,
                 Err(error) => {
                     eprintln!("marketplace install: {error}");
@@ -1058,7 +1093,10 @@ fn marketplace_cli(args: &[String]) -> i32 {
                 println!("imported MCP servers: {:?}", report.imported_servers);
             }
             if !report.skipped_existing.is_empty() {
-                println!("skipped (already configured): {:?}", report.skipped_existing);
+                println!(
+                    "skipped (already configured): {:?}",
+                    report.skipped_existing
+                );
             }
             if !report.rejected.is_empty() {
                 println!("rejected (not confirmed): {:?}", report.rejected);
@@ -1098,7 +1136,9 @@ fn marketplace_cli(args: &[String]) -> i32 {
             0
         }
         "uninstall" => {
-            let (Some(plugin_name), Some(target_flag)) = (flag(rest, "--plugin"), flag(rest, "--target")) else {
+            let (Some(plugin_name), Some(target_flag)) =
+                (flag(rest, "--plugin"), flag(rest, "--target"))
+            else {
                 eprintln!("marketplace uninstall: --plugin/--target 必填");
                 return 2;
             };
@@ -1133,14 +1173,14 @@ fn marketplace_cli(args: &[String]) -> i32 {
                         return 1;
                     }
                 };
-                let report = match installer::uninstall_execute(&plan, &mut config.mcp, &secrets, &home)
-                {
-                    Ok(report) => report,
-                    Err(error) => {
-                        eprintln!("marketplace uninstall: {error}");
-                        return 1;
-                    }
-                };
+                let report =
+                    match installer::uninstall_execute(&plan, &mut config.mcp, &secrets, &home) {
+                        Ok(report) => report,
+                        Err(error) => {
+                            eprintln!("marketplace uninstall: {error}");
+                            return 1;
+                        }
+                    };
                 if let Err(error) = config.save_with(&store, &secrets) {
                     eprintln!("marketplace uninstall: config save failed: {error}");
                     return 1;

@@ -13,10 +13,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::tool_api::{
-    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorKind,
-    ToolErrorCode, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode,
+    ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
-use crate::{permission::ToolCategory, ToolRisk};
+use crate::{ToolRisk, permission::ToolCategory};
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -177,11 +177,15 @@ fn list_catalog(workspace_root: &std::path::Path) -> SkillListOutput {
     }
 }
 
-fn list_resources(workspace_root: &std::path::Path, name: &str) -> Result<SkillListOutput, ToolExecutionError> {
+fn list_resources(
+    workspace_root: &std::path::Path,
+    name: &str,
+) -> Result<SkillListOutput, ToolExecutionError> {
     let resources = qaqh_skills::skill_resources(workspace_root, name).map_err(|error| {
         recoverable(
-            legacy_error(ToolErrorKind::NotFound, "skill_not_available", error)
-                .with_hint("Use an exact name from the skill catalog (call skill_list without arguments)."),
+            legacy_error(ToolErrorKind::NotFound, "skill_not_available", error).with_hint(
+                "Use an exact name from the skill catalog (call skill_list without arguments).",
+            ),
         )
     })?;
     Ok(SkillListOutput {
@@ -196,7 +200,9 @@ fn list_resources(workspace_root: &std::path::Path, name: &str) -> Result<SkillL
                         qaqh_skills::SkillResourceSource::Disk { absolute_path } => {
                             (Some(absolute_path.to_string_lossy().into_owned()), None)
                         }
-                        qaqh_skills::SkillResourceSource::Embedded { content } => (None, Some(content)),
+                        qaqh_skills::SkillResourceSource::Embedded { content } => {
+                            (None, Some(content))
+                        }
                     };
                     SkillResourceEntry {
                         relative_path: resource.relative_path,

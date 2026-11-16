@@ -18,8 +18,8 @@ use lsp_types::{
     WorkDoneProgressParams, WorkspaceSymbolParams,
 };
 
-use qaqh_types::{ToolDef, ToolFunction, ToolResult};
 use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_types::{ToolDef, ToolFunction, ToolResult};
 use qaqh_workspace::{DynamicTool, ToolRisk};
 
 use crate::bridge::DEFAULT_TIMEOUT_SECS;
