@@ -118,6 +118,8 @@ pub(crate) async fn handle_open_v2(
             content: true,
             single_stream: true,
             pairing: true,
+            // ADR-0028 §D3：shell 数据面是显式协商出来的,不是版本猜测出来的。
+            shell_stream: true,
         },
         // B07:命令目录代际随握手下发,客户端在发命令前即可校验兼容性。
         // spec §11:读模型/事件词表代际同批下发,客户端严格校验。

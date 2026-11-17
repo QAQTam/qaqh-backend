@@ -142,6 +142,18 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             vec!["RingingV2ContentUploadResponse"],
             vec!["content-upload-response.json"],
         ),
+        (
+            // ADR-0028 §D3 裁定=候选 B：用户 shell 终端的数据面。登记的 method 是
+            // `GET`（升级请求按 HTTP 事实就是 GET + `Upgrade: websocket`），ws 不是
+            // HTTP 方法；这条流的存在性由 `RingingV2Capabilities.shell_stream` 协商。
+            "shell.stream",
+            "GET",
+            "/ringing/v2/shells/{shell_id}/stream",
+            "interact",
+            true,
+            vec!["ShellStreamControl", "ShellStreamEvent", "ShellView"],
+            vec!["shell-ws-control-stdin.json", "shell-ws-event-closed.json"],
+        ),
     ];
     let mut capabilities: Vec<Value> = routes
         .into_iter()
@@ -270,6 +282,15 @@ fn capability_wire_notes(id: &str) -> Option<Vec<&'static str>> {
             "a JSON body that is not PermissionRequestDetails shape fails the request: 500 permission_details_shape_invalid",
             "a well-shaped body whose values violate is_valid() projects as details_unavailable=true and is logged as permission_details_incomplete; approval stays fail-closed (device approve/trust rejected with permission_details_unavailable, reject still allowed)",
             "content store read failure: 500 content_unavailable",
+        ]),
+        "shell.stream" => Some(vec![
+            "one ws stream only (ADR-0028 D3): the route table registers GET because the upgrade request is an HTTP GET with Upgrade: websocket; the capability bit is RingingV2Capabilities.shell_stream, never a version guess",
+            "exactly four control frame names: uplink attach{from_offset?}/stdin{bytes}/resize{cols,rows}, downlink closed{reason}; downlink data frames are raw PTY bytes with no envelope, uplink binary frames are rejected with a ws close (1008) — two ways to write the same action would be two sources of truth",
+            "no second cursor protocol: no seq field, no ack frame, no ringing.resync_required; recovery is re-attach on the same bounded raw byte ring (SHELL_REPLAY_CAP), and a slow viewer re-attaches from the offset it already delivered",
+            "disconnect never kills: closing the socket only drops one viewer; the shell is stopped only by shell.close, device revoke or daemon shutdown (same law as ExecStopReason, which has no client variant)",
+            "shell bytes never enter SessionEventFrame: session SSE capacity, replay tail and epoch:seq cursor are untouched by this stream",
+            "handshake reuses the single identity model: axum_impl/authz.rs resolve_identity plus the same Interact scope and lease-bound instance_key as the shell.* RPC arm (service_api::shell_owner); unknown or foreign shell_id is 404 shell_not_found and cannot probe existence",
+            "closed.reason is exactly ShellStopReason::as_str(): closed|idle_reaped|owner_revoked|daemon_shutdown|child_exited; child_exited is observed by the registry (ConPTY emits no EOF on child exit), not by the viewer",
         ]),
         _ => None,
     }

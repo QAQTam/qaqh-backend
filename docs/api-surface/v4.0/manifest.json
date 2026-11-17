@@ -5,7 +5,7 @@
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "43378a4abbee1d1c861ff5d948a9919adcd1d2350abd7df3d64d6e2807aa35b0",
+  "contract_hash": "91290ab3291e483b299f4a1e4e00cb28f5731b5885c15e520365b1bda70bc674",
   "files": [
     {
       "path": "constants.ts",
@@ -13,7 +13,7 @@
     },
     {
       "path": "coverage.json",
-      "sha256": "b8f774a06b395140e23eb6f774125e0ac1c37e8f2e0d943cc31cf41c917815b3"
+      "sha256": "a038cd0719715b8e5d05ecb13d302231fd585bf74d821b73120da1c86d6ba11b"
     },
     {
       "path": "cs/AccountsEmptyParams.cs",
@@ -465,7 +465,7 @@
     },
     {
       "path": "cs/RingingV2Capabilities.cs",
-      "sha256": "1197f06e7bb9f6252ca0e913f8f7e5d4f3a7d9571dc8335b0bb4c754454045ff"
+      "sha256": "5d245a5c31ba6b1094ac75a7f4031de0e53f8b6fdd17d5b01c86727424dee5fb"
     },
     {
       "path": "cs/RingingV2ClientKind.cs",
@@ -702,6 +702,14 @@
     {
       "path": "cs/ShellOpenParams.cs",
       "sha256": "9758712ef8c21b25807b2848c215b1b185b9e1d0a3b66f4f1d75d65e54d4b547"
+    },
+    {
+      "path": "cs/ShellStreamControl.cs",
+      "sha256": "9329baf4787c69f3d73493700fdeecb0cee7f737b994170142ca473c67766fc9"
+    },
+    {
+      "path": "cs/ShellStreamEvent.cs",
+      "sha256": "3ce29c488aeb9821e0d3fb4558103b208ddb65620fdec6821bc87378d1f54726"
     },
     {
       "path": "cs/ShellView.cs",
@@ -1081,7 +1089,7 @@
     },
     {
       "path": "fixtures/open-response.json",
-      "sha256": "b3c04367902d0ee2885e5511b4cc0de190ed00598432ac95b79162ab8873fa48"
+      "sha256": "44cf921ecac40abb9be8c37246bfe9b0ed188410e4ded85165b1e3a861550c0b"
     },
     {
       "path": "fixtures/pair-params.json",
@@ -1448,12 +1456,20 @@
       "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
     },
     {
+      "path": "fixtures/shell-ws-control-stdin.json",
+      "sha256": "6dd2d9e52e600a9dbd2c468a2babbd18ed9ec29ebf360b6cc15303bc97fb8abd"
+    },
+    {
+      "path": "fixtures/shell-ws-event-closed.json",
+      "sha256": "bc08471993d9911344b9e284a9cb9832fc2028ccfbd96ec52bbba23b66b5e7fb"
+    },
+    {
       "path": "fixtures/team-response.json",
       "sha256": "8444c265e0a6689daead7b81ec2c398434aee8c7b2e90c2dd19b0bd8013f4503"
     },
     {
       "path": "index.ts",
-      "sha256": "b011d0351850ce3ff859e0a81bcf0a28f52519e00c8883617a27ca3ee16b1087"
+      "sha256": "a8256e7d08b9877ac0d471e17b3b342dffae04d6a05900e06b455565913a9495"
     },
     {
       "path": "node.ts",
@@ -1937,7 +1953,7 @@
     },
     {
       "path": "types/qaqh/RingingV2Capabilities.ts",
-      "sha256": "1152c04069fcc60781cf324c7d1cc2094578538c2bd12ec8883364c460bf6e15"
+      "sha256": "893552867b6b4acda3ff540b156fc182ba90d08285250e4000b646fb27528ea1"
     },
     {
       "path": "types/qaqh/RingingV2ClientKind.ts",
@@ -2182,6 +2198,14 @@
     {
       "path": "types/qaqh/ShellOpenParams.ts",
       "sha256": "1da23dda22aba8b6ecebc58b745ca44773a29c850c8f28c2ea9d897f6d7bc9c8"
+    },
+    {
+      "path": "types/qaqh/ShellStreamControl.ts",
+      "sha256": "8e2b878e1eaad483c6244057e43bf906995b85bc40c2703a1e9e65a36ffa75d9"
+    },
+    {
+      "path": "types/qaqh/ShellStreamEvent.ts",
+      "sha256": "a9bc44187df409943f40e7240383d5577f3173f9cb644cfcda517c5dec095441"
     },
     {
       "path": "types/qaqh/ShellView.ts",

@@ -177,6 +177,8 @@ export * from "./types/qaqh/ShellCloseResult";
 export * from "./types/qaqh/ShellListParams";
 export * from "./types/qaqh/ShellListResult";
 export * from "./types/qaqh/ShellOpenParams";
+export * from "./types/qaqh/ShellStreamControl";
+export * from "./types/qaqh/ShellStreamEvent";
 export * from "./types/qaqh/ShellView";
 export * from "./types/qaqh/SiwcCode";
 export * from "./types/qaqh/SiwcConnectionStatus";

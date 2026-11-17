@@ -184,3 +184,70 @@ fn another_device_cannot_touch_or_probe_a_shell() {
 
     let _ = registry.close("device-owner", &info.id);
 }
+
+/// 子进程**自己**退出也必须被观察到。
+///
+/// 为什么单独立一条：ConPTY 的输出管道写端由 master 持有，子进程退出不产生 EOF
+/// （`qaqh-pty/src/lib.rs:119-127` 的根因注记），所以「只等 read 拿到 EOF」的实现
+/// 会把用户敲了 `exit` 的会话永远报成 `alive:true` —— 那既是给用户看的谎（宪法 5），
+/// 又是泄漏：那份 256KiB 回放环和表项要占到 daemon 关停，而 `sweep_idle` 按 D5
+/// 只在该会话**仍活**时动手。切片 4 的 ws `closed` 帧把这条事实直接暴露给用户，
+/// 所以它必须由注册表自己说得出原因。
+#[test]
+fn child_exit_is_observed_recorded_and_harvested() {
+    let registry = ShellRegistry::new();
+    let info = registry.open("device-test-5", ShellOpen::default()).expect("open shell");
+    // 先拿观看者句柄：原因写在 watch 里，单向（Once Some never back to None）。
+    let mut attach = attach(&registry, "device-test-5", &info.id);
+    assert!(attach.stopped.borrow().is_none(), "刚 attach 不该有终止事实");
+
+    registry
+        .write("device-test-5", &info.id, b"exit\r")
+        .expect("write exit");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while attach.stopped.borrow_and_update().is_none() {
+        assert!(Instant::now() < deadline, "15s 内没观察到子进程退出");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        *attach.stopped.borrow_and_update(),
+        Some(ShellStopReason::ChildExited),
+        "用户敲 exit 的会话，原因必须是 child_exited，不是 idle_reaped/daemon_shutdown"
+    );
+    assert!(
+        registry.list("device-test-5").is_empty(),
+        "退出即收割：死条目不许占着回放环等 daemon 关停"
+    );
+    // `ShellAttach` 里有 broadcast::Receiver（不 Debug），所以这里手写分支而不是
+    // expect_err —— 断言本身一个字不少。
+    match registry.attach("device-test-5", &info.id, 0) {
+        Ok(_) => panic!("收割之后不得再 attach"),
+        Err(error) => assert!(error.contains("no such shell"), "{error}"),
+    }
+}
+
+/// 显式 close 与「子进程已逝」撞上时，回给调用方的必须是**实际发生**的那次终止：
+/// 已经 child_exited 的会话被 `shell.close` 收走时不许改写原因（先到先得）。
+#[test]
+fn explicit_close_does_not_rewrite_a_recorded_terminal_fact() {
+    let registry = ShellRegistry::new();
+    let info = registry.open("device-test-6", ShellOpen::default()).expect("open shell");
+    let mut attach = attach(&registry, "device-test-6", &info.id);
+    registry
+        .write("device-test-6", &info.id, b"exit\r")
+        .expect("write exit");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let reason = loop {
+        if let Some(reason) = *attach.stopped.borrow_and_update() {
+            break reason;
+        }
+        assert!(Instant::now() < deadline, "15s 内没观察到退出");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(reason, ShellStopReason::ChildExited);
+    // 表已经摘掉了，close 只能报「不存在」——它没有机会把一个已逝会话改写成 closed。
+    assert!(registry.close("device-test-6", &info.id).is_err());
+    assert_eq!(*attach.stopped.borrow_and_update(), Some(reason));
+}

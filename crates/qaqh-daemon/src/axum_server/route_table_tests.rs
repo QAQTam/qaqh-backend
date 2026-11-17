@@ -35,6 +35,7 @@ fn synth(path: &str) -> String {
     for (placeholder, value) in [
         ("{session_id}", "0199a0f0-0000-7000-8000-000000000001"),
         ("{command_id}", "cmd-synthetic"),
+        ("{shell_id}", "shell-synthetic"),
         (
             "{content_id}",
             "sha256:0000000000000000000000000000000000000000000000000000000000000000",
@@ -96,8 +97,11 @@ async fn v2_route_table_equals_the_real_router() {
         CONTROL_PLANE_ROUTES.len() + RINGING_V2_HTTP_ROUTES.len(),
         // 11 = 4 控制面（health/activity/stop/stop-if-idle）+ 7 市场端点
         //（ADR-0022：list/installed GET，add/install/uninstall/remove/update
-        // POST）；16 = Ringing v2。
-        27,
+        // POST）；17 = Ringing v2，含 ADR-0028 §D3 那一条 ws 数据面
+        // （`GET /ringing/v2/shells/{shell_id}/stream`：升级请求按 HTTP 事实就是
+        // GET，本表只登记真实 HTTP 方法，所以探针拿到的是 400「不是升级请求」，
+        // 而不是 fallback 的 404 —— 断言只要求「不是 fallback」，仍然成立）。
+        28,
         "路由登记处总数变了：若是有意的，同步更新本断言的预期值"
     );
 

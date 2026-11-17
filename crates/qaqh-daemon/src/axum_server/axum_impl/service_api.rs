@@ -2,6 +2,35 @@
 
 use super::*;
 
+/// 用户 shell 面（RPC 三条 + ws 数据面）**唯一**的 owner 取法。
+///
+/// 三步都在这一处，谁都不许自己走一遍：
+/// 1. `Interact` 档 —— 写类命令同律（`commands.rs::required_scope` 的同一份 Scope）；
+/// 2. lease 必须**属于本身份**：device 拿别人的 `x-qaqh-client-session-id` 不算数
+///    （`v2::caller_lease_bound_to_identity`，A3「身份由 token 反推」）；
+/// 3. owner = daemon 在 open 时按 token 反查写入的稳定 `instance_key`
+///    （`lease_store.instance_for_session`），params/path 里没有 owner 位。
+///
+/// 为什么要第 2 步：只按 header 里的 cs 取 `instance_for_session`，则「有效 token +
+/// 猜到的 cs」就能把 shell 挂到**别人**的 owner 名下，还能操作别人已开的壳。这正是
+/// `authz.rs` 顶部那句话要挡的情形，此前 shell 臂漏了它。
+pub(crate) fn shell_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    identity: &Identity,
+) -> Result<String, Response> {
+    require_scope(identity, Scope::Interact)?;
+    let Some(caller) = v2::caller_lease_bound_to_identity(state, headers, identity) else {
+        return Err(lease_required_json());
+    };
+    let owner = state
+        .leases
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .instance_for_session(&caller);
+    owner.ok_or_else(lease_required_json)
+}
+
 /// `POST /ringing/v2/service/{method}` — 服务面 RPC（Read/Write 两类，
 /// 方法表见 `qaqh_runtime::ringing::service_methods`）。旧
 /// `/queries/{name}` 与 `/actions/{name}` 双端点已并入此处。
@@ -89,7 +118,7 @@ pub(crate) async fn handle_service(
         )
             .into_response();
     }
-    // ── 用户 shell 面（ADR-0028 切片 3）─────────────────────────────────
+    // ── 用户 shell 面（ADR-0028 切片 3/4）───────────────────────────────
     //
     // 为什么在 axum 层执行而不是丢进 runtime dispatch：owner **只能**来自已鉴权
     // 身份，而 `service_methods::dispatch(&service, method, params)` 的签名里根本
@@ -97,20 +126,13 @@ pub(crate) async fn handle_service(
     // (METHODS/TYPED_METHODS) 照登记，形状由那批 typed DTO + validators 锁死，
     // 结果侧与此前 `validate_typed_result` 同一份 DTO —— 类型即形状保证。
     //
-    // owner 取 `leases.instance_for_session(client_session_id)`：这是 daemon 在
-    // open 时按 token 反推写入的稳定身份（admin 为自报 instance、device 为
-    // device_id），**不是** params 里能伪装的字段（`authz.rs` 纪律）。
+    // owner/scope 的取法在 `shell_owner` 这一处，ws 数据面（`shell_ws`）调的是**同一个**
+    // 函数：终端流与 RPC 面对同一个身份只能有一套判定，否则「谁能连这条流」就有了两个
+    // 答案（D3 硬约束第 2 条）。
     if method.starts_with("shell.") {
-        if let Err(response) = require_scope(&identity, Scope::Interact) {
-            return response;
-        }
-        let Some(owner) = state
-            .leases
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .instance_for_session(&client_session_id)
-        else {
-            return lease_required_json();
+        let owner = match shell_owner(&state, &headers, &identity) {
+            Ok(owner) => owner,
+            Err(response) => return response,
         };
         let outcome: Result<serde_json::Value, String> = match method {
             "shell.open" => serde_json::from_value::<service_methods::ShellOpenParams>(
@@ -123,7 +145,9 @@ pub(crate) async fn handle_service(
                 serde_json::from_value::<service_methods::ShellCloseParams>(params.clone())
                     .map_err(|error| error.to_string())
                     .and_then(|args| state.service.shell_close(&owner, &args.shell_id))
-                    .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+                    .and_then(|result| {
+                        serde_json::to_value(result).map_err(|error| error.to_string())
+                    })
             }
             "shell.list" => serde_json::from_value::<service_methods::ShellListParams>(
                 params.clone(),

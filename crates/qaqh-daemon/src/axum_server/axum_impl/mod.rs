@@ -45,6 +45,7 @@ pub mod control;
 pub mod marketplace_api;
 pub mod pairing;
 pub mod service_api;
+pub mod shell_ws;
 pub(crate) mod test_hooks;
 pub mod v2;
 
@@ -202,6 +203,12 @@ pub fn build_router(state: AppState) -> Router {
             ("GET", "/ringing/v2/devices") => router.route(path, get(pairing::handle_devices)),
             ("POST", "/ringing/v2/devices/{device_id}/revoke") => {
                 router.route(path, post(pairing::handle_device_revoke))
+            }
+            // 用户 shell 终端的 ws 数据面（ADR-0028 §D3 裁定=候选 B，切片 4）。这是本
+            // 仓**唯一**一条 ws 流：升级按 HTTP 事实是 GET，`WebSocketUpgrade` 抽取器
+            // 会当场拒掉非升级请求（400），所以它不会被当普通 JSON 读端点误用。
+            ("GET", "/ringing/v2/shells/{shell_id}/stream") => {
+                router.route(path, get(shell_ws::handle_shell_stream_v2))
             }
             other => panic!("contract route without a registered handler: {other:?}"),
         };

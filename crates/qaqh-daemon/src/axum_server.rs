@@ -7,6 +7,8 @@ mod axum_impl;
 #[cfg(test)]
 mod route_table_tests;
 #[cfg(test)]
+mod shell_ws_tests;
+#[cfg(test)]
 mod v2_storm_tests;
 
 pub(crate) use axum_impl::challenge::ChallengeStore;

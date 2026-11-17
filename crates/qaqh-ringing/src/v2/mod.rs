@@ -2,6 +2,7 @@
 //!
 //! RingingV2 command and transport wire types on the versioned base path.
 
+mod shell_stream;
 mod types;
 
 pub use types::{
@@ -18,6 +19,7 @@ pub use types::{
     SessionCreateResult, SessionSettingsPatch, SettingValue, ToolsSettingPatch, events_path,
     open_path,
 };
+pub use shell_stream::{ShellStreamControl, ShellStreamEvent, shell_stream_path};
 
 /// Ringing v2 wire version.
 pub const RINGING_V2_VERSION: u32 = 2;
@@ -32,6 +34,13 @@ pub const RINGING_V2_BASE_PATH: &str = "/ringing/v2";
 /// - contract exporter 校验 coverage 声明的路由 ⊆ 本表,双侧不得再漂移。
 /// `/health`、`/activity`、`/control/v1/*` 是控制面观测/停机端点,不属于
 /// Ringing 契约面,不在本表。
+///
+/// 最后一条是**唯一**的 ws 流(用户 shell 终端数据面,ADR-0028 §D3 裁定=候选 B)：
+/// 登记的 method 写 `GET` 而不是 `WS`，因为升级请求按 HTTP 事实就是 GET +
+/// `Upgrade: websocket`；`router.route(path, get(..))` 与本表的 method 列必须同
+/// 一面镜子（写 `WS` 会让本表的列不再等于 HTTP 方法，B02 闸也就失去意义）。
+/// 「这是一条 ws 流、不是普通 JSON GET」这件事写在 `coverage.json` 的能力记录里
+/// （含 4 个控制帧的词表），不靠版本猜测。
 pub const RINGING_V2_HTTP_ROUTES: &[(&str, &str)] = &[
     ("POST", "/ringing/v2/clients/open"),
     ("POST", "/ringing/v2/leases/renew"),
@@ -52,4 +61,5 @@ pub const RINGING_V2_HTTP_ROUTES: &[(&str, &str)] = &[
     ("POST", "/ringing/v2/pair"),
     ("GET", "/ringing/v2/devices"),
     ("POST", "/ringing/v2/devices/{device_id}/revoke"),
+    ("GET", "/ringing/v2/shells/{shell_id}/stream"),
 ];

@@ -12,4 +12,15 @@ single_stream: boolean,
 /**
  * QR pairing endpoints are available.
  */
-pairing: boolean, };
+pairing: boolean, 
+/**
+ * 用户 shell 终端的 **ws 数据面**可用：
+ * `GET /ringing/v2/shells/{shell_id}/stream`（带 `Upgrade: websocket`）。
+ *
+ * 这条布尔位是 ADR-0028 §D3 硬约束第 5 条「显式声明这条流,禁止靠版本猜测」
+ * 的落点：客户端**不许**用 daemon 版本号推断有没有 shell 流。它的词表只有
+ * 4 个控制帧（`attach`/`stdin`/`resize`/`closed`）+ 裸字节下行，见
+ * [`crate::ShellStreamControl`]。与 `single_stream` 无关系：会话事件流的
+ * `epoch:seq` 游标、回放尾、`ringing.resync_required` 一概不在这条流上。
+ */
+shell_stream: boolean, };

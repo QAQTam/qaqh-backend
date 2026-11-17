@@ -23,5 +23,7 @@ public sealed record RingingV2Capabilities
     public bool SingleStream { get; init; }
     [JsonPropertyName("pairing")]
     public bool Pairing { get; init; }
+    [JsonPropertyName("shell_stream")]
+    public bool ShellStream { get; init; }
 }
 

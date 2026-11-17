@@ -920,6 +920,34 @@
         "TeamBoardSnapshot"
       ],
       "validation": "rust-dto"
+    },
+    {
+      "fixtures": [
+        "shell-ws-control-stdin.json",
+        "shell-ws-event-closed.json"
+      ],
+      "id": "shell.stream",
+      "method": "GET",
+      "minimum_scope": "interact",
+      "path": "/ringing/v2/shells/{shell_id}/stream",
+      "remote_transport_acceptance": "not_verified",
+      "requires_lease": true,
+      "status": "implemented",
+      "types": [
+        "ShellStreamControl",
+        "ShellStreamEvent",
+        "ShellView"
+      ],
+      "validation": "rust-dto",
+      "wire_notes": [
+        "one ws stream only (ADR-0028 D3): the route table registers GET because the upgrade request is an HTTP GET with Upgrade: websocket; the capability bit is RingingV2Capabilities.shell_stream, never a version guess",
+        "exactly four control frame names: uplink attach{from_offset?}/stdin{bytes}/resize{cols,rows}, downlink closed{reason}; downlink data frames are raw PTY bytes with no envelope, uplink binary frames are rejected with a ws close (1008) — two ways to write the same action would be two sources of truth",
+        "no second cursor protocol: no seq field, no ack frame, no ringing.resync_required; recovery is re-attach on the same bounded raw byte ring (SHELL_REPLAY_CAP), and a slow viewer re-attaches from the offset it already delivered",
+        "disconnect never kills: closing the socket only drops one viewer; the shell is stopped only by shell.close, device revoke or daemon shutdown (same law as ExecStopReason, which has no client variant)",
+        "shell bytes never enter SessionEventFrame: session SSE capacity, replay tail and epoch:seq cursor are untouched by this stream",
+        "handshake reuses the single identity model: axum_impl/authz.rs resolve_identity plus the same Interact scope and lease-bound instance_key as the shell.* RPC arm (service_api::shell_owner); unknown or foreign shell_id is 404 shell_not_found and cannot probe existence",
+        "closed.reason is exactly ShellStopReason::as_str(): closed|idle_reaped|owner_revoked|daemon_shutdown|child_exited; child_exited is observed by the registry (ConPTY emits no EOF on child exit), not by the viewer"
+      ]
     }
   ],
   "command_idempotency": {

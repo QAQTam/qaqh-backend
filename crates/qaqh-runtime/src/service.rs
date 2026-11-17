@@ -676,6 +676,50 @@ impl QaqhService {
         })
     }
 
+    // ── 数据面（ADR-0028 D3 裁定=候选 B：ws）──────────────────────────
+    //
+    // 这三条**不是**服务方法，也没有 DTO/validator/METHODS 登记：`stdin`/`resize`
+    // 做成 RPC 就等于给终端另造一套请求-回执-游标语义（ADR-0017 §被否选项第 4 条
+    // 点名的平行协议形态，也是 D4 刻意不做 `shell.write`/`shell.output` 的理由）。
+    // 它们是给 daemon 的 ws handler 用的内核侧句柄 —— `registry()` 是 `pub(crate)`，
+    // 装配层拿不到 `ShellRegistry`，只能从这一层过。owner 的口径与 RPC 面**同一条**
+    // （daemon 从已鉴权身份/lease 反查），这里同样绝不接受自报 owner。
+
+    /// 订阅一条 shell：有界回放段 + 实时帧 + 终止事实。`from_offset` 落在缓冲头
+    /// 之前时按可用段给（`ShellAttach::from_offset` 是实际起点）。
+    pub fn shell_attach(
+        &self,
+        owner_instance_key: &str,
+        shell_id: &str,
+        from_offset: u64,
+    ) -> Result<crate::shell::ShellAttach, String> {
+        let registry = self.registry()?;
+        registry.shells().attach(owner_instance_key, shell_id, from_offset)
+    }
+
+    /// 往 shell 打原始字节（终端 keystroke/粘贴）。
+    pub fn shell_stdin(
+        &self,
+        owner_instance_key: &str,
+        shell_id: &str,
+        bytes: &[u8],
+    ) -> Result<usize, String> {
+        let registry = self.registry()?;
+        registry.shells().write(owner_instance_key, shell_id, bytes)
+    }
+
+    /// 改几何，回报**内核读回值**（D6：shell 面吃活尺寸，不回报请求值）。
+    pub fn shell_resize(
+        &self,
+        owner_instance_key: &str,
+        shell_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(u16, u16), String> {
+        let registry = self.registry()?;
+        registry.shells().resize(owner_instance_key, shell_id, cols, rows)
+    }
+
     /// device 吊销路径（`pairing::handle_device_revoke`）：吊销即收掉该身份名下
     /// 所有 shell。这是 D5 的三条显式 kill 路之一。
     pub fn shutdown_shells_of(&self, owner_instance_key: &str) -> usize {

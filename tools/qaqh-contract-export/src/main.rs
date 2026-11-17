@@ -374,6 +374,8 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         content: true,
         single_stream: true,
         pairing: false,
+        // ADR-0028 §D3 硬约束第 5 条：ws 数据面必须协商出来，不许客户端靠版本猜。
+        shell_stream: true,
     };
     let open_response = RingingV2OpenResponse {
         schema: qaqh_ringing::RINGING_SCHEMA.to_owned(),
@@ -701,6 +703,25 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             }],
         },
     )?;
+    // ws 数据面（ADR-0028 §D3 裁定=候选 B，切片 4）的两个帧样本。形状由
+    // `qaqh-ringing` 的帧型生成，词表只有 attach/stdin/resize/closed 四个名字；
+    // 上行没有裸字节这条路（binary 帧只用于下行），所以下面这个样本就是「打字」。
+    write_fixture(
+        stage,
+        "shell-ws-control-stdin.json",
+        &qaqh_ringing::ShellStreamControl::Stdin {
+            // base64::STANDARD of b"exit\r\n"
+            bytes: "ZXhpdA0K".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "shell-ws-event-closed.json",
+        &qaqh_ringing::ShellStreamEvent::Closed {
+            // 口径仍由 `ShellStopReason::as_str()` 单点生成，不在 exporter 里拼字符串。
+            reason: qaqh_runtime::ShellStopReason::ChildExited.as_str().to_owned(),
+        },
+    )?;
     write_fixture(
         stage,
         "service-session-turn-params.json",
@@ -985,6 +1006,9 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::ShellCloseResult,
         qaqh_runtime::ringing::service_methods::ShellListParams,
         qaqh_runtime::ringing::service_methods::ShellListResult,
+        // ws 数据面的帧型（切片 4）。同上：漏在这里 = 方法/路由有、类型产物没有。
+        qaqh_ringing::ShellStreamControl,
+        qaqh_ringing::ShellStreamEvent,
         qaqh_runtime::ringing::service_methods::SessionTurnParams,
         qaqh_runtime::ringing::service_methods::SessionListParams,
         qaqh_runtime::ringing::service_methods::SessionMetaParams,

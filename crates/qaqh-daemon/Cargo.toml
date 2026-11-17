@@ -28,7 +28,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 subtle = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
-axum = { version = "0.8" }
+# ws: 用户 shell 终端数据面（ADR-0028 D3 裁定=候选 B）。除此之外不引任何新传输。
+axum = { version = "0.8", features = ["ws"] }
+# shell ws 数据面的 `stdin{bytes}` 是 base64（ADR-0028 §D3 约束 3：上行只有 text 一种
+# 形状）。版本与 qaqh-file-tools 已声明的 0.23 同一条，不新增版本。
+base64 = "0.23"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.7", features = ["trace", "fs", "limit", "cors", "set-header", "util"] }
 tokio-stream = "0.1"
@@ -48,6 +52,9 @@ qaqh-siwc = { path = "../qaqh-siwc" }
 tempfile = "3"
 # v2_storm_tests 需要逐帧 poll SSE 响应体（回放尾的"部分读取+截止"语义）。
 http-body-util = "0.1"
+# shell_ws_tests 要一条**真**的 ws 握手：`oneshot` 伪造不出升级后的双向字节通道。
+# 版本与 axum 的 ws feature 拉进来的那一条同版，不新增版本。
+tokio-tungstenite = "0.29"
 
 [lints]
 workspace = true

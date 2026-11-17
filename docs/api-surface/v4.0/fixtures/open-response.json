@@ -12,7 +12,8 @@
     "service": true,
     "content": true,
     "single_stream": true,
-    "pairing": false
+    "pairing": false,
+    "shell_stream": true
   },
   "command_contract_revision": "ringing-commands-10",
   "session_contract_revision": "ringing-session-3"

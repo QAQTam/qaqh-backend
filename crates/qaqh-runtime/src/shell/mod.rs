@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// 用户 shell 的默认几何。与前端 `ShellTerminal.tsx` 的兜底值同律，
 /// UI 测量到真实值后立刻 resize 覆盖。
@@ -54,6 +54,9 @@ pub struct ShellOpen {
 
 /// 一帧原始输出 + 它在整条会话里的字节游标。游标只用于**回放定位**，
 /// 不是 `SessionEventFrame.seq` 那种跨重连的会话事实游标（D3 约束 4）。
+///
+/// 这里**只有字节**：终止事实走 [`ShellAttach::stopped`] 那条 watch，不往裸字节流里
+/// 塞虚构帧 —— 往 xterm 的输入流里编一个「会话结束」的字节序列就是让客户端猜。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ShellFrame {
     pub offset: u64,
@@ -81,6 +84,11 @@ pub struct ShellAttach {
     pub from_offset: u64,
     pub next_offset: u64,
     pub frames: broadcast::Receiver<ShellFrame>,
+    /// 终止事实的观测口：`None` = 还活着，`Some(reason)` = 已经死了，原因就是 D5 那
+    /// 三条显式 kill 路之一或 `ChildExited`。订阅一次就拿到**当前值**（所以「子进程
+    /// 自己退出后晚来的观看者」也能读到真相，不必轮询 `alive`，也不必有哨兵字节），
+    /// 之后 `changed()` 只往已终止的方向走（切片 4 的 `closed` 控制帧就来自这里）。
+    pub stopped: watch::Receiver<Option<ShellStopReason>>,
 }
 
 /// shell 终止原因。**没有** `ClientDisconnected` 这一档（断联不 kill）。
@@ -107,6 +115,14 @@ impl ShellStopReason {
     }
 }
 
+/// 日志与 wire 用**同一个**拼写：`{}` 走 `as_str()`，不许再出现 `Closed` 这种
+/// 与 `ShellCloseResult.reason` 不同的第二事实源（`{:?}` 留给调试用 Debug）。
+impl std::fmt::Display for ShellStopReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// 注册表句柄（可克隆，daemon 装配时塞进 AppState；切片 3/4 接线）。
 #[derive(Clone, Default)]
 pub struct ShellRegistry {
@@ -128,6 +144,10 @@ struct LiveShell {
     reader: Mutex<Option<Box<dyn Read + Send>>>,
     output: Mutex<OutputRing>,
     frames: broadcast::Sender<ShellFrame>,
+    /// 终止事实的唯一真源。用 `watch` 而不是再开一条 broadcast：`watch` 保留
+    /// **当前值**，所以「先死、后 attach」的观看者也读得到原因（broadcast 会把
+    /// 没订阅时发过的那帧永远丢掉）。`None` = 还活着。
+    stopped: watch::Sender<Option<ShellStopReason>>,
     last_activity: Mutex<Instant>,
     alive: std::sync::atomic::AtomicBool,
     /// 最后一次**可信**的几何：open 时是请求值，之后每次从内核读成功就刷新。
@@ -189,6 +209,7 @@ impl ShellRegistry {
         let id = format!("shell_{}", qaqh_ringing_contract::ulid::generate_ulid());
         let pid = control.pid;
         let (frames, _) = broadcast::channel(SHELL_VIEWER_CAPACITY);
+        let (stopped, _) = watch::channel(None);
         let shell = Arc::new(LiveShell {
             id: id.clone(),
             owner_instance_key: owner_instance_key.to_string(),
@@ -200,34 +221,28 @@ impl ShellRegistry {
             reader: Mutex::new(Some(io.reader)),
             output: Mutex::new(OutputRing::new()),
             frames,
+            stopped,
             last_activity: Mutex::new(Instant::now()),
             alive: std::sync::atomic::AtomicBool::new(true),
             geometry: Mutex::new((cols, rows)),
         });
 
+        // 观察者先起、后入表：反过来会有一段时间这条会话**已经能被 attach 却永远
+        // 读不到字节**（宪法 5：那是个看起来能用的空壳）。起不来就当场拆会话。
+        if let Err(error) = spawn_output_watchers(Arc::clone(&shell), self.clone()) {
+            let mut control = shell.control.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = control.kill_group();
+            // 必须关 master：读泵可能已经起来了，而 ConPTY 的写端由 master 持有 ——
+            // 不关就是漏一条永不退出的线程（`qaqh-pty/src/lib.rs:119-127`）。
+            control.close_terminal();
+            drop(control);
+            let _ = shell.mark_stopped(ShellStopReason::DaemonShutdown);
+            return Err(format!("qaqh-shell: output watchers failed to start: {error}"));
+        }
         self.shells
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(id.clone(), Arc::clone(&shell));
-        // 读泵起不来就当场拆会话：不能留一个"开了但永远读不到字节"的壳（宪法 5）。
-        let pump = match pump_output(Arc::clone(&shell)) {
-            Ok(pump) => pump,
-            Err(error) => {
-                self.shells
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .remove(&shell.id);
-                let _ = shell
-                    .control
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .kill_group();
-                return Err(format!("qaqh-shell: output pump failed to start: {error}"));
-            }
-        };
-        // 句柄丢弃 = 线程脱管(detached)：会话生命周期由 close/sweep 驱动，不靠
-        // join；读泵自己会在 EOF 时收尾。
-        drop(pump);
         log::info!(
             "[shell] open {} pid={} shell={} cwd={} geometry={}x{}",
             shell.id,
@@ -251,12 +266,22 @@ impl ShellRegistry {
         let shell = self.find_owned(owner_instance_key, id)?;
         shell.touch();
         let frames = shell.frames.subscribe();
+        // watch 的 subscribe 先于环快照：attach 之后发生的终止一定能在 receiver 里读到，
+        // 已经发生过的终止则直接从当前值读到（`Option` 是单向的，只会变成 Some）。
+        let stopped = shell.stopped.subscribe();
         let (replay, start, next_offset) = {
             let output = shell.output.lock().unwrap_or_else(|e| e.into_inner());
             let oldest = output.total.saturating_sub(output.bytes.len() as u64);
             (output.tail_from(from_offset), from_offset.max(oldest), output.total)
         };
-        Ok(ShellAttach { info: shell.info(), replay, from_offset: start, next_offset, frames })
+        Ok(ShellAttach {
+            info: shell.info(),
+            replay,
+            from_offset: start,
+            next_offset,
+            frames,
+            stopped,
+        })
     }
 
     /// 往 shell 的 stdin 注入原始字节（keystrokes 走数据面，不走 RPC —— D4）。
@@ -337,6 +362,10 @@ impl ShellRegistry {
 
     /// 无人观看且无输入活动超过 `ttl_secs` 才回收；0 = 关（与
     /// `session_idle_unload_secs` 同纪律）。挂在既有 60s 周期任务里。
+    ///
+    /// 条件里**不含** `alive`：已经逝了但仍挂在表里的条目（唯一的路是子进程在
+    /// `open` 入表前就退出）也归这里清出去，否则那份 256KiB 环要占到 daemon 关停。
+    /// `stop_one` 对逝条目只做摘表，不会再动内核（先到先得，见 `mark_stopped`）。
     pub fn sweep_idle(&self, ttl_secs: u64) -> Vec<String> {
         if ttl_secs == 0 {
             return Vec::new();
@@ -355,7 +384,7 @@ impl ShellRegistry {
                     .unwrap_or_else(|e| e.into_inner())
                     .elapsed()
                     >= ttl;
-                unwatched && idle && shell.alive.load(std::sync::atomic::Ordering::Relaxed)
+                unwatched && idle
             })
             .cloned()
             .collect();
@@ -388,7 +417,14 @@ impl ShellRegistry {
         // 先从表里摘掉：并发 attach/write 立刻拿到 unknown shell，而不是
         // 对着一个正在死的会话继续打字。
         self.shells.lock().unwrap_or_else(|e| e.into_inner()).remove(&shell.id);
-        if !shell.alive.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        // 先到先得：谁写下终止事实，谁负责把内核侧收干净 —— 同一次终止只允许一条路
+        // 动手（读泵把子进程自己退出算作 `ChildExited`，显式 close 算作 `Closed`）。
+        let (reason, won) = shell.mark_stopped(reason);
+        if !won {
+            log::info!(
+                "[shell] stop {} pid={} skipped: 已由 {reason} 终止",
+                shell.id, shell.pid
+            );
             return Ok(reason);
         }
         {
@@ -398,14 +434,51 @@ impl ShellRegistry {
             // 不产生 EOF（qaqh-pty lib.rs:119-127 的根因注记）。
             control.close_terminal();
         }
-        // 不发哨兵帧：观看者以 `info().alive == false` + 本连接收到 closed 控制
-        // 帧（切片 4）为准。往裸字节流里塞虚构帧会让 xterm 猜不透。
-        log::info!("[shell] stopped {} pid={} reason={:?}", shell.id, shell.pid, reason);
+        // 不发哨兵字节帧：观看者从 `ShellAttach::stopped` 这条 watch 读原因
+        // （切片 4 的 ws `closed` 控制帧）。往裸字节流里编一帧「会话结束」会让
+        // xterm 猜不透，而且那份原因就成了第二事实源。
+        log::info!("[shell] stopped {} pid={} reason={}", shell.id, shell.pid, reason.as_str());
         Ok(reason)
+    }
+
+    /// 读泵在子进程退出后摘表：只摘自己那一份 `Arc`，并发 close 已经摘过就不动。
+    /// **先摘表再碰 control** —— `stop_one` 的顺序是「map → control」，反序即死锁。
+    fn forget(&self, shell: &Arc<LiveShell>) {
+        let mut shells = self.shells.lock().unwrap_or_else(|e| e.into_inner());
+        if shells.get(&shell.id).is_some_and(|live| Arc::ptr_eq(live, shell)) {
+            shells.remove(&shell.id);
+        }
     }
 }
 
 impl LiveShell {
+    /// 先到先得地写终止事实，返回 `(权威原因, 是否本次写入)`。
+    ///
+    /// 为什么必须是「先到先得」：`shell.close` 打到一条刚刚自己退出过的会话时，
+    /// 回给调用方的若是 `closed` 就是给用户看的第二个版本的事实（宪法 5）；读泵
+    /// 抢到 `ChildExited` 之后任何路都不许改写它。`watch` 一旦成 `Some` 就永不
+    /// 回退，所以写完立刻读必然拿得到原因。
+    fn mark_stopped(&self, reason: ShellStopReason) -> (ShellStopReason, bool) {
+        let won = self.stopped.send_if_modified(|current| {
+            if current.is_some() {
+                return false;
+            }
+            *current = Some(reason);
+            true
+        });
+        if won {
+            self.alive.store(false, std::sync::atomic::Ordering::Release);
+        }
+        let recorded = self.stop_reason().expect(
+            "qaqh-shell: mark_stopped 之后 watch 里必有原因,读不到即为逻辑错",
+        );
+        (recorded, won)
+    }
+
+    fn stop_reason(&self) -> Option<ShellStopReason> {
+        *self.stopped.borrow()
+    }
+
     fn touch(&self) {
         *self.last_activity.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
     }
@@ -439,11 +512,49 @@ impl LiveShell {
     }
 }
 
-/// 每会话一条读泵线程：裸字节进环 + 广播；EOF/读错即收割并置 dead。
+/// 子进程**自己**退出的观察间隔。与 exec 面 `PROCESS_WATCH_INTERVAL`（`manager.rs:25`）
+/// 同值同律。
 ///
-/// reader 在这里从 `control` 之外的独立所有权取出（`into_parts` 已交出来），
-/// 所以打字与 resize 都不会被慢读拖住。
-fn pump_output(shell: Arc<LiveShell>) -> std::io::Result<std::thread::JoinHandle<()>> {
+/// 为什么必须有这条线程而不是「等读泵拿到 EOF」：ConPTY 的输出管道写端由 master
+/// 持有，子进程退出**不产生 EOF**（`qaqh-pty/src/lib.rs:119-127` 的根因注记）。
+/// 只盯 read 循环的话，用户敲 `exit` 之后这条会话会永远挂在「还活着」上 —— 那既是
+/// 谎（`shell.list` 报 alive），也是泄漏（256KiB 的环 + 表项没人收，`sweep_idle`
+/// 按 D5 只动活会话，永远不动它）。
+const SHELL_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// 每会话两条线程：读泵搬字节，观察线程盯退出。两条都要，是因为上面那段 EOF 纪律。
+///
+/// 句柄全部丢弃 = 线程脱管(detached)：会话生命周期由 close/sweep/revoke/shutdown
+/// 驱动，不靠 join；子进程一逝两条自己收。
+fn spawn_output_watchers(shell: Arc<LiveShell>, registry: ShellRegistry) -> std::io::Result<()> {
+    spawn_read_pump(Arc::clone(&shell), registry.clone())?;
+    let id = shell.id.clone();
+    std::thread::Builder::new()
+        .name(format!("shell-reap-{id}"))
+        .spawn(move || {
+            loop {
+                let exited = {
+                    let mut control = shell.control.lock().unwrap_or_else(|e| e.into_inner());
+                    // Err 也按「已逝」处理：ECHILD 之类只可能是别人已经收割过。
+                    match control.try_wait() {
+                        Ok(Some(_)) | Err(_) => true,
+                        Ok(None) => false,
+                    }
+                };
+                if exited || !shell.alive.load(std::sync::atomic::Ordering::Acquire) {
+                    break;
+                }
+                std::thread::sleep(SHELL_EXIT_POLL);
+            }
+            harvest_child_exit(&shell, &registry);
+            // 读泵不靠这里叫醒：上面那次 close_terminal 就是它要的 EOF。
+        })
+        .map(|_| ())
+}
+
+/// 读泵：裸字节进环 + 广播。reader 在 `control` 之外的独立所有权里（`into_parts`
+/// 交出来的），所以打字与 resize 都不会被慢读拖住。
+fn spawn_read_pump(shell: Arc<LiveShell>, registry: ShellRegistry) -> std::io::Result<()> {
     let mut reader = shell
         .reader
         .lock()
@@ -470,16 +581,30 @@ fn pump_output(shell: Arc<LiveShell>) -> std::io::Result<std::thread::JoinHandle
                     }
                 }
             }
-            // 子进程关掉了管道：收割事实，并顺手关掉 master 让 ConPTY 那侧也收摊
-            // （`close_terminal` 只能在收割后调 —— qaqh-pty lib.rs:316-321 的纪律）。
-            {
-                let mut control = shell.control.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = control.try_wait();
-                control.close_terminal();
-            }
-            shell.alive.store(false, std::sync::atomic::Ordering::Relaxed);
-            log::info!("[shell] pump ended {}", shell.id);
+            // Unix 上子进程退出会直接给 EOF，于是这条路也可能先到 —— 收摊口是同一个，
+            // 先到先得，不会与观察线程双杀。
+            harvest_child_exit(&shell, &registry);
         })
+        .map(|_| ())
+}
+
+/// 子进程自己退出这条路的收尾。**只有抢到终止事实的那一条动手**：摘表、收割、
+/// 关 master（`close_terminal` 只能在收割之后调 —— `qaqh-pty/src/lib.rs:316-321`）。
+/// 显式 `close`/`revoke`/`shutdown` 已经写下原因的话，这里连日志都不许再造一个事实。
+fn harvest_child_exit(shell: &Arc<LiveShell>, registry: &ShellRegistry) {
+    let (reason, won) = shell.mark_stopped(ShellStopReason::ChildExited);
+    if !won {
+        log::info!("[shell] {} 已由 {reason} 收摊，本次不重复动手", shell.id);
+        return;
+    }
+    // 先摘表再碰 control：`stop_one` 的取锁顺序是 map → control，反序即死锁。
+    registry.forget(shell);
+    {
+        let mut control = shell.control.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = control.try_wait();
+        control.close_terminal();
+    }
+    log::info!("[shell] exited {} pid={} reason={}", shell.id, shell.pid, reason.as_str());
 }
 
 /// daemon 侧决定用哪个 shell —— 客户端不传可执行名（D4：少一个参数少一条注入面）。
