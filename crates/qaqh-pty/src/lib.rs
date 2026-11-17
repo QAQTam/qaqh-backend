@@ -325,6 +325,102 @@ impl SpawnedSession {
             *master = None;
         }
     }
+
+    /// 变更终端几何（用户 shell 面的 resize 落点；ADR-0028）。
+    ///
+    /// Windows 经留存的 ConPTY master 打 `ResizePseudoConsole`，Unix 在 dup 出的
+    /// `master_fd` 上打 `TIOCSWINSZ`。**pipe 后端没有终端几何**，显式拒绝而不是
+    /// 静默 no-op（宪法 5：不能工作就报错，不许装成能工作）。
+    ///
+    /// 纪律：这条**只服务用户 shell**。agent exec 面的尺寸仍钉死 80×24 —— 那是
+    /// 模型侧 ConPTY 重排签名的口径（`qaqh-process-tools/src/exec/truncate.rs`
+    /// 判据「CUP 列参数 == 终端列数」），两边不许「顺手统一」：让 exec 跟着窗口
+    /// 变宽而不重播种 reflower，就是 `truncate.rs:131` 记的那类「字符串随机损坏，
+    /// first diff 恒在第 80 列」。
+    pub fn resize(&self, cols: u16, rows: u16) -> std::io::Result<()> {
+        if cols < 2 || rows < 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "qaqh-pty: terminal geometry must be at least 2x2",
+            ));
+        }
+        match &self.inner {
+            #[cfg(windows)]
+            SessionInner::Pty { master, .. } => {
+                let Some(master) = master.as_ref() else {
+                    return Err(std::io::Error::other(
+                        "qaqh-pty: ConPTY master already closed (terminal reaped)",
+                    ));
+                };
+                master
+                    .resize(portable_pty::PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    })
+                    .map_err(anyhow_to_io)
+            }
+            #[cfg(unix)]
+            SessionInner::Pty { master_fd, .. } => {
+                let winsize = libc::winsize {
+                    ws_row: rows,
+                    ws_col: cols,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                // SAFETY: `master_fd` 由本会话持有且仍有效；`winsize` 是定长 POD，
+                // `TIOCSWINSZ` 只从该指针读固定字节数。
+                if unsafe { libc::ioctl(master_fd.as_raw_fd(), libc::TIOCSWINSZ as _, &winsize) }
+                    == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "qaqh-pty: terminal geometry only exists for PTY sessions",
+            )),
+        }
+    }
+
+    /// 读回**活的**终端几何 `(cols, rows)`。shell 面用它把真实尺寸回报给 UI，
+    /// 而不是相信上一次请求值（ConPTY 在进程退出的竞态下 resize 会失败）。
+    pub fn terminal_size(&self) -> std::io::Result<(u16, u16)> {
+        match &self.inner {
+            #[cfg(windows)]
+            SessionInner::Pty { master, .. } => {
+                let Some(master) = master.as_ref() else {
+                    return Err(std::io::Error::other(
+                        "qaqh-pty: ConPTY master already closed (terminal reaped)",
+                    ));
+                };
+                let size = master.get_size().map_err(anyhow_to_io)?;
+                Ok((size.cols, size.rows))
+            }
+            #[cfg(unix)]
+            SessionInner::Pty { master_fd, .. } => {
+                let mut winsize: libc::winsize = unsafe { std::mem::zeroed() };
+                // SAFETY: 同上 —— 有效 fd + 定长结构体写回。
+                if unsafe {
+                    libc::ioctl(
+                        master_fd.as_raw_fd(),
+                        libc::TIOCGWINSZ as _,
+                        &mut winsize as *mut libc::winsize,
+                    )
+                } == -1
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok((winsize.ws_col, winsize.ws_row))
+            }
+            _ => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "qaqh-pty: terminal geometry only exists for PTY sessions",
+            )),
+        }
+    }
 }
 
 /// Pipe-backed child with stdout/stderr preserved as separate streams.
