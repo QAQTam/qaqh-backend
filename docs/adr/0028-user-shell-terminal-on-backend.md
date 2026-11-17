@@ -1,6 +1,6 @@
-# ADR-0028 用户 shell 终端落后端：复用 `qaqh-pty`；数据面传输**待裁定**（ws 与 ADR-0017 §被否选项冲突）
+# ADR-0028 用户 shell 终端落后端：复用 `qaqh-pty`；数据面走 ws（supersede ADR-0017 决策 6）
 
-状态: **已采纳 · 切片 1 已实施（实测）· 切片 2 已实施（实测）· 切片 3–5 未实施 · §D3 传输选型未定，等所有者裁定**
+状态: **已采纳 · 切片 1 已实施（实测）· 切片 2 已实施（实测）· 切片 3–5 未实施 · §D3 已裁定 = 候选 B（ws 数据面），并显式 supersede ADR-0017 决策 6 与 §被否选项第 4 条**
 · 起草日期 2026-11-17 · 裁定人 所有者 · 起草人 QAQ agent
 
 > 引用本 ADR 必须看状态字段：**「已采纳」≠「已完成」**（规则 17）。
@@ -76,7 +76,13 @@
 
 **D2 面分离必须是机器事实，不是纪律。** shell **不进** `TimelineEntry`/DB/模型上下文，**不注册任何 agent tool**，**不复用 `ExecSessionManager` 的注册表**。理由是可验证的耦合而不是洁癖：exec 会话 owner 是 `session_id`，而 `service.rs:252-266` 规定会话 close/delete 连带杀其 exec —— 用户 shell 若塞进同一张表，就会被 agent 会话的生命周期牵着死。shell 的 owner 取 **device 稳定身份 `instance_key`**（`lease_store.rs` 注释：device token 反推的 `device_id`）。反向同样成立：用户也不得能往 LLM 操控的 exec 面里打字（所有者裁定）。
 
-**D3 数据面传输选型 = 未定，等裁定。** 两条候选：
+**D3 数据面传输 = 已裁定：候选 B（ws 数据面）。** 所有者 2026-11-17 选 B 并裁定：本决策
+**显式 supersede ADR-0017 决策 6「不引入 WebSocket」与 §被否选项第 4 条**，不静并存
+（ADR-0017 头部已加"状态更新"注记指向本文）。当时否决 ws 的理由有四条，只有"只读终端不
+需要双向通道"对本次失效；其余三条（第二套游标/去重/重连 = 平行协议、缺口在持久化与重连
+读取而非传输、前端零 WS 基建）**依然成立**，所以 B 的落地必须靠下面的硬约束把它们逐条封
+死，而不是当作已被需求解决。**候选 A（长轮询 offset 区间读）转为被否方案保留**，见
+§被否方案第 6 条。两条候选的原始陈述留在此处作为决策依据：
 
 - **候选 A（我的推荐）：长轮询区间读 + `shell.write` 命令。** 下行用
   `shell.output { shell_id, from_offset, wait_ms }`：服务端有新字节立刻返回，没有就
@@ -96,6 +102,31 @@
   重放游标（断线即重新 attach，shell 不存历史所以无 resync）；在
   `RingingV2Capabilities` 显式声明这条流，禁止靠版本猜测。
 
+**B 的硬约束（裁定后即刻生效，逐条可验，不是口号）**：
+
+1. **只加一条路由**：`WS /ringing/v2/shells/{shell_id}/stream` 进
+   `crates/qaqh-ringing/src/v2/mod.rs` 的 `RINGING_V2_HTTP_ROUTES`（规则 16：出现字面量
+   `.route(...)`/`.upgrade(...)` 之外的注册即错误），并在 `axum_impl/mod.rs` 的表驱动
+   match 里加一条 arm；`route_table_tests.rs:92-96` 的"表长度 == 实际注册数"必须同步。
+2. **鉴权复用同一模型，不许第二套判断**：握手必须先走
+   `axum_impl/authz.rs:46-62 resolve_identity()`，scope 走
+   `axum_impl/commands.rs:315 required_scope()` 同一档（shell 归 `Interact`，
+   与写类命令同律）；ws handler 内**禁止**自行解析 header/token/scope。
+   并复用 `v2.rs:1323-1346 caller_lease_bound_to_identity()` + `:1348-1373
+   require_lease_on_session()` 的等价闸，杜绝"借别人 shell_id 连流"。
+3. **不建第二套游标/去重/resync**：ws 上只有 4 种控制帧
+   （`attach{from_offset?}` / `stdin{bytes}` / `resize{cols,rows}` / `closed{reason}`），
+   数据帧就是裸字节。**断线即重连重 attach**，回放靠 `ShellRegistry::attach(from_offset)`
+   的有界环（256KiB），**不**承诺无限重放、**不**发明 seq、**不**发
+   `ringing.resync_required`。这条是把 ADR-0017 剩下的三条理由里"第二套语义"那一条
+   压到最小的唯一办法：新流的恢复语义 = 老流的 offset 语义。
+4. **shell 字节永不进 `SessionEventFrame`**，会话 SSE 的 `EVENT_CHANNEL_CAPACITY=1024`
+   / 回放尾 2048 帧 4MiB / `epoch:seq` 游标一律不动（ADR-0017 决策 1-5、7-8 仍生效）。
+5. **前端零基建这条要用工作量正面回答**：切片 5 必须给出可核对的删除清单与新增清单
+   （删 `node-pty`/`pty-host.ts`/4 个 IPC/preload 桥/asar 例外，增 ws 客户端 + 4 种控制帧
+   的收发），并让"净行数"成为验收指标 —— 若前端换了传输反而变重，就是本次决策失败，
+   必须回头改候选 A，而不是把两套并存当成解决方案。
+
 **D4 控制面命令取最小集。** `shell.open` / `shell.close` / `shell.list` 三条（`shell.write` 与 `shell.output` 是否成命令取决于 D3 选型）。`shell.open` 只吃 `{cwd?, cols?, rows?}`——**shell 由 daemon 决定**，客户端不传可执行名：少一个参数就少一条注入面，而"进程归后端所有"本就是这次迁移的理由。`qaqh-runtime::registry::detect_shell()` 已实测**不是**可复用件：它只是把 `qaqh_workspace::bootstrap_exec_shell()`（agent 的**命令执行** shell）打进启动日志，与"用户登录 shell"不同面，故 shell 侧自带 `default_shell_argv()`（Windows `powershell.exe`，Unix `$SHELL` 落回 `/bin/bash`），与前端旧实现语义对齐。
 
 **D5 生命周期与 exec 面同律 + 一条 shell 独有 idle 回收。** kill 只有三条显式路（`shell.close` / device revoke / daemon shutdown），断联不 kill。无人观看超 TTL 才回收，实现为既有 60s 任务里新增一次 `ShellRegistry::sweep_idle(ttl)`（切片 2 已提供该函数），配置项 `shell_idle_reap_secs`（缺省 600，0=关）与 `session_idle_unload_secs` 同纪律；**有观看者时 sweep 绝不动手**（切片 2 已测）。
@@ -109,13 +140,14 @@
 | 1 | `SpawnedSession::{resize, terminal_size}` | **已实施**。`cargo test -p qaqh-pty` → `terminal_geometry` 2 passed（90×30 起→读回一致、resize 132×44 内核读回一致；`1×24`/`80×1`/`0×0` 全 `InvalidInput`），既有 `conpty_output_is_captured_and_eof_arrives_on_terminal_close` 未破；`cargo clippy -p qaqh-pty --all-targets` 本改动零 warning。**unix 的 `TIOCSWINSZ`/`TIOCGWINSZ` 臂本机不可编译验证**（`libc` 是 `cfg(unix)` 依赖），待 CI/unix 主机补验 |
 | 2 | `crates/qaqh-runtime/src/shell/{mod.rs,tests.rs}`（`ShellRegistry`：owner=`instance_key`、有界原始字节环 + `tokio::sync::broadcast`、读泵线程、close/revoke/shutdown/sweep_idle） | **已实施**。`cargo check -p qaqh-runtime --all-targets` 干净（第一轮 2×E0308 已修：cwd 是 `PathBuf`→存 display；读泵句柄改为显式 `Result`，**起泵失败当场摘会话并杀组**，不留"开了但永远读不到字节"的壳）；`cargo test -p qaqh-runtime --lib shell::` → **3 passed**。第三条首跑 FAILED 的原因是我比对方式错（ANSI 参数字节被当正文，实测累积串 `…93mecho37mqaqhshellprobe25hmqaqhshellprobe…` 证明字节全在场）；修法是**先剥 CSI/OSC 再比对**，并把断言加强成"同一 marker ≥2 次"= 回显一次 + 执行输出一次，外加"回放里不得出现会话帧文本" |
 | 3 | `shell.*` 命令 + `MethodInfo` 新形状 + scope 档 + 穷举闸 + `COMMAND_CONTRACT_REVISION` bump + 金标准机器重切 | **未实施** |
-| 4 | 数据面传输（D3 选型后实施：候选 A 的长轮询 handler，或候选 B 的 ws 路由） | **未实施** |
+| 4 | ws 数据面：`WS /ringing/v2/shells/{shell_id}/stream` 一条路由 + 4 种控制帧（`attach`/`stdin`/`resize`/`closed`）+ 裸字节数据帧；`axum` 加 `features=["ws"]`；握手复用 `resolve_identity` + `required_scope` | **未实施**（D3 已裁定为 B） |
 | 5 | 前端切桥（删 node-pty/pty-host/preload，`ShellTerminal` 改接） | **未实施**，交 qaqh-electron 仓 |
 
 ## 已知代价（诚实）
 
-- 切片 2 的 registry 目前**还没有任何调用方**（没有命令、没有路由），所以它是"绿测试下的死代码"状态，价值要等切片 3/4 兑现；这也正是我把 D3 挂起而不停手写 ws 的原因——选型不同，切片 3 的 DTO 形状不同。
-- `Cargo.lock` 已因新依赖（`qaqh-runtime` → `qaqh-pty`）变动，本改动未提交前不发版。
+- 切片 2 的 registry 目前**还没有任何调用方**（没有命令、没有路由），所以它是"绿测试下的死代码"状态，价值要等切片 3/4 兑现。D3 裁定后这条欠账有了明确去处：切片 3 的 DTO 形状由 B 决定（`shell.open/close/list` 三条命令，`stdin/resize/输出`全走 ws，**不**做 `shell.write`/`shell.output` 命令）。
+- `Cargo.lock` 已因新依赖（`qaqh-runtime` → `qaqh-pty`）变动，只多一行 `"qaqh-pty"`，无版本漂移。
+- 走 B 之后**尚未兑现**的新代价（切片 4 落地时逐条核销）：`crates/qaqh-daemon/Cargo.toml` 现为 `axum = { version = "0.8" }`（**无 features 段**）⇒ 要显式加 `features = ["ws"]`，依赖图进 tungstenite 一族、CI 三平台重编；前端要新建它从来没有过的 WS 客户端基建（ADR-0017 §背景 17 实测记过"应用码零 WebSocket"）；D3 第 3 条"只有 4 种控制帧、不发明游标"必须有测试钉住，否则它就会长成 ADR-0017 当初警告的那个平行协议。
 - durable 语义：daemon 更新/重启会杀掉用户 shell（沿用 `manager.rs:665-672`）。所有者已裁定"不用担心，前端更新更频繁"。
 
 ## 被否方案（留痕防重提）
@@ -125,6 +157,7 @@
 3. **shell 字节塞进 `SessionEventFrame`**：等于把 UI 资产写进会话事实流，违反 `events.rs:1-5` 的事件词表纪律，且要把 shell 流量塞进为会话设计的 1024 容量广播 + 4MiB 回放尾。
 4. **独立 `qaqh-shell` 子进程以求跨 daemon 重启存活**：第三份生命周期管理，所有者已明确不需要该存活度。
 5. **静并存（一边保留 ADR-0017"不引入 WebSocket"，一边偷偷加 ws）**：这是最省事的写法，也是把冲突推给下一个读代码的人。要加就在 D3 显式 supersede，否则不加。
+6. **候选 A：长轮询 offset 区间读（`shell.output{from_offset,wait_ms}` + `shell.write`）**：技术上更保守 —— 零新传输、零第二套语义、完全不碰 ADR-0017 决策 6。2026-11-17 所有者裁定选 B 而否掉 A，理由是交互终端要原生双向与低延迟，长轮询每 shell 占一条 in-flight 请求、每个 keystroke 一次 POST 的模型不像终端。**A 留作显式回退路径**：若 D3 硬约束第 5 条的"前端净行数"验收不过，就回到 A，而不是让两套传输并存。
 
 ## §更正记录（2026-11-17 15:0x）
 
