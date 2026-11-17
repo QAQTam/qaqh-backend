@@ -1,8 +1,10 @@
 //! Native glob tool: workspace-rooted path listing with gitignore-style patterns.
 //!
-//! Pure in-process implementation (`globset` matcher + `ignore::WalkBuilder`
-//! traversal) — **no shell, no external binaries**. Sandbox-safe: `ReadOnly`
-//! risk, workspace-rooted, hidden/gitignored paths skipped by default.
+//! Pure in-process implementation (`globset` matcher + `ignore` **parallel**
+//! walker — 与 rg --files 同一遍历姿态) — **no shell, no external binaries**.
+//! Sandbox-safe: `ReadOnly` risk, workspace-rooted, hidden/gitignored paths
+//! skipped by default. `ctx.timeout`/cancellation 是每个条目都会消费的硬
+//! 护栏（2026-11-17 复盘：曾经 15 万文件裸 walk 236s 无法中断）。
 //!
 //! Syntax is identical to `rg -g` / gitignore / VS Code file search:
 //! - `*` matches within one path segment (does NOT cross `/`)
@@ -12,8 +14,11 @@
 //! - `{a,b}` alternation
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ignore::WalkState;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,6 +28,7 @@ use crate::tool_api::{
     ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorKind,
     ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
+use crate::walk_limit::{WalkLimit, WalkStop};
 
 /// 默认返回上限：防超大仓库结果爆炸（`rg --files` 语义下的熔断）。
 const DEFAULT_MAX_RESULTS: usize = 500;
@@ -40,14 +46,35 @@ pub struct GlobArgs {
     pub max_results: Option<u64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct GlobOutput {
     pub matches: Vec<String>,
     pub truncated: bool,
     pub count: usize,
+    /// walk 因 tool deadline 提前停走——结果不完整。非 wire（skip），只进
+    /// model_text 提示。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub deadline_hit: bool,
+    /// walk 因调用被取消而提前停走。非 wire（skip）。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub cancelled_hit: bool,
 }
 
 impl GlobOutput {
+    fn stop_note(&self) -> Option<&'static str> {
+        if self.cancelled_hit {
+            Some("... stopped: call cancelled — results are INCOMPLETE")
+        } else if self.deadline_hit {
+            Some(
+                "... stopped: walk deadline exceeded — results are INCOMPLETE (narrow `path`, or use exec rg on huge unignored trees)",
+            )
+        } else {
+            None
+        }
+    }
+
     fn model_text(&self) -> String {
         let mut text = self.matches.join("\n");
         if self.truncated {
@@ -55,6 +82,12 @@ impl GlobOutput {
                 "\n... truncated at {} matches",
                 self.matches.len()
             ));
+        }
+        if let Some(note) = self.stop_note() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(note);
         }
         if text.is_empty() {
             text = "(no files match the pattern)".to_string();
@@ -70,6 +103,9 @@ impl GlobOutput {
         );
         if self.truncated {
             summary.push_str(" · truncated");
+        }
+        if self.stop_note().is_some() {
+            summary.push_str(" · incomplete");
         }
         summary
     }
@@ -128,41 +164,85 @@ impl TypedTool for GlobTool {
         let matcher = glob.compile_matcher();
 
         let root_path = glob_root(ctx, args.path.as_deref());
-        let walker = ignore::WalkBuilder::new(&root_path)
-            // rg --files 默认：跳过 hidden + gitignored + parent 忽略规则；
-            // require_git(false)：非 git 仓库目录同样应用 .gitignore（对齐 rg）。
-            .standard_filters(true)
-            .require_git(false)
-            .build();
-
-        let mut matches: Vec<String> = Vec::new();
-        let mut truncated = false;
-        for entry in walker.flatten() {
-            if !entry
-                .file_type()
-                .is_some_and(|file_type| file_type.is_file())
-            {
-                continue;
-            }
-            let Ok(rel) = entry.path().strip_prefix(&root_path) else {
-                continue;
-            };
-            // 统一 `/` 分隔（globset 按 `/` 匹配；Windows 下 Path 是 `\`）。
-            let rel_str = rel.to_string_lossy().replace('\\', "/");
-            if matcher.is_match(&rel_str) {
-                matches.push(rel_str);
-                if matches.len() >= max_results {
-                    truncated = true;
-                    break;
-                }
-            }
+        // 并行 walker（rg 默认同构）：大树上 Windows 单线程 FindNextFile 的
+        // µs 级条目成本 × 15 万条目就是分钟级——必须吃满多核。
+        let limit = WalkLimit::from_ctx(ctx);
+        let root = Arc::new(root_path);
+        let matcher = Arc::new(matcher);
+        let collected: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let budget_hit = Arc::new(AtomicBool::new(false));
+        let deadline_hit = Arc::new(AtomicBool::new(false));
+        let cancelled_hit = Arc::new(AtomicBool::new(false));
+        {
+            let walker = ignore::WalkBuilder::new(root.as_path())
+                // rg --files 默认：跳过 hidden + gitignored + parent 忽略规则；
+                // require_git(false)：非 git 仓库目录同样应用 .gitignore（对齐 rg）。
+                .standard_filters(true)
+                .require_git(false)
+                .build_parallel();
+            walker.run(|| {
+                let root = Arc::clone(&root);
+                let matcher = Arc::clone(&matcher);
+                let collected = Arc::clone(&collected);
+                let budget_hit = Arc::clone(&budget_hit);
+                let deadline_hit = Arc::clone(&deadline_hit);
+                let cancelled_hit = Arc::clone(&cancelled_hit);
+                let limit = limit.clone();
+                Box::new(move |entry| {
+                    match limit.stopped() {
+                        Some(WalkStop::Cancelled) => {
+                            cancelled_hit.store(true, Ordering::Relaxed);
+                            return WalkState::Quit;
+                        }
+                        Some(WalkStop::Deadline) => {
+                            deadline_hit.store(true, Ordering::Relaxed);
+                            return WalkState::Quit;
+                        }
+                        None => {}
+                    }
+                    let Ok(entry) = entry else {
+                        return WalkState::Continue;
+                    };
+                    if !entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_file())
+                    {
+                        return WalkState::Continue;
+                    }
+                    let Ok(rel) = entry.path().strip_prefix(root.as_path()) else {
+                        return WalkState::Continue;
+                    };
+                    // 统一 `/` 分隔（globset 按 `/` 匹配；Windows 下 Path 是 `\`）。
+                    let rel_str = rel.to_string_lossy().replace('\\', "/");
+                    if matcher.is_match(&rel_str) {
+                        let mut matches =
+                            collected.lock().unwrap_or_else(|e| e.into_inner());
+                        matches.push(rel_str);
+                        if matches.len() >= max_results {
+                            budget_hit.store(true, Ordering::Relaxed);
+                            return WalkState::Quit;
+                        }
+                    }
+                    WalkState::Continue
+                })
+            });
         }
 
+        let mut matches =
+            std::mem::take(&mut *collected.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut truncated = budget_hit.load(Ordering::Relaxed);
         matches.sort();
+        // 并行下预算可能轻微超收（多 worker 同时 push），统一裁到上限。
+        if matches.len() > max_results {
+            matches.truncate(max_results);
+            truncated = true;
+        }
         Ok(GlobOutput {
             count: matches.len(),
             matches,
             truncated,
+            deadline_hit: deadline_hit.load(Ordering::Relaxed),
+            cancelled_hit: cancelled_hit.load(Ordering::Relaxed),
         })
     }
 }
@@ -470,6 +550,7 @@ mod tests {
             matches: vec!["src/a.rs".to_string()],
             truncated: false,
             count: 1,
+            ..Default::default()
         };
         let model = match output.model_blocks().into_iter().next() {
             Some(ToolContentBlock::Text { text }) => text,
@@ -497,5 +578,29 @@ mod tests {
                 truncated: false,
             }
         );
+    }
+
+    /// 2026-11-17 复盘护栏：deadline/取消必须能在 walk 中途真正掐停，
+    /// 返回部分结果 + INCOMPLETE 提示，而不是无限跑或谎报 "no files match"。
+    #[test]
+    fn glob_stops_at_deadline_and_cancellation() {
+        let dir = fixture();
+
+        let mut tool_ctx = ctx(dir.path());
+        tool_ctx.timeout = Duration::from_nanos(1);
+        let output = GlobTool
+            .run(&tool_ctx, parse_args(serde_json::json!({ "pattern": "**/*" })))
+            .expect("deadline stop is a partial result, not an error");
+        assert!(output.deadline_hit, "1ns deadline must trip");
+        assert!(output.model_text().contains("deadline"));
+        assert!(!output.model_text().contains("no files match"));
+
+        let tool_ctx = ctx(dir.path());
+        tool_ctx.cancellation.cancel();
+        let output = GlobTool
+            .run(&tool_ctx, parse_args(serde_json::json!({ "pattern": "**/*" })))
+            .expect("cancelled stop is a partial result, not an error");
+        assert!(output.cancelled_hit);
+        assert!(output.model_text().contains("cancelled"));
     }
 }

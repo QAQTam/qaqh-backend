@@ -1,6 +1,6 @@
 //! `grep`：内容搜索工具——直接使用 ripgrep 的核心库
-//! （`grep-searcher` + `grep-regex` + `ignore`，与 rg 二进制同一实现），
-//! **零外部二进制依赖**：用户机器上没有 rg 也能用。
+//! （`grep-searcher` + `grep-regex` + `ignore` **并行 walker**，与 rg 二进制
+//! 同一实现姿态），**零外部二进制依赖**：用户机器上没有 rg 也能用。
 //!
 //! 与 `glob`（文件名列举）分工：grep 搜**文件内容**，输出 `path:line:content`
 //! （上下文行用 rg 的 `path-line-content` 格式）。与 `exec` 分工：grep 是
@@ -10,6 +10,8 @@
 //! - 默认大小写不敏感（对齐 Claude Code Grep）；`case_sensitive=true` 关闭。
 //! - 默认跳过 hidden/gitignored/binary 文件（rg 原生行为）。
 //! - `max_results` 截断 + `truncated` 标记，防上下文爆炸。
+//! - `ctx.timeout`/cancellation 是每个 walk 条目都消费的硬护栏；非法 `-g`
+//!   显式拒绝而非静默吞掉（2026-11-17 假阴性复盘）。
 
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
@@ -18,6 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::ToolRisk;
@@ -25,6 +29,7 @@ use crate::tool_api::{
     ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorKind,
     ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
+use crate::walk_limit::{WalkLimit, WalkStop};
 
 const DEFAULT_MAX_RESULTS: usize = 200;
 const MAX_RESULTS_CAP: usize = 2_000;
@@ -80,7 +85,7 @@ struct MatchLine {
     is_context: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct GrepOutput {
     pub status: String,
     pub matches: Vec<GrepMatch>,
@@ -89,9 +94,37 @@ pub struct GrepOutput {
     #[serde(skip)]
     #[schemars(skip)]
     lines: Vec<MatchLine>,
+    /// walk 因 tool deadline 提前停走——结果不完整。非 wire（skip）。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub deadline_hit: bool,
+    /// walk 因调用被取消而提前停走。非 wire（skip）。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub cancelled_hit: bool,
+    /// walk 扫过的可见文件数（skip；区分"无内容匹配"与"被 -g 筛空"）。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub files_scanned: usize,
+    /// 通过过滤器、实际进入内容搜索的文件数。
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub files_searched: usize,
 }
 
 impl GrepOutput {
+    fn stop_note(&self) -> Option<&'static str> {
+        if self.cancelled_hit {
+            Some("... stopped: call cancelled — results are INCOMPLETE")
+        } else if self.deadline_hit {
+            Some(
+                "... stopped: walk deadline exceeded — results are INCOMPLETE (narrow `paths`/`glob`, or use exec rg on huge unignored trees)",
+            )
+        } else {
+            None
+        }
+    }
+
     fn model_text(&self) -> String {
         let mut text = String::new();
         if self.lines.is_empty() {
@@ -122,8 +155,23 @@ impl GrepOutput {
                 self.count
             ));
         }
-        if text.is_empty() {
-            text = "(no matches)\n".to_string();
+        if let Some(note) = self.stop_note() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(note);
+            text.push('\n');
+        } else if text.is_empty() {
+            // 2026-11-17 假阴性复盘：必须区分"真的无匹配"与"-g 过滤器把可见
+            // 文件全筛没了"——后者谎报 no matches 会把模型引向"代码不存在"。
+            text = if self.files_searched == 0 && self.files_scanned > 0 {
+                format!(
+                    "(no matches — the glob filter(s) excluded all {} files scanned; drop or widen `glob`)\n",
+                    self.files_scanned
+                )
+            } else {
+                "(no matches)\n".to_string()
+            };
         }
         text
     }
@@ -143,6 +191,9 @@ impl GrepOutput {
         );
         if self.truncated {
             summary.push_str(" · truncated");
+        }
+        if self.stop_note().is_some() {
+            summary.push_str(" · incomplete");
         }
         summary
     }
@@ -240,46 +291,64 @@ impl TypedTool for GrepTool {
         let context_before = args.context_before.unwrap_or(0) as usize;
         let context_after = args.context_after.unwrap_or(0) as usize;
 
-        let globs = args.glob.unwrap_or_default();
+        let globs: Vec<String> = args
+            .glob
+            .unwrap_or_default()
+            .into_iter()
+            .map(|glob| glob.trim().to_string())
+            .filter(|glob| !glob.is_empty())
+            .collect();
+        // 2026-11-17 复盘：内嵌换行的 `-g` pattern 若放行编译，会静默把整个
+        // 搜索空间筛空并谎报 "(no matches)"——假阴性。显式拒绝；纯外围空白
+        // 由上面的 trim 无害修复。
+        for glob in &globs {
+            let bare = glob.strip_prefix('!').unwrap_or(glob);
+            if bare.is_empty() {
+                return Err(grep_error(format!("grep: empty glob filter {glob:?}")));
+            }
+            if bare.contains(['\n', '\r']) {
+                return Err(grep_error(format!(
+                    "grep: invalid glob {glob:?}: embedded newline; pass filters like \"*.rs\""
+                )));
+            }
+        }
         let (neg_globs, pos_globs): (Vec<&str>, Vec<&str>) = globs
             .iter()
             .map(String::as_str)
             .partition(|glob| glob.starts_with('!'));
-        let pos_matchers: Vec<globset::GlobMatcher> = pos_globs
-            .iter()
-            .filter_map(|glob| {
-                globset::GlobBuilder::new(glob)
-                    .literal_separator(true)
-                    .build()
-                    .ok()
-            })
-            .map(|glob| glob.compile_matcher())
-            .collect();
-        let neg_matchers: Vec<globset::GlobMatcher> = neg_globs
-            .iter()
-            .filter_map(|glob| {
-                globset::GlobBuilder::new(glob.strip_prefix('!').unwrap_or(glob))
-                    .literal_separator(true)
-                    .build()
-                    .ok()
-            })
-            .map(|glob| glob.compile_matcher())
-            .collect();
-        let glob_filter = |rel: &str| -> bool {
-            // rg -g 是 gitignore 语义：不含 `/` 的模式（如 "*.rs"）匹配任意层级
-            // 的 basename；含 `/` 的模式匹配相对路径。
-            let basename = rel.rsplit('/').next().unwrap_or(rel);
-            let pos_hit = pos_matchers.is_empty()
-                || pos_matchers
-                    .iter()
-                    .any(|matcher| matcher.is_match(rel) || matcher.is_match(basename));
-            if !pos_hit {
-                return false;
-            }
-            !neg_matchers
-                .iter()
-                .any(|matcher| matcher.is_match(rel) || matcher.is_match(basename))
+        let compile_glob = |glob: &str| -> Result<globset::GlobMatcher, ToolExecutionError> {
+            let bare = glob.strip_prefix('!').unwrap_or(glob);
+            globset::GlobBuilder::new(bare)
+                .literal_separator(true)
+                .build()
+                .map_err(|error| grep_error(format!("grep: invalid glob {glob:?}: {error}")))
+                .map(|compiled| compiled.compile_matcher())
         };
+        let mut pos_matchers: Vec<globset::GlobMatcher> = Vec::new();
+        for glob in &pos_globs {
+            pos_matchers.push(compile_glob(glob)?);
+        }
+        let mut neg_matchers: Vec<globset::GlobMatcher> = Vec::new();
+        for glob in &neg_globs {
+            neg_matchers.push(compile_glob(glob)?);
+        }
+        let glob_filter: Arc<dyn Fn(&str) -> bool + Send + Sync> = Arc::new(
+            move |rel: &str| -> bool {
+                // rg -g 是 gitignore 语义：不含 `/` 的模式（如 "*.rs"）匹配任意
+                // 层级的 basename；含 `/` 的模式匹配相对路径。
+                let basename = rel.rsplit('/').next().unwrap_or(rel);
+                let pos_hit = pos_matchers.is_empty()
+                    || pos_matchers
+                        .iter()
+                        .any(|matcher| matcher.is_match(rel) || matcher.is_match(basename));
+                if !pos_hit {
+                    return false;
+                }
+                !neg_matchers
+                    .iter()
+                    .any(|matcher| matcher.is_match(rel) || matcher.is_match(basename))
+            },
+        );
 
         let ws_path = if ctx.workspace_root.as_os_str().is_empty() {
             PathBuf::from(".")
@@ -319,64 +388,126 @@ impl TypedTool for GrepTool {
             }
         }
 
-        let mut searcher = SearcherBuilder::new()
-            .line_number(true)
-            .after_context(context_after)
-            .before_context(context_before)
-            .binary_detection(BinaryDetection::quit(b'\x00'))
-            .build();
-
-        let mut all_matches: Vec<MatchLine> = Vec::new();
-        let mut truncated = false;
+        let matcher = Arc::new(matcher);
+        let ws_abs = Arc::new(ws_abs);
+        let limit = WalkLimit::from_ctx(ctx);
+        let state = Arc::new(SearchState::new(max_results));
 
         'roots: for root in &roots {
-            let walker = ignore::WalkBuilder::new(root)
+            // rg 默认并行遍历；单线程在 16k 条目的 target/ 上要 10s+。
+            let walker = ignore::WalkBuilder::new(root.clone())
                 .standard_filters(true)
                 .require_git(false)
-                .build();
-            for entry in walker.flatten() {
-                if !entry
-                    .file_type()
-                    .is_some_and(|file_type| file_type.is_file())
-                {
-                    continue;
-                }
-                let path = entry.path();
-                let rel = path
-                    .strip_prefix(&ws_abs)
-                    .unwrap_or(path)
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                if !glob_filter(&rel) {
-                    continue;
-                }
-                // max_results 是**全局**预算：先看已收集数，再给当前文件剩余配额。
-                let collected = all_matches.iter().filter(|m| !m.is_context).count();
-                if collected >= max_results {
-                    truncated = true;
-                    break 'roots;
-                }
-                let mut sink = CollectSink {
-                    path: rel.clone(),
-                    abs_path: path.to_string_lossy().into_owned(),
-                    matches: Vec::new(),
-                    max_matches: max_results - collected,
-                    truncated: false,
-                };
-                // 忽略单个文件的 IO 错误（rg 行为：不可读文件跳过）。
-                let _ = searcher.search_path(&matcher, path, &mut sink);
-                if sink.truncated {
-                    truncated = true;
-                }
-                all_matches.extend(sink.matches);
-                if truncated {
-                    break 'roots;
-                }
+                .build_parallel();
+            walker.run(|| {
+                let matcher = Arc::clone(&matcher);
+                let glob_filter = Arc::clone(&glob_filter);
+                let ws_abs = Arc::clone(&ws_abs);
+                let state = Arc::clone(&state);
+                let limit = limit.clone();
+                let mut searcher = SearcherBuilder::new()
+                    .line_number(true)
+                    .after_context(context_after)
+                    .before_context(context_before)
+                    .binary_detection(BinaryDetection::quit(b'\x00'))
+                    .build();
+                Box::new(move |entry| {
+                    match limit.stopped() {
+                        Some(WalkStop::Cancelled) => {
+                            state.cancelled_hit.store(true, Ordering::Relaxed);
+                            return ignore::WalkState::Quit;
+                        }
+                        Some(WalkStop::Deadline) => {
+                            state.deadline_hit.store(true, Ordering::Relaxed);
+                            return ignore::WalkState::Quit;
+                        }
+                        None => {}
+                    }
+                    let Ok(entry) = entry else {
+                        return ignore::WalkState::Continue;
+                    };
+                    if !entry
+                        .file_type()
+                        .is_some_and(|file_type| file_type.is_file())
+                    {
+                        return ignore::WalkState::Continue;
+                    }
+                    state.scanned.fetch_add(1, Ordering::Relaxed);
+                    let path = entry.path();
+                    let rel = path
+                        .strip_prefix(ws_abs.as_path())
+                        .unwrap_or(path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if !glob_filter(&rel) {
+                        return ignore::WalkState::Continue;
+                    }
+                    // max_results 是**全局**预算：先看已收集数，再给当前文件剩余配额。
+                    if state.counted.load(Ordering::Acquire) >= state.max {
+                        state.truncated.store(true, Ordering::Relaxed);
+                        return ignore::WalkState::Quit;
+                    }
+                    state.searched.fetch_add(1, Ordering::Relaxed);
+                    let mut sink = CollectSink {
+                        path: rel,
+                        abs_path: path.to_string_lossy().into_owned(),
+                        matches: Vec::new(),
+                        max_matches: state
+                            .max
+                            .saturating_sub(state.counted.load(Ordering::Relaxed)),
+                        truncated: false,
+                    };
+                    // 忽略单个文件的 IO 错误（rg 行为：不可读文件跳过）。
+                    let _ = searcher.search_path(matcher.as_ref(), path, &mut sink);
+                    if sink.truncated {
+                        state.truncated.store(true, Ordering::Relaxed);
+                    }
+                    if !sink.matches.is_empty() {
+                        let fresh = sink.matches.iter().filter(|m| !m.is_context).count();
+                        let total = {
+                            let mut lines =
+                                state.lines.lock().unwrap_or_else(|e| e.into_inner());
+                            lines.extend(sink.matches.drain(..));
+                            state.counted.fetch_add(fresh, Ordering::AcqRel) + fresh
+                        };
+                        if total >= state.max {
+                            state.truncated.store(true, Ordering::Relaxed);
+                            return ignore::WalkState::Quit;
+                        }
+                    }
+                    ignore::WalkState::Continue
+                })
+            });
+            if state.truncated.load(Ordering::Acquire)
+                || state.deadline_hit.load(Ordering::Relaxed)
+                || state.cancelled_hit.load(Ordering::Relaxed)
+            {
+                break 'roots;
             }
         }
 
-        let match_count = all_matches.iter().filter(|m| !m.is_context).count();
-        let matches = all_matches
+        // 并行收集没有确定遍历序：全局按 (path, line) 排序（比 rg 的并发序
+        // 更确定），再按全局预算裁剪——多 worker 竞态下可能轻微超收。
+        let mut all_matches =
+            std::mem::take(&mut *state.lines.lock().unwrap_or_else(|e| e.into_inner()));
+        all_matches.sort_by(|a, b| {
+            (&a.path, a.line, a.is_context).cmp(&(&b.path, b.line, b.is_context))
+        });
+        let mut kept: Vec<MatchLine> = Vec::new();
+        let mut match_count = 0usize;
+        let mut trimmed = false;
+        for line in all_matches {
+            if !line.is_context {
+                if match_count >= max_results {
+                    trimmed = true;
+                    break;
+                }
+                match_count += 1;
+            }
+            kept.push(line);
+        }
+        let truncated = trimmed || state.truncated.load(Ordering::Relaxed);
+        let matches = kept
             .iter()
             .filter(|m| !m.is_context)
             .map(|m| GrepMatch {
@@ -390,13 +521,48 @@ impl TypedTool for GrepTool {
             matches,
             truncated,
             count: match_count,
-            lines: all_matches,
+            lines: kept,
+            deadline_hit: state.deadline_hit.load(Ordering::Relaxed),
+            cancelled_hit: state.cancelled_hit.load(Ordering::Relaxed),
+            files_scanned: state.scanned.load(Ordering::Relaxed),
+            files_searched: state.searched.load(Ordering::Relaxed),
         })
     }
 }
 
 fn grep_error(message: impl Into<String>) -> ToolExecutionError {
     ToolExecutionError::Recoverable(ToolError::new(ToolErrorKind::Execution, message))
+}
+
+/// 并行 walker 的共享状态：全局预算、收集、过滤器命中计数与停走标记。
+struct SearchState {
+    lines: Mutex<Vec<MatchLine>>,
+    /// 已收集的非上下文匹配行数（全局预算）。
+    counted: AtomicUsize,
+    truncated: AtomicBool,
+    /// 扫过的可见文件数（过滤前）。
+    scanned: AtomicUsize,
+    /// 实际进入 searcher 的文件数（过滤后）——用于区分 `(no matches)`
+    /// 与 `glob` 筛空全部文件。
+    searched: AtomicUsize,
+    deadline_hit: AtomicBool,
+    cancelled_hit: AtomicBool,
+    max: usize,
+}
+
+impl SearchState {
+    fn new(max: usize) -> Self {
+        Self {
+            lines: Mutex::new(Vec::new()),
+            counted: AtomicUsize::new(0),
+            truncated: AtomicBool::new(false),
+            scanned: AtomicUsize::new(0),
+            searched: AtomicUsize::new(0),
+            deadline_hit: AtomicBool::new(false),
+            cancelled_hit: AtomicBool::new(false),
+            max,
+        }
+    }
 }
 
 /// Sink：按 searcher 的回调顺序收集匹配行与上下文行（顺序天然正确）。
@@ -724,6 +890,7 @@ mod tests {
                 content: "TODO".to_string(),
                 is_context: false,
             }],
+            ..Default::default()
         };
         let model = match output.model_blocks().into_iter().next() {
             Some(ToolContentBlock::Text { text }) => text,
@@ -754,5 +921,74 @@ mod tests {
                 truncated: false,
             }
         );
+    }
+
+    /// 内嵌换行/未闭合的 `-g` pattern 必须显式拒绝——静默吞掉会把整个搜索
+    /// 空间筛空并谎报 no matches（2026-11-17 假阴性复盘）。外围空白 trim 修复。
+    #[test]
+    fn invalid_glob_filter_is_rejected_not_silently_swallowed() {
+        let (_dir, root) = setup(&[("a.rs", "target\n")]);
+        let error = run(
+            &root,
+            serde_json::json!({ "pattern": "target", "glob": "src\n*.rs" }),
+        )
+        .expect_err("embedded-newline glob must error");
+        assert_eq!(error_code(error), "execution");
+
+        let error = run(
+            &root,
+            serde_json::json!({ "pattern": "target", "glob": ["["] }),
+        )
+        .expect_err("unclosed glob must error");
+        assert_eq!(error_code(error), "execution");
+
+        let output = run(
+            &root,
+            serde_json::json!({ "pattern": "target", "glob": "\n\n*.rs\n\n" }),
+        )
+        .expect("outer whitespace is trimmed, glob stays valid");
+        assert_eq!(output.count, 1);
+    }
+
+    /// "过滤器筛空一切" 与 "真的无匹配" 必须可区分。
+    #[test]
+    fn glob_excluding_every_file_says_so_instead_of_no_matches() {
+        let (_dir, root) = setup(&[("a.rs", "target\n"), ("b.md", "target\n")]);
+        let output = run(
+            &root,
+            serde_json::json!({ "pattern": "target", "glob": ["nope/*.rs"] }),
+        )
+        .expect("grep");
+        assert_eq!(output.count, 0);
+        let text = output.model_text();
+        assert!(text.contains("glob filter(s) excluded"), "got: {text}");
+    }
+
+    /// deadline/取消必须掐停并行 walker，返回部分结果 + INCOMPLETE 标记。
+    #[test]
+    fn grep_deadline_and_cancel_stop_walk_with_marker() {
+        let (_dir, root) = setup(&[("a.rs", "target\n"), ("b.rs", "target\n")]);
+
+        let mut tool_ctx = ctx(root.as_path());
+        tool_ctx.timeout = Duration::from_nanos(1);
+        let output = GrepTool
+            .run(
+                &tool_ctx,
+                parse_args(serde_json::json!({ "pattern": "target" })),
+            )
+            .expect("deadline stop returns partial results, not an error");
+        assert!(output.deadline_hit, "1ns deadline must trip");
+        assert!(output.model_text().contains("deadline"));
+
+        let tool_ctx = ctx(root.as_path());
+        tool_ctx.cancellation.cancel();
+        let output = GrepTool
+            .run(
+                &tool_ctx,
+                parse_args(serde_json::json!({ "pattern": "target" })),
+            )
+            .expect("cancelled stop returns partial results, not an error");
+        assert!(output.cancelled_hit);
+        assert!(output.model_text().contains("cancelled"));
     }
 }

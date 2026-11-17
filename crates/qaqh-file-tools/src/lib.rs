@@ -35,6 +35,7 @@ pub mod journal;
 pub mod pending;
 pub mod read_image;
 pub mod support;
+pub(crate) mod walk_limit;
 
 // ── 根 re-export：让搬移后的模块内 `crate::x` 路径保持可解析 ──
 
