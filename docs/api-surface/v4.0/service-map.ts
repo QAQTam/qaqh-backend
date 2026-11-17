@@ -1,6 +1,9 @@
-import type { AccountsEmptyParams, ClientsListParams, ConfigDto, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams, DsAccountAttemptParams, DsAccountBalanceResult, DsAccountBonus, DsAccountBonusAckParams, DsAccountModel, DsAccountSignInStartParams, DsAccountSignInStartResult, DsAccountSignInStatusResult, DsAccountStatusResult, DsAccountVerifyResult, ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams, ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult, MemorySnapshot, PlanReadItem, PlanReadParams, RingingV2ClientView, SessionActivity, SessionActivityParams, SessionDashboard, SessionDashboardParams, SessionGetActivityParams, SessionListEntry, SessionListParams, SessionMetaParams, SessionToolActivity, SessionTurnParams, SessionTurnSnapshot, SiwcFlowParams, SiwcModel, SiwcProfileParams, SiwcProfileSelectParams, SiwcProfilesResult, SiwcSignInStartParams, SiwcSignInStartResult, SiwcSignInStatusResult, SiwcSignOutResult, SiwcStatusResult, SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoListParams, TodoListSnapshot, TodoStatusParams, TodoStatusSnapshot, WorkspaceEntry, WorkspaceGetParams, WorkspaceListParams } from "./index";
+import type { AccountsEmptyParams, ClientsListParams, ConfigDto, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams, DsAccountAttemptParams, DsAccountBalanceResult, DsAccountBonus, DsAccountBonusAckParams, DsAccountModel, DsAccountSignInStartParams, DsAccountSignInStartResult, DsAccountSignInStatusResult, DsAccountStatusResult, DsAccountVerifyResult, ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams, ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult, MemorySnapshot, PlanReadItem, PlanReadParams, RingingV2ClientView, SessionActivity, SessionActivityParams, SessionDashboard, SessionDashboardParams, SessionGetActivityParams, SessionListEntry, SessionListParams, SessionMetaParams, SessionToolActivity, SessionTurnParams, SessionTurnSnapshot, ShellCloseParams, ShellCloseResult, ShellListParams, ShellListResult, ShellOpenParams, ShellView, SiwcFlowParams, SiwcModel, SiwcProfileParams, SiwcProfileSelectParams, SiwcProfilesResult, SiwcSignInStartParams, SiwcSignInStartResult, SiwcSignInStatusResult, SiwcSignOutResult, SiwcStatusResult, SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoListParams, TodoListSnapshot, TodoStatusParams, TodoStatusSnapshot, WorkspaceEntry, WorkspaceGetParams, WorkspaceListParams } from "./index";
 
 export interface ServiceMap {
+  "shell.open": { params: ShellOpenParams; result: ShellView; };
+  "shell.close": { params: ShellCloseParams; result: ShellCloseResult; };
+  "shell.list": { params: ShellListParams; result: ShellListResult; };
   "daemon.version": { params: DaemonVersionParams; result: string; };
   "clients.list": { params: ClientsListParams; result: RingingV2ClientView[]; };
   "skills.catalog": { params: SkillsCatalogParams; result: SkillsCatalogResult; };
@@ -43,6 +46,9 @@ export interface ServiceMap {
 }
 
 export const serviceMetadata = {
+  "shell.open": { kind: "write", requires_session: false, admin_only: false },
+  "shell.close": { kind: "write", requires_session: false, admin_only: false },
+  "shell.list": { kind: "read", requires_session: false, admin_only: false },
   "daemon.version": { kind: "read", requires_session: false, admin_only: false },
   "clients.list": { kind: "read", requires_session: false, admin_only: true },
   "skills.catalog": { kind: "read", requires_session: false, admin_only: false },

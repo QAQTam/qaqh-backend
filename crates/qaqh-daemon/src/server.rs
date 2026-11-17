@@ -343,6 +343,23 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
                             })
                             .await;
                         }
+                        // ADR-0028 D5：用户 shell 的 idle 回收挂在**同一条** 60s 任务里
+                        // （与 goal/exec-notify/handoff 同律同址），不新造第三种生命
+                        // 周期机制。判据是"无人观看且无输入活动"，断联本身不杀壳。
+                        {
+                            let service = service.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                let reaped = service.sweep_idle_shells();
+                                if !reaped.is_empty() {
+                                    log::info!(
+                                        "[daemon] shell idle-reaped {} shell(s): {:?}",
+                                        reaped.len(),
+                                        reaped
+                                    );
+                                }
+                            })
+                            .await;
+                        }
                     }
                     changed = shutdown_rx.changed() => {
                         if changed.is_err() || *shutdown_rx.borrow() {

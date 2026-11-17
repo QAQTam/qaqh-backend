@@ -245,5 +245,11 @@ pub(crate) async fn handle_device_revoke(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .revoke_device(&device_id);
+    // ADR-0028 D5：吊销是用户 shell 面三条**显式** kill 路之一（断联不杀，吊销
+    // 必杀）。owner 口径与 shell 面同源 —— 都是 device_id。
+    let shells = state.service.shutdown_shells_of(&device_id);
+    if shells > 0 {
+        log::info!("[daemon] revoke {device_id}: stopped {shells} user shell(s)");
+    }
     StatusCode::NO_CONTENT.into_response()
 }

@@ -628,6 +628,51 @@
       "status": "implemented"
     },
     {
+      "admin_only": false,
+      "fixtures": [
+        "service-shell-close-params.json",
+        "service-shell-close-result.json"
+      ],
+      "id": "service.shell.close",
+      "kind": "write",
+      "method": "POST",
+      "params_type": "ShellCloseParams",
+      "path": "/ringing/v2/service/shell.close",
+      "requires_session": false,
+      "result_type": "ShellCloseResult",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-shell-list-params.json",
+        "service-shell-list-result.json"
+      ],
+      "id": "service.shell.list",
+      "kind": "read",
+      "method": "POST",
+      "params_type": "ShellListParams",
+      "path": "/ringing/v2/service/shell.list",
+      "requires_session": false,
+      "result_type": "ShellListResult",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-shell-open-params.json",
+        "service-shell-open-result.json"
+      ],
+      "id": "service.shell.open",
+      "kind": "write",
+      "method": "POST",
+      "params_type": "ShellOpenParams",
+      "path": "/ringing/v2/service/shell.open",
+      "requires_session": false,
+      "result_type": "ShellView",
+      "status": "implemented"
+    },
+    {
       "admin_only": true,
       "fixtures": [
         "service-siwc-models-params.json",

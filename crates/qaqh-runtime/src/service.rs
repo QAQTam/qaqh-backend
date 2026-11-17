@@ -557,6 +557,13 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .shutdown_all();
+        // ADR-0028 D5：用户 shell 与 exec 面同律 —— daemon 关停前把活壳收干净，
+        // 不留孤儿 powershell/bash。必须在 registry 锁**释放之后**调用：
+        // `shutdown_shells()` 自己还要取同一把锁。
+        let shells = self.shutdown_shells();
+        if shells > 0 {
+            log::info!("[runtime] shutdown stopped {shells} user shell(s)");
+        }
     }
 
     /// F4: 死 worker 重生（daemon 周期任务调用；内部自带退避与关闭保护）。
@@ -613,6 +620,88 @@ impl QaqhService {
         self.registry
             .lock()
             .map_err(|e| format!("registry lock: {e}"))
+    }
+
+    // ── 用户 shell 面（ADR-0028 切片 3）──────────────────────────────────
+    //
+    // `owner_instance_key` 一律由 daemon 从**已鉴权身份/lease** 反查后传入
+    // （`service_api` 的 shell 臂），这里绝不从 params 里读 owner —— `authz.rs`
+    // 的纪律是"绝不采信客户端自报字段"。执行体在 `crate::shell::ShellRegistry`，
+    // 这一层只做装配与 DTO 投影，形状由 `service_methods` 的 typed 表锁死。
+
+    pub fn shell_open(
+        &self,
+        owner_instance_key: &str,
+        params: &crate::ringing::service_methods::ShellOpenParams,
+    ) -> Result<crate::ringing::service_methods::ShellView, String> {
+        let registry = self.registry()?;
+        registry
+            .shells()
+            .open(
+                owner_instance_key,
+                crate::shell::ShellOpen {
+                    cols: params.cols,
+                    rows: params.rows,
+                    cwd: params.cwd.clone(),
+                },
+            )
+            .map(Into::into)
+    }
+
+    pub fn shell_close(
+        &self,
+        owner_instance_key: &str,
+        shell_id: &str,
+    ) -> Result<crate::ringing::service_methods::ShellCloseResult, String> {
+        let registry = self.registry()?;
+        let reason = registry.shells().close(owner_instance_key, shell_id)?;
+        Ok(crate::ringing::service_methods::ShellCloseResult {
+            shell_id: shell_id.to_string(),
+            reason: reason.as_str().to_string(),
+        })
+    }
+
+    pub fn shell_list(
+        &self,
+        owner_instance_key: &str,
+    ) -> Result<crate::ringing::service_methods::ShellListResult, String> {
+        let registry = self.registry()?;
+        Ok(crate::ringing::service_methods::ShellListResult {
+            shells: registry
+                .shells()
+                .list(owner_instance_key)
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+        })
+    }
+
+    /// device 吊销路径（`pairing::handle_device_revoke`）：吊销即收掉该身份名下
+    /// 所有 shell。这是 D5 的三条显式 kill 路之一。
+    pub fn shutdown_shells_of(&self, owner_instance_key: &str) -> usize {
+        let Ok(registry) = self.registry() else {
+            return 0;
+        };
+        registry.shells().shutdown_owner(owner_instance_key)
+    }
+
+    /// daemon 60s 周期任务（与 `sweep_active_goals` / `sweep_handoff_forks` 同律
+    /// 同址）。阈值是代码常量而非 config 字段，理由见 `shell::SHELL_IDLE_REAP_SECS`。
+    pub fn sweep_idle_shells(&self) -> Vec<String> {
+        let Ok(registry) = self.registry() else {
+            return Vec::new();
+        };
+        registry
+            .shells()
+            .sweep_idle(crate::shell::SHELL_IDLE_REAP_SECS)
+    }
+
+    /// daemon 关停：与 exec 面同律，先把用户的壳收干净再走。
+    pub fn shutdown_shells(&self) -> usize {
+        let Ok(registry) = self.registry() else {
+            return 0;
+        };
+        registry.shells().shutdown_all()
     }
 
     pub fn exec_session_owner(

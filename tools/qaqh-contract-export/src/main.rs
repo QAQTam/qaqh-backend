@@ -322,6 +322,8 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         SessionDashboardParams, SessionDashboardTask, SessionGetActivityParams, SessionListParams,
         SessionMetaParams, SessionToolActivity, SessionTurnParams, SkillCatalogDiagnostic,
         SkillCatalogEntry, SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams,
+        ShellCloseParams, ShellCloseResult, ShellListParams, ShellListResult, ShellOpenParams,
+        ShellView,
         TodoCountsSnapshot, TodoItemSnapshot, TodoListParams, TodoListSnapshot, TodoStatusParams,
         TodoStatusSnapshot, WorkspaceGetParams, WorkspaceListParams,
     };
@@ -637,6 +639,68 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             text: "build ok\n".to_owned(),
         },
     )?;
+    // 用户 shell 面（ADR-0028 切片 3）。fixture 值与 DTO 同源，形状由这批类型保证；
+    // `reason` 用 `ShellStopReason::as_str()` 的口径，两处不许各写一份拼写。
+    write_fixture(
+        stage,
+        "service-shell-open-params.json",
+        &ShellOpenParams {
+            cols: Some(132),
+            rows: Some(44),
+            cwd: Some("/fixture/workspace".to_owned()),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-shell-open-result.json",
+        &ShellView {
+            id: "shell_0199a0f000007000800000000001".to_owned(),
+            pid: 4242,
+            shell: "fixture-shell".to_owned(),
+            cwd: "/fixture/workspace".to_owned(),
+            cols: 132,
+            rows: 44,
+            alive: true,
+            output_offset: 0,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-shell-close-params.json",
+        &ShellCloseParams {
+            shell_id: "shell_0199a0f000007000800000000001".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-shell-close-result.json",
+        &ShellCloseResult {
+            shell_id: "shell_0199a0f000007000800000000001".to_owned(),
+            // 口径与 `ShellStopReason::as_str()` 同源，不许在 exporter 里另拼一份。
+            reason: qaqh_runtime::ShellStopReason::Closed.as_str().to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-shell-list-params.json",
+        &ShellListParams {},
+    )?;
+    write_fixture(
+        stage,
+        "service-shell-list-result.json",
+        &ShellListResult {
+            shells: vec![ShellView {
+                id: "shell_0199a0f000007000800000000001".to_owned(),
+                pid: 4242,
+                shell: "fixture-shell".to_owned(),
+                cwd: "/fixture/workspace".to_owned(),
+                cols: 132,
+                rows: 44,
+                alive: true,
+                output_offset: 0,
+            }],
+        },
+    )?;
     write_fixture(
         stage,
         "service-session-turn-params.json",
@@ -912,6 +976,15 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::ExecSessionListResult,
         qaqh_runtime::ringing::service_methods::ExecSessionOutputParams,
         qaqh_runtime::ringing::service_methods::ExecSessionOutputResult,
+        // 用户 shell 面（ADR-0028 切片 3）。这份清单是**显式**的：coverage 会从
+        // METHODS/TYPED_METHODS 登记方法，但类型产物只导这里列出的 —— 漏在这里
+        // 会造成"方法有、类型没有"的假绿（check 两边一致地缺，照样 exit 0）。
+        qaqh_runtime::ringing::service_methods::ShellOpenParams,
+        qaqh_runtime::ringing::service_methods::ShellView,
+        qaqh_runtime::ringing::service_methods::ShellCloseParams,
+        qaqh_runtime::ringing::service_methods::ShellCloseResult,
+        qaqh_runtime::ringing::service_methods::ShellListParams,
+        qaqh_runtime::ringing::service_methods::ShellListResult,
         qaqh_runtime::ringing::service_methods::SessionTurnParams,
         qaqh_runtime::ringing::service_methods::SessionListParams,
         qaqh_runtime::ringing::service_methods::SessionMetaParams,

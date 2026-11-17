@@ -32,9 +32,16 @@ pub const SHELL_DEFAULT_ROWS: u16 = 24;
 /// 同量级 —— 但这里是**原始 ANSI 字节**，不是给模型的文本视图。
 pub const SHELL_REPLAY_CAP: usize = 256 * 1024;
 
-/// 单个观看者（ws 连接）的滞后容忍度：满了按 broadcast 语义丢最旧并上报
-/// [`ShellAttach::lagged`]，由客户端重新 attach 取回放窗口，而不是拖住读泵。
+/// 单个观看者（ws 连接）的滞后容忍度：满了由 `broadcast::Receiver::recv()` 报
+/// `RecvError::Lagged`，观看方据此重新 `attach(from_offset)` 取回放窗口 ——
+/// 与既有 exec 面"落后不掐读泵"同律，慢客户端不许把读泵钉住。
 const SHELL_VIEWER_CAPACITY: usize = 512;
+
+/// 无人观看且无输入活动的回收阈值。**刻意不做成 config 字段**：`ConfigDto` /
+/// `ConfigPatch` 是导出的用户空间 DTO（`qaqh-config/src/dto.rs:84,111` 的
+/// `session_idle_unload_secs` 就是活证），把它塞进去等于让一个内部阈值变成
+/// 又一次 wire 实变的搭车项。要用户可调时再单独立项。
+pub const SHELL_IDLE_REAP_SECS: u64 = 600;
 
 /// 打开一条 shell 的请求面。**只有几何与目录**：shell 由 daemon 决定（D4 ——
 /// 少一个参数就少一条注入面，且"进程归后端所有"本来就是这次迁移的理由）。
@@ -86,6 +93,20 @@ pub enum ShellStopReason {
     ChildExited,
 }
 
+impl ShellStopReason {
+    /// wire 上的原因字符串口径（`ShellCloseResult.reason`）；snake_case 与
+    /// `ExecStopReason` 的序列化风格同律。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Closed => "closed",
+            Self::IdleReaped => "idle_reaped",
+            Self::OwnerRevoked => "owner_revoked",
+            Self::DaemonShutdown => "daemon_shutdown",
+            Self::ChildExited => "child_exited",
+        }
+    }
+}
+
 /// 注册表句柄（可克隆，daemon 装配时塞进 AppState；切片 3/4 接线）。
 #[derive(Clone, Default)]
 pub struct ShellRegistry {
@@ -109,6 +130,10 @@ struct LiveShell {
     frames: broadcast::Sender<ShellFrame>,
     last_activity: Mutex<Instant>,
     alive: std::sync::atomic::AtomicBool,
+    /// 最后一次**可信**的几何：open 时是请求值，之后每次从内核读成功就刷新。
+    /// master 关掉/子进程已逝时 `info()` 回报这一份，而不是编一个默认尺寸
+    /// （一个退出的 132×44 终端被报成 100×24 就是给用户看的谎，宪法 5）。
+    geometry: Mutex<(u16, u16)>,
 }
 
 /// 有界原始字节环：保留尾部 `SHELL_REPLAY_CAP`，同时记账**全量**偏移。
@@ -177,6 +202,7 @@ impl ShellRegistry {
             frames,
             last_activity: Mutex::new(Instant::now()),
             alive: std::sync::atomic::AtomicBool::new(true),
+            geometry: Mutex::new((cols, rows)),
         });
 
         self.shells
@@ -216,8 +242,13 @@ impl ShellRegistry {
 
     /// 订阅实时帧并取回从 `from_offset` 起的回放段。`from_offset` 落后于缓冲头
     /// 时按可用段给（`next_offset` 是权威续读点），调用方据此对齐。
-    pub fn attach(&self, id: &str, from_offset: u64) -> Result<ShellAttach, String> {
-        let shell = self.find(id)?;
+    pub fn attach(
+        &self,
+        owner_instance_key: &str,
+        id: &str,
+        from_offset: u64,
+    ) -> Result<ShellAttach, String> {
+        let shell = self.find_owned(owner_instance_key, id)?;
         shell.touch();
         let frames = shell.frames.subscribe();
         let (replay, start, next_offset) = {
@@ -229,8 +260,8 @@ impl ShellRegistry {
     }
 
     /// 往 shell 的 stdin 注入原始字节（keystrokes 走数据面，不走 RPC —— D4）。
-    pub fn write(&self, id: &str, bytes: &[u8]) -> Result<usize, String> {
-        let shell = self.find(id)?;
+    pub fn write(&self, owner_instance_key: &str, id: &str, bytes: &[u8]) -> Result<usize, String> {
+        let shell = self.find_owned(owner_instance_key, id)?;
         shell.touch();
         let mut stdin = shell.stdin.lock().unwrap_or_else(|e| e.into_inner());
         stdin.write_all(bytes).map_err(|error| error.to_string())?;
@@ -239,13 +270,20 @@ impl ShellRegistry {
     }
 
     /// 变更几何并回报内核里的真值（不回报"请求值"：ConPTY 在退出竞态下会拒）。
-    pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(u16, u16), String> {
-        let shell = self.find(id)?;
+    pub fn resize(
+        &self,
+        owner_instance_key: &str,
+        id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(u16, u16), String> {
+        let shell = self.find_owned(owner_instance_key, id)?;
         shell.touch();
         let control = shell.control.lock().unwrap_or_else(|e| e.into_inner());
         control.resize(cols, rows).map_err(|error| error.to_string())?;
         let (cols, rows) = control.terminal_size().map_err(|error| error.to_string())?;
         drop(control);
+        *shell.geometry.lock().unwrap_or_else(|e| e.into_inner()) = (cols, rows);
         // 尺寸变更是一次活动：否则窗口刚拉大就被 idle 回收掐掉。
         Ok((cols, rows))
     }
@@ -263,8 +301,8 @@ impl ShellRegistry {
         infos
     }
 
-    pub fn close(&self, id: &str) -> Result<ShellStopReason, String> {
-        let shell = self.find(id)?;
+    pub fn close(&self, owner_instance_key: &str, id: &str) -> Result<ShellStopReason, String> {
+        let shell = self.find_owned(owner_instance_key, id)?;
         self.stop_one(&shell, ShellStopReason::Closed)
     }
 
@@ -328,13 +366,22 @@ impl ShellRegistry {
         ids
     }
 
-    fn find(&self, id: &str) -> Result<Arc<LiveShell>, String> {
-        self.shells
+    /// owner 判定在**注册表内部**做：daemon 各入口给的是 `authz.rs` 反推出来的
+    /// `instance_key`，不是 params 里的自报字段（D2 的机器面）。错误文案对
+    /// "不存在"与"不是你的"给同一句话，避免跨 device 的存在性探针。
+    fn find_owned(&self, owner_instance_key: &str, id: &str) -> Result<Arc<LiveShell>, String> {
+        let found = self
+            .shells
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(id)
-            .cloned()
-            .ok_or_else(|| format!("qaqh-shell: unknown shell id {id}"))
+            .cloned();
+        match found {
+            Some(shell) if shell.owner_instance_key == owner_instance_key => Ok(shell),
+            _ => Err(format!(
+                "qaqh-shell: no such shell for this caller: {id}"
+            )),
+        }
     }
 
     fn stop_one(&self, shell: &Arc<LiveShell>, reason: ShellStopReason) -> Result<ShellStopReason, String> {
@@ -369,9 +416,15 @@ impl LiveShell {
 
     fn info(&self) -> ShellInfo {
         let control = self.control.lock().unwrap_or_else(|e| e.into_inner());
-        let (cols, rows) = control
-            .terminal_size()
-            .map_or((SHELL_DEFAULT_COLS, SHELL_DEFAULT_ROWS), |(cols, rows)| (cols, rows));
+        let geometry = match control.terminal_size() {
+            Ok(geometry) => {
+                *self.geometry.lock().unwrap_or_else(|e| e.into_inner()) = geometry;
+                geometry
+            }
+            // 读不到内核真值（会话已收割、master 已关）→ 用最后一次可信值。
+            Err(_) => *self.geometry.lock().unwrap_or_else(|e| e.into_inner()),
+        };
+        let (cols, rows) = geometry;
         drop(control);
         ShellInfo {
             id: self.id.clone(),

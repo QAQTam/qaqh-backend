@@ -157,6 +157,84 @@ pub struct ExecSessionOutputResult {
     pub text: String,
 }
 
+// ── 用户 shell 终端面（ADR-0028 切片 3）────────────────────────────────
+//
+// 只有生命周期三条。刻意**没有** `shell.write` / `shell.resize` / `shell.output`：
+// 那三样走 ws 数据面（D3 硬约束第 3 条）。把它们做成 RPC 就等于给终端再造一套
+// 请求-回执-游标语义，正是 ADR-0017 §被否选项点名的平行协议形态。
+
+/// `shell.open`：只吃几何与目录。**可执行名由 daemon 决定**（D4：少一个参数就少
+/// 一条注入面，且"进程归后端所有"是这次迁移的理由），**owner 由 daemon 从 lease
+/// 反查**（`lease_store.rs instance_for_session`），两者都不许出现在 params 里 ——
+/// `authz.rs` 的纪律是"绝不采信客户端自报字段"。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ShellOpenParams {
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub cols: Option<u16>,
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub rows: Option<u16>,
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub cwd: Option<String>,
+}
+
+/// 一条用户 shell 的可见状态。`output_offset` 是原始字节水位，即 ws `attach`
+/// 时 `from_offset` 的上界（**不是** `SessionEventFrame.seq` 那套会话游标）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ShellView {
+    pub id: String,
+    pub pid: u32,
+    pub shell: String,
+    pub cwd: String,
+    pub cols: u16,
+    pub rows: u16,
+    pub alive: bool,
+    pub output_offset: u64,
+}
+
+/// 权威形状只有一处：注册表的 `ShellInfo` → wire 的 `ShellView`。
+impl From<crate::shell::ShellInfo> for ShellView {
+    fn from(info: crate::shell::ShellInfo) -> Self {
+        Self {
+            id: info.id,
+            pid: info.pid,
+            shell: info.shell,
+            cwd: info.cwd,
+            cols: info.cols,
+            rows: info.rows,
+            alive: info.alive,
+            output_offset: info.output_offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ShellCloseParams {
+    pub shell_id: String,
+}
+
+/// 终止原因回显给调用方（`closed` / `idle_reaped` / `owner_revoked` /
+/// `daemon_shutdown` / `child_exited`）；断联**不是**一种原因（D5）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ShellCloseResult {
+    pub shell_id: String,
+    pub reason: String,
+}
+
+/// `shell.list` 无参数：owner 来自身份，客户端自报的 owner 一律不采信。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ShellListParams {}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct ShellListResult {
+    pub shells: Vec<ShellView>,
+}
+
 /// Load one persisted turn by its canonical turn id for session-level origin links.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -409,6 +487,9 @@ validators! {
         validate_todo_list_params => TodoListParams,
         validate_todo_status_params => TodoStatusParams,
         validate_plan_read_params => PlanReadParams,
+        validate_shell_open_params => ShellOpenParams,
+        validate_shell_close_params => ShellCloseParams,
+        validate_shell_list_params => ShellListParams,
         ;
     result:
         validate_string_result => String,
@@ -431,9 +512,39 @@ validators! {
         validate_todo_status_result => Option<TodoStatusSnapshot>,
         validate_plan_read_result => Vec<PlanReadItem>,
         validate_clients_list_result => Vec<qaqh_ringing::v2::RingingV2ClientView>,
+        validate_shell_view_result => ShellView,
+        validate_shell_close_result => ShellCloseResult,
+        validate_shell_list_result => ShellListResult,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
+    // 用户 shell 面（ADR-0028 切片 3）。执行体在 daemon 的 axum 层（owner 只能来自
+    // 已鉴权身份，见 service_api 的 shell 臂），但**方法表照登记**：形状由这批 typed
+    // DTO + validators 锁死，coverage/capability 与 `clients.list` 同样从表反查。
+    TypedMethodInfo {
+        method: "shell.open",
+        params_type: "ShellOpenParams",
+        result_type: "ShellView",
+        info: WRITE,
+        validate_params: validate_shell_open_params,
+        validate_result: validate_shell_view_result,
+    },
+    TypedMethodInfo {
+        method: "shell.close",
+        params_type: "ShellCloseParams",
+        result_type: "ShellCloseResult",
+        info: WRITE,
+        validate_params: validate_shell_close_params,
+        validate_result: validate_shell_close_result,
+    },
+    TypedMethodInfo {
+        method: "shell.list",
+        params_type: "ShellListParams",
+        result_type: "ShellListResult",
+        info: READ,
+        validate_params: validate_shell_list_params,
+        validate_result: validate_shell_list_result,
+    },
     TypedMethodInfo {
         method: "daemon.version",
         params_type: "DaemonVersionParams",
@@ -773,6 +884,15 @@ const WRITE_ADMIN: MethodInfo = MethodInfo {
     requires_session: false,
     admin_only: true,
 };
+/// client-scoped 写方法：**不属于任何会话**（`requires_session: false`），也不需
+/// admin。用户 shell 面（ADR-0028 D4）是第一个住户 —— 它的 owner 是 daemon 从
+/// lease 反查的 `instance_key`，不是 `session_id`，所以 `READ_SEEDED` 那一档的
+/// 写对应物不适用；而"打开一个终端"显然不是 admin 专属动作。
+const WRITE: MethodInfo = MethodInfo {
+    kind: MethodKind::Write,
+    requires_session: false,
+    admin_only: false,
+};
 
 /// 方法表**本体**（单一真源）。
 ///
@@ -795,6 +915,11 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("session.turn", READ_SEEDED),
     ("exec_session.list", READ_SEEDED),
     ("exec_session.output", READ_SEEDED),
+    // 用户 shell 面（ADR-0028 切片 3）：三条都是 client-scoped，不绑会话；
+    // 执行在 daemon 的 axum 层（owner 来自已鉴权身份），表在此登记形状与档位。
+    ("shell.open", WRITE),
+    ("shell.close", WRITE),
+    ("shell.list", READ),
     // workspace
     ("workspace.get", READ_SEEDED),
     ("workspace.list", READ),

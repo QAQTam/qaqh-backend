@@ -89,6 +89,69 @@ pub(crate) async fn handle_service(
         )
             .into_response();
     }
+    // ── 用户 shell 面（ADR-0028 切片 3）─────────────────────────────────
+    //
+    // 为什么在 axum 层执行而不是丢进 runtime dispatch：owner **只能**来自已鉴权
+    // 身份，而 `service_methods::dispatch(&service, method, params)` 的签名里根本
+    // 没有身份位。先例就是上面的 `clients.list`（presence 归 axum 层）。方法表
+    // (METHODS/TYPED_METHODS) 照登记，形状由那批 typed DTO + validators 锁死，
+    // 结果侧与此前 `validate_typed_result` 同一份 DTO —— 类型即形状保证。
+    //
+    // owner 取 `leases.instance_for_session(client_session_id)`：这是 daemon 在
+    // open 时按 token 反推写入的稳定身份（admin 为自报 instance、device 为
+    // device_id），**不是** params 里能伪装的字段（`authz.rs` 纪律）。
+    if method.starts_with("shell.") {
+        if let Err(response) = require_scope(&identity, Scope::Interact) {
+            return response;
+        }
+        let Some(owner) = state
+            .leases
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .instance_for_session(&client_session_id)
+        else {
+            return lease_required_json();
+        };
+        let outcome: Result<serde_json::Value, String> = match method {
+            "shell.open" => serde_json::from_value::<service_methods::ShellOpenParams>(
+                params.clone(),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|args| state.service.shell_open(&owner, &args))
+            .and_then(|view| serde_json::to_value(view).map_err(|error| error.to_string())),
+            "shell.close" => {
+                serde_json::from_value::<service_methods::ShellCloseParams>(params.clone())
+                    .map_err(|error| error.to_string())
+                    .and_then(|args| state.service.shell_close(&owner, &args.shell_id))
+                    .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string()))
+            }
+            "shell.list" => serde_json::from_value::<service_methods::ShellListParams>(
+                params.clone(),
+            )
+            .map_err(|error| error.to_string())
+            .and_then(|_| state.service.shell_list(&owner))
+            .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string())),
+            other => Err(format!("unknown shell method: {other}")),
+        };
+        return match outcome {
+            Ok(value) => (
+                StatusCode::OK,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::to_vec(&value).unwrap_or_default(),
+            )
+                .into_response(),
+            Err(message) => (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "application/json")],
+                serde_json::to_vec(&serde_json::json!({
+                    "code": "action_failed",
+                    "message": message,
+                }))
+                .unwrap_or_default(),
+            )
+                .into_response(),
+        };
+    }
     match service_methods::dispatch(&state.service, method, &params) {
         Ok(value) => (
             StatusCode::OK,

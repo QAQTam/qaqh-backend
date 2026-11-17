@@ -5,7 +5,7 @@
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "7946aea13c858a16ea5ec857d9bfb041e81d3ab9d1931c355c0c89540071f09d",
+  "contract_hash": "43378a4abbee1d1c861ff5d948a9919adcd1d2350abd7df3d64d6e2807aa35b0",
   "files": [
     {
       "path": "constants.ts",
@@ -13,7 +13,7 @@
     },
     {
       "path": "coverage.json",
-      "sha256": "4d95cc4716e144860804608c6235e76cf0e320c7266dfccef949fa2ab6fa81b0"
+      "sha256": "b8f774a06b395140e23eb6f774125e0ac1c37e8f2e0d943cc31cf41c917815b3"
     },
     {
       "path": "cs/AccountsEmptyParams.cs",
@@ -684,6 +684,30 @@
       "sha256": "fb9b030596c46a09ac76fc569aa3fbb26c8ae17059896218c2b1835bbb405f20"
     },
     {
+      "path": "cs/ShellCloseParams.cs",
+      "sha256": "97caaf27234cd4df6a92df295c70e7ab31b288b9339b95b6b93086d61d761901"
+    },
+    {
+      "path": "cs/ShellCloseResult.cs",
+      "sha256": "bf4086775f97534d9d6c3ed7e11dbafc29d02d3f09c1ff37874d66c7955e4070"
+    },
+    {
+      "path": "cs/ShellListParams.cs",
+      "sha256": "9d84bdc7ee8242a92506152e87180f25a40f4c9ade6105a65a5d49e3da81144f"
+    },
+    {
+      "path": "cs/ShellListResult.cs",
+      "sha256": "929ad6ffe158a8b1ec9adcb54e68fb9417f471d8acd8d3d97e2f253f08ebd06f"
+    },
+    {
+      "path": "cs/ShellOpenParams.cs",
+      "sha256": "9758712ef8c21b25807b2848c215b1b185b9e1d0a3b66f4f1d75d65e54d4b547"
+    },
+    {
+      "path": "cs/ShellView.cs",
+      "sha256": "de05b32950c6ed70777f29d3c835ed3c5960e0f046c76d37bb60789c250736b9"
+    },
+    {
       "path": "cs/SiwcCode.cs",
       "sha256": "a1920143a1c4e0625ae490daa2044a73737d5864511ca011afa87df88f5b8c34"
     },
@@ -1284,6 +1308,30 @@
       "sha256": "38e0b9de817f645c4bec37c0d4a3e58baecccb040f5718dc069a72c7385a0bed"
     },
     {
+      "path": "fixtures/service-shell-close-params.json",
+      "sha256": "92dbd403e674b8daa4dd81d5e271a54357591397b5ceb036768dcf1ebc7a1184"
+    },
+    {
+      "path": "fixtures/service-shell-close-result.json",
+      "sha256": "4527d097c5561b096dc4dac16a551e2ef3e7d0a135da7eef8bf80d93c1438e00"
+    },
+    {
+      "path": "fixtures/service-shell-list-params.json",
+      "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356"
+    },
+    {
+      "path": "fixtures/service-shell-list-result.json",
+      "sha256": "00f116c70e8db35910b0f03fce020371a3065541b7931658fec3363c69ea4e82"
+    },
+    {
+      "path": "fixtures/service-shell-open-params.json",
+      "sha256": "d84c3be26347362db9b75d2f8aea842a636a744637a9a574c4ffab7040895232"
+    },
+    {
+      "path": "fixtures/service-shell-open-result.json",
+      "sha256": "d9fe25639a6a40a014b7b4ccd71f6bc53f64a84ba50576cf94c0a48b3239b815"
+    },
+    {
       "path": "fixtures/service-siwc-models-params.json",
       "sha256": "f89c727bb71cf0a58f9f8dfa8b10ec4d634652ed78c9781ce9ed430e8db43231"
     },
@@ -1405,7 +1453,7 @@
     },
     {
       "path": "index.ts",
-      "sha256": "80141f93854490343407a0015a3301f4db09a9eb581578978b63eb3c2c86ec1a"
+      "sha256": "b011d0351850ce3ff859e0a81bcf0a28f52519e00c8883617a27ca3ee16b1087"
     },
     {
       "path": "node.ts",
@@ -1413,7 +1461,7 @@
     },
     {
       "path": "service-map.ts",
-      "sha256": "2a614508fd4b9fd112b602afe81d06b63c00079ab0b34d454d00f19addf5b2c9"
+      "sha256": "0196bfef81df98619a8b21ffe8d2918934894042b69b547af57cf53d409a0e80"
     },
     {
       "path": "types/ReceiptIdScope.ts",
@@ -2114,6 +2162,30 @@
     {
       "path": "types/qaqh/SettingValue.ts",
       "sha256": "e5ed593ea81b4af323d970515c2ee982dae9a72a5dfa090303c04c3687f303dd"
+    },
+    {
+      "path": "types/qaqh/ShellCloseParams.ts",
+      "sha256": "16540153f553f0abebf1b8e930716e0d7e08aa99f086c562632414d746a5e293"
+    },
+    {
+      "path": "types/qaqh/ShellCloseResult.ts",
+      "sha256": "7a9317e46fa35ae534716116a17b8e9ffebae62b1238754a4e9afd7966ae0ea9"
+    },
+    {
+      "path": "types/qaqh/ShellListParams.ts",
+      "sha256": "55bf88c0d4b7ce339bfc92ce557d417d1cd89eee0e13a0e7f7f3ea2f768796a3"
+    },
+    {
+      "path": "types/qaqh/ShellListResult.ts",
+      "sha256": "09e6aac0b78df45923909853bcdd6a35d9ed5a4e4a889970d695a8320919003f"
+    },
+    {
+      "path": "types/qaqh/ShellOpenParams.ts",
+      "sha256": "1da23dda22aba8b6ecebc58b745ca44773a29c850c8f28c2ea9d897f6d7bc9c8"
+    },
+    {
+      "path": "types/qaqh/ShellView.ts",
+      "sha256": "bdc57dd495ca7c9acaa42e8239e3ae95ef2965e74f34a7412df70f9469cd5d02"
     },
     {
       "path": "types/qaqh/SiwcCode.ts",

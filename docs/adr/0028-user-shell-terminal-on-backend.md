@@ -172,6 +172,34 @@
 | `contract.rs:594-601` 两张路由表 + 单一 POST RPC 行号 | 控制面表在 `axum_impl/mod.rs:120-132`（只有 `/health`、`/activity`、`/control/v1/stop*`、`/marketplace/v1/*`） |
 | `command_surface.rs:30-35` 钉死"新增命令必须 bump revision" | 穷举闸实际在 `service_methods.rs:904/932/957/966/1181`；revision bump 纪律出处是 ADR-0007/0017，行号待切片 3 时实测 |
 | "闸门只剩 exporter 一条" | 更准确：`scripts/check-surface-change-policy.py` 与 `scripts/check-lts-api-surface.py` **都不存在**（宪规 20 引用的后者也是幽灵），`.github/workflows` 在 main 上只剩 `release.yml`，而 **LTS-v3.1 分支上 Rust Suite / LTS API / Surface Policy 三条仍在**（本轮 `gh run list` 实测可见） |
-| §3 断言"新流不违反既有裁决" | 与 **ADR-0017 决策 6 + §被否选项**正面冲突，改为 D3 待裁定 |
+| §3 断言"新流不违反既有裁决" | 与 **ADR-0017 决策 6 + §被否选项**正面冲突，改为 D3 待裁定（后由所有者裁定为候选 B，见正文） |
+| "新增命令面必须 bump `COMMAND_CONTRACT_REVISION`，判据在 `command_surface.rs:30-35`" | 实测口径**不支持**把这个常量当作服务面的账：`qaqh-ringing/src/v2/types.rs:86` 的定义与其上方注释说明它管的是**命令目录**（`-8` = `turn_active`/`turn_not_found` 拒绝码，`-9` = 新增 `goal.set/get/clear` **命令**），而 `shell.*` 三条是**服务方法**（`POST /ringing/v2/service/{method}` + `METHODS` 表），不碰命令信封。⇒ 本次**未 bump** 两个 revision 常量。与 ADR-0007 决策 3 的模板要求（refreeze 的 ADR"内容至少含：新 `contract_revision` 值"）存在**未解决的张力**，留给所有者裁定，不由我单方填值；`contract_hash`/`manifest.json` 由 exporter 记账是本次实际的换锁痕迹 |
+
+### 两处"绿得可疑"的实测教训（切片 3 落地时踩到，必须留给下一个会话）
+
+1. **`check` 的绿可以是"两边一致地缺"**。第一次 `export` 被 coverage 拒绝：
+   `service.shell.close declares missing fixture: fixtures/service-shell-close-params.json`
+   —— 补完 6 个 fixture 后 `check` 就 exit 0 了，但金标准里**一个 `Shell*.ts` 都没有**：
+   因为 `export_types`（`tools/qaqh-contract-export/src/main.rs:900-901`）是一份
+   **显式类型清单**，coverage 从 `METHODS`/`TYPED_METHODS` 自动登记方法，类型却只导清单里
+   列出的。把 6 个 shell DTO 加进清单后，`types/qaqh/` 与 `cs/` 各出 6 个产物，此时
+   `CHECK_EXIT=0` 才是真绿。**推论**：以后新增 typed 服务方法，验收不能只看 `check`，
+   必须同时断言 `docs/api-surface/v4.0/types/qaqh/<新类型>.ts` 存在。
+2. fixture 与 reason 字符串都必须**由类型单点生成**：`service-shell-close-result.json` 的
+   `reason` 走 `qaqh_runtime::ShellStopReason::Closed.as_str()`，不在 exporter 里手写
+   `"closed"`（否则 `ShellStopReason::as_str()` 与金标准各说各话，而没人会红）。
+
+### 切片 3 实测记录（补 D3 裁定之后）
+
+- `cargo check -p qaqh-daemon` → exit 0；`cargo clippy -p qaqh-runtime -p qaqh-daemon` 对**我改的文件**零
+  warning（剩下的 `host_impl.rs`×2、`registry/queries.rs`×2、`registry/goal.rs:334`、`v2.rs:219`、
+  `pairing.rs:106` 逐条核过是**存量**，行号都在我未触碰的 hunk 里）。
+- `cargo test -p qaqh-runtime --lib` → **55 passed**（含 `shell::` 4 条与三条穷举闸：
+  `method_table_has_no_duplicate_names`、`typed_descriptors_match_runtime_method_metadata`、
+  `typed_method_results_match_descriptors`）。
+- 质量修正两处：`service_api.rs` 里 `.map_err(Into::into)` 的 String→String 冗余转换（clippy
+  指出）；`ShellRegistry::info()` 原先在内核读不到几何时**回落默认 100×24**，改为
+  `geometry: Mutex<(u16,u16)>` 记"最后一次可信值"（open=request 值、resize/内核读成功即刷新）——
+  退出的 132×44 终端报成 100×24 是给用户看的谎（宪法 5）。
 
 同时更正我在对话里给过的两处二手结论：① "金标准多点长期欠账" 实为 autocrlf 的 EOL 记账噪声（`git diff --numstat` 只有 6 改 2 新增）；② "exec PTY 的 `stty size → 24 80`" 来自我看不到的那批结果，本轮 pwsh 只复现了 `[Console]::WindowWidth=80`，`stty` 数字未经本轮复验。
