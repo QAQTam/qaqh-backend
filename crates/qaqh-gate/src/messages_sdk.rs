@@ -107,6 +107,23 @@ fn extract_text(content: &[ContentBlock]) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
+/// 运行时动态注入的特征前缀——**与 `qaqh-runtime` registry 的
+/// `GOAL_CONTINUATION_MARKER`/`EXEC_TERMINAL_MARKER` 及 transport.rs 的
+/// skill envelope 前缀同源，改动必须三处同步**。这些文本以 system 角色落在
+/// timeline 尾部，语义是"刚刚发生的事"。
+const DYNAMIC_INJECTION_PREFIXES: &[&str] = &[
+    "<qaqh_goal_continuation",
+    "<qaqh_exec_session_terminal",
+    "<skill_context_envelope",
+];
+
+fn is_dynamic_injection(text: &str) -> bool {
+    let head = text.trim_start();
+    DYNAMIC_INJECTION_PREFIXES
+        .iter()
+        .any(|prefix| head.starts_with(prefix))
+}
+
 /// Project harness history onto the SDK's neutral model. Wire-level rules
 /// (same-role alternation, tool_result placement, orphan pairing) are left to
 /// the SDK normalization layer; only harness semantics live here: system
@@ -128,7 +145,18 @@ pub(crate) fn project_messages(
         match msg.role.as_str() {
             "system" | "developer" => {
                 if let Some(t) = extract_text(&msg.content) {
-                    system_parts.push(t);
+                    if is_dynamic_injection(&t) {
+                        // 2026-11-17 复盘：提升进顶层 system 会把"刚发生"的
+                        // 触发搬离尾部注意力位——部分模型据此把请求读成"用户
+                        // 空发消息"或拿上一轮自述当用户话语（qwen3.8-flash @
+                        // wire=messages 实测空回/答非所问）。Anthropic 协议
+                        // 没有 in-message system，忠实映射就是原位 user 轮
+                        // （Claude Code 同款姿势），顶层 system 同时保持字节
+                        // 稳定（前缀缓存不再被每条通知击穿）。
+                        projected.push(WireMessage::new(mutil_ai::Role::User, vec![Part::text(t)]));
+                    } else {
+                        system_parts.push(t);
+                    }
                 }
             }
             "user" => {
@@ -1261,6 +1289,40 @@ mod tests {
                 .messages
                 .iter()
                 .any(|m| m.role == mutil_ai::ExternalRole::System)
+        );
+    }
+
+    /// 2026-11-17 复盘护栏：goal/exec 尾部通知必须原位渲染为 user 轮——
+    /// 顶层 system 保持字节稳定（前缀缓存不被通知击穿），请求尾部带着新鲜
+    /// 触发事件（模型不再"看不见刚发生的事"）。
+    #[test]
+    fn dynamic_injection_stays_in_place_as_user_turn() {
+        let notice = "<qaqh_exec_session_terminal exec_session_id=\"x\">done</qaqh_exec_session_terminal>";
+        let msgs = vec![
+            Message::system("stable prompt"),
+            Message::user("hi"),
+            qa_msg("assistant", vec![ContentBlock::text("report")]),
+            qa_msg("system", vec![ContentBlock::text(notice)]),
+        ];
+        let projected = project_messages(msgs, 0);
+        assert_eq!(projected.len(), 4, "system + user + assistant + notice-as-user");
+        assert_eq!(projected[0].role, mutil_ai::Role::System);
+        let Part::Text { text, .. } = &projected[0].parts[0] else {
+            panic!("top entry must be system text");
+        };
+        assert_eq!(text, "stable prompt", "top system must stay byte-stable");
+        let last = projected.last().expect("tail entry");
+        assert_eq!(last.role, mutil_ai::Role::User, "notice projects in place as user");
+        let Part::Text { text, .. } = &last.parts[0] else {
+            panic!("notice must project as user text");
+        };
+        assert!(text.starts_with("<qaqh_exec_session_terminal"));
+        // 归一化后仍是合法 Anthropic 请求：尾部 user，顶层 system 单条。
+        let norm = normalized(&ChatRequest::new(projected));
+        assert_eq!(norm.system.as_deref(), Some("stable prompt"));
+        assert_eq!(
+            norm.messages.last().map(|m| &m.role),
+            Some(&mutil_ai::ExternalRole::User)
         );
     }
 

@@ -164,6 +164,19 @@ impl AgentRegistry {
             return;
         }
 
+        // Cancelled = 用户/属主明确的停止意图：既不记空回复、也不立即再触发
+        // （2026-11-17 事故复盘：客户端连发 Cancel 杀掉 9 个 NotStarted 回合，
+        // 旧语义全部按闸 3 计入"空回复"把 goal 误封，且 Cancelled 还照常续跑，
+        // 把一次 stop 放大成烧轮级联）。续跑交由 daemon 周期扫描兜底，stop 的
+        // 回合语义归人裁决。
+        if matches!(notice.terminal, TurnTerminal::Cancelled) {
+            log::info!(
+                "[goal] turn cancelled; audit/re-trigger deferred to sweep (session={})",
+                notice.session_id
+            );
+            return;
+        }
+
         // 回合权威事实:终态 usage + 墙钟 + 工具活动 + 终答 + 输入标记。
         let session_id = notice.session_id.clone();
         let turn_id = notice.turn_id.clone();
@@ -284,7 +297,6 @@ impl AgentRegistry {
             }
         }
 
-        // 仍 Active → 续跑(Cancelled 也续跑:用户取消不暂停,所有者拍板 Codex 原样)。
         self.continue_goal_if_idle(&notice.session_id);
     }
 

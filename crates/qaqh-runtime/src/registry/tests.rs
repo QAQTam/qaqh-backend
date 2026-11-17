@@ -185,3 +185,98 @@ fn test_owner_dir() -> std::sync::Arc<qaqh_session::owner::OwnerDirectory> {
             .expect("open owners db"),
     )
 }
+
+/// 2026-11-17 事故回归：客户端连发 ConversationCancel 杀掉 9 个 NotStarted
+/// 续跑轮，旧语义把它们全部按闸 3 计成"空回复"，3 连即把 Active goal 误封。
+/// Cancelled 是明确的停止意图——不记空、不立即重触发，续跑交周期扫描兜底。
+///
+/// 反证（非空洞）：回合被播成真实的 goal 续跑轮（input 块带 marker、
+/// 终态 Cancelled、无答案无工具）。移除 `route_goal_terminal` 的 Cancelled
+/// 短路后旧路径照跑：`automatic=true && empty=true` → `empty_turns` 记成 1，
+/// 本测试变红。
+#[tokio::test]
+async fn cancelled_goal_turn_defers_audit_and_retrigger() {
+    use qaqh_ringing_contract::fact::{
+        ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, TurnId, TurnTerminal,
+    };
+    use qaqh_ringing_contract::state::{TimelineEntry, TurnOutcome};
+
+    let owners = test_owner_dir();
+    let session_id = "ses-cancel-audit";
+    let turn_id = "turn-cancelled-cont";
+    owners
+        .ensure_session(session_id, None, false)
+        .expect("session row");
+    owners
+        .db()
+        .write_blocking(|conn| {
+            qaqh_session::db::goals::create_goal(
+                conn,
+                session_id,
+                "goal-cancel-1",
+                "keep the goal alive",
+                None,
+            )
+            .map(|row| row.goal_id)
+        })
+        .expect("goal row");
+
+    let owner = owners.get_or_create(session_id);
+    owner
+        .start_turn(turn_id, Some("input-goal-cont-1".to_string()))
+        .await
+        .expect("turn row");
+    owner
+        .append_block(TimelineEntry::Input {
+            block_id: BlockId::new("block-goal-cont-1".to_string()),
+            turn_id: Some(TurnId::new(turn_id.to_string())),
+            purpose: InputPurpose::TriggerTurn,
+            content: ContentValue::Inline {
+                text: "<qaqh_goal_continuation goal_id=\"goal-cancel-1\">Continue working toward the active goal</qaqh_goal_continuation>".to_string(),
+            },
+            attachments: vec![],
+            images: vec![],
+            inter_agent: None,
+            subagent_terminal: None,
+            actor: ActorRef {
+                kind: ActorKind::System,
+                id: "system".into(),
+                display_name: None,
+            },
+        })
+        .await
+        .expect("goal-cont input block");
+    owner
+        .finish_turn(
+            turn_id,
+            "finished",
+            TurnOutcome::Finished {
+                terminal: TurnTerminal::Cancelled,
+                usage: None,
+                error: None,
+            },
+        )
+        .await
+        .expect("finish cancelled turn");
+
+    let mut registry = AgentRegistry::new(owners.clone());
+    registry.route_goal_terminal(&qaqh_agent_runtime::session_loop::TurnTerminalNotice {
+        session_id: session_id.to_string(),
+        turn_id: turn_id.to_string(),
+        terminal: TurnTerminal::Cancelled,
+        error: None,
+        trigger: None,
+    });
+
+    let row = owners
+        .db()
+        .read_blocking(|conn| qaqh_session::db::goals::get_goal(conn, session_id))
+        .expect("read goal")
+        .expect("goal row");
+    assert_eq!(
+        row.status,
+        qaqh_ringing_contract::state::GoalStatus::Active,
+        "单次取消不得封 goal"
+    );
+    assert_eq!(row.empty_turns, 0, "Cancelled 不计入空回复");
+}
