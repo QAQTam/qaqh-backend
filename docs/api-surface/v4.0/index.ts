@@ -229,6 +229,7 @@ export * from "./types/qaqh/ToolCallState";
 export * from "./types/qaqh/ToolCallView";
 export * from "./types/qaqh/ToolCancellationReason";
 export * from "./types/qaqh/ToolEffectInfo";
+export * from "./types/qaqh/ToolImageRef";
 export * from "./types/qaqh/ToolInterruptionReason";
 export * from "./types/qaqh/ToolMetrics";
 export * from "./types/qaqh/ToolStatus";

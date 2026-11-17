@@ -1,11 +1,11 @@
 {
   "format_version": 1,
   "wire_version": 2,
-  "backend_version": "4.0.0",
+  "backend_version": "4.0.1",
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "2cd681315dd2ce5abc80559f29ec23df415b980f4ae1890c8a2dad409126bff7",
+  "contract_hash": "7946aea13c858a16ea5ec857d9bfb041e81d3ab9d1931c355c0c89540071f09d",
   "files": [
     {
       "path": "constants.ts",
@@ -853,7 +853,7 @@
     },
     {
       "path": "cs/TimelineEntry.cs",
-      "sha256": "aaa359030205f21483e5ed3bc293da5fb061ff5bc2e3cbc7ad8effbff4117d4d"
+      "sha256": "86bb9e8fe01e26968c71d95db20470d9fcf8807e71ad4ee5c817955b0a05e3bf"
     },
     {
       "path": "cs/TodoCountsSnapshot.cs",
@@ -898,6 +898,10 @@
     {
       "path": "cs/ToolEffectInfo.cs",
       "sha256": "73e592358e39ec5c1a759da46e1f2e40682c4613ebb7facc6fbbd8c7d851bc76"
+    },
+    {
+      "path": "cs/ToolImageRef.cs",
+      "sha256": "5612df8fc3869461934bb787e1edae5228f979d2876d8d28ef7a126f9954cdd2"
     },
     {
       "path": "cs/ToolInterruptionReason.cs",
@@ -1061,7 +1065,7 @@
     },
     {
       "path": "fixtures/pair-result.json",
-      "sha256": "435e84ad31801ec7cec1e4538010127738dc131ebc7145087f852d6b82b6ec81"
+      "sha256": "5adac942fec575182fe730f1c2adea389f9e088780a552dea89eb058efb4ef2d"
     },
     {
       "path": "fixtures/pair-token-params.json",
@@ -1101,7 +1105,7 @@
     },
     {
       "path": "fixtures/service-daemon-version-result.json",
-      "sha256": "7b631325a9221bd311e994ff2f5251703df30023eafdc4a754eb8a3135904d02"
+      "sha256": "7c2a19accf04035cb6e073896850aceb6be408feeba17bca8b5cb43538122bac"
     },
     {
       "path": "fixtures/service-diagnostics-memory-snapshot-params.json",
@@ -1401,7 +1405,7 @@
     },
     {
       "path": "index.ts",
-      "sha256": "513f7e64c1ac4aa40e03824ef89a64f82f64e2c540617ca6b46273c0baf360e4"
+      "sha256": "80141f93854490343407a0015a3301f4db09a9eb581578978b63eb3c2c86ec1a"
     },
     {
       "path": "node.ts",
@@ -2289,7 +2293,7 @@
     },
     {
       "path": "types/qaqh/TimelineEntry.ts",
-      "sha256": "f8d3f48239ff9a1b34cfbb6c45774e2ee1afbd8f1f7b445f5f1b9675b9208d22"
+      "sha256": "aad41f186937d5b1a1469d2f2ba63f10ae6a951b9b26a57b727fb013776d15d0"
     },
     {
       "path": "types/qaqh/TodoCountsSnapshot.ts",
@@ -2338,6 +2342,10 @@
     {
       "path": "types/qaqh/ToolEffectInfo.ts",
       "sha256": "64fae10ba606ea8ae7d8e6ae9acddf8a846792f07da8fb390160e7fea32d799f"
+    },
+    {
+      "path": "types/qaqh/ToolImageRef.ts",
+      "sha256": "053563dfc9d85ae1c8e3f380e17ea540b67b151c50fe7472e05bc09245214061"
     },
     {
       "path": "types/qaqh/ToolInterruptionReason.ts",

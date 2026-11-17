@@ -10,6 +10,7 @@ import type { InterAgentEnvelope } from "./InterAgentEnvelope";
 import type { SessionContentRef } from "./SessionContentRef";
 import type { SubagentTerminalNotification } from "./SubagentTerminalNotification";
 import type { ToolCallId } from "./ToolCallId";
+import type { ToolImageRef } from "./ToolImageRef";
 import type { TurnId } from "./TurnId";
 import type { UsageInfo } from "./UsageInfo";
 
@@ -36,4 +37,11 @@ generated_ms?: number | null,
  * Provider 专属续传状态(Responses API encrypted reasoning 等),
  * 下一轮原样回传;客户端不解读。
  */
-opaque?: Array<JsonValue>, } } | { "kind": "tool_call", "data": { call_id: ToolCallId, turn_id: TurnId | null, } } | { "kind": "tool_result", "data": { call_id: ToolCallId, turn_id: TurnId | null, content: ContentValue, } } | { "kind": "compaction", "data": { summary: ContentValue, } };
+opaque?: Array<JsonValue>, } } | { "kind": "tool_call", "data": { call_id: ToolCallId, turn_id: TurnId | null, } } | { "kind": "tool_result", "data": { call_id: ToolCallId, turn_id: TurnId | null, content: ContentValue, 
+/**
+ * 工具产出的图片外置引用(A-2 L0):结算时字节落盘
+ * `{data_dir}/images/{sha256}.{ext}`,timeline 只持索引;模型上下文
+ * 回放时重建为兄弟 `ImageRef` 内容块,gate 请求构建期按需读盘。
+ * additive:旧行缺席即空。
+ */
+images?: Array<ToolImageRef>, } } | { "kind": "compaction", "data": { summary: ContentValue, } };

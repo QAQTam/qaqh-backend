@@ -58,6 +58,7 @@
 | [0024](0024-home-control-mcp-transport.md) | 硬件控制 MCP：Rust 独立进程 + stdio + 2026-07-28 无状态协议 | **已采纳（部分实施）** · server 侧真机闭环（2026-11-17：四工具 + 策略层 + 云侧读写 + 审计/幂等/冷却/带外批准/会话探活与静默续期(默认关)；`cargo test` 35 绿 + rmcp Auto 客户端集成测试 3 绿、stdio 冒烟 50 断言绿（含 era 反证））；**daemon/`qaqh-mcp` 侧未接线**，零 wire 变化验证未跑；era 反证两半边都已用 rmcp 客户端/手搓管道验证，但**未过真实 daemon** |
 | [0025](0025-mcp-default-on-and-third-party-compat.md) | MCP 默认开与三方兼容（client 侧）+ rmcp 统一 3.10.0 | 已采纳 · 切片 A–D + R1（精确锁 =3.10.0）+ R2（被否：不砍 qaqh-skills 复用 MCP Skills）已留痕；延后项见落地清单 |
 | [0026](0026-exec-notify-on-exit-subscription.md) | exec 订阅终态推送：`write_stdin notify_on_exit`（订阅制回调决策 8；armed+delivered 恰一次交付、注入不带正文、Exited/TimedOut 可推送白名单） | 已采纳 · 切片 1 + 切片 2（exec_command 起始订阅）已实施（manager/工具面/registry 投递/周期补投/模板措辞/测试/schema 指引）；跨通道恰一次交付已闭合 |
+| [0027](0027-v4-0-gold-standard-recut-for-tool-image-ref.md) | 在 `main` 上就地机器重切 v4.0 金标准，追认 `ToolImageRef` + `TimelineEntry.images` | **已采纳 · 已实施**（2026-11-17 所有者裁定：用户空间不可变只在 LTS 仓、当前无 LTS 发版计划）· `check` 实测 exit 1→0 · 已知不严格：`ringing-commands-10`/`ringing-session-3`/`wire_version 2` 三戳**未 bump**，禁止当成 refreeze 免记账的先例 |
 
 ## 阅读顺序
 

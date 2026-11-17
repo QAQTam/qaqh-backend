@@ -106,6 +106,9 @@ public sealed record TimelineEntryToolResultData
     public string? TurnId { get; init; }
     [JsonPropertyName("content")]
     public ContentValue Content { get; init; }
+    [JsonPropertyName("images")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ToolImageRef[] Images { get; init; }
 }
 
 public sealed record TimelineEntryCompaction : TimelineEntry
