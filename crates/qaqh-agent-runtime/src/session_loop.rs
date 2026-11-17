@@ -565,6 +565,11 @@ impl SessionLoop {
         // attempt(此前失败轮的 usage 直接丢弃,turn 级重发会放大这个缺口)。
         let mut accrued_usage: Option<UsageInfo> = None;
         let mut watchdog_folded = false;
+        // A 路（文本续写）的运行态：prefill 尾消息在线程历史中的长度水位。
+        // prefill 是临时构造，随本次请求消费后即移除；其内容由续写 attempt
+        // 的块（seed+续写段）承载落盘。
+        let mut text_seed: Option<String> = None;
+        let mut prefill_len: Option<usize> = None;
 
         'rounds: loop {
             // Steer/Interject 合并:下一轮请求前注入 user 消息。
@@ -651,14 +656,19 @@ impl SessionLoop {
                 }),
                 blocks: blocks.clone(),
             };
-            let outcome = provider_job::run_round(
+            let mut outcome = provider_job::run_round(
                 spec,
                 messages.clone(),
                 self.session_id.clone(),
                 cancel_rx.clone(),
                 Some(progress),
+                text_seed.take(),
             )
             .await;
+            // prefill 已随本次请求消费（clone 发出，线程历史不留）。
+            if let Some(len) = prefill_len.take() {
+                messages.truncate(len);
+            }
             self.note_context(&outcome);
             // 失败 attempt 的已见 usage 进累计:重发结算与最终账本都以合并
             // 口径为准。重发分支不取走累计,继续累加;结算分支取走。
@@ -745,6 +755,113 @@ impl SessionLoop {
                                 break 'rounds;
                             }
                         }
+                        // ── 重发形态分派（预算已扣、退避已过）──
+                        // B 路:截断的工具调用 → 注入失败 ToolResult。wire 无关
+                        // (chat 的 "{}" arguments / messages 的 input {} 都合法),
+                        // 失败事实让模型下轮用完整参数重调。半截 args 装不进
+                        // 中性 ToolUse.input(Value 须合法 JSON):截断恰在完整
+                        // 边界时可解析出全参,否则退空对象——只用于声明面与
+                        // UI,授权面与执行面都不参与。
+                        if !outcome.partial_tools.is_empty() {
+                            let prefix = outcome
+                                .partial_text
+                                .clone()
+                                .filter(|t| !t.trim().is_empty());
+                            if let Some(prefix) = &prefix {
+                                // 前缀是被截断消息的已产出部分,attempt-2 的
+                                // 新消息不含它——独立落盘成块。
+                                self.owner
+                                    .append_block(TimelineEntry::AssistantBlock {
+                                        block_id: BlockId::new(format!(
+                                            "block_{}",
+                                            generate_ulid()
+                                        )),
+                                        turn_id: turn.clone(),
+                                        ord: 0,
+                                        block_kind: AssistantBlockKind::Answer,
+                                        content: ContentValue::Inline {
+                                            text: prefix.clone(),
+                                        },
+                                        model: blocks.model.clone(),
+                                        usage: None,
+                                        generated_ms: outcome.generated_ms,
+                                        opaque: vec![],
+                                    })
+                                    .await
+                                    .ok();
+                            }
+                            let mut reply = Vec::new();
+                            if let Some(prefix) = prefix {
+                                reply.push(ContentBlock::Text { text: prefix });
+                            }
+                            let mut tool_messages = Vec::new();
+                            for tool in &outcome.partial_tools {
+                                let input = serde_json::from_str::<serde_json::Value>(
+                                    &tool.args_text,
+                                )
+                                .unwrap_or(serde_json::Value::Object(Default::default()));
+                                reply.push(ContentBlock::ToolUse {
+                                    id: tool.call_id.clone(),
+                                    name: tool.name.clone(),
+                                    input: input.clone(),
+                                });
+                                self.declare(&turn, &tool.call_id, &tool.name, &input).await;
+                                let failure = format!(
+                                    "tool call stream was cut off mid-generation \
+                                     ({} bytes of arguments received); call the tool \
+                                     again with complete arguments",
+                                    tool.args_text.len()
+                                );
+                                self.owner
+                                    .append_block(TimelineEntry::ToolResult {
+                                        call_id: ToolCallId::new(tool.call_id.clone()),
+                                        turn_id: Some(turn.clone()),
+                                        content: ContentValue::Inline {
+                                            text: failure.clone(),
+                                        },
+                                        images: Vec::new(),
+                                    })
+                                    .await
+                                    .ok();
+                                tool_messages.push(tool_result_message(
+                                    &tool.call_id,
+                                    &failure,
+                                    false,
+                                    &[],
+                                ));
+                            }
+                            // 与正常 ToolUse 分支同形:assistant 消息在前,
+                            // tool result 随后。
+                            messages.push(Message {
+                                msg_id: None,
+                                role: "assistant".into(),
+                                name: None,
+                                content: reply,
+                            });
+                            messages.extend(tool_messages);
+                            continue 'rounds;
+                        }
+                        // A 路:纯文本截断 → prefill 前缀 + seed 续写。messages
+                        // wire 是官方 continuation;chat/gemini 尾 assistant text
+                        // 是 prefill 手法(近似续写)。partial reasoning 被剥:
+                        // thinking 块回传必须带块尾 signature,截断时拿不到,
+                        // 上游语义上就没有「思考续写」。
+                        if let Some(prefix) = outcome
+                            .partial_text
+                            .clone()
+                            .filter(|t| !t.trim().is_empty())
+                        {
+                            messages.push(Message {
+                                msg_id: None,
+                                role: "assistant".into(),
+                                name: None,
+                                content: vec![ContentBlock::Text { text: prefix.clone() }],
+                            });
+                            prefill_len = Some(messages.len());
+                            text_seed = Some(prefix);
+                            continue 'rounds;
+                        }
+                        // D 路:无可续素材 → 整 turn 原样重发。
                         continue 'rounds;
                     }
                     outcome.usage = accrued_usage.take();

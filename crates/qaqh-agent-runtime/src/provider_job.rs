@@ -66,6 +66,16 @@ pub enum ProviderFailureKind {
     WorkerCrash,
 }
 
+/// 一次请求中截断的在飞工具调用：call_id/name 齐全，`args_text` 是已到达
+/// 的累计片段（可能不闭合）。turn 级重发据此注入失败 ToolResult；参数不
+/// 完整不构成授权面，永不用于执行。
+pub struct PartialToolCall {
+    pub call_id: String,
+    pub name: String,
+    pub args_text: String,
+    pub complete: bool,
+}
+
 /// 一次模型请求的结果:证据级别 + 中性消息 + 流式展示残段。
 pub struct ProviderOutcome {
     /// How far the effect actually got.
@@ -84,6 +94,8 @@ pub struct ProviderOutcome {
     pub incomplete_reason: Option<String>,
     pub partial_text: Option<String>,
     pub partial_reasoning: Option<String>,
+    /// 截断时在飞的工具调用（B 路失败注入素材）。仅失败 attempt 非空。
+    pub partial_tools: Vec<PartialToolCall>,
     pub error: Option<String>,
     /// True only when run_round observed and acted on this turn's cancel signal.
     pub cancelled: bool,
@@ -136,6 +148,9 @@ pub async fn run_round(
     user_id: String,
     mut cancel: tokio::sync::watch::Receiver<bool>,
     progress: Option<ProgressStream>,
+    // 文本续写（A 路）的 seed：prefill 前缀，计入 attempt-2 的 partial_text，
+    // display 首帧与 seal 全文自然完整。与 messages 里的 prefill 尾消息配套。
+    text_seed: Option<String>,
 ) -> ProviderOutcome {
     if *cancel.borrow() {
         let mut outcome = not_started("cancelled before provider request started");
@@ -153,7 +168,9 @@ pub async fn run_round(
     let flag = cancel_flag.clone();
     let display = progress.clone();
     let mut job =
-        tokio::task::spawn_blocking(move || stream_once(spec, messages, user_id, &flag, display));
+        tokio::task::spawn_blocking(move || {
+            stream_once(spec, messages, user_id, &flag, display, text_seed)
+        });
     let mut finished: Option<ProviderOutcome> = None;
     let mut cancelled_by_turn = false;
     loop {
@@ -210,13 +227,15 @@ fn stream_once(
     user_id: String,
     flag: &Arc<AtomicBool>,
     display: Option<ProgressStream>,
+    text_seed: Option<String>,
 ) -> ProviderOutcome {
     let mut final_event = None;
     let mut stream_usage = None;
     let mut stream_error = None;
     let mut stream_error_kind = None;
     let mut duplicate_done = false;
-    let mut partial_text = String::new();
+    let seed = text_seed.unwrap_or_default();
+    let mut partial_text = seed.clone();
     let mut partial_reasoning = String::new();
     let mut last_emit: Option<Instant> = None;
     let mut first_output_at: Option<Instant> = None;
@@ -260,7 +279,7 @@ fn stream_once(
                 }
             qaqh_gate::StreamEvent::Error { kind, message } => {
                 stream_error_kind = Some(kind);
-                    stream_error = Some(message);
+                stream_error = Some(message);
                 }
                 qaqh_gate::StreamEvent::ContentDelta(text) => {
                     if partial_text.len() < MAX_PARTIAL_TEXT_BYTES {
@@ -367,6 +386,15 @@ fn stream_once(
         let mut outcome = failed_after_start(&detail, stream_error_kind);
         outcome.partial_text = (!partial_text.is_empty()).then_some(partial_text);
         outcome.partial_reasoning = (!partial_reasoning.is_empty()).then_some(partial_reasoning);
+        outcome.partial_tools = tool_args
+            .drain()
+            .map(|(_, stream)| PartialToolCall {
+                call_id: stream.call_id,
+                name: stream.name,
+                args_text: stream.text,
+                complete: stream.completed,
+            })
+            .collect();
         outcome.generated_ms = output_window_ms(first_output_at, last_output_at);
         // 失败 attempt 已见的使用量不丢:重发后的 usage 累计与账本都以此
         // 为准(此前直接丢弃,上游实际消耗无法入账)。
@@ -391,12 +419,32 @@ fn stream_once(
             other => neutral_blocks.push(other),
         }
     }
-    let message = Message {
+    let mut message = Message {
         msg_id: raw_message.msg_id,
         role: raw_message.role,
         name: raw_message.name,
         content: neutral_blocks,
     };
+    if !seed.is_empty() {
+        // A 路续写:上游响应只含续写段,权威块与 display 口径必须一致——
+        // 把 seed 前缀拼进首个 Text 块(无 Text 块则前插),seal 落盘的才是
+        // 模型实际输出的完整文本。
+        match message
+            .content
+            .iter_mut()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text),
+                _ => None,
+            }) {
+            Some(first_text) => {
+                let combined = format!("{seed}{}", &*first_text);
+                *first_text = combined;
+            }
+            None => message
+                .content
+                .insert(0, ContentBlock::Text { text: seed }),
+        }
+    }
     let (finish, incomplete_reason) = classify(stop_reason.as_deref(), &message);
     ProviderOutcome {
         evidence: Evidence::Terminal,
@@ -409,6 +457,7 @@ fn stream_once(
         incomplete_reason,
         partial_text: (!partial_text.is_empty()).then_some(partial_text),
         partial_reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
+        partial_tools: Vec::new(),
         error: None,
         cancelled: false,
         failure_kind: None,
@@ -790,6 +839,7 @@ fn not_started(message: &str) -> ProviderOutcome {
         incomplete_reason: None,
         partial_text: None,
         partial_reasoning: None,
+        partial_tools: Vec::new(),
         error: Some(message.chars().take(512).collect()),
         cancelled: false,
         failure_kind: Some(ProviderFailureKind::Request),
@@ -810,6 +860,7 @@ fn failed_after_start(message: &str, kind: Option<qaqh_gate::ErrorKind>) -> Prov
         incomplete_reason: None,
         partial_text: None,
         partial_reasoning: None,
+        partial_tools: Vec::new(),
         error: Some(message.chars().take(512).collect()),
         cancelled: false,
         failure_kind: Some(ProviderFailureKind::Request),

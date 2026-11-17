@@ -5,9 +5,11 @@
 
 > **状态说明（2026-11-17 更新）**：server 侧已实施并在真机闭环——
 > `D:\mijia-ohos\home-control-mcp` 四工具接线 + `mijia-core` 云侧读写 + 策略层
-> （allowlist / 封闭动作表 / 每会话授权开关 / 静默时段 / 空调硬闸 / plan 一次性句柄 /
-> 冷却 / 审计 JSONL / approvals 带外批准文件）；`cargo test` 22 项全绿、
-> `cargo build` 零 warning，stdio JSON-RPC 真机冒烟 37 项断言全绿（含 era 反证服务端半边）（含一次对落地扇的
+> （allowlist / 封闭动作表 / 每会话授权开关 / 静默时段 / 空调硬闸 / 会话真探活与
+> passToken 静默续期（默认关）/ plan 一次性句柄 /
+> 冷却 / 审计 JSONL / approvals 带外批准文件 / `reason`→pending 待审批队列）；
+> `cargo test` 35 项 + 集成 3 项全绿、
+> `cargo build` 零 warning，stdio JSON-RPC 真机冒烟 50 项断言全绿；另用与 `auto_lifecycle()` 逐字同构的 rmcp Auto 客户端做了 3 项集成测试（modern 零回退 + legacy 被 -32022 拒）（含一次对落地扇的
 > 真实下发 + 实时回读）。**仍未做**：`qaqh-mcp` 端到端连通（§8 客户端侧）、
 > `check --against docs/api-surface/v3.0` 零 wire 变化验证、era 反证与 CI 配对检查。
 > 实现规格与逐项证据见同目录 `home-control-mcp/DESIGN.md`（§10/§11）。

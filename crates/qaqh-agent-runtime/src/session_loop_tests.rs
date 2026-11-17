@@ -1332,6 +1332,246 @@ mod handoff_tests {
         assert_eq!(source, "user");
     }
 
+    /// OpenAI chat SSE:一段增量 + 一条 error 尾帧。增量必须在前——有产出
+    /// 时 gate 才走「掐流即失败」(Fatal)而不是零产出重试,后者会消耗脚本
+    /// 第二条响应,让 turn 级重发的断言失真。
+    fn mid_stream_error_body(code: &str) -> String {
+        let delta =
+            serde_json::json!({"choices":[{"index":0,"delta":{"content":"半截"},"finish_reason":null}]});
+        let usage = serde_json::json!({"choices":[],"usage":{"prompt_tokens":60,"completion_tokens":5,"total_tokens":65}});
+        let error = serde_json::json!({"error":{"code":code,"message":"upstream exploded"}});
+        format!("data: {delta}\n\ndata: {usage}\n\ndata: {error}\n\n")
+    }
+
+    /// 纯文本截断:一段增量 + error 尾帧(ProviderInternal 瞬态)。
+    fn truncated_text_error_body(prefix: &str) -> String {
+        let delta = serde_json::json!({"choices":[{"index":0,"delta":{"content":prefix},"finish_reason":null}]});
+        let error = serde_json::json!({"error":{"code":"server_error","message":"upstream exploded"}});
+        format!("data: {delta}\n\ndata: {error}\n\n")
+    }
+
+    /// 工具参数截断:text 前缀 + 半截 args 的 tool_calls delta + error 尾帧。
+    fn truncated_tool_error_body() -> String {
+        let delta = serde_json::json!({"choices":[{"index":0,"delta":{"content":"我先读取配置"},"finish_reason":null}]});
+        let tool = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_x1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"conf"}}]}}]});
+        let error = serde_json::json!({"error":{"code":"server_error","message":"upstream exploded"}});
+        format!("data: {delta}\n\ndata: {tool}\n\ndata: {error}\n\n")
+    }
+
+    /// 可重试的 mid-stream error 尾帧(未识别 token → ProviderInternal 瞬态),
+    /// attempt 残段为纯文本 → A 路(prefill+seed):attempt-2 的块 = seed +
+    /// 续写段,一条块承载完整文本;失败 attempt 已见的 usage 不丢。
+    #[tokio::test]
+    async fn turn_retries_retryable_mid_stream_error_and_completes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, mid_stream_error_body("server_error")),
+                (200, text_body("恢复后完成")),
+            ],
+            vec![],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("瞬态失败重发"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle"
+                && serde_json::to_string(&value["timeline"])
+                    .map_or(false, |timeline| timeline.contains("恢复后完成"))
+        })
+        .await;
+        assert_eq!(
+            h.requests.lock().unwrap().len(),
+            2,
+            "同一 turn 必须恰好两次请求:原始 + 重发"
+        );
+        let outcome = &state["turns"][0]["outcome"]["data"];
+        assert!(
+            outcome["error"].is_null(),
+            "重发成功后不得留下失败事实: {outcome}"
+        );
+        let timeline = serde_json::to_string(&state["timeline"]).expect("timeline");
+        assert!(
+            timeline.contains("半截恢复后完成"),
+            "A 路续写:attempt-2 的块 = seed+续写段,一条完整块: {timeline}"
+        );
+        // 失败 attempt 的已见 usage(65)并入最终口径,不因失败被丢弃。
+        assert_eq!(
+            state["turns"][0]["outcome"]["data"]["usage"]["total_tokens"],
+            serde_json::json!(65),
+            "失败 attempt 的 usage 必须计入: {outcome}"
+        );
+    }
+
+    /// 不可重试类别(content_filter token → ContentFiltered):不重发,按
+    /// provider_failed 结算,真实原因随失败事实落盘。
+    #[tokio::test]
+    async fn turn_does_not_retry_non_retryable_mid_stream_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = harness(
+            dir.path(),
+            vec![(200, mid_stream_error_body("content_filter"))],
+            vec![],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("内容审查不重发"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle"
+                && value["turns"][0]["outcome"]["data"]["error"]["code"] == "provider_failed"
+        })
+        .await;
+        assert_eq!(
+            h.requests.lock().unwrap().len(),
+            1,
+            "不可重试类别不得发起第二次请求"
+        );
+        let error = &state["turns"][0]["outcome"]["data"]["error"];
+        assert_eq!(error["code"], "provider_failed", "结算形态: {error}");
+        assert!(
+            error["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("provider stream error")),
+            "失败必须携带真实原因: {error}"
+        );
+    }
+
+    /// 重发预算耗尽:第二次 attempt 仍瞬态失败 → 不再重发,按失败结算。
+    #[tokio::test]
+    async fn turn_retry_budget_exhausted_settles_failed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, mid_stream_error_body("server_error")),
+                (200, mid_stream_error_body("server_error")),
+            ],
+            vec![],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("两次瞬态失败"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle"
+                && value["turns"][0]["outcome"]["data"]["error"]["code"] == "provider_failed"
+        })
+        .await;
+        assert_eq!(
+            h.requests.lock().unwrap().len(),
+            2,
+            "预算 1 次:原始 + 一次重发,之后必须收口"
+        );
+        let error = &state["turns"][0]["outcome"]["data"]["error"];
+        assert_eq!(error["code"], "provider_failed", "结算形态: {error}");
+    }
+
+    /// B 路:截断的工具调用 → 注入失败 ToolResult。前缀独立落盘;第二次
+    /// 请求的 body 里 assistant 消息带 tool_use(合法化 input)与失败
+    /// tool_result,模型据此重调;失败事实作为 durable fact 入库。
+    #[tokio::test]
+    async fn turn_retry_injects_failed_tool_result_for_truncated_calls() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, truncated_tool_error_body()),
+                (200, text_body("收到，将重新调用")),
+            ],
+            vec![],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("工具参数截断重发"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle"
+                && timeline_tool_result(value).contains("cut off")
+        })
+        .await;
+        assert_eq!(
+            h.requests.lock().unwrap().len(),
+            2,
+            "注入失败结果后 attempt-2 完成回合"
+        );
+        let second = &h.requests.lock().unwrap()[1];
+        assert!(second.contains("call_x1"), "失败注入必须携带原 call_id");
+        assert!(
+            second.contains("cut off"),
+            "失败 tool_result 必须随请求回传: {second}"
+        );
+        assert!(
+            second.contains("我先读取配置"),
+            "text 前缀必须随 assistant 消息回传"
+        );
+        let outcome = &state["turns"][0]["outcome"]["data"];
+        assert!(outcome["error"].is_null(), "B 路完成后无失败事实: {outcome}");
+        // 前缀独立落盘成块(它不在 attempt-2 的消息里)。
+        let timeline = serde_json::to_string(&state["timeline"]).expect("timeline");
+        assert!(
+            timeline.contains("我先读取配置"),
+            "B 路前缀必须作为独立块落盘: {timeline}"
+        );
+    }
+
+    /// A 路:纯文本截断 → prefill 前缀 + seed 续写。第二次请求带尾部
+    /// assistant 消息;attempt-2 的块 = seed + 续写段,一条块承载完整文本,
+    /// 历史不残留 prefill 临时消息。
+    #[tokio::test]
+    async fn turn_retry_continues_from_truncated_text() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, truncated_text_error_body("今天天气")),
+                (200, text_body("很好，适合出门")),
+            ],
+            vec![],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("文本截断续写"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle"
+                && serde_json::to_string(&value["timeline"]).map_or(false, |timeline| {
+                    timeline.contains("今天天气很好，适合出门")
+                })
+        })
+        .await;
+        assert_eq!(h.requests.lock().unwrap().len(), 2);
+        let second = &h.requests.lock().unwrap()[1];
+        assert!(
+            second.contains("今天天气"),
+            "prefill 前缀必须随第二次请求回传: {second}"
+        );
+        let outcome = &state["turns"][0]["outcome"]["data"];
+        assert!(outcome["error"].is_null(), "续写完成后无失败事实: {outcome}");
+        let timeline = serde_json::to_string(&state["timeline"]).expect("timeline");
+        assert!(
+            !timeline.contains("今天天气今天天气"),
+            "seed 不得重复拼接: {timeline}"
+        );
+    }
+
     /// 占用页脚挂在本轮最后一条工具结果的信封正文尾部：实时遥测，不进历史事实。
     ///
     /// 回归：页脚挂载按 `ContentBlock::Text` 匹配，而工具消息的正文块是
