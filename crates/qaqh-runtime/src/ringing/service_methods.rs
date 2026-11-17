@@ -1332,6 +1332,37 @@ mod tests {
         }
     }
 
+    /// 客户端的 shell 表与 daemon 方法表**两向**对齐（ADR-0028 切片 5）。
+    ///
+    /// 为什么不并进上面那条账号面闸：账号面那一条逐条断言「白名单里每条都是
+    /// **admin_only**」，而 `shell.*` 三条是用户本机桌面壳的读写、刻意不 admin_only
+    /// （配对设备拿到 shell 面等于让它往用户的终端里打字）。把它们混进那张表不是
+    /// 「多加三条」，是把那条闸的语义改成「账号面 or 别的什么」。所以分表分闸。
+    #[test]
+    fn client_shell_method_table_mirrors_the_daemon_shell_surface() {
+        let declared: Vec<&str> = METHODS
+            .iter()
+            .filter(|(name, _)| name.starts_with("shell."))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(!declared.is_empty(), "daemon 方法表里必须还有 shell.* 这一族");
+        for method in &declared {
+            assert!(
+                qaqh_client::service::SHELL_METHODS.contains(method),
+                "{method} 在 daemon 方法表里，但客户端的 shell 表没放行（桌面壳会调不到）"
+            );
+        }
+        for method in qaqh_client::service::SHELL_METHODS {
+            let info = lookup(method).unwrap_or_else(|| {
+                panic!("客户端 shell 表里的 {method} 不在 daemon 方法表（死条目）")
+            });
+            assert!(
+                !info.admin_only,
+                "{method} 是用户 shell 面，不是账号凭据面：admin_only 会把它挡在 interact 档之外"
+            );
+        }
+    }
+
     /// 服务面会话键只认 `session_id`：legacy `seed` 已随 Phase E 退场。
     #[test]
     fn session_param_only_accepts_session_id() {

@@ -533,3 +533,166 @@ async fn shell_stream_handshake_gate_reuses_the_single_identity_model() {
     .await;
     assert_eq!(closed["reason"], json!("closed"), "{closed}");
 }
+
+/// SDK 客户端专用的 marker（与 `MARKER` 分开：两条测试各自验各自的会话）。
+const SDK_MARKER: &str = "qaqhclientsdk";
+
+/// 反复收下下行裸字节，直到剥 ANSI 后的可见文本满足条件（口径见文件头：ConPTY 会把
+/// 回显切成转义片段，不剥就会把明明在场的回显判成丢失）。
+async fn drain_until(
+    bytes: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    seen: &mut Vec<u8>,
+    budget: Duration,
+    want: impl Fn(&str) -> bool,
+    what: &str,
+) {
+    let deadline = Instant::now() + budget;
+    loop {
+        if let Ok(Some(chunk)) = tokio::time::timeout(Duration::from_millis(500), bytes.recv()).await {
+            seen.extend(chunk);
+        }
+        if want(&visible(seen)) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{what}：{}s 内没等到期望内容，可见文本={:?}",
+            budget.as_secs(),
+            visible(seen)
+        );
+    }
+}
+
+/// 切片 5 判据 1 的**另一半**：用真 SDK 客户端（`qaqh_client::shell_stream`）打这条流。
+///
+/// 上面那条往返用的是手搓的 `tungstenite` 客户端——它证明服务端形状对，但证明不了
+/// 客户端与服务端**理解同一套协议**：两边各自错到一起去，测试照样绿。这条换成真客户端，
+/// 于是握手头、base64 `stdin`、裸字节下行、`closed` 解析、能力位闸门全部走生产代码；
+/// §切片 5 的行为验收 ①②③④ 也因此在机器上断言得动（GUI 那一次仍要点，但它不再是
+/// 唯一凭据）。lease 是真协商的：`clients/open` 作答 `shell_stream`，客户端只认这一位。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sdk_shell_stream_round_trip_against_the_served_daemon() {
+    use qaqh_client::shell_stream::{ShellStream, ShellStreamHandlers, ShellStreamStatus};
+    use std::sync::Arc;
+    use tokio::sync::mpsc;
+
+    let state = test_state();
+    let app = build_router(state.clone());
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.expect("serve");
+    });
+
+    let client = qaqh_client::Client::connect_async(qaqh_client::ClientOptions {
+        remote: Some(qaqh_client::RemoteEndpoint {
+            base_url: format!("http://{addr}"),
+            token: ADMIN.to_string(),
+            tls_fp: None,
+        }),
+        ..Default::default()
+    })
+    .await
+    .expect("客户端必须与这台 daemon 协商出 lease");
+    let lease = client.session_state().await.expect("lease 已协商");
+    assert!(
+        lease.capabilities.shell_stream,
+        "能力位必须由 `clients/open` 显式作答；客户端侧的闸门只认这一位（§D3 约束 5）"
+    );
+
+    let opened = client
+        .service_call("shell.open", json!({ "cols": 110, "rows": 30 }))
+        .await
+        .expect("shell.open 经客户端可达（放行表在 qaqh_client::service::SHELL_METHODS）");
+    let shell_id = opened["id"].as_str().expect("shell id").to_owned();
+
+    let (bytes_tx, mut bytes_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ShellStreamEvent>();
+    let (status_tx, mut status_rx) = mpsc::unbounded_channel::<ShellStreamStatus>();
+    let stream = ShellStream::start(
+        &shell_id,
+        &client,
+        ShellStreamHandlers {
+            on_bytes: Arc::new(move |_id, bytes| {
+                let _ = bytes_tx.send(bytes);
+            }),
+            on_event: Arc::new(move |_id, event| {
+                let _ = event_tx.send(event);
+            }),
+            on_status: Arc::new(move |_id, status| {
+                let _ = status_tx.send(status);
+            }),
+        },
+    )
+    .await
+    .expect("订阅这条流");
+
+    // ① 开终端就该看到提示符：首帧不带 from_offset = 服务端按 0 attach = 整段缓冲尾。
+    let mut seen: Vec<u8> = Vec::new();
+    drain_until(&mut bytes_rx, &mut seen, Duration::from_secs(25), |text| {
+        !text.is_empty()
+    }, "① 开终端的输出")
+    .await;
+    // ② 打字有回显：一帧 stdin，服务端 base64 解码后喂同一个 ConPTY。
+    stream
+        .stdin(format!("echo {SDK_MARKER}\r\n").as_bytes())
+        .await
+        .expect("stdin 上行");
+    drain_until(&mut bytes_rx, &mut seen, Duration::from_secs(25), |text| {
+        text.contains(SDK_MARKER)
+    }, "② 打字的回显")
+    .await;
+
+    // ③ 几何真值只能读 `shell.list`：这条流上刻意没有 ack 帧。
+    stream.resize(132, 44).await.expect("resize 上行");
+    let listed = client
+        .service_call("shell.list", json!({}))
+        .await
+        .expect("shell.list");
+    let mine = listed["shells"]
+        .as_array()
+        .expect("shells")
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(&shell_id))
+        .expect("本身份的清单里该有这条 shell");
+    assert_eq!(
+        (mine["cols"].as_u64(), mine["rows"].as_u64()),
+        (Some(132), Some(44)),
+        "③ resize 没落到 PTY: {mine}"
+    );
+
+    // ④ 子进程自己退出：退出观察线程落的 `child_exited` 必须原样到达 closed 帧。
+    stream.stdin(b"exit\r\n").await.expect("exit 上行");
+    let reason = tokio::time::timeout(Duration::from_secs(25), async {
+        loop {
+            if let Some(ShellStreamEvent::Closed { reason }) = event_rx.recv().await {
+                return reason;
+            }
+        }
+    })
+    .await
+    .expect("④ 等不到 closed 帧");
+    assert_eq!(reason, "child_exited", "④ 终止原因不是 child_exited");
+
+    // 协议事实之后，传输层必须落到同一个终态，且不再接受控制帧（不静默吞字）。
+    // 这里必须**等**而不是 `try_recv` 扫一遍：`closed` 帧先上报、状态后落地，是读循环
+    // 的真实顺序（先搬完尾字节再宣布结束），用 try_recv 会把自己写成一条会赢的竞态。
+    let terminal = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match status_rx.recv().await {
+                Some(ShellStreamStatus::Closed { reason }) => return reason,
+                Some(_) => {}
+                // 发送端先掉了却没落到 Closed = 读循环在没有终态的情况下消失，那是 bug。
+                None => panic!("状态通道先于 Closed 断掉"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("传输状态没跟着协议事实落到 Closed"));
+    assert_eq!(terminal, "child_exited", "传输状态与协议事实脱节");
+    let error = stream.stdin(b"ls\r\n").await.unwrap_err();
+    assert!(error.to_string().contains("已终止"), "流终止后还在收控制帧: {error}");
+
+    server.abort();
+}

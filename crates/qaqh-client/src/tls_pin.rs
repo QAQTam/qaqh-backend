@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::error::ClientError;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
@@ -110,6 +111,30 @@ impl ServerCertVerifier for PinnedServerCertVerifier {
             .signature_verification_algorithms
             .supported_schemes()
     }
+}
+
+/// 指纹 pin 的 rustls 客户端配置。
+///
+/// **HTTP 与 ws 共用这一份**：daemon token 与证书指纹只有一套信任判定
+/// （ADR-0028 §切片 5 前提），第二条流不许自己再拼一遍 verifier/版本/失败文案。
+/// 用 `crate::error::ClientError` 而非 `std::io::Error`：调用方是返回
+/// `ClientError::Result` 的传输层，`rustls::Error` 在这里没有更好的归宿。
+pub(crate) fn pinned_client_config(fp: &str) -> Result<rustls::ClientConfig, ClientError> {
+    let expected = parse_fingerprint(fp).ok_or_else(|| {
+        ClientError::Protocol(format!(
+            "invalid tls fingerprint (want 64 hex chars, sha256 optional prefix): {fp}"
+        ))
+    })?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_protocol_versions(rustls::ALL_VERSIONS)
+        .map_err(|error| ClientError::Protocol(format!("tls versions: {error}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(PinnedServerCertVerifier::new(
+            expected, provider,
+        )))
+        .with_no_client_auth();
+    Ok(config)
 }
 
 #[cfg(test)]

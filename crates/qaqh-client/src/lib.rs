@@ -17,6 +17,8 @@ pub mod projection;
 pub mod remote_path;
 pub mod service;
 pub mod service_types;
+#[cfg(feature = "shell-stream")]
+pub mod shell_stream;
 pub mod session;
 mod sse_decoder;
 mod tls_pin;

@@ -55,9 +55,30 @@ pub const SERVICE_METHODS: &[&str] = &[
     "dsaccount.verify",         // VERIFY
 ];
 
-/// 方法名是否在白名单内（`service_call` 与调用方的预检共用同一条判定）。
+/// 用户 shell 服务面三条（ADR-0028 切片 3 的 daemon 方法表，切片 5 的客户端出口）。
+///
+/// **刻意不并进 [`SERVICE_METHODS`]**：那张表的真源是
+/// `qaqh_siwc::methods::ALL ∪ qaqh_dsaccount::methods::ALL`，并且 `qaqh-runtime`
+/// 的 `client_service_whitelist_mirrors_account_methods` 逐条断言「白名单里的每条
+/// 都是 **admin_only** 的账号面方法」。把 `shell.*` 塞进去不是多加三条名字，是把
+/// 那条闸门的语义改成「账号面 or 别的什么」——正好是它想防的东西。
+///
+/// 分成两张表，各自有自己的闸：这张由
+/// `client_shell_method_table_mirrors_the_daemon_shell_surface` 双向锁住
+/// （daemon 表里 `shell.` 开头的集合 ⊆ 这张表，且这张表的每条都在 daemon 表里）。
+pub const SHELL_METHODS: &[&str] = &[
+    "shell.open",  // service_methods::METHODS —— 开一条 shell（owner 由 daemon 反查）
+    "shell.close", // 收走一条 shell（终止原因的唯一入口）
+    "shell.list",  // 本身份已开的 shell（几何真值也从这里读）
+];
+
+/// 方法名是否在放行范围内（`service_call` 与调用方的预检共用同一条判定）。
+///
+/// 两张表共用一个判定入口，是为了让「客户端放行了什么」这个问题只有**一处**回答
+/// ——napi 的 `service_methods()`、主进程 IPC 闸门、`Client::service_call` 的本地
+/// 拒绝，都从这里取，不再各写一份并集。
 pub fn is_allowed(method: &str) -> bool {
-    SERVICE_METHODS.contains(&method)
+    SERVICE_METHODS.contains(&method) || SHELL_METHODS.contains(&method)
 }
 
 /// 把非 2xx 响应体翻成结构化错误。
@@ -129,6 +150,23 @@ mod tests {
         // 会话写操作走唯一 RingingCommand 入口，不属服务面。
         assert!(!is_allowed("session.resume"));
         assert!(!is_allowed(""));
+    }
+
+    #[test]
+    fn shell_methods_are_allowed_and_input_is_not_an_rpc() {
+        for method in SHELL_METHODS {
+            assert!(is_allowed(method), "{method} 应被放行（桌面壳的 shell 服务面）");
+        }
+        assert_eq!(SHELL_METHODS.len(), 3, "{SHELL_METHODS:?}");
+        let mut sorted = SHELL_METHODS.to_vec();
+        let total = sorted.len();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), total, "shell 表有重复条目");
+        // `shell.write` / `shell.output` 是候选 A（长轮询）的形状：放行它们就等于
+        // 给同一个终端开第二套传输（ADR-0028 §被否选项第 5 条点名的「静并存」）。
+        assert!(!is_allowed("shell.write"));
+        assert!(!is_allowed("shell.output"));
     }
 
     fn qaqh_dsaccount_verify() -> &'static str {

@@ -1,7 +1,11 @@
 # ADR-0028 用户 shell 终端落后端：复用 `qaqh-pty`；数据面走 ws（supersede ADR-0017 决策 6）
 
-状态: **已采纳 · 切片 1–4 已实施（实测，见 §切片 4 落地记录）· 切片 5 未实施（§切片 5 是交给 qaqh-electron 的施工清单；前端一行未改）· §D3 已裁定 = 候选 B（ws 数据面），并显式 supersede ADR-0017 决策 6 与 §被否选项第 4 条**
+状态: **已采纳 · 切片 1–5 已实施（实测，见 §切片 4/§切片 5 落地记录）· §D3 已裁定 = 候选 B（ws 数据面），并显式 supersede ADR-0017 决策 6 与 §被否选项第 4 条 · §切片 5 施工前置已裁定 = 方案 A（Rust `qaqh-client` feature + napi 四口）· 净行数判定 Δ = −9 通过，候选 A 未启用**
 · 起草日期 2026-11-17 · 裁定人 所有者 · 起草人 QAQ agent
+
+> 切片 5 只做完了**机器可验**的那一半：`shell.open → ws 订阅 → 打字/resize → exit`
+> 已在真 axum + 真 ConPTY + 真 SDK 客户端上断言过（§切片 5 落地记录），但**行为验收里
+> 的 GUI 人肉点击与换掉本机那份旧 daemon** 仍未做——不要把这一条当成品验收读过。
 
 > 引用本 ADR 必须看状态字段：**「已采纳」≠「已完成」**（规则 17）。
 > 本文件 14:36 的第一版在 §3 写进了一批**我并没有实测到的引用**，已于 15:0x 全量
@@ -141,7 +145,7 @@
 | 2 | `crates/qaqh-runtime/src/shell/{mod.rs,tests.rs}`（`ShellRegistry`：owner=`instance_key`、有界原始字节环 + `tokio::sync::broadcast`、读泵线程、close/revoke/shutdown/sweep_idle） | **已实施**。`cargo check -p qaqh-runtime --all-targets` 干净（第一轮 2×E0308 已修：cwd 是 `PathBuf`→存 display；读泵句柄改为显式 `Result`，**起泵失败当场摘会话并杀组**，不留"开了但永远读不到字节"的壳）；`cargo test -p qaqh-runtime --lib shell::` → **3 passed**。第三条首跑 FAILED 的原因是我比对方式错（ANSI 参数字节被当正文，实测累积串 `…93mecho37mqaqhshellprobe25hmqaqhshellprobe…` 证明字节全在场）；修法是**先剥 CSI/OSC 再比对**，并把断言加强成"同一 marker ≥2 次"= 回显一次 + 执行输出一次，外加"回放里不得出现会话帧文本" |
 | 3 | `shell.*` 命令 + `MethodInfo` 新形状 + scope 档 + 穷举闸 + ~~`COMMAND_CONTRACT_REVISION` bump~~ + 金标准机器重切 | **已实施**（commit `c0ed5d37`）。`cargo test -p qaqh-runtime --lib` → 55 passed（含三条穷举闸）；`cargo test -p qaqh-daemon --bins` → 158 passed；`export` + `check` 均 exit 0；`types/qaqh/Shell*`（6）+ `cs/Shell*`（6）在位。**revision 未 bump 是对的**（`COMMAND_CONTRACT_REVISION` 管命令目录，`shell.*` 是服务方法），详见 §更正记录最后一行——但那一行也说明「服务面要不要另设 revision 位」仍待所有者裁定 |
 | 4 | ws 数据面：一条路由 + 4 种控制帧（`attach`/`stdin`/`resize`/`closed`）+ 裸字节数据帧；`axum` 加 `features=["ws"]`；握手复用同一套身份/ scope | **已实施**（本轮，实测见 §切片 4 落地记录）。`cargo check -p qaqh-daemon --all-targets` exit 0；`cargo test -p qaqh-runtime --lib shell::` → **6 passed**（新增两条：退出被观察并收割、已记录的原因不许被 close 改写）；`cargo test -p qaqh-daemon --bins -- shell_stream route_table` → **3 passed**（真 `axum::serve` + 真 ConPTY + 真 ws 客户端跑完整链：open→回放→打字→resize→第二个观看者回放→断联不杀→close→`closed{reason:"closed"}`）；`export`/`check` 均 exit 0，且 `types/qaqh/ShellStream{Control,Event}.ts` + `fixtures/shell-ws-{control-stdin,event-closed}.json` 确实在金标准里（不是「两边一致地缺」） |
-| 5 | 前端切桥（删 node-pty/pty-host/preload，`ShellTerminal` 改接） | **未实施**，交 qaqh-electron 仓；施工清单 + 净行数验收口径 + 一条待所有者裁定见 §切片 5 |
+| 5 | 前端切桥（删 node-pty/pty-host/preload，`ShellTerminal` 改接）+ Rust ws 客户端 + napi 四口 | **已实施**。`cargo test -p qaqh-client --features shell-stream` → 67 passed（其中 `shell_stream` 9 条；另有 2 条**存量**红：`discovery::tests` 要 `spawn sh`，本机 `Get-Command sh` = NO，且该文件不在本轮 diff 里）；`cargo test -p qaqh-daemon --bins` → **56 passed**（新增 `sdk_shell_stream_round_trip_against_the_served_daemon`：真 SDK 客户端 ↔ 真 axum ↔ 真 ConPTY）；`cargo test -p qaqh-runtime --lib` → **58 passed**（新增 shell 双向闸）；`cargo test -p qaqh-ringing --lib` → 20 passed；electron `pnpm test` → 81 passed / 0 failed、`tsc --noEmit` 两侧 exit 0；**Δ = −9 ≤ 0 ⇒ 判定线过，候选 A 未启用**。逐条实测、落点偏离与新坑见 §切片 5 落地记录 |
 
 ## 已知代价（诚实）
 
@@ -178,6 +182,11 @@
 4. **独立 `qaqh-shell` 子进程以求跨 daemon 重启存活**：第三份生命周期管理，所有者已明确不需要该存活度。
 5. **静并存（一边保留 ADR-0017"不引入 WebSocket"，一边偷偷加 ws）**：这是最省事的写法，也是把冲突推给下一个读代码的人。要加就在 D3 显式 supersede，否则不加。
 6. **候选 A：长轮询 offset 区间读（`shell.output{from_offset,wait_ms}` + `shell.write`）**：技术上更保守 —— 零新传输、零第二套语义、完全不碰 ADR-0017 决策 6。2026-11-17 所有者裁定选 B 而否掉 A，理由是交互终端要原生双向与低延迟，长轮询每 shell 占一条 in-flight 请求、每个 keystroke 一次 POST 的模型不像终端。**A 留作显式回退路径**：若 D3 硬约束第 5 条的"前端净行数"验收不过，就回到 A，而不是让两套传输并存。
+   ⇒ **切片 5 实测（2026-11-17）：Δ = −9 ≤ 0，判定线过，本回退路径未被启用。** 再要动它，
+   必须先拿出 `D:\Projects\qaqh-electron\scripts\shell-netlines.ps1` 的新读数（锚点失配会当场
+   throw，不会悄悄算错），而不是「感觉 ws 那套重」。同时注意 §切片 5 落地记录 的教训：第一版
+   确实**不过线**（当时那把尺量到 240 行 vs 基线 138），把它压回负数的是**去掉第二条 open 路**
+   与**把理由搬回本 ADR**，不是砍功能。
 
 ## §更正记录（2026-11-17 15:0x）
 
@@ -263,6 +272,10 @@ token + 猜到的别人 cs」能把 shell 挂到**别人** owner 名下并操作
 
 ## §切片 5：交给 qaqh-electron 的切桥清单（一行前端代码未改）
 
+> ⚠️ 下面是**施工前**写的清单，标题保留原样以免与后文的行数对账脱钩。删除侧已逐条执行；
+> 新增侧与实际落点有**一处偏离**（谁发 `shell.open`），理由与代价记在文末
+> §切片 5 落地记录 的「与 §新增清单 第 2 条的落点偏离」。**只读这一节就开工的人会搭错形状。**
+
 ### 前提（不是建议，是既有事实）
 
 `webui/src/lib/transport/index.ts:5` 与 `src/main/ringing-client.ts:1-12` 写明：**daemon
@@ -327,3 +340,134 @@ token 不进 webview**，全部 Ringing 传输由主进程经 `crates/qaqh-napi-
 > 命名易混，施工前必读：这里的 **A** 指"ws 客户端放 Rust SDK"；本 ADR §D3 里的
 > **候选 A** 指"长轮询 offset 区间读"（§被否方案第 6 条，只在净行数判定不过时才启用）。
 > 两者无关，别把"选 A"理解成回退到长轮询。
+
+## §切片 5 落地记录（2026-11-17，裁定=方案 A 之后）
+
+### 三个落点
+
+| 落点 | 内容 | 关键形状 |
+|---|---|---|
+| Rust SDK | `crates/qaqh-client/src/shell_stream.rs` + cargo feature `shell-stream`（**默认不开**） | `ShellStream::{start,stdin,resize,attach,close}` + `ShellStreamHandlers{on_bytes,on_event,on_status}` + `ShellStreamStatus`。帧型**直接复用** `qaqh_ringing::ShellStreamControl/Event/shell_stream_path`——协议运行时一份，不在 TS 里写第二份 |
+| 服务面放行 | `qaqh_client::service::SHELL_METHODS`（三条）+ `is_allowed()` 两张表共用一个判定 | **刻意不并进** `SERVICE_METHODS`：账号面那条双向闸逐条断言「白名单里每条都是 admin_only」，`shell.*` 不是。分表分闸，新闸 `client_shell_method_table_mirrors_the_daemon_shell_surface` 双向锁 |
+| napi / 桌面壳 | `crates/qaqh-napi-client` 四口 `shellSubscribe/shellStdin/shellResize/shellClose`；`service_methods()` 追加 `SHELL_METHODS` | 主进程**不碰** base64、不碰 JSON 帧形状、不碰 `from_offset`；`BytesFn` 用 napi `Buffer` ⇒ PTY 输出不过 JSON |
+
+`wss` 的信任锚复用 `tls_pin`：把 `build_http_client` 里那段 ClientConfig 构造提成
+`tls_pin::pinned_client_config()`，HTTP 与 ws 同一份；`Credentials` 因此多了 `tls_fp`
+（端点/token/指纹**必须一起**热更新，`ClientInner` 的注释本来就禁止另存副本）。
+`https` 端点但没有指纹时**当场拒绝**，不降级明文、也不改用系统默认信任。
+
+### 实测输出（逐条，命令即判据 4 的定向闸）
+
+| 命令 | 读数 |
+|---|---|
+| `cargo test -p qaqh-client --features shell-stream` | 67 passed · **2 failed**：`discovery::tests::process_is_running_is_false_for_a_reaped_child` 与 `discovery_is_dead_when_pid_is_gone_even_if_endpoint_listens`，两条都 `spawn sh: program not found`——本机 `Get-Command sh` = NO，且 `discovery.rs` 不在本轮 diff 里（**存量环境红，非本轮引入**） |
+| `cargo test -p qaqh-client --features shell-stream shell_stream` | **9 passed; 0 failed**（URL 推导 / 握手四条头 / base64 帧形状 / 404 判终 / 断线判重连 / 下行 closed / 真 socket 上的 `from_offset=2` 重连与「收到 closed 不再重连」/ 404 不重试） |
+| `cargo test -p qaqh-client`（默认 feature 关） | 58 passed · 同 2 条 `sh` 存量红 —— feature 关时 ws 代码**不编译**，这条也要绿 |
+| `cargo test -p qaqh-ringing --lib` | **20 passed** |
+| `cargo test -p qaqh-runtime --lib` | **58 passed**（57 → 58：新增那条 shell 双向闸） |
+| `cargo test -p qaqh-daemon --bins` | **56 passed; 0 failed**（55 → 56：新增 `sdk_shell_stream_round_trip_against_the_served_daemon`） |
+| `cargo clippy -p qaqh-client --features shell-stream --all-targets` | 我改的文件**零** warning（`qaqh-client (lib) generated 6 warnings` 全在 `discovery.rs` 的 doc-list，存量） |
+| `cargo run -p qaqh-contract-export -- check --against docs/api-surface/v4.0` | **exit 0**，且 `docs/api-surface/` 无一个文件变化 ⇒ **本轮不是契约面改动**（不加 DTO、不加路由、不动金标准），故不套 `contract-refreeze`/`guard-tightening`/`doc-only-refresh` 三标签 |
+| `pnpm typecheck`（electron 根：`src/**` + `scripts/**`） | exit 0 |
+| `pnpm -C webui typecheck` | exit 0（1361 个文件在程序里，`ShellTerminal.tsx`/`desktop-host.ts`/`ShellStreamEvent.ts` 逐条确认在内） |
+| `pnpm test`（electron，82 条） | **81 passed · 0 failed · 1 skipped**（Linux-only 的 inode 检查） |
+
+### 判据 1 的机器面：真 SDK 客户端 ↔ 真 daemon
+
+`crates/qaqh-daemon` 加 dev-dependency `qaqh-client = features=["shell-stream"]`，新增
+`sdk_shell_stream_round_trip_against_the_served_daemon`：客户端**自己**发
+`clients/open` 拿 lease（于是能力位闸门也被真答一次，§D3 约束 5「不许按版本猜」在链上成立）
+→ `service_call("shell.open")` → `ShellStream::start`（真 axum 升级、真鉴权头）→ 打字等回显
+→ `resize(132,40)` 后读 `shell.list` 核几何 → `exit` 后拿 `closed{reason:"child_exited"}`
+并断言流终止后 `stdin` 必须报错。它把 §验收 的行为判据 ①②③④ 打成了机器断言
+（GUI 那一次仍要点，但不再是唯一凭据）。
+
+**这条测试第一版红的不是产品，是它自己**：`closed` 帧先上报、`on_status(Closed)` 后落地是读循环
+的真实顺序（先把尾字节搬完再宣布结束），而我用 `status_rx.try_recv()` 扫一遍 ⇒ 竞态。改成有界
+等待，并把「通道先于 Closed 断掉」写成 panic 分支——否则这个 bug 会伪装成通过。
+
+### 净行数判定：Δ = −9 ⇒ PASS（候选 A 未启用）
+
+删除侧沿用 §切片 5 的实测清单 138 行。新增侧**不能**用 `git diff` 当口径——这批文件同时
+带着其他人的在飞改动（prefs / find-in-page / diff 排版…），所以按锚点区间取，脚本入库：
+`D:\Projects\qaqh-electron\scripts\shell-netlines.ps1`（锚点失配会当场 throw，不会悄悄算错）。
+
+```
+新增：代码 102 + 注释 12 + 空行 8 + ShellTerminal 净 7 = 129
+删除基线 138 ⇒ Δ = -9（判定线 Δ ≤ 0）⇒ PASS
+辅助口径（只算代码行）：109 ⇒ Δ = -29
+```
+
+⚠️ 这个数**不是一开始就过的**，三次实测读数（都出自同一把尺，脚本输出原文）：
+
+| 形状 | 新增侧读数 | Δ |
+|---|---|---|
+| 第一版：`shell.open/close/list` 也在主进程包一层桥 + 大段 inline 理由 | 代码 150 + 注释 72 + 空行 18 + ShellTerminal 净 9 = **249** | **+111** |
+| 中间版：生命周期回到 service_query，理由还没搬干净 | **144** | **+6** |
+| 终版（本节上面的读数） | **129** | **−9** |
+
+把它压回负数的两件事，都不是「删测试/删功能」：
+
+1. **生命周期回到通用服务面**。渲染层「开一个终端」= 一次普通 `service_query("shell.open")`
+   （与 `workspace.set`、`exec_session.interrupt` 同一条已存在的路），桥只承载这条流的四件事
+   （attach/detach/stdin/resize）。省掉的是**第二条 open 路**，不是功能。
+2. **理由从代码搬回本 ADR**（规则 17 的本意）。注释从 72 行压到 12 行，只留一行指针式的关键
+   提醒（「ws 断了不写成 closed」这种会被人改错的地方）。代码行 150 → 102 才是实质收益。
+
+于是 §D3 约束 5 的正面回答成立：**换传输之后前端反而更轻**（代码行 −29），不需要回 §被否方案
+第 6 条的候选 A；两套传输并存依然是禁止的。
+
+### 与 §新增清单 第 2 条的落点偏离（留痕，不是偷偷改）
+
+第 2 条写「主进程新增一个 shell 桥（替代 `pty-host.ts`）：`shell.open`/`shell.close` 经现有
+RingingClient 走服务面，ws 订阅……」。实施时把「谁发 `shell.open`」交给了渲染层的通用
+`service_query`，主进程桥**只**做 `shellAttach/shellDetach/shellStdin/shellResize`。理由：
+
+- 与第 1 条自相矛盾的部分消失（第 1 条本来就写「`bridge.create/write/resize/kill` 换成
+  `shell.open`/`shell.close` 服务面调用 + 桥上的 `stdin`/`resize` 发送」）。桥里再包一层
+  `shell_open` 就是同一个动作两个入口——正是本次迁移要防的形状。
+- §前提 仍然成立且没被削弱：daemon token 依然不进 webview。渲染层发的是
+  `qaqh:invoke("service_query")`，凭证与 socket 全在主进程（`isServiceMethod()` 那道闸的
+  真源就是 addon 的 `service_methods()`，见 `ipc-handlers.ts`）。
+- RPC 与订阅之间被打断留下的「无人观看 shell」不是孤儿：daemon 的 idle 回收（§D5）就是为
+  这个准备的，前端不需要再造一道闸门。
+
+代价照记：`shell.*` 因此出现在 `service_methods()`（渲染层可直调）与 `MAIN_SERVICE_METHODS`/
+`ElectronServiceMap`/`ServiceMap` 三张表里，换来的是少一层 IPC。
+
+### 本轮新踩到、必须留给下一个会话的坑
+
+1. **tungstenite 0.29 的 EOF 是 `Protocol` 级错误**。我第一版把 `WsError::Protocol(_) | Utf8(_) |
+   Http(_)` 一律判成「两侧词表分家 ⇒ 收摊」，于是假服务端裸拆 socket 后客户端**再也不重连**，
+   `reconnect_resumes_from_the_bytes_already_delivered` 当场红。§D5 说断联不 kill，所以握手
+   成功之后的任何连接层失败都必须重连；判终只认两种事实：下行 `closed` 帧与握手 404
+   （`classify_stream` 现在的形状 + 那条 `a_dead_connection_is_never_a_terminal_fact` 锚）。
+2. **改 Rust 的 `service_methods()` 必须重建并替换 `native/*.node`**，否则
+   `config-allowlist-wire.test.mjs` 红的是**旧二进制**（它 `require` 真 addon 比对 TS 表），
+   不是代码。本轮的复建命令：`cargo build --release -p qaqh-napi-client` →
+   把 `target/release/qaqh_napi_client.dll` 拷成 `native/qaqh_napi_client.win32-x64-msvc.node`。
+3. **`QAQH_DATA_DIR` 起不了第二个隔离 daemon**：`qaqh-types::platform` 硬要求 data root 是
+   当前用户主目录下的直接 `.qaqh`（越界直接 `PermissionDenied`）。所以「换掉本机那份旧
+   daemon exe」和「起一个探针专用 daemon」是**同一件事**——只能覆盖安装位置那份并重启它，
+   而那会杀掉正在跑的会话与 shell。这件事没做，等所有者点头。
+4. `qaqh-client` 的 examples 面上 workspace lints 带 `-D clippy::unwrap_used`：探针里
+   负向断言要用 `match`，`unwrap_err()` 直接编不过。
+5. 测试里 `std::sync::MutexGuard` 活过 `.await` 会被 `clippy::await_holding_lock` 点名
+   （future 变 `!Send`）；把 guard 包进作用域，别指望 `drop()` 写在哪一行。
+6. Electron 侧 `napi` 的 async 方法不能持 `Mutex` guard 跨 await ⇒ 句柄表存
+   `Arc<ShellStream>`，取副本后再 await（与 daemon 侧 `shell_ws.rs` 里 `watch::Ref` 的
+   `Send` 纪律是同一条）。
+
+### 未验证 / 未做（如实）
+
+- **§验收 的 GUI 人肉点击 ①–⑤ 未做**：本机安装的 `resources/bin/qaqh-daemon.exe` 仍是旧
+  二进制（没有 shell 面），换它=重启用户的 daemon=杀现有会话与 shell，需要所有者裁定。
+  探针已经备好：`cargo run -p qaqh-client --features shell-stream --example shell_stream_e2e`
+  （读 `daemon.json`，把 ①②③④ 一次跑完）。
+- **`wss://` 路径本机没跑过**：指纹 pin 的代码路径（`Connector::Rustls` + 无指纹即拒）只有
+  单元级保证，没有真 LAN 自签 daemon 可连。
+- **CI 三平台编译**（`axum/ws` + `tokio-tungstenite` 进 `qaqh-client` 的依赖图）：main 上
+  workflows 仍只有 `release.yml`（只 build 不 test），打 tag 需所有者同意。
+- `qaqh-pty` 的 unix 分支、ws 的 unix 分支：本机（Windows）不可编译验证，同 §切片 1 那条。
+- `Cargo.lock` 新增：workspace 侧 `tokio-tungstenite v0.29` + `webpki-roots`（`rustls-tls-*`
+  feature 拉进来的根证书集）；napi 独立锁文件同步。CI 三平台重编未验证。

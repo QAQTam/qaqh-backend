@@ -49,21 +49,8 @@ pub(crate) fn build_http_client(tls_fp: Option<&str>) -> Result<reqwest::Client>
     ensure_crypto_provider();
     let mut builder = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(5));
     if let Some(fp) = tls_fp {
-        let expected = crate::tls_pin::parse_fingerprint(fp).ok_or_else(|| {
-            ClientError::Protocol(format!(
-                "invalid tls fingerprint (want 64 hex chars, sha256 optional prefix): {fp}"
-            ))
-        })?;
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        let config = rustls::ClientConfig::builder_with_provider(provider.clone())
-            .with_protocol_versions(rustls::ALL_VERSIONS)
-            .map_err(|error| ClientError::Protocol(format!("tls versions: {error}")))?
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(
-                crate::tls_pin::PinnedServerCertVerifier::new(expected, provider),
-            ))
-            .with_no_client_auth();
-        builder = builder.tls_backend_preconfigured(config);
+        // 配置本体在 tls_pin（HTTP 与 shell 的 ws 数据面共用同一份判定）。
+        builder = builder.tls_backend_preconfigured(crate::tls_pin::pinned_client_config(fp)?);
     }
     Ok(builder.build()?)
 }
@@ -266,6 +253,55 @@ struct V2StreamHandle {
 }
 
 impl Client {
+    /// 测试缝（仅 `cfg(test)`）：造一个「已协商好 lease」的 Client，端点指向调用方
+    /// 自建的假服务端。`shell_stream` 的集成测试用它把**真实**的 ws 读循环对准一个
+    /// 假 daemon——凭证来源与线上一致（`credentials()` / `session_id_header()`），
+    /// 不是把逻辑抄进测试。
+    #[cfg(test)]
+    pub(crate) async fn with_lease_for_test(
+        base_url: &str,
+        token: &str,
+        tls_fp: Option<String>,
+        client_session_id: &str,
+    ) -> Client {
+        ensure_crypto_provider();
+        let http = reqwest::Client::new();
+        let session = Arc::new(RingingSession::new(
+            base_url.to_string(),
+            token.to_string(),
+            tls_fp,
+            http.clone(),
+            "test-instance".to_string(),
+            None,
+        ));
+        session.set_local_discovery(false);
+        session
+            .adopt_for_test(
+                "test-instance".to_string(),
+                client_session_id.to_string(),
+                "test-epoch".to_string(),
+                60_000,
+            )
+            .await;
+        let (stop_tx, _stop_rx) = watch::channel(false);
+        Client {
+            inner: Arc::new(ClientInner {
+                http,
+                session,
+                handlers: ClientHandlers {
+                    on_v2_event: std::sync::Arc::new(|_, _| {}),
+                    on_v2_reset: std::sync::Arc::new(|_, _| {}),
+                    on_v2_status: std::sync::Arc::new(|_, _| {}),
+                    on_liveness: std::sync::Arc::new(|| {}),
+                },
+                stop_tx,
+                tasks: Mutex::new(Vec::new()),
+                v2_streams: Mutex::new(HashMap::new()),
+                attached_sessions: Mutex::new(HashSet::new()),
+            }),
+        }
+    }
+
     /// Connect using the discovery file, optionally launching the daemon first.
     ///
     /// This blocks the calling thread until open negotiation completes (or the
@@ -319,6 +355,7 @@ impl Client {
         let session = Arc::new(RingingSession::new(
             base_url.clone(),
             token.clone(),
+            options.remote.as_ref().and_then(|r| r.tls_fp.clone()),
             http.clone(),
             options.client_instance_id.clone(),
             options.client_kind,
@@ -404,6 +441,15 @@ impl Client {
 
     async fn push_task(&self, task: tokio::task::JoinHandle<()>) {
         self.inner.tasks.lock().await.push(task);
+    }
+
+    /// [`Self::close`] 的停止信号。由 `shell_stream` 的读循环订阅：
+    /// `Client::close()` 的文档承诺「停掉全部后台任务」，一条 shell 的 ws
+    /// 句柄虽然由调用方持有（与 [`crate::v2_stream::V2Stream`] 同律），
+    /// 也不该在客户端已关闭后继续重连一个死 lease。
+    #[cfg(feature = "shell-stream")]
+    pub(crate) fn stop_signal(&self) -> watch::Receiver<bool> {
+        self.inner.stop_tx.subscribe()
     }
 
     /// 当前端点与 Bearer token。每次请求现取——daemon 重启后 session 会
@@ -605,8 +651,11 @@ impl Client {
         self.inner.v2_streams.lock().await.keys().cloned().collect()
     }
 
-    /// Current client session id for request headers.
-    async fn session_id_header(&self) -> Result<String> {
+    /// 当前 lease 的 `x-qaqh-client-session-id` 头值（请求头与 ws 握手共用）。
+    ///
+    /// `shell_stream` 的 ws 握手复用同一个头：身份只有一套（ADR-0028 §D3 约束 2），
+    /// ws 侧不许自己再解析 token、也不许让渲染层自报字段。
+    pub(crate) async fn session_id_header(&self) -> Result<String> {
         self.inner
             .session
             .state()

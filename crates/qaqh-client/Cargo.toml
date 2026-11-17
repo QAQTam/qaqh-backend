@@ -20,6 +20,24 @@ sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process"] }
 uuid = { version = "1", features = ["v4"] }
+# 用户 shell 的 ws 数据面（feature `shell-stream`，ADR-0028 §D3 裁定=候选 B）。
+# `base64` 与 qaqh-daemon / qaqh-file-tools 同版（0.23），不引入新条目。
+# `tokio-tungstenite` 与 axum 0.8 的 `ws` feature 拉进来的那条同版（0.29）；
+# `rustls-tls-webpki-roots` 只为拿到 `Connector::Rustls`——wss 一律走 `tls_pin`
+# 的指纹 pin，webpki 根在本 crate 的实际使用里不参与信任判定。
+base64 = { version = "0.23", optional = true }
+tokio-tungstenite = { version = "0.29", optional = true, features = ["rustls-tls-webpki-roots"] }
+
+[features]
+# 默认**不开**：shell 流是桌面壳（Electron 主进程经 napi）与远端设备才需要的能力，
+# TUI 不链它就不该付 ws 依赖图的代价。裁定见 ADR-0028 §切片 5 施工前置（方案 A）。
+default = []
+shell-stream = ["dep:base64", "dep:tokio-tungstenite"]
+
+# 真 daemon 的端到端探针（ADR-0028 §切片 5 行为验收）。它的存在理由写在文件头。
+[[example]]
+name = "shell_stream_e2e"
+required-features = ["shell-stream"]
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }

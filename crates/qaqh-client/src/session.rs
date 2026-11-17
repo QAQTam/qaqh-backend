@@ -10,12 +10,19 @@ use qaqh_ringing::v2::RingingV2ClientKind;
 
 /// 当前 daemon 端点与 Bearer token。
 ///
-/// 二者在 daemon 每次启动时都会变（端口 0 → OS 临时端口，token 随机，
-/// 见 `qaqh-daemon/src/server.rs`），因此**不能**在构造时烘死。
+/// 三者（endpoint/token/指纹）在 daemon 每次启动时都可能变（端口 0 → OS 临时
+/// 端口，token 随机，见 `qaqh-daemon/src/server.rs`），因此**不能**在构造时烘死。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Credentials {
     pub base_url: String,
     pub token: String,
+    /// LAN 自签证书的指纹 pin（`None` = 本机回环 HTTP / 系统默认信任）。
+    ///
+    /// 与 endpoint/token 同属**一份**权威：shell 的 ws 数据面（`shell-stream`
+    /// feature）拼 wss 时必须拿同一个值，否则第二条流会带着另一套 TLS 判定
+    /// 去连同一个 daemon（ADR-0028 §切片 5 前提「daemon token 不进 webview、
+    /// 凭证只有一套」的机器面）。
+    pub tls_fp: Option<String>,
 }
 
 /// Ringing v2 session: open + background lease renewal.
@@ -63,6 +70,7 @@ impl RingingSession {
     pub fn new(
         base_url: String,
         token: String,
+        tls_fp: Option<String>,
         http: reqwest::Client,
         client_instance_id: String,
         client_kind: Option<RingingV2ClientKind>,
@@ -74,6 +82,7 @@ impl RingingSession {
             credentials: std::sync::RwLock::new(Credentials {
                 base_url: base_url.trim_end_matches('/').to_string(),
                 token,
+                tls_fp,
             }),
             local_discovery: std::sync::atomic::AtomicBool::new(false),
             http,
@@ -94,6 +103,7 @@ impl RingingSession {
         Credentials {
             base_url: guard.base_url.clone(),
             token: guard.token.clone(),
+            tls_fp: guard.tls_fp.clone(),
         }
     }
 
@@ -123,11 +133,15 @@ impl RingingSession {
         };
         let base_url = base_url.trim_end_matches('/').to_string();
         let mut guard = self.credentials.write().expect("credentials lock");
-        if guard.base_url == base_url && guard.token == d.token {
+        if guard.base_url == base_url
+            && guard.token == d.token
+            && guard.tls_fp == d.tls_fingerprint
+        {
             return false;
         }
         guard.base_url = base_url;
         guard.token = d.token;
+        guard.tls_fp = d.tls_fingerprint;
         true
     }
 
@@ -383,6 +397,7 @@ mod tests {
         RingingSession::new(
             base_url.into(),
             token.into(),
+            None,
             reqwest::Client::new(),
             "test-instance".into(),
             None,

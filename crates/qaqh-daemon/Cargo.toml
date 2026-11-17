@@ -55,6 +55,10 @@ http-body-util = "0.1"
 # shell_ws_tests 要一条**真**的 ws 握手：`oneshot` 伪造不出升级后的双向字节通道。
 # 版本与 axum 的 ws feature 拉进来的那一条同版，不新增版本。
 tokio-tungstenite = "0.29"
+# shell_ws_tests 里还有一条用**真 SDK 客户端**打的往返（`qaqh_client::shell_stream`）：
+# 切片 5 的判据是「客户端与服务端说的是同一套协议」，而手搓的 tungstenite 客户端证明
+# 不了这一点——两边各自理解错、测试照样绿。daemon 的运行期不依赖客户端库，只登记 dev。
+qaqh-client = { path = "../qaqh-client", features = ["shell-stream"] }
 
 [lints]
 workspace = true
