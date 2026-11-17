@@ -3304,6 +3304,7 @@ dependencies = [
  "qaqh-memwatch",
  "qaqh-process-tools",
  "qaqh-profile",
+ "qaqh-pty",
  "qaqh-ringing",
  "qaqh-ringing-contract",
  "qaqh-ringing-runtime",

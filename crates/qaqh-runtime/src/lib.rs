@@ -23,7 +23,9 @@ pub mod ringing;
 mod service;
 mod session_meta;
 mod subagent_supervisor;
+mod shell;
 
 pub use error::{QaqhError, QaqhResult};
 pub use registry::{AgentRegistry, cache_system_path, detect_os_info, detect_shell};
 pub use service::QaqhService;
+pub use shell::{ShellAttach, ShellFrame, ShellInfo, ShellOpen, ShellRegistry, ShellStopReason};

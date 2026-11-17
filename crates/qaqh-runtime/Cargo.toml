@@ -21,6 +21,7 @@ qaqh-workspace = { path = "../qaqh-workspace" }
 qaqh-types = { path = "../qaqh-types" }
 qaqh-profile = { path = "../qaqh-profile" }
 qaqh-process-tools = { path = "../qaqh-process-tools" }
+qaqh-pty = { path = "../qaqh-pty" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
 qaqh-skills = { path = "../qaqh-skills" }
 sha2 = "0.11"
