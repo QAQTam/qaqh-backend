@@ -313,13 +313,17 @@ token 不进 webview**，全部 Ringing 传输由主进程经 `crates/qaqh-napi-
   后 UI 收到 `closed{reason:"child_exited"}` 并关页签；⑤ 关掉应用再打开，`shell.list`
   里旧壳已随 daemon 生命周期收干净（所有者已裁定不必跨重启存活）。
 
-### 待所有者裁定（不由施工方自己填）
+### 施工前置：ws 客户端放哪 —— 所有者 2026-11-17 已裁定 = **A**
 
-**ws 客户端代码放哪。** 两个候选，差别只在"谁承载帧编解码与重连"：
+两个候选，差别只在"谁承载帧编解码与重连"：
 
-- **A（本 ADR 推荐）：Rust `qaqh-client` 加一条 `shell_stream` 能力（cargo feature，
+- **A（已裁定采用）：Rust `qaqh-client` 加一条 `shell_stream` 能力（cargo feature，
   默认不开）+ napi 面上加 `shellSubscribe/shellStdin/shellResize/shellClose`**。
   前端 npm 依赖零增长，TUI/Android/HarmonyOS 复用同一份协议运行时，代价是 napi 面变宽。
-- **B：主进程用 TS `ws` 客户端**（新增 npm 依赖 `ws` + 自己写 base64/帧编解码）。
+- **B（未采用）：主进程用 TS `ws` 客户端**（新增 npm 依赖 `ws` + 自己写 base64/帧编解码）。
   改动局限在 Electron 仓，代价是协议运行时出现第二份实现（与本仓"一份协议运行时"的
   既有取向相反）。
+
+> 命名易混，施工前必读：这里的 **A** 指"ws 客户端放 Rust SDK"；本 ADR §D3 里的
+> **候选 A** 指"长轮询 offset 区间读"（§被否方案第 6 条，只在净行数判定不过时才启用）。
+> 两者无关，别把"选 A"理解成回退到长轮询。
