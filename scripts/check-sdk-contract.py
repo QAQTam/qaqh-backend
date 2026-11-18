@@ -87,8 +87,8 @@ const kind: "read" = serviceMetadata["daemon.version"].kind;
 const siwcParams: ServiceMap["siwc.sign_in.status"]["params"] = { flow_id: "synthetic" };
 const siwcResult: ServiceMap["siwc.status"]["result"] = { status: "connected", sharing: true, profiles: 1, usageUrl: "https://example.invalid", apiBase: "https://example.invalid/v1" };
 const adminOnly: true = serviceMetadata["dsaccount.verify"].admin_only;
-const driver: NonNullable<SessionState["driver"]> = { holder: null, epoch: 1 };
-const bootstrapDriver: SessionBootstrap["state"]["driver"] = driver;
+const timelineFromOrd: SessionState["timeline_from_ord"] = null;
+const bootstrapExecSessions: SessionBootstrap["state"]["exec_sessions"] = [];
 const approvals: RingingV2PendingApprovals = { pending_permission: null, pending_interaction: null };
 const upload: RingingV2ContentUploadResponse["truncated"] = false;
 const settingsCommand: RingingV2CommandEnvelope = { schema: "qaqh.Ringing", version: 2, contract_revision: COMMAND_CONTRACT_REVISION, command_id: "cmd-settings", client_instance_id: "instance", client_session_id: "lease", target: { kind: "session", session_id: "ses-synthetic" }, command: { type: "session.settings.patch", patch: { model_selection: { kind: "inherit" }, tools: { mode: "all" } } }, preconditions: [{ kind: "settings_revision", revision: 3 }] };
@@ -100,7 +100,7 @@ const activityNoTurn: ServiceMap["session.activity"]["result"][number] = { sessi
 const workspaceEntry: ServiceMap["workspace.list"]["result"][number] = { id: "ws-1", path: "/synthetic/workspace", title: "workspace", order: 0, session_ids: ["0199a0f0-0000-7000-8000-000000000001"], missing_dir: false };
 const workspaceCreate: RingingCommand = { type: "workspace.create", path: "/synthetic/workspace" };
 const workspaceUnbound: ServiceMap["workspace.get"]["result"] = "";
-void [open, params, kind, siwcParams, siwcResult, adminOnly, bootstrapDriver, approvals, upload, sessionTarget, settingsPrecondition, settingsCommand, activityParams, activityEntry, activityNoTurn, workspaceEntry, workspaceCreate, workspaceUnbound];
+void [open, params, kind, siwcParams, siwcResult, adminOnly, timelineFromOrd, bootstrapExecSessions, approvals, upload, sessionTarget, settingsPrecondition, settingsCommand, activityParams, activityEntry, activityNoTurn, workspaceEntry, workspaceCreate, workspaceUnbound];
 type Command = RingingV2CommandEnvelope;
 type Status = RingingV2CommandStatus;
 // @ts-expect-error unknown methods must not have a catch-all signature
