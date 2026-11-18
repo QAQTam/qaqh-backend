@@ -1,0 +1,9 @@
+{
+  "_comment": "Identity of each frozen line's golden tree (ADR-0011). Machine-written by scripts/check-lts-api-surface.py --pin-frozen; never hand-edit. Registering a lock is guard-tightening, rewriting the tree it names is a refreeze.",
+  "docs/api-surface/v4.1": {
+    "contract_hash": "0899a89b8c6e38098d4aebdaf2aaee6c903fbd8b8eb0f2adcd5242a2bbeb72ca",
+    "generator_version": "qaqh-contract-export/0.2.0",
+    "git_tree": "aa549af4b8c1d5c00c0490b21605a6d40a822ed1",
+    "manifest_files": 629
+  }
+}

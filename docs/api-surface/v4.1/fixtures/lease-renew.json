@@ -1,0 +1,5 @@
+{
+  "ok": true,
+  "lease_ttl_ms": 30000,
+  "renew_interval_ms": 10000
+}

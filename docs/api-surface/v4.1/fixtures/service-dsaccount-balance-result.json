@@ -1,0 +1,17 @@
+{
+  "recharge": [
+    {
+      "currency": "CNY",
+      "balance": "0E-16",
+      "tokenEstimation": null
+    }
+  ],
+  "bonus": [],
+  "totalCost": [
+    {
+      "currency": "CNY",
+      "amount": "1.23"
+    }
+  ],
+  "hasUsableBalance": false
+}

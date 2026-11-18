@@ -1,0 +1,20 @@
+{
+  "signedIn": false,
+  "account": null,
+  "storageError": null,
+  "inferenceOrigin": "https://example.invalid",
+  "usageUrl": "https://example.invalid/usage",
+  "topUpUrl": "https://example.invalid/topup",
+  "flow": {
+    "attemptId": null,
+    "state": "idle",
+    "authorizeUrl": null,
+    "expiresAtMs": 0,
+    "error": null
+  },
+  "revoke": {
+    "state": "idle",
+    "attempts": 0,
+    "message": null
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "profileId": "profile-fixture",
+  "revoked": false,
+  "hadRefreshToken": true,
+  "usageUrl": "https://example.invalid/usage"
+}

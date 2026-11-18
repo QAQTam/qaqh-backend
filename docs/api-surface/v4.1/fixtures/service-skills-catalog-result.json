@@ -1,0 +1,18 @@
+{
+  "skills": [
+    {
+      "name": "qaqh-core",
+      "description": "synthetic skill",
+      "scope": "user",
+      "origin": "user",
+      "path": "/synthetic/skills/qaqh-core"
+    }
+  ],
+  "diagnostics": [
+    {
+      "severity": "warning",
+      "path": "/synthetic/skills/broken-skill",
+      "message": "synthetic diagnostic"
+    }
+  ]
+}

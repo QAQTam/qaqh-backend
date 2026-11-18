@@ -1,0 +1,17 @@
+{
+  "active": "profile-fixture",
+  "profiles": [
+    {
+      "id": "profile-fixture",
+      "label": "Synthetic",
+      "status": "connected",
+      "sharing": true,
+      "clientId": "client-fixture",
+      "scopes": [
+        "scope-fixture"
+      ],
+      "savedAtMs": 1700000000000
+    }
+  ],
+  "pending": []
+}

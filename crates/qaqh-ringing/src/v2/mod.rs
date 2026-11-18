@@ -50,10 +50,7 @@ pub const RINGING_V2_HTTP_ROUTES: &[(&str, &str)] = &[
     ("POST", "/ringing/v2/commands"),
     ("GET", "/ringing/v2/commands/{command_id}"),
     ("GET", "/ringing/v2/sessions/{session_id}/approvals"),
-    (
-        "POST",
-        "/ringing/v2/sessions/{session_id}/approvals/respond",
-    ),
+    ("POST", "/ringing/v2/sessions/{session_id}/approvals/respond"),
     ("POST", "/ringing/v2/content"),
     ("GET", "/ringing/v2/content/{content_id}"),
     ("POST", "/ringing/v2/service/{method}"),
