@@ -121,7 +121,6 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                     timeout_ms: request.timeout_ms,
                     yield_time_ms: request.yield_time_ms,
                     max_output_bytes: request.max_output_tokens as usize * 4,
-                    notify_on_exit: request.notify_on_exit,
                     cancellation: context.cancellation.shared_flag(),
                 },
                 self.publisher.clone(),
@@ -144,7 +143,6 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                 chars: request.chars,
                 yield_time_ms: request.yield_time_ms,
                 max_output_bytes: request.max_output_tokens as usize * 4,
-                notify_on_exit: request.notify_on_exit,
                 cancellation: context.cancellation.shared_flag(),
             })
             .map_err(exec_manager_error)?;
@@ -165,7 +163,6 @@ fn exec_result_to_tool_core(
         timed_out: result.timed_out,
         cancelled: result.cancelled,
         input_bytes_written: result.input_bytes_written,
-        notify_armed: result.notify_armed,
     }
 }
 

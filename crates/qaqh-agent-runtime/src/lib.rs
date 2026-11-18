@@ -22,5 +22,5 @@ pub mod tool_job;
 
 pub use progress::{AttemptBlocks, ProgressSink, ProgressStream};
 pub use qaqh_process_tools::exec_session::{
-    ExecNotifyPort, ExecSessionManager, ExecTerminalNotice, StopResult as ExecSessionStopResult,
+    ExecSessionManager, StopResult as ExecSessionStopResult,
 };

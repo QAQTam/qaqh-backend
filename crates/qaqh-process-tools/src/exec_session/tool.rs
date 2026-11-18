@@ -37,22 +37,6 @@ pub struct ExecCommandArgs {
     /// Maximum model output budget in tokens.
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
-    /// Subscribe the terminal notification at launch — the right choice for
-    /// long builds, test suites, and installs:
-    /// - Command still running when the initial wait window closes → the call
-    ///   returns `yielded` with the session armed. End your turn; the harness
-    ///   delivers the terminal result (exit code + stop reason, no output
-    ///   body) as a one-shot system message when the process exits. Do not
-    ///   poll afterwards; once the notice arrives, one write_stdin drains the
-    ///   buffered output if needed.
-    /// - Command exits within the window → the terminal result is delivered
-    ///   right in this call and nothing is armed.
-    /// - Not for servers/daemons meant to keep running (dev servers, vite,
-    ///   watchers): they never exit, so nothing would ever notify. Omit this
-    ///   flag for them (and omit timeout_ms too).
-    /// - Combined with timeout_ms, a force-stop is delivered as `timed_out`.
-    #[serde(default)]
-    pub notify_on_exit: Option<bool>,
 }
 
 /// exec_command `shell` 字段的白名单——这个 enum **就是**模型面 schema：
@@ -101,25 +85,15 @@ pub struct WriteStdinArgs {
     pub exec_session_id: String,
     #[serde(default)]
     pub chars: String,
-    /// Read wait window. Empty input (pure read or notify detach): 5000..=30000 ms,
-    /// default 5000. Non-empty input (send keystrokes): 250..=30000 ms, default 250.
+    /// Read wait window. Empty input (pure read): 5000..=300000 ms, default
+    /// 5000 — a single long poll waits for the process and returns as soon as
+    /// it exits; prefer one large yield_time_ms over repeated short polls.
+    /// Non-empty input (send keystrokes): 250..=30000 ms, default 250.
     /// The two floors are not interchangeable — e.g. 3000 ms is rejected when chars is empty.
     #[serde(default)]
     pub yield_time_ms: Option<u32>,
     #[serde(default)]
     pub max_output_tokens: Option<u32>,
-    /// Arm the terminal notification for an already-running session (empty
-    /// chars only): the call returns immediately — end your turn, and the
-    /// harness delivers the terminal result (exit code + stop reason, no
-    /// output body) as a one-shot system message when the process exits.
-    /// - Session already exited → the normal terminal read comes back in this
-    ///   call and nothing is armed.
-    /// - While armed, do not poll; after the notice, one write_stdin drains
-    ///   the buffered output.
-    /// - For new commands prefer exec_command(notify_on_exit=true) — one
-    ///   round trip arms at launch.
-    #[serde(default)]
-    pub notify_on_exit: Option<bool>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -223,7 +197,7 @@ impl TypedTool for ExecCommandTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "exec_command",
-            "Run a shell command. `cmd` is wrapped by the selected shell dialect (`shell`); long-running commands return an execution session id — use write_stdin to read output or provide terminal input. stdout/stderr are captured as separate streams; avoid `2>&1`/`1>&2` unless merging is intentional. Pagers and git prompts/editors are disarmed via env (PAGER/GIT_PAGER/GH_PAGER=cat, GIT_TERMINAL_PROMPT=0, GIT_EDITOR=true); output ending in `:` means stuck in a pager — send `q` via write_stdin. Payload interpreters (node/bun/python/deno) are programs to run inside `cmd`, never a value for `shell`.",
+            "Run a shell command. `cmd` is wrapped by the selected shell dialect (`shell`); long-running commands return an execution session id — use write_stdin to read output or provide terminal input. To wait for a long-running command, issue a single empty write_stdin with a large yield_time_ms (up to 300000): it returns as soon as the process exits. stdout/stderr are captured as separate streams; avoid `2>&1`/`1>&2` unless merging is intentional. Pagers and git prompts/editors are disarmed via env (PAGER/GIT_PAGER/GH_PAGER=cat, GIT_TERMINAL_PROMPT=0, GIT_EDITOR=true); output ending in `:` means stuck in a pager — send `q` via write_stdin. Payload interpreters (node/bun/python/deno) are programs to run inside `cmd`, never a value for `shell`.",
             crate::permission::ToolCategory::Exec,
             crate::ToolRisk::Destructive,
             Duration::from_secs(30),
@@ -312,7 +286,6 @@ impl TypedTool for ExecCommandTool {
                 yield_time_ms,
                 timeout_ms: args.timeout_ms,
                 max_output_tokens,
-                notify_on_exit: args.notify_on_exit.unwrap_or(false),
             },
         );
         if result.is_err() {
@@ -320,15 +293,7 @@ impl TypedTool for ExecCommandTool {
                 let _ = std::fs::remove_file(path);
             }
         }
-        let mut result = result?;
-        if result.notify_armed {
-            let id = result
-                .exec_session_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "<unknown>".to_owned());
-            append_subscribe_notice(&mut result.output, &id);
-        }
+        let result = result?;
         Ok(result.into())
     }
 }
@@ -342,10 +307,10 @@ impl TypedTool for WriteStdinTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "write_stdin",
-            "Read new output from an execution session, send terminal input, or interrupt it with exactly Ctrl-C. With notify_on_exit=true (empty chars) detach instead: the call returns immediately, end your turn, and the harness delivers the terminal result as a one-shot system message when the process exits.",
+            "Read new output from an execution session, send terminal input, or interrupt it with exactly Ctrl-C. Empty chars polls for output: yield_time_ms 5000..=300000 (default 5000) — to wait for a long-running command to finish, issue one empty poll with a large yield_time_ms; it returns immediately when the process exits, delivering the terminal result and remaining output. Non-empty chars writes keystrokes: yield_time_ms 250..=30000 (default 250).",
             crate::permission::ToolCategory::Exec,
             crate::ToolRisk::Destructive,
-            Duration::from_secs(30),
+            Duration::from_secs(310),
         )
     }
 
@@ -367,20 +332,17 @@ impl TypedTool for WriteStdinTool {
         }
         let default_yield = if args.chars.is_empty() { 5_000 } else { 250 };
         let yield_time_ms = args.yield_time_ms.unwrap_or(default_yield);
-        let min_yield = if args.chars.is_empty() { 5_000 } else { 250 };
-        if !(min_yield..=30_000).contains(&yield_time_ms) {
+        // codex 同款双轨：空读是长轮询通道（上限 300s，进程退出即返回），
+        // 非空写入保持短窗上限让交互 stdin 响应快。
+        let (min_yield, max_yield) = if args.chars.is_empty() {
+            (5_000, 300_000)
+        } else {
+            (250, 30_000)
+        };
+        if !(min_yield..=max_yield).contains(&yield_time_ms) {
             return Err(ToolError::invalid_arguments(format!(
-                "yield_time_ms must be between {min_yield} and 30000 for this input"
+                "yield_time_ms must be between {min_yield} and {max_yield} for this input"
             ))
-            .into());
-        }
-        // ADR-0026：订阅是纯 detach 动作，与写输入互斥；manager 侧同样只在
-        // 空 chars 时生效（纵深防御），此处给出确定性报错。
-        let notify_on_exit = args.notify_on_exit.unwrap_or(false);
-        if notify_on_exit && !args.chars.is_empty() {
-            return Err(ToolError::invalid_arguments(
-                "notify_on_exit requires empty chars — subscribing is a pure detach, not an input write",
-            )
             .into());
         }
         let max_output_tokens = output_budget(args.max_output_tokens)?;
@@ -390,41 +352,17 @@ impl TypedTool for WriteStdinTool {
                 "execution session host was not injected for this conversation",
             ))
         })?;
-        let mut result = host.write_stdin(
+        let result = host.write_stdin(
             context,
             WriteStdinRequest {
                 exec_session_id: ExecSessionId::new(args.exec_session_id),
                 chars: args.chars,
                 yield_time_ms,
                 max_output_tokens,
-                notify_on_exit,
             },
         )?;
-        if result.notify_armed {
-            let id = result
-                .exec_session_id
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "<unknown>".to_owned());
-            append_subscribe_notice(&mut result.output, &id);
-        }
         Ok(result.into())
     }
-}
-
-/// ADR-0026：订阅成功时附加的行为契约文本（进模型面 output，不进 JSON 字段）。
-fn append_subscribe_notice(output: &mut String, exec_session_id: &str) {
-    if !output.is_empty() {
-        output.push('\n');
-    }
-    output.push_str(&format!(
-        "[exec session subscribed] Terminal notification for {exec_session_id} is now owned \
-         by the harness: end your turn now — when the process exits, a one-shot system \
-         message (<qaqh_exec_session_terminal>) will deliver the terminal result (exit \
-         code + stop reason). Do not keep polling this session; if you need its output \
-         afterwards, a single write_stdin on {exec_session_id} after the terminal notice \
-         drains the buffered output."
-    ));
 }
 
 fn output_budget(requested: Option<u32>) -> Result<u32, ToolExecutionError> {

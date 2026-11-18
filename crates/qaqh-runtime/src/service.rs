@@ -104,7 +104,6 @@ impl QaqhService {
         // 与 send_input 的入队语义无死锁）。
         let router_service = service.clone();
         let fork_service = service.clone();
-        let notify_service = service.clone();
         if let Ok(mut registry) = service.registry() {
             registry.set_terminal_router(Some(Arc::new(move |notice| {
                 // ADR-0016 切片 1：封箱终态挂钩调度内核 fork（阅读窗
@@ -118,16 +117,6 @@ impl QaqhService {
                     registry.route_turn_terminal(notice);
                 }
             })));
-            // ADR-0026：exec 订阅终态端口——manager finalize 回调进 registry
-            // （route_turn_terminal 同款短临界区、无 await；watcher 线程回调时
-            // 不持任何会话 core 锁，与 send_input 的入队语义无死锁）。
-            registry
-                .exec_sessions()
-                .set_notify_port(Some(Arc::new(move |notice| {
-                    if let Ok(mut registry) = notify_service.registry() {
-                        registry.route_exec_terminal(&notice);
-                    }
-                })));
         }
         service
     }
@@ -311,15 +300,6 @@ impl QaqhService {
             return Vec::new();
         };
         registry.sweep_active_goals()
-    }
-
-    /// ADR-0026：exec 订阅终态兜底补投（daemon 周期任务调用）。主路径是
-    /// finalize 端口回调；这里只补投 armed+terminal+未送达 的残留。
-    pub fn sweep_exec_notices(&self) -> Vec<String> {
-        let Ok(mut registry) = self.registry() else {
-            return Vec::new();
-        };
-        registry.sweep_armed_exec_sessions()
     }
 
     /// ADR-0016 切片 3：handoff fork 兜底扫描（daemon 周期任务调用）。封箱
@@ -884,6 +864,10 @@ impl QaqhService {
                 ephemeral: row.ephemeral,
                 created_at: (row.created_at_ms.max(0) as u64) / 1000,
                 updated_at: (row.updated_at_ms.max(0) as u64) / 1000,
+                // 开箱判据的两个毫秒级事实:血缘前驱与毫秒创建时刻。此前批量
+                // 列表既不 SELECT 前驱列也不透传,后继会话的渲染侧永远读空。
+                handoff_from_session_id: row.handoff_from_session_id,
+                created_at_ms: Some(row.created_at_ms.max(0) as u64),
                 ..SessionMeta::default()
             };
             let stored_workspace_id = workspace_ids.remove(&session_id);

@@ -337,7 +337,6 @@ impl AgentRegistry {
     }
 }
 
-mod exec_notify;
 mod goal;
 pub(crate) mod handoff_fork;
 mod lifecycle;

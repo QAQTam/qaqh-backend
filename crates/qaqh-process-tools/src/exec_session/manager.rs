@@ -45,10 +45,6 @@ pub struct ExecSessionStart {
     pub timeout_ms: Option<u64>,
     pub yield_time_ms: u32,
     pub max_output_bytes: usize,
-    /// ADR-0026（切片 2）：启动即订阅。与 poll 订阅同一原子语义：命令在
-    /// yield 窗口内自行退出 → 启动调用直接交付终态（读取通道置 delivered，
-    /// 推送让位）；窗口耗尽仍存活 → 结果 notify_armed=true。
-    pub notify_on_exit: bool,
     pub cancellation: Arc<AtomicBool>,
 }
 
@@ -63,8 +59,6 @@ pub struct ExecSessionResult {
     pub timed_out: bool,
     pub cancelled: bool,
     pub input_bytes_written: Option<usize>,
-    /// ADR-0026：本次调用是否为「订阅即返回」（仅订阅成功的 poll 为 true）。
-    pub notify_armed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,25 +69,7 @@ pub struct ExecSessionPoll {
     pub yield_time_ms: u32,
     pub max_output_bytes: usize,
     pub cancellation: Arc<AtomicBool>,
-    /// ADR-0026：订阅终态通知。只在 chars 为空时生效（工具面校验）。
-    pub notify_on_exit: bool,
 }
-
-/// ADR-0026：订阅会话的终态通知快照。armed 会话 finalize 时若终态可推送
-/// （Exited / TimedOut）且未送达，经端口回调 registry；端口未注入 = 不回传
-/// （与 `TurnTerminalPort` 同律）。registry 送达成功后回写
-/// `mark_notify_delivered`；daemon 周期扫描只补投 armed+terminal+未送达 的残留。
-#[derive(Debug, Clone)]
-pub struct ExecTerminalNotice {
-    pub owner_session_id: String,
-    pub exec_session_id: ExecSessionId,
-    pub command: String,
-    pub outcome: ExecSessionOutcome,
-}
-
-/// ADR-0026：exec 订阅终态端口。回调方（registry）在 watcher 线程上被调用：
-/// finalize 已在 core 锁外触发本回调，回调方不得阻塞在会话 core 锁上。
-pub type ExecNotifyPort = Arc<dyn Fn(ExecTerminalNotice) + Send + Sync>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecManagerErrorKind {
@@ -147,20 +123,12 @@ pub struct ExecSessionManager {
 #[derive(Default)]
 struct ManagerInner {
     state: Mutex<ManagerState>,
-    /// ADR-0026：订阅终态端口（registry 装配注入；None = 不回传）。
-    notify_port: Mutex<Option<ExecNotifyPort>>,
 }
 
 impl std::fmt::Debug for ManagerInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let port_armed = self
-            .notify_port
-            .lock()
-            .map(|port| port.is_some())
-            .unwrap_or(false);
         f.debug_struct("ManagerInner")
             .field("state", &self.state)
-            .field("notify_port", &port_armed)
             .finish()
     }
 }
@@ -216,10 +184,6 @@ struct SessionCore {
     active_slot_released: bool,
     finished_at_ms: Option<i64>,
     stream_dropped_bytes: u64,
-    /// ADR-0026：模型已订阅终态通知（write_stdin notify_on_exit=true）。
-    notify_armed: bool,
-    /// ADR-0026：终态通知已送达模型（poll 当场交付或端口推送，恰一通道）。
-    notify_delivered: bool,
     /// tty 会话的模型侧重排重建器（ConPTY 行重排签名跨读持有）；pipe 为 None。
     model_reflower: Option<crate::exec::truncate::ConptyReflower>,
 }
@@ -405,8 +369,6 @@ impl ExecSessionManager {
                 active_slot_released: false,
                 finished_at_ms: None,
                 stream_dropped_bytes: 0,
-                notify_armed: false,
-                notify_delivered: false,
                 model_reflower: request
                     .tty
                     .then(|| crate::exec::truncate::ConptyReflower::new(spec.cols)),
@@ -441,39 +403,17 @@ impl ExecSessionManager {
         }
 
         let yield_window = Duration::from_millis(yield_time_ms as u64);
-        // ADR-0026（切片 2）：启动即订阅——与 poll 订阅同一原子语义。armed
-        // 后命令在窗口内自行退出 → 启动调用直接交付终态（读取通道置
-        // delivered，推送让位）；窗口耗尽仍存活 → yielded + notify_armed，
-        // 模型结束回合等推送。
-        let armed_at_start = request.notify_on_exit && {
-            let mut core = session.core.lock().unwrap_or_else(|e| e.into_inner());
-            let runnable = core.terminal.is_none();
-            if runnable {
-                core.notify_armed = true;
-            }
-            runnable
-        };
         let _interaction = session
             .interaction
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let result = wait_for_call(
+        Ok(wait_for_call(
             &session,
             yield_window,
             max_output_bytes,
             Some(&cancellation),
             true,
-        );
-        let result = if armed_at_start && matches!(result.outcome, ToolCallOutcome::Yielded { .. })
-        {
-            ExecSessionResult {
-                notify_armed: true,
-                ..result
-            }
-        } else {
-            result
-        };
-        Ok(result)
+        ))
     }
 
     pub fn poll(&self, request: ExecSessionPoll) -> Result<ExecSessionResult, ExecManagerError> {
@@ -524,33 +464,6 @@ impl ExecSessionManager {
 
         if request.cancellation.load(Ordering::SeqCst) {
             return Ok(session.cancelled_without_consuming());
-        }
-        // ADR-0026：订阅判定与终态读取共用 core 锁——终态已定则不订阅、走
-        // 下方普通终态读（本次调用交付，推送不会发生）；仍在跑则置 armed 后
-        // 立即返回（不等 yield 窗口、不消费 model_pending，待读缓冲留给终态
-        // 后一次性收割）。finalize 在同一把锁内置终态，二者互斥，“恰一次
-        // 交付”由构造保证。
-        if request.notify_on_exit && request.chars.is_empty() {
-            let mut core = session.core.lock().unwrap_or_else(|e| e.into_inner());
-            if core.terminal.is_none() {
-                core.notify_armed = true;
-                let result = ExecSessionResult {
-                    outcome: ToolCallOutcome::Yielded {
-                        exec_session_id: session.id.clone(),
-                    },
-                    exec_session_id: Some(session.id.clone()),
-                    output: String::new(),
-                    output_truncated: false,
-                    omitted_bytes: 0,
-                    exit_code: None,
-                    timed_out: false,
-                    cancelled: false,
-                    input_bytes_written: None,
-                    notify_armed: true,
-                };
-                drop(core);
-                return Ok(result);
-            }
         }
         Ok(wait_for_call(
             &session,
@@ -605,61 +518,6 @@ impl ExecSessionManager {
             .sessions
             .get(id.as_str())
             .map(|session| session.owner_session_id.clone())
-    }
-
-    /// ADR-0026：装配订阅终态端口（service init 调用一次；None = 拆除）。
-    pub fn set_notify_port(&self, port: Option<ExecNotifyPort>) {
-        *self
-            .inner
-            .notify_port
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = port;
-    }
-
-    /// ADR-0026：registry 送达成功后回写。返回是否首次落标志（false = 已
-    /// 送达/未订阅/会话已被回收），调用方据此决定是否计入补投统计。
-    pub fn mark_notify_delivered(&self, exec_session_id: &ExecSessionId) -> bool {
-        let session = {
-            let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.sessions.get(exec_session_id.as_str()).cloned()
-        };
-        let Some(session) = session else {
-            return false;
-        };
-        let mut core = session.core.lock().unwrap_or_else(|e| e.into_inner());
-        if core.notify_armed && !core.notify_delivered {
-            core.notify_delivered = true;
-            return true;
-        }
-        false
-    }
-
-    /// ADR-0026：armed 且终态可推送（Exited/TimedOut）且未送达的会话快照，
-    /// 供 daemon 周期扫描补投。与 finalize 推送门同一口径：Cancelled/
-    /// Interrupted 不推送——都是有主体的主动停止。
-    pub fn armed_undelivered(&self) -> Vec<ExecTerminalNotice> {
-        let sessions = {
-            let state = self.inner.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.sessions.values().cloned().collect::<Vec<_>>()
-        };
-        sessions
-            .iter()
-            .filter_map(|session| {
-                let core = session.core.lock().unwrap_or_else(|e| e.into_inner());
-                let pushable = matches!(
-                    core.terminal,
-                    Some(ExecSessionOutcome::Exited { .. } | ExecSessionOutcome::TimedOut { .. })
-                );
-                (core.notify_armed && !core.notify_delivered && pushable).then(|| {
-                    ExecTerminalNotice {
-                        owner_session_id: session.owner_session_id.clone(),
-                        exec_session_id: session.id.clone(),
-                        command: session.command.clone(),
-                        outcome: core.terminal.clone().expect("terminal checked"),
-                    }
-                })
-            })
-            .collect()
     }
 
     /// Stop every live child during daemon shutdown and wait for final owner facts.
@@ -902,7 +760,6 @@ impl ManagedSession {
             timed_out: false,
             cancelled: true,
             input_bytes_written: None,
-            notify_armed: false,
         }
     }
 }
@@ -914,12 +771,6 @@ fn result_from_core(
     starting_call: bool,
     input_bytes_written: Option<usize>,
 ) -> ExecSessionResult {
-    // ADR-0026：armed 会话的终态结果一经任何读取通道交付（普通 poll 捕获
-    // 退出、启动调用窗口内退出），即视为已送达——端口推送随之让位，
-    // “恰一次”跨通道成立。推送成功后的后续读取此处幂等（delivered 已置）。
-    if core.terminal.is_some() && core.notify_armed {
-        core.notify_delivered = true;
-    }
     let raw_output = read
         .chunks
         .iter()
@@ -994,7 +845,6 @@ fn result_from_core(
         timed_out,
         cancelled,
         input_bytes_written,
-        notify_armed: false,
     }
 }
 
@@ -1299,7 +1149,7 @@ fn finalize_session(
     exit: Option<qaqh_pty::SessionExit>,
     watch_failed: bool,
 ) {
-    let (view, mut transcript, truncated, release_slot, outcome_for_notice, notify_terminal) = {
+    let (view, mut transcript, truncated, release_slot) = {
         let mut core = session.core.lock().unwrap_or_else(|e| e.into_inner());
         if core.finalized {
             return;
@@ -1346,7 +1196,6 @@ fn finalize_session(
             },
         };
         core.terminal = Some(output.clone());
-        let outcome_for_notice = output.clone();
         core.state = ExecSessionState::Finished { outcome: output };
         core.finished_at_ms = Some(now_ms());
         core.finalized = true;
@@ -1390,23 +1239,7 @@ fn finalize_session(
             stream_dropped_bytes: core.stream_dropped_bytes,
             output: None,
         };
-        // ADR-0026：订阅推送门——armed 且未送达且终态可推送（Exited/TimedOut）。
-        // Cancelled/Interrupted 不推送：都是有主体的主动停止（用户中断/终止、
-        // daemon 关停），回推只会制造噪声。
-        let notify_terminal = core.notify_armed
-            && !core.notify_delivered
-            && matches!(
-                outcome_for_notice,
-                ExecSessionOutcome::Exited { .. } | ExecSessionOutcome::TimedOut { .. }
-            );
-        (
-            view,
-            transcript,
-            truncated,
-            release_slot,
-            outcome_for_notice,
-            notify_terminal,
-        )
+        (view, transcript, truncated, release_slot)
     };
 
     session
@@ -1415,32 +1248,6 @@ fn finalize_session(
     session.changed.notify_all();
     if release_slot {
         release_active(&inner, &session.owner_session_id);
-    }
-    // ADR-0026：触发前复核门——等待中的 poll 可能在 publisher.finish 期间
-    // 醒来并经读取通道交付终态（result_from_core 置 delivered），此时推送
-    // 让位。残余窗口仅剩“复核后、触发前”的微秒级交错，后果是无正文的
-    // 重复通知，语义幂等（ADR-0026 决策 3 如实登记）。
-    let notify_terminal = notify_terminal && {
-        let core = session.core.lock().unwrap_or_else(|e| e.into_inner());
-        core.notify_armed && !core.notify_delivered
-    };
-    // ADR-0026：推送在 core 锁外触发——回调方会进入 registry 锁与 DB 读，
-    // 不得与会话 core 锁形成嵌套顺序。端口缺席 = 无 registry 挂接（测试等
-    // 裸 manager 使用），armed 状态保留，由 armed_undelivered 扫描面兜底。
-    if notify_terminal {
-        let port = inner
-            .notify_port
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        if let Some(port) = port {
-            port(ExecTerminalNotice {
-                owner_session_id: session.owner_session_id.clone(),
-                exec_session_id: session.id.clone(),
-                command: session.command.clone(),
-                outcome: outcome_for_notice,
-            });
-        }
     }
 }
 
@@ -1734,7 +1541,6 @@ mod tests {
             timeout_ms,
             yield_time_ms,
             max_output_bytes: 4096,
-            notify_on_exit: false,
             cancellation: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -1835,7 +1641,6 @@ mod tests {
                 chars: String::new(),
                 yield_time_ms: 1000,
                 max_output_bytes: 4096,
-                notify_on_exit: false,
                 cancellation: Arc::new(AtomicBool::new(false)),
             })
             .expect("poll yielded command");
@@ -1894,7 +1699,6 @@ mod tests {
                 chars: "hello\n".into(),
                 yield_time_ms: 1000,
                 max_output_bytes: 4096,
-                notify_on_exit: false,
                 cancellation: Arc::new(AtomicBool::new(false)),
             })
             .expect("write terminal input and poll");
@@ -1922,216 +1726,6 @@ mod tests {
             result.outcome,
             ToolCallOutcome::Failed { ref error } if error.code == "timed_out"
         ));
-        manager.shutdown();
-    }
-
-    fn poll_request(
-        exec_session_id: ExecSessionId,
-        chars: &str,
-        yield_time_ms: u32,
-    ) -> ExecSessionPoll {
-        ExecSessionPoll {
-            exec_session_id,
-            owner_session_id: "SES-EXEC-TEST".into(),
-            chars: chars.into(),
-            yield_time_ms,
-            max_output_bytes: 4096,
-            notify_on_exit: false,
-            cancellation: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    fn yield_session_id(result: &ExecSessionResult) -> ExecSessionId {
-        match &result.outcome {
-            ToolCallOutcome::Yielded { exec_session_id } => exec_session_id.clone(),
-            outcome => panic!("expected yielded outcome, got {outcome:?}"),
-        }
-    }
-
-    /// ADR-0026：订阅即返回；进程退出后端口恰一次推送；回写 delivered 后
-    /// 扫描面不再看到该会话。
-    #[test]
-    fn notify_on_exit_arms_immediately_and_pushes_terminal_once() {
-        let manager = ExecSessionManager::new();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        manager.set_notify_port(Some(Arc::new(move |notice| {
-            let _ = sender.send(notice);
-        })));
-        let initial = manager
-            .start(
-                request("sleep 0.3", 20, None),
-                Arc::new(RecordingPublisher::default()),
-            )
-            .expect("background command");
-        let id = yield_session_id(&initial);
-
-        let mut subscribe = poll_request(id.clone(), "", 20);
-        subscribe.notify_on_exit = true;
-        let armed = manager.poll(subscribe).expect("subscribe");
-        assert!(armed.notify_armed);
-        assert!(matches!(armed.outcome, ToolCallOutcome::Yielded { .. }));
-
-        let notice = receiver
-            .recv_timeout(Duration::from_secs(5))
-            .expect("terminal notice");
-        assert_eq!(notice.exec_session_id.as_str(), id.as_str());
-        assert!(matches!(
-            notice.outcome,
-            ExecSessionOutcome::Exited { exit_code: Some(0) }
-        ));
-        assert!(manager.mark_notify_delivered(&id));
-        assert!(manager.armed_undelivered().is_empty());
-        // 恰一次：窗口内不再有第二条推送。
-        assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
-        manager.shutdown();
-    }
-
-    /// ADR-0026：终态已定的会话订阅不成立——本次调用直接交付终态结果，
-    /// 端口不再推送（消灭“恰好在生命周期结束时读到”的竞态）。
-    #[test]
-    fn notify_on_exit_after_terminal_delivers_in_call_not_via_port() {
-        let manager = ExecSessionManager::new();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        manager.set_notify_port(Some(Arc::new(move |notice| {
-            let _ = sender.send(notice);
-        })));
-        let initial = manager
-            .start(
-                request("printf done", 1000, None),
-                Arc::new(RecordingPublisher::default()),
-            )
-            .expect("fast command");
-        assert_eq!(initial.outcome, ToolCallOutcome::Completed);
-        let id = initial.exec_session_id.clone().expect("session id");
-
-        let mut poll = poll_request(id, "", 100);
-        poll.notify_on_exit = true;
-        let result = manager.poll(poll).expect("poll terminal session");
-        assert!(!result.notify_armed);
-        assert_eq!(result.outcome, ToolCallOutcome::Completed);
-        assert!(result.output.contains("done"));
-        assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
-        manager.shutdown();
-    }
-
-    /// ADR-0026：Cancelled 终态不推送（用户中断是有主体的主动停止）。
-    #[test]
-    fn notify_on_exit_does_not_push_for_cancelled_sessions() {
-        let manager = ExecSessionManager::new();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        manager.set_notify_port(Some(Arc::new(move |notice| {
-            let _ = sender.send(notice);
-        })));
-        let initial = manager
-            .start(
-                request("sleep 5", 20, None),
-                Arc::new(RecordingPublisher::default()),
-            )
-            .expect("long command");
-        let id = yield_session_id(&initial);
-
-        let mut subscribe = poll_request(id.clone(), "", 20);
-        subscribe.notify_on_exit = true;
-        let armed = manager.poll(subscribe).expect("subscribe");
-        assert!(armed.notify_armed);
-
-        // Ctrl-C 等价路径：中断 → Cancelled 终态。
-        let interrupt = poll_request(id.clone(), "\u{3}", 1000);
-        let _ = manager.poll(interrupt).expect("interrupt");
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while !manager
-            .list("SES-EXEC-TEST")
-            .iter()
-            .any(|view| view.id.as_str() == id.as_str() && view.state.is_terminal())
-        {
-            assert!(Instant::now() < deadline, "session did not stop");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
-        assert!(manager.armed_undelivered().is_empty());
-        manager.shutdown();
-    }
-
-    /// ADR-0026：读取通道交付终态即视为送达——armed 会话的终态 poll 抑制
-    /// 端口推送（无端口场景下经 armed_undelivered 收敛可确定性断言）。
-    #[test]
-    fn terminal_poll_delivery_marks_armed_session_delivered() {
-        let manager = ExecSessionManager::new();
-        let initial = manager
-            .start(
-                request("sleep 0.2", 20, None),
-                Arc::new(RecordingPublisher::default()),
-            )
-            .expect("background command");
-        let id = yield_session_id(&initial);
-
-        let mut subscribe = poll_request(id.clone(), "", 20);
-        subscribe.notify_on_exit = true;
-        assert!(manager.poll(subscribe).expect("subscribe").notify_armed);
-
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while manager.armed_undelivered().is_empty() {
-            assert!(Instant::now() < deadline, "session never finalized");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-
-        let poll = poll_request(id, "", 1000);
-        let result = manager.poll(poll).expect("terminal poll");
-        assert!(matches!(result.outcome, ToolCallOutcome::Completed));
-        assert!(manager.armed_undelivered().is_empty());
-        manager.shutdown();
-    }
-
-    /// ADR-0026（切片 2）：启动即订阅——窗口耗尽仍存活 → armed + yielded，
-    /// 进程退出后恰一次推送。
-    #[test]
-    fn start_notify_on_exit_arms_when_command_survives_the_window() {
-        let manager = ExecSessionManager::new();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        manager.set_notify_port(Some(Arc::new(move |notice| {
-            let _ = sender.send(notice);
-        })));
-        let mut start = request("sleep 0.3", 20, None);
-        start.notify_on_exit = true;
-        let initial = manager
-            .start(start, Arc::new(RecordingPublisher::default()))
-            .expect("long command");
-        assert!(initial.notify_armed);
-        assert!(matches!(initial.outcome, ToolCallOutcome::Yielded { .. }));
-        let id = yield_session_id(&initial);
-
-        let notice = receiver
-            .recv_timeout(Duration::from_secs(5))
-            .expect("terminal notice");
-        assert_eq!(notice.exec_session_id.as_str(), id.as_str());
-        assert!(matches!(
-            notice.outcome,
-            ExecSessionOutcome::Exited { exit_code: Some(0) }
-        ));
-        assert!(manager.mark_notify_delivered(&id));
-        assert!(manager.armed_undelivered().is_empty());
-        manager.shutdown();
-    }
-
-    /// ADR-0026（切片 2）：窗口内自行退出 → 启动调用直接交付终态，
-    /// 不订阅、不推送（读取通道置 delivered）。
-    #[test]
-    fn start_notify_on_exit_delivers_terminal_in_window_without_push() {
-        let manager = ExecSessionManager::new();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        manager.set_notify_port(Some(Arc::new(move |notice| {
-            let _ = sender.send(notice);
-        })));
-        let mut start = request("printf quick", 1000, None);
-        start.notify_on_exit = true;
-        let result = manager
-            .start(start, Arc::new(RecordingPublisher::default()))
-            .expect("fast command");
-        assert_eq!(result.outcome, ToolCallOutcome::Completed);
-        assert!(!result.notify_armed);
-        assert!(result.output.contains("quick"));
-        assert!(receiver.recv_timeout(Duration::from_millis(300)).is_err());
         manager.shutdown();
     }
 }
