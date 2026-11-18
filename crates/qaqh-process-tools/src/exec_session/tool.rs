@@ -64,7 +64,8 @@ pub struct ExecCommandArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellName {
-    /// POSIX bash. On Windows resolves Git-for-Windows/MSYS2 bash, never the WSL wrapper.
+    /// POSIX bash. On Windows resolves a native bash-compatible engine when
+    /// present, else Git-for-Windows/MSYS2 bash; never the WSL wrapper.
     Bash,
     /// Explicit Windows alias of `bash` (same resolution; disambiguates when platform guessing is risky).
     #[serde(rename = "bash4windows")]
@@ -100,7 +101,9 @@ pub struct WriteStdinArgs {
     pub exec_session_id: String,
     #[serde(default)]
     pub chars: String,
-    /// Empty input defaults to 5000 ms; non-empty input defaults to 250 ms.
+    /// Read wait window. Empty input (pure read or notify detach): 5000..=30000 ms,
+    /// default 5000. Non-empty input (send keystrokes): 250..=30000 ms, default 250.
+    /// The two floors are not interchangeable — e.g. 3000 ms is rejected when chars is empty.
     #[serde(default)]
     pub yield_time_ms: Option<u32>,
     #[serde(default)]

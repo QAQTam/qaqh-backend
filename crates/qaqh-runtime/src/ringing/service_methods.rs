@@ -163,10 +163,11 @@ pub struct ExecSessionOutputResult {
 // 那三样走 ws 数据面（D3 硬约束第 3 条）。把它们做成 RPC 就等于给终端再造一套
 // 请求-回执-游标语义，正是 ADR-0017 §被否选项点名的平行协议形态。
 
-/// `shell.open`：只吃几何与目录。**可执行名由 daemon 决定**（D4：少一个参数就少
-/// 一条注入面，且"进程归后端所有"是这次迁移的理由），**owner 由 daemon 从 lease
-/// 反查**（`lease_store.rs instance_for_session`），两者都不许出现在 params 里 ——
-/// `authz.rs` 的纪律是"绝不采信客户端自报字段"。
+/// `shell.open`：几何、目录，外加一个**闭集壳名**（`pwsh`/`bash`/`cmd`/…，词表与
+/// exec 模型面的 `shell=` 参数同源，argv 由 daemon 端解析；这不是"客户端传可执行
+/// 文件"——客户端传不进路径，见 §D4 修订）。**owner 由 daemon 从 lease 反查**
+/// （`lease_store.rs instance_for_session`），不许出现在 params 里 —— `authz.rs`
+/// 的纪律是"绝不采信客户端自报字段"。
 #[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct ShellOpenParams {
@@ -176,6 +177,10 @@ pub struct ShellOpenParams {
     pub rows: Option<u16>,
     #[cfg_attr(feature = "ts", ts(optional))]
     pub cwd: Option<String>,
+    /// 闭集壳名（`None` = daemon 默认登录壳）。非法名在注册表当场拒绝，
+    /// 不落回默认壳。
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub shell: Option<String>,
 }
 
 /// 一条用户 shell 的可见状态。`output_offset` 是原始字节水位，即 ws `attach`

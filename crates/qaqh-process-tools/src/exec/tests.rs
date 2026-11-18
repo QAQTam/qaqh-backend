@@ -34,15 +34,37 @@ fn shell_from_name_resolves_known_shells() {
 #[test]
 fn platform_shell_priority_is_fixed() {
     #[cfg(windows)]
-    assert_eq!(
-        Shell::auto_candidates(),
-        &[
-            Shell::PowerShell,
-            Shell::Bash,
-            Shell::WindowsPowerShell,
-            Shell::Cmd
-        ]
-    );
+    {
+        use super::shell::niubash_shim;
+        // 装了 Niubash（本机安装布局命中）⇒ Bash(shim) 压过 PowerShell；
+        // CI 无 Niubash ⇒ 历史序不变。两条腿都必须钉死。
+        if niubash_shim().is_some() {
+            assert_eq!(
+                Shell::auto_candidates(),
+                &[
+                    Shell::Bash,
+                    Shell::PowerShell,
+                    Shell::WindowsPowerShell,
+                    Shell::Cmd
+                ]
+            );
+            // 钉定与派生同源：available()、path()、argv[0] 必须落在同一 shim。
+            assert!(Shell::Bash.available());
+            let argv = Shell::Bash.derive_exec_args("true");
+            assert_eq!(argv[0], niubash_shim().unwrap());
+            assert_eq!(&argv[1..3], ["-c", "true"]);
+        } else {
+            assert_eq!(
+                Shell::auto_candidates(),
+                &[
+                    Shell::PowerShell,
+                    Shell::Bash,
+                    Shell::WindowsPowerShell,
+                    Shell::Cmd
+                ]
+            );
+        }
+    }
     #[cfg(target_os = "linux")]
     assert_eq!(
         Shell::auto_candidates(),

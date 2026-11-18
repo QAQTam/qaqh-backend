@@ -11,13 +11,30 @@ pub fn bootstrap() -> String {
 }
 
 /// 显式钉住壳路径（embedder/测试用；`bootstrap()` 之外的第二入口）。
-/// 传空串 = no-op。钉住的路径在 `Shell::path()` 中优先于 git-bash 路径、
+/// 传空串 = no-op。钉住的路径在 `Shell::path()` 中优先于 Windows bash 钉定
+/// （niubash shim 或 git-bash 绝对路径）、
 /// 候选解析与名义名，但并非处处最高：`cmd`/`WindowsPowerShell` 仍先取
 /// System32 系统壳固定路径（审计 M2）。此前 `Zsh`/`Sh` 完全不消费该值，
 /// 使 macOS（默认壳恰为 Zsh）上的钉壳成为静默 no-op——Zsh 现与
 /// Bash/PowerShell 同序消费；`Sh` 从不作为任何平台的默认壳，维持原样。
 pub fn register_shell(path: &str) {
     Shell::register_shell(path);
+}
+
+/// 用户 shell 终端面（ADR-0028 §D4 修订）：把闭集壳名解析成**登录形态** argv
+/// （不带 `-c`/`-Command`，spawn 后由 PTY 自然进入交互）。词表与 exec 模型面
+/// 的 `shell=` 参数**同源**——[`Shell::from_name`] 同一张表、`Shell::path()` 同
+/// 一条钉序（git-bash 绝对路径、cmd/WindowsPowerShell 的 System32 钉死均照抄），
+/// 所以这里不构成第二条注入面，也不构成第二份探测实现。未知名返回 `None`，
+/// 由调用方给出拒绝文案；本函数不猜、不落回默认壳。
+pub fn user_shell_argv(name: &str) -> Option<(Vec<String>, String)> {
+    let shell = Shell::from_name(name)?;
+    let path = shell.path().to_string();
+    let argv = match shell {
+        Shell::PowerShell | Shell::WindowsPowerShell => vec![path.clone()],
+        _ => vec![path.clone()],
+    };
+    Some((argv, path))
 }
 
 // ── Platform shell detection ──
@@ -60,14 +77,19 @@ impl Shell {
     }
 
     /// Resolve an explicit shell name requested by the model (exec `shell`
-    /// parameter). Windows `bash` resolves to Git-for-Windows / MSYS2 when
-    /// present, avoiding the WSL wrapper. Unknown names fall back to None so
-    /// the caller can report a clean error.
+    /// parameter). Windows `bash` resolves to the Niubash install's rubash
+    /// engine shim first, else Git-for-Windows / MSYS2, avoiding the WSL
+    /// wrapper. Unknown names fall back to None so the caller can report a
+    /// clean error.
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
             "bash" | "bash4windows" => {
                 #[cfg(windows)]
                 {
+                    if let Some(shim) = niubash_shim() {
+                        DETECTED_BASH_PATH.get_or_init(|| shim.to_string());
+                        return Some(Shell::Bash);
+                    }
                     const WIN_BASH_CANDIDATES: &[&str] = &[
                         "C:\\Program Files\\Git\\bin\\bash.exe",
                         "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
@@ -98,10 +120,15 @@ impl Shell {
         }
     }
 
-    /// Platform-priority auto-detection candidates.
+    /// Platform-priority auto-detection candidates. exec 的「未指定 shell」
+    /// 选择循环（handler 的 find(available)）逐字消费这张表：Windows 上装了
+    /// Niubash 时 Bash（钉定 = shim）压过 PowerShell，未装时维持历史序。
     pub(crate) fn auto_candidates() -> &'static [Shell] {
         #[cfg(windows)]
         {
+            if niubash_shim().is_some() {
+                return &[Shell::Bash, Shell::PowerShell, Shell::WindowsPowerShell, Shell::Cmd];
+            }
             &[
                 Shell::PowerShell,
                 Shell::Bash,
@@ -165,7 +192,15 @@ impl Shell {
     pub(crate) fn detect_uncached() -> Self {
         #[cfg(windows)]
         {
-            // Windows 优先级：pwsh 7 > Git for Windows bash > powershell 5.1 > cmd。
+            // Windows 优先级：niubash(rubash 引擎 shim) > pwsh 7 > Git for
+            // Windows bash > powershell 5.1 > cmd。shim 不在任何 PATH 目录里
+            // （安装器只把安装根挂上 PATH，bash.exe 在 winuxcmd\bin），必须按
+            // 布局定位；命中时钉进 DETECTED_BASH_PATH，`path()`/`available()`
+            // 与派生链同源。
+            if let Some(shim) = niubash_shim() {
+                DETECTED_BASH_PATH.get_or_init(|| shim.to_string());
+                return Shell::Bash;
+            }
             if Shell::PowerShell.available() {
                 return Shell::PowerShell;
             }
@@ -209,7 +244,8 @@ impl Shell {
     }
 
     /// Path to the shell executable.
-    /// 各壳的优先级并不统一：`Bash` 为 显式注册 > Windows git-bash 绝对路径
+    /// 各壳的优先级并不统一：`Bash` 为 显式注册 > Windows bash 钉定
+    /// （`DETECTED_BASH_PATH`：niubash shim 优先，其次 git-bash 绝对路径）
     /// > 候选集解析出的**绝对路径**（`resolved_shell_name`，仅 PATH 查找）>
     /// 名义名 `bash`；`PowerShell` 为 显式注册 > 候选解析 > `pwsh`；
     /// `cmd`/`WindowsPowerShell` 先取 Windows 系统壳固定路径（审计 M2），
@@ -575,6 +611,36 @@ pub(crate) fn find_bash_on_path() -> Option<String> {
             return Some(candidate.to_string_lossy().into_owned());
         }
     }
+    None
+}
+
+/// Niubash 安装树里的 bash shim（执行语义 = 内嵌 rubash 引擎，MIT，
+/// Bash 5.3 差分 244/246）。用户级安装布局
+/// `%LOCALAPPDATA%\Programs\Niubash\winuxcmd\bin\bash.exe`；shim 把 `-c`
+/// 按 bash 语义转发到 niu.exe 内嵌引擎，stdout/stderr 纯净、退出码与
+/// `-c` 后位置参数原样透传（niubash 1.5.0 实测）。它不在 PATH 里
+/// （安装器只挂安装根），PATH 查找永远发现不了，必须按布局探测。
+/// LOCALAPPDATA 缺失或服务账户布局不匹配时为 `None`——探测序退回
+/// pwsh 优先，与历史行为逐字节一致。
+#[cfg(windows)]
+pub(super) fn niubash_shim() -> Option<&'static str> {
+    static SHIM: OnceLock<Option<String>> = OnceLock::new();
+    SHIM.get_or_init(|| {
+        let local = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        [
+            local.join(r"Programs\Niubash\winuxcmd\bin\bash.exe"),
+            local.join(r"Programs\Niubash\winuxcmd\usr\bin\bash.exe"),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+    })
+    .as_deref()
+}
+
+#[cfg(not(windows))]
+#[allow(dead_code)] // 仅 Windows 消费（detect/auto_candidates 的 cfg 块内）。
+pub(super) fn niubash_shim() -> Option<&'static str> {
     None
 }
 

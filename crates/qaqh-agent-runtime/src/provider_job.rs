@@ -66,9 +66,10 @@ pub enum ProviderFailureKind {
     WorkerCrash,
 }
 
-/// 一次请求中截断的在飞工具调用：call_id/name 齐全，`args_text` 是已到达
+/// 一次请求中截断/损坏的工具调用：call_id/name 齐全，`args_text` 是已到达
 /// 的累计片段（可能不闭合）。turn 级重发据此注入失败 ToolResult；参数不
-/// 完整不构成授权面，永不用于执行。
+/// 完整不构成授权面，永不用于执行。两个入口都填：流中断（有片段）与
+/// 终态响应里携带损坏 ToolUse（无可用参数，`args_text` 为空）。
 pub struct PartialToolCall {
     pub call_id: String,
     pub name: String,
@@ -149,7 +150,8 @@ pub async fn run_round(
     mut cancel: tokio::sync::watch::Receiver<bool>,
     progress: Option<ProgressStream>,
     // 文本续写（A 路）的 seed：prefill 前缀，计入 attempt-2 的 partial_text，
-    // display 首帧与 seal 全文自然完整。与 messages 里的 prefill 尾消息配套。
+    // display 首帧与 seal 全文自然完整。前缀消息只挂在发出请求的瞬态尾，
+    // 不进 durable messages。
     text_seed: Option<String>,
 ) -> ProviderOutcome {
     if *cancel.borrow() {
@@ -207,16 +209,9 @@ pub async fn run_round(
     };
     let mut outcome = outcome;
     outcome.cancelled = cancelled_by_turn;
-    // Publish the final cumulative value regardless of the throttle window so a
-    // cancelled or failed attempt still shows everything that was generated.
-    if let Some(display) = &progress {
-        if let Some(text) = outcome.partial_text.as_deref() {
-            publish_block(display, ProgressBlockKind::Answer, text);
-        }
-        if let Some(text) = outcome.partial_reasoning.as_deref() {
-            publish_block(display, ProgressBlockKind::Reasoning, text);
-        }
-    }
+    // 流末全文兜底已移进 stream_once，且排在工具尾巴之前。这里不再重发：
+    // 重发的全文会落到最后一个工具帧之后，把 answer 的 MessageDelta 序列
+    // 劈成两半（upstream_chunk_to_outbound_latency_and_stream_completeness）。
     outcome
 }
 
@@ -238,6 +233,9 @@ fn stream_once(
     let mut partial_text = seed.clone();
     let mut partial_reasoning = String::new();
     let mut last_emit: Option<Instant> = None;
+    // 已发布到 display 的累积文本长度：判重尺，见 publish_text_if_grown。
+    let mut published_answer_len = 0usize;
+    let mut published_reasoning_len = 0usize;
     let mut first_output_at: Option<Instant> = None;
     let mut last_output_at: Option<Instant> = None;
     let mut tool_args: HashMap<usize, ToolInputStream> = HashMap::new();
@@ -288,7 +286,12 @@ fn stream_once(
                     if let Some(display) = &display
                         && due(&mut last_emit)
                     {
-                        publish_block(display, ProgressBlockKind::Answer, &partial_text);
+                        publish_text_if_grown(
+                            display,
+                            ProgressBlockKind::Answer,
+                            &partial_text,
+                            &mut published_answer_len,
+                        );
                     }
                 }
                 qaqh_gate::StreamEvent::ReasoningDelta { kind, text } => {
@@ -301,7 +304,12 @@ fn stream_once(
                     if let Some(display) = &display
                         && due(&mut last_emit)
                     {
-                        publish_block(display, ProgressBlockKind::Reasoning, &partial_reasoning);
+                        publish_text_if_grown(
+                            display,
+                            ProgressBlockKind::Reasoning,
+                            &partial_reasoning,
+                            &mut published_reasoning_len,
+                        );
                     }
                 }
                 qaqh_gate::StreamEvent::ToolCallProgress {
@@ -326,6 +334,13 @@ fn stream_once(
                     if let Some(display) = &display
                         && (entry.mark_complete() || due(&mut last_emit))
                     {
+                        flush_text_before_tool(
+                            display,
+                            &partial_text,
+                            &partial_reasoning,
+                            &mut published_answer_len,
+                            &mut published_reasoning_len,
+                        );
                         publish_tool_input(display, entry);
                     }
                 }
@@ -353,6 +368,13 @@ fn stream_once(
                     if let Some(display) = &display
                         && (entry.mark_complete() || due(&mut last_emit))
                     {
+                        flush_text_before_tool(
+                            display,
+                            &partial_text,
+                            &partial_reasoning,
+                            &mut published_answer_len,
+                            &mut published_reasoning_len,
+                        );
                         publish_tool_input(display, entry);
                     }
                 }
@@ -378,6 +400,17 @@ fn stream_once(
             }
         },
     );
+    // 流末全文兜底：排在工具尾巴之前，且以已发布长度判重——已经因工具帧
+    // 冲刷过的全文不再补发，answer 的 MessageDelta 序列因此保持连续。
+    if let Some(display) = &display {
+        flush_text_before_tool(
+            display,
+            &partial_text,
+            &partial_reasoning,
+            &mut published_answer_len,
+            &mut published_reasoning_len,
+        );
+    }
     // 无论这条出口走向哪里，先补欠的尾巴：失败/重复 Done 的回合同样有过在飞的
     // 参数，渲染层要的是「模型最后吐到哪」。
     flush_tool_input_tails(&display, &mut tool_args);
@@ -445,6 +478,7 @@ fn stream_once(
                 .insert(0, ContentBlock::Text { text: seed }),
         }
     }
+    let partial_tools = corrupt_tool_calls(&message);
     let (finish, incomplete_reason) = classify(stop_reason.as_deref(), &message);
     ProviderOutcome {
         evidence: Evidence::Terminal,
@@ -457,7 +491,7 @@ fn stream_once(
         incomplete_reason,
         partial_text: (!partial_text.is_empty()).then_some(partial_text),
         partial_reasoning: (!partial_reasoning.is_empty()).then_some(partial_reasoning),
-        partial_tools: Vec::new(),
+        partial_tools,
         error: None,
         cancelled: false,
         failure_kind: None,
@@ -527,6 +561,46 @@ fn publish_block(display: &ProgressStream, kind: ProgressBlockKind, text: &str) 
         model: &display.blocks.model,
         text,
     });
+}
+
+/// 累积正文/思考只增不减；按已发布长度判重。流末兜底因此不会在工具帧之后
+/// 重复发一帧全文——那正是把 answer 的 MessageDelta 序列劈成两半的病灶。
+fn publish_text_if_grown(
+    display: &ProgressStream,
+    kind: ProgressBlockKind,
+    text: &str,
+    published_len: &mut usize,
+) -> bool {
+    if text.is_empty() || text.len() <= *published_len {
+        return false;
+    }
+    publish_block(display, kind, text);
+    *published_len = text.len();
+    true
+}
+
+/// 工具展示帧落地前，先把已攒的正文/思考全文冲刷到 display。
+/// 顺序不变量：同一 attempt 内 answer 的 MessageDelta 连续，工具帧只能排在
+/// 其后，不能插在两帧正文之间（前端按到达序把两类帧渲染进不同区域）。
+fn flush_text_before_tool(
+    display: &ProgressStream,
+    partial_text: &str,
+    partial_reasoning: &str,
+    published_answer_len: &mut usize,
+    published_reasoning_len: &mut usize,
+) {
+    publish_text_if_grown(
+        display,
+        ProgressBlockKind::Reasoning,
+        partial_reasoning,
+        published_reasoning_len,
+    );
+    publish_text_if_grown(
+        display,
+        ProgressBlockKind::Answer,
+        partial_text,
+        published_answer_len,
+    );
 }
 
 fn publish_tool_input(display: &ProgressStream, entry: &mut ToolInputStream) {
@@ -735,11 +809,40 @@ impl Estimator {
 /// Any hanging tool declaration or null-input tool call is classified as
 /// [`ProviderFinish::Incomplete`] so partial JSON arguments can never be
 /// dispatched as tools.
+/// 从已收尾的响应里取出参数损坏的 ToolUse（悬挂身份或 Null 参数）。
+/// 与 `classify()` 共用同一判据：终态响应同样可能携带半截工具调用，它必须
+/// 和流中断一样进入 B 路重试，而不是被 `finish_failed` 直接判死。
+fn corrupt_tool_calls(message: &Message) -> Vec<PartialToolCall> {
+    message
+        .content
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, block)| match block {
+            ContentBlock::ToolUse { id, name, input }
+                if block.is_hanging_tool_use() || input.is_null() =>
+            {
+                Some(PartialToolCall {
+                    call_id: if id.is_empty() {
+                        format!("truncated_{idx}")
+                    } else {
+                        id.clone()
+                    },
+                    name: if name.is_empty() {
+                        "unknown".to_owned()
+                    } else {
+                        name.clone()
+                    },
+                    args_text: String::new(),
+                    complete: false,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 fn classify(stop_reason: Option<&str>, message: &Message) -> (ProviderFinish, Option<String>) {
-    let has_corrupt_tool = message.content.iter().any(|block| {
-        block.is_hanging_tool_use()
-            || matches!(block, ContentBlock::ToolUse { input, .. } if input.is_null())
-    });
+    let has_corrupt_tool = !corrupt_tool_calls(message).is_empty();
     if has_corrupt_tool {
         // 逐块留痕：哪个调用坏了、是 Null 参数还是悬挂身份、当时的 stop_reason。
         // gate 层（finalize）已有 args-head 级日志，这里是 wire 无关的兜底视图，

@@ -41,6 +41,11 @@ use crate::tool_job::{
 };
 use qaqh_ringing_contract::fact::ProviderFinish;
 
+/// widget 快照回流块的 actor id（落库标记，重建时据此还原提醒通道 name）。
+const WIDGET_STATE_ACTOR_ID: &str = "widget-state";
+/// widget 快照在模型消息上的提醒通道 name；wire 投影不消费，stale 边界据此跳过。
+const WIDGET_STATE_NAME: &str = "qaqh_widget_state";
+
 /// 权限交互的应答。
 #[derive(Debug, Clone, Copy)]
 pub struct PermissionAnswer {
@@ -144,8 +149,8 @@ struct ActiveTurn {
     trigger: Option<qaqh_ringing_contract::commands::InterAgentEnvelope>,
     /// 运行中合并(Steer/Interject):下一轮 provider 调用前注入。
     steers: Vec<String>,
-    /// widget-directive §4：本回合收到的 modelContent 快照，下一轮 provider 请求前
-    /// 统一渲染为 `<widget-state>` reminder（内存态，消费即清，不落盘）。
+    /// widget-directive §4：本回合收到的 modelContent 快照，落库为 durable
+    /// Input 并并入 messages（下一回合逐字节重建，零反转）。
     widget_contexts: Vec<qaqh_ringing_contract::commands::WidgetContext>,
     /// 本回合升起、未决的交互(中断时统一取消)。
     pending_interactions: Vec<InteractionId>,
@@ -522,7 +527,8 @@ impl SessionLoop {
             self.finish_active(&turn_id).await;
             return;
         }
-        // 回合开场的 widget 快照与 steer 同走 reminder 通道（§4）。
+        // 回合开场的 widget 快照与 steer 都汇入本回合（§4）：两者都是落库的
+        // durable 事实，下一回合从历史逐字节重建（零反转）。
         if let Some(widget_context) = input.widget_context.clone()
             && let Some(active) = self.lock().active.as_mut()
         {
@@ -565,11 +571,10 @@ impl SessionLoop {
         // attempt(此前失败轮的 usage 直接丢弃,turn 级重发会放大这个缺口)。
         let mut accrued_usage: Option<UsageInfo> = None;
         let mut watchdog_folded = false;
-        // A 路（文本续写）的运行态：prefill 尾消息在线程历史中的长度水位。
-        // prefill 是临时构造，随本次请求消费后即移除；其内容由续写 attempt
-        // 的块（seed+续写段）承载落盘。
+        // A 路（文本续写）的运行态：prefill 前缀。唯一保留的请求瞬态尾（续写
+        // 锚点），永不进入 durable messages（混进历史=下一回合重建在此处字节
+        // 分叉）；其内容由续写 attempt 的块（seed+续写段）承载落盘。
         let mut text_seed: Option<String> = None;
-        let mut prefill_len: Option<usize> = None;
 
         'rounds: loop {
             // Steer/Interject 合并:下一轮请求前注入 user 消息。
@@ -588,8 +593,8 @@ impl SessionLoop {
                     content: vec![ContentBlock::Text { text }],
                 });
             }
-            // widget-directive §4：结构化状态回流——快照序列化成 reminder 消息，
-            // 随本轮请求发出；时间线/用户文本永不出现这段内容。
+            // widget-directive §4：结构化状态回流。快照作为 durable Input 落库，
+            // 与发出的消息共用同一份字节：下一回合重建逐字节重现，零字节反转。
             let widget_contexts = {
                 let mut inner = self.lock();
                 match inner.active.as_mut() {
@@ -600,14 +605,40 @@ impl SessionLoop {
             if !widget_contexts.is_empty() {
                 let payload =
                     serde_json::to_string(&widget_contexts).unwrap_or_else(|_| "[]".to_string());
-                messages.push(Message {
-                    msg_id: None,
-                    role: "user".into(),
-                    name: None,
-                    content: vec![ContentBlock::Text {
-                        text: format!("<widget-state>\n{payload}\n</widget-state>"),
-                    }],
-                });
+                let text = format!("<widget-state>\n{payload}\n</widget-state>");
+                // durable：与 watchdog Input 同款落库；actor.id 供 assemble_context
+                // 还原提醒通道 name（stale 边界据此跳过）。
+                let entry = TimelineEntry::Input {
+                    block_id: BlockId::new(format!("block_{}", generate_ulid())),
+                    turn_id: Some(turn.clone()),
+                    purpose: InputPurpose::Interject,
+                    content: ContentValue::Inline { text: text.clone() },
+                    attachments: Vec::new(),
+                    images: Vec::new(),
+                    inter_agent: None,
+                    subagent_terminal: None,
+                    actor: ActorRef {
+                        kind: ActorKind::System,
+                        id: WIDGET_STATE_ACTOR_ID.into(),
+                        display_name: Some("widget 状态回流".into()),
+                    },
+                };
+                // 落库成功才并入 messages：保证发出的每个字节都能从历史重建。
+                // 失败只记日志并丢弃这次快照（best-effort，不制造字节反转）。
+                match self.owner.append_block(entry).await {
+                    Ok(()) => messages.push(Message {
+                        msg_id: None,
+                        role: "user".into(),
+                        // name 标记提醒通道：wire 投影不消费它，gate 的
+                        // stale_image_boundary 据此识别"非消化信号"（见 sdk_common）。
+                        name: Some(WIDGET_STATE_NAME.into()),
+                        content: vec![ContentBlock::Text { text }],
+                    }),
+                    Err(error) => log::warn!(
+                        "[loop] {} widget state persist failed: {error}",
+                        self.session_id
+                    ),
+                }
             }
 
             // 软阈值提醒：交接文档由模型写，后端只把真实读数摊开给它看。
@@ -656,19 +687,29 @@ impl SessionLoop {
                 }),
                 blocks: blocks.clone(),
             };
+            // ── 请求构造 ── durable messages 保持纯追加：本轮发出的每个历史
+            // 字节，下一回合重建时逐字节重现。widget 快照已落库并在 messages
+            // 中（消息即历史、零反转）；唯一瞬态是 prefill 续写锚点，它必须是
+            // 请求最后一条消息，内容由续写 attempt 的块承载落盘。
+            let mut request = messages.clone();
+            if let Some(prefix) = &text_seed {
+                request.push(Message {
+                    msg_id: None,
+                    role: "assistant".into(),
+                    // 续写锚点不是应答：name 标记后 stale 边界扫描会跳过它。
+                    name: Some("qaqh_prefill".into()),
+                    content: vec![ContentBlock::Text { text: prefix.clone() }],
+                });
+            }
             let mut outcome = provider_job::run_round(
                 spec,
-                messages.clone(),
+                request,
                 self.session_id.clone(),
                 cancel_rx.clone(),
                 Some(progress),
                 text_seed.take(),
             )
             .await;
-            // prefill 已随本次请求消费（clone 发出，线程历史不留）。
-            if let Some(len) = prefill_len.take() {
-                messages.truncate(len);
-            }
             self.note_context(&outcome);
             // 失败 attempt 的已见 usage 进累计:重发结算与最终账本都以合并
             // 口径为准。重发分支不取走累计,继续累加;结算分支取走。
@@ -756,108 +797,26 @@ impl SessionLoop {
                             }
                         }
                         // ── 重发形态分派（预算已扣、退避已过）──
-                        // B 路:截断的工具调用 → 注入失败 ToolResult。wire 无关
-                        // (chat 的 "{}" arguments / messages 的 input {} 都合法),
-                        // 失败事实让模型下轮用完整参数重调。半截 args 装不进
-                        // 中性 ToolUse.input(Value 须合法 JSON):截断恰在完整
-                        // 边界时可解析出全参,否则退空对象——只用于声明面与
-                        // UI,授权面与执行面都不参与。
+                        // B 路:截断的工具调用 → 注入失败 ToolResult。与终态
+                        // incomplete 分支共用 inject_failed_tool_results，避免
+                        // 两条边界各写一份、其中一条漏掉重试。
                         if !outcome.partial_tools.is_empty() {
-                            let prefix = outcome
-                                .partial_text
-                                .clone()
-                                .filter(|t| !t.trim().is_empty());
-                            if let Some(prefix) = &prefix {
-                                // 前缀是被截断消息的已产出部分,attempt-2 的
-                                // 新消息不含它——独立落盘成块。
-                                self.owner
-                                    .append_block(TimelineEntry::AssistantBlock {
-                                        block_id: BlockId::new(format!(
-                                            "block_{}",
-                                            generate_ulid()
-                                        )),
-                                        turn_id: turn.clone(),
-                                        ord: 0,
-                                        block_kind: AssistantBlockKind::Answer,
-                                        content: ContentValue::Inline {
-                                            text: prefix.clone(),
-                                        },
-                                        model: blocks.model.clone(),
-                                        usage: None,
-                                        generated_ms: outcome.generated_ms,
-                                        opaque: vec![],
-                                    })
-                                    .await
-                                    .ok();
-                            }
-                            let mut reply = Vec::new();
-                            if let Some(prefix) = prefix {
-                                reply.push(ContentBlock::Text { text: prefix });
-                            }
-                            let mut tool_messages = Vec::new();
-                            for tool in &outcome.partial_tools {
-                                let input = serde_json::from_str::<serde_json::Value>(
-                                    &tool.args_text,
-                                )
-                                .unwrap_or(serde_json::Value::Object(Default::default()));
-                                reply.push(ContentBlock::ToolUse {
-                                    id: tool.call_id.clone(),
-                                    name: tool.name.clone(),
-                                    input: input.clone(),
-                                });
-                                self.declare(&turn, &tool.call_id, &tool.name, &input).await;
-                                let failure = format!(
-                                    "tool call stream was cut off mid-generation \
-                                     ({} bytes of arguments received); call the tool \
-                                     again with complete arguments",
-                                    tool.args_text.len()
-                                );
-                                self.owner
-                                    .append_block(TimelineEntry::ToolResult {
-                                        call_id: ToolCallId::new(tool.call_id.clone()),
-                                        turn_id: Some(turn.clone()),
-                                        content: ContentValue::Inline {
-                                            text: failure.clone(),
-                                        },
-                                        images: Vec::new(),
-                                    })
-                                    .await
-                                    .ok();
-                                tool_messages.push(tool_result_message(
-                                    &tool.call_id,
-                                    &failure,
-                                    false,
-                                    &[],
-                                ));
-                            }
-                            // 与正常 ToolUse 分支同形:assistant 消息在前,
-                            // tool result 随后。
-                            messages.push(Message {
-                                msg_id: None,
-                                role: "assistant".into(),
-                                name: None,
-                                content: reply,
-                            });
-                            messages.extend(tool_messages);
+                            self.inject_failed_tool_results(
+                                &turn, &outcome, &blocks, &mut messages,
+                            )
+                            .await;
                             continue 'rounds;
                         }
-                        // A 路:纯文本截断 → prefill 前缀 + seed 续写。messages
-                        // wire 是官方 continuation;chat/gemini 尾 assistant text
-                        // 是 prefill 手法(近似续写)。partial reasoning 被剥:
+                        // A 路:纯文本截断 → prefill 前缀 + seed 续写。前缀只进
+                        // 本次请求 clone 的瞬态尾(见请求构造),永不混进 durable
+                        // messages。messages wire 是官方 continuation;chat/gemini
+                        // 尾 assistant text 是 prefill 手法(近似续写)。partial
+                        // reasoning 被剥:
                         // thinking 块回传必须带块尾 signature,截断时拿不到,
                         // 上游语义上就没有「思考续写」。
-                        if let Some(prefix) = outcome
-                            .partial_text
-                            .clone()
-                            .filter(|t| !t.trim().is_empty())
+                        if let Some(prefix) =
+                            outcome.partial_text.clone().filter(|t| !t.trim().is_empty())
                         {
-                            messages.push(Message {
-                                msg_id: None,
-                                role: "assistant".into(),
-                                name: None,
-                                content: vec![ContentBlock::Text { text: prefix.clone() }],
-                            });
-                            prefill_len = Some(messages.len());
                             text_seed = Some(prefix);
                             continue 'rounds;
                         }
@@ -886,6 +845,41 @@ impl SessionLoop {
                     break;
                 }
                 Evidence::Terminal => {
+                    // 终态响应携带损坏 ToolUse（classify → Incomplete）与流中断
+                    // 同属"工具参数没生成完整"。此前只有 StartedUnknown 走 B 路，
+                    // 终态直接 finish_failed，同一类截断从相邻边界漏出。
+                    // 在 seal 之前拦截：扣一次 turn 预算，注入失败 ToolResult，
+                    // 让模型下轮用完整参数重调；预算耗尽仍如实判死。
+                    if turn_retry_budget > 0
+                        && outcome.finish == Some(ProviderFinish::Incomplete)
+                        && !outcome.partial_tools.is_empty()
+                    {
+                        turn_retry_budget -= 1;
+                        let retry_display = ProgressStream {
+                            sink: Arc::new(OwnerSink {
+                                owner: Arc::clone(&self.owner),
+                            }),
+                            blocks: blocks.clone(),
+                        };
+                        retry_display
+                            .sink
+                            .attempt_finished(&turn_id, &blocks.all_block_ids(), &[]);
+                        retry_display.sink.retrying(RetryingProgress {
+                            turn_id: &turn_id,
+                            attempt: attempt_no + 1,
+                            max_attempts: 1 + MAX_TURN_RETRIES,
+                            delay_secs: 0,
+                            error: outcome
+                                .incomplete_reason
+                                .as_deref()
+                                .unwrap_or("incomplete tool call"),
+                        });
+                        self.inject_failed_tool_results(
+                            &turn, &outcome, &blocks, &mut messages,
+                        )
+                        .await;
+                        continue 'rounds;
+                    }
                     outcome.usage = accrued_usage.take();
                     self.seal_response(&turn, &blocks, &outcome).await;
                     match outcome.finish {
@@ -937,6 +931,22 @@ impl SessionLoop {
                                 if name == crate::handoff::TOOL_NAME && ok {
                                     handed_off = true;
                                 }
+                                // ctx 页脚 append 进结果正文：落库与发送共用同一份
+                                // 字节，历史即消息、零字节反转（残留读数无妨）。
+                                let text = match self.last_context() {
+                                    Some(usage) => {
+                                        let footer = crate::handoff::ctx_footer(
+                                            usage.used_tokens,
+                                            usage.window_tokens,
+                                        );
+                                        if footer.is_empty() {
+                                            text
+                                        } else {
+                                            format!("{text}{footer}")
+                                        }
+                                    }
+                                    None => text,
+                                };
                                 // ToolResult is the durable RingingV2 history fact. Keeping a
                                 // result only in this turn's in-memory request makes the next
                                 // context rebuild synthesize `missing tool result`.
@@ -977,21 +987,6 @@ impl SessionLoop {
                                 self.finish_completed(&turn, outcome.usage.clone()).await;
                                 break 'rounds;
                             }
-                            // 占用页脚只挂在本轮最后一条工具结果上：它是实时遥测，
-                            // 不进历史事实（重放时不该带上上一轮的百分比）。
-                            // 工具消息的正文块是 ToolResult 而非 Text——按 Text 匹配
-                            // 永远落空，页脚从未真正挂上去过；改为追加到信封正文
-                            // 尾部，随 render_xml_envelope 原样发出。
-                            if let Some(usage) = self.last_context()
-                                && let Some(last) = tool_messages.last_mut()
-                                && let Some(ContentBlock::ToolResult { result, .. }) =
-                                    last.content.last_mut()
-                            {
-                                result.append_model_tail(&crate::handoff::ctx_footer(
-                                    usage.used_tokens,
-                                    usage.window_tokens,
-                                ));
-                            }
                             messages.push(message);
                             messages.extend(tool_messages);
                         }
@@ -1014,6 +1009,85 @@ impl SessionLoop {
             }
         }
         self.finish_active(&turn_id).await;
+    }
+
+    /// B 路重发的公共落盘/组消息逻辑：截断的工具调用以失败 ToolResult 注入
+    /// 下轮请求。StartedUnknown（流中断）与 Terminal（终态带损坏 ToolUse）
+    /// 共用，避免两条边界各写一份导致其中一条漏掉重试。
+    async fn inject_failed_tool_results(
+        &self,
+        turn: &TurnId,
+        outcome: &ProviderOutcome,
+        blocks: &AttemptBlocks,
+        messages: &mut Vec<Message>,
+    ) {
+        let prefix = outcome
+            .partial_text
+            .clone()
+            .filter(|t| !t.trim().is_empty());
+        if let Some(prefix) = &prefix {
+            // 前缀是被截断消息的已产出部分，下一 attempt 的新消息不含它。
+            self.owner
+                .append_block(TimelineEntry::AssistantBlock {
+                    block_id: BlockId::new(format!("block_{}", generate_ulid())),
+                    turn_id: turn.clone(),
+                    ord: 0,
+                    block_kind: AssistantBlockKind::Answer,
+                    content: ContentValue::Inline {
+                        text: prefix.clone(),
+                    },
+                    model: blocks.model.clone(),
+                    usage: None,
+                    generated_ms: outcome.generated_ms,
+                    opaque: vec![],
+                })
+                .await
+                .ok();
+        }
+        let mut reply = Vec::new();
+        if let Some(prefix) = prefix {
+            reply.push(ContentBlock::Text { text: prefix });
+        }
+        let mut tool_messages = Vec::new();
+        for tool in &outcome.partial_tools {
+            let input = serde_json::from_str::<serde_json::Value>(&tool.args_text)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            reply.push(ContentBlock::ToolUse {
+                id: tool.call_id.clone(),
+                name: tool.name.clone(),
+                input: input.clone(),
+            });
+            self.declare(turn, &tool.call_id, &tool.name, &input).await;
+            let failure = format!(
+                "tool call was cut off mid-generation ({} bytes of arguments received); call the tool again with complete arguments",
+                tool.args_text.len()
+            );
+            self.owner
+                .append_block(TimelineEntry::ToolResult {
+                    call_id: ToolCallId::new(tool.call_id.clone()),
+                    turn_id: Some(turn.clone()),
+                    content: ContentValue::Inline {
+                        text: failure.clone(),
+                    },
+                    images: Vec::new(),
+                })
+                .await
+                .ok();
+            tool_messages.push(tool_result_message(
+                &tool.call_id,
+                &failure,
+                false,
+                &[],
+            ));
+        }
+        // 与正常 ToolUse 分支同形：assistant 消息在前，tool result 随后。
+        messages.push(Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: reply,
+        });
+        messages.extend(tool_messages);
     }
 
     async fn declare(
@@ -2048,7 +2122,6 @@ impl SessionLoop {
         // 重建上传图片注册表（read_image(image_index) 的真相源）。注册表是
         // 进程本地的（空闲卸载/resume 清空），按 timeline 输入序全量重建，
         // 保证索引与 gate 投影的 [Image #N] 编号对齐；字节落盘内容寻址幂等。
-        // 系统输入的图不进模型上下文（gate 投影不编号），跳过登记。
         qaqh_workspace::read_image::reset_images(&self.session_id);
         let state = self.owner.snapshot().await?;
         let tools_by_id: HashMap<String, &qaqh_ringing_contract::state::ToolCallView> = state
@@ -2073,25 +2146,23 @@ impl SessionLoop {
                     {
                         content_blocks.push(ContentBlock::Text { text });
                     }
-                    if actor.kind != ActorKind::System {
-                        for image in &images {
-                            match qaqh_types::image_store::store_image_b64(
-                                &image.data,
-                                &image.mime_type,
-                            ) {
-                                Ok(sha256) => {
-                                    qaqh_workspace::read_image::register_image_ref(
-                                        &self.session_id,
-                                        &image.mime_type,
-                                        &sha256,
-                                    );
-                                }
-                                Err(error) => {
-                                    log::warn!(
-                                        "[loop] {} input image persist failed: {error}",
-                                        self.session_id
-                                    );
-                                }
+                    for image in &images {
+                        match qaqh_types::image_store::store_image_b64(
+                            &image.data,
+                            &image.mime_type,
+                        ) {
+                            Ok(sha256) => {
+                                qaqh_workspace::read_image::register_image_ref(
+                                    &self.session_id,
+                                    &image.mime_type,
+                                    &sha256,
+                                );
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "[loop] {} input image persist failed: {error}",
+                                    self.session_id
+                                );
                             }
                         }
                     }
@@ -2100,15 +2171,20 @@ impl SessionLoop {
                         data: image.data,
                     }));
                     if !content_blocks.is_empty() {
+                        // 模型面统一 user：TimelineEntry::Input 的 actor.kind
+                        // 是落库/UI/审计口径（System 通知仍是 system actor），
+                        // 但请求里中段 system 是所有 wire 都要处理的异形——
+                        // BUG-2026-11-15-03（提升顶层后 messages 为空被 400）与
+                        // 2026-11-17 复盘（注意力位移、被读成空发）的教训都收敛
+                        // 到这条原位 user 轮，gate 不再需要按文本嗅探。
+                        // widget 快照按 actor.id 还原提醒通道 name：落库/重建
+                        // 与发出时同字节、同标记，stale 边界据此跳过。
+                        let name = (actor.id == WIDGET_STATE_ACTOR_ID)
+                            .then(|| WIDGET_STATE_NAME.to_string());
                         messages.push(Message {
                             msg_id: None,
-                            role: if actor.kind == ActorKind::System {
-                                "system"
-                            } else {
-                                "user"
-                            }
-                            .into(),
-                            name: None,
+                            role: "user".into(),
+                            name,
                             content: content_blocks,
                         });
                     }

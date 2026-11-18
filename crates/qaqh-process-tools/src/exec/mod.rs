@@ -27,7 +27,7 @@ pub(crate) mod sbx_bypass;
 
 #[cfg(test)]
 pub(crate) use register::register;
-pub use shell::{bootstrap, register_shell};
+pub use shell::{bootstrap, register_shell, user_shell_argv};
 
 #[cfg(test)]
 pub(crate) use direct::{direct_exec, reader_eof_warning};

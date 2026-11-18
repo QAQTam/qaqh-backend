@@ -650,6 +650,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             cols: Some(132),
             rows: Some(44),
             cwd: Some("/fixture/workspace".to_owned()),
+            shell: Some("pwsh".to_owned()),
         },
     )?;
     write_fixture(

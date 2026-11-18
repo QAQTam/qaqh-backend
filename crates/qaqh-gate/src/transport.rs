@@ -3,16 +3,15 @@
 //! HTTP/SSE/重试已整体移交 mutil-ai（`messages_sdk` / `chat_sdk` /
 //! `responses_sdk` + `sdk_common`）；本模块只保留仍被复用的同步门面
 //! （crate 级 current-thread runtime 的 `block_on`）、可取消睡眠、
-//! `RetryPolicy`（gate 侧旋钮，编译成 SDK 策略）、错误描述表、
-//! skill envelope 归一与 `SseTrace` 诊断。
+//! `RetryPolicy`（gate 侧旋钮，编译成 SDK 策略）、错误描述表和 `SseTrace` 诊断。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use qaqh_types::{ContentBlock, Message};
+use qaqh_types::Message;
 
-use super::types::{ProviderConfig, StreamEvent};
+use super::types::StreamEvent;
 
 // 与官方客户端会话重试策略对齐（opencode session/retry.ts：2s 初始、翻倍；
 // 本常量 5 = 1 次原始请求 + 4 次重试），吸收网关瞬时 5xx  burst。
@@ -174,28 +173,6 @@ pub(crate) fn empty_request_noop_done_event() -> StreamEvent {
 pub(crate) fn empty_request_sync_error() -> String {
     "empty_request: 本次请求无任何可投影内容（input 为空），已本地短路；未向上游发送空请求"
         .to_string()
-}
-
-pub(crate) fn normalize_skill_envelope(
-    provider: &ProviderConfig,
-    mut messages: Vec<Message>,
-) -> Result<Vec<Message>, String> {
-    let is_envelope = messages.last().is_some_and(|message| {
-        message.role == "system" && message.content.iter().any(|block| {
-            matches!(block, ContentBlock::Text { text } if text.starts_with("<skill_context_envelope"))
-        })
-    });
-    if !is_envelope || provider.supports_tail_system {
-        return Ok(messages);
-    }
-    let envelope = messages.pop().expect("checked last message");
-    let dynamic_slot = messages
-        .iter()
-        .take_while(|message| message.role == "system")
-        .count();
-    messages.insert(dynamic_slot, envelope);
-    log::warn!("skill context moved to head dynamic system slot; prompt-prefix cache degraded");
-    Ok(messages)
 }
 
 /// `QAQH_SSE_TRACE=<path>`：将 gate 派生的每个流式事件按到达序追加写入文件

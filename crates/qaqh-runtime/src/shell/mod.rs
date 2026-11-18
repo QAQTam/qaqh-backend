@@ -43,13 +43,16 @@ const SHELL_VIEWER_CAPACITY: usize = 512;
 /// 又一次 wire 实变的搭车项。要用户可调时再单独立项。
 pub const SHELL_IDLE_REAP_SECS: u64 = 600;
 
-/// 打开一条 shell 的请求面。**只有几何与目录**：shell 由 daemon 决定（D4 ——
-/// 少一个参数就少一条注入面，且"进程归后端所有"本来就是这次迁移的理由）。
+/// 打开一条 shell 的请求面。几何、目录，外加**闭集壳名**（D4 修订 2026-11-17：
+/// `shell` 是 `pwsh/bash/cmd/…` 的枚举名而非可执行路径，argv 仍由 daemon 端
+/// `qaqh_process_tools::exec::user_shell_argv` 解析——与 exec 模型面同一张词表、
+/// 同一条钉序，客户端依旧传不进任何任意可执行名）。`None` = daemon 默认。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ShellOpen {
     pub cols: Option<u16>,
     pub rows: Option<u16>,
     pub cwd: Option<String>,
+    pub shell: Option<String>,
 }
 
 /// 一帧原始输出 + 它在整条会话里的字节游标。游标只用于**回放定位**，
@@ -192,7 +195,14 @@ impl ShellRegistry {
     pub fn open(&self, owner_instance_key: &str, request: ShellOpen) -> Result<ShellInfo, String> {
         let cols = request.cols.unwrap_or(SHELL_DEFAULT_COLS);
         let rows = request.rows.unwrap_or(SHELL_DEFAULT_ROWS);
-        let (argv, shell_label) = default_shell_argv();
+        // 壳名在**这里**塌进 argv：请求带名就走 exec 面的同一张闭集词表，未知名
+        // 当场拒绝——不落回默认壳（那会让打错字的调用方开出一个他没要的交互进程，
+        // 宪法 5）。不带名才是 daemon 的默认登录壳。
+        let (argv, shell_label) = match request.shell.as_deref() {
+            None => default_shell_argv(),
+            Some(name) => qaqh_process_tools::exec::user_shell_argv(name)
+                .ok_or_else(|| format!("qaqh-shell: unknown shell name: {name}"))?,
+        };
         let cwd = resolve_cwd(request.cwd.as_deref())?;
 
         // spec.env 是**完整替换表**（spawn_pty 内 env_clear）。用户 shell 的语义

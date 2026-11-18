@@ -49,7 +49,8 @@
   ```
   widget_context: { session_id, widget: {path, title}, model_content: Json } | null
   ```
-- 语义：前端在用户点击 `sendFollowUpMessage` 确认时携带**当下最新** `modelContent` 快照；daemon 把它作为结构化 input metadata 注入 agentloop（渲染进 system/reminder 块），**绝不拼进用户可见文本**；`privateContent` 永不出前端存储（Electron userData，按 fragment 绝对路径键——**实施裁定：`workspace|session|path` 三段键收缩为 path**，绝对路径唯一编码 workspace+session，语义等价且渲染层少一个易变句柄）。
+- 语义：前端在用户点击 `sendFollowUpMessage` 确认时携带**当下最新** `modelContent` 快照；daemon 把它落库为 durable Input（提醒通道），并作为一条 user 消息注入 provider 上下文——落库与发送同字节、下一回合逐字节重建（零字节反转），不作为普通用户可见文本；`privateContent` 永不出前端存储（Electron userData，按 fragment 绝对路径键——**实施裁定：`workspace|session|path` 三段键收缩为 path**，绝对路径唯一编码 workspace+session，语义等价且渲染层少一个易变句柄）。
+- 实施修订（2026-11-18）：快照从"请求瞬态尾、不落库"改为 durable Input——旧形态在下一回合重建时丢失该字节，前缀缓存从该点位整段击穿；与上下文占用页脚 append 化同一口径。落库失败则丢弃该快照（best-effort），不制造"发了没落库"的字节反转。
 - best-effort：注入失败（字段缺失/版本不匹配）→ 回合照常，仅少上下文。
 - 此为 LTS 用户空间小破坏（新增可选字段），符合宪法 15。
 

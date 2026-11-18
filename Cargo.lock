@@ -2875,7 +2875,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qaqh-acp"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "agent-client-protocol",
  "qaqh-client",
@@ -2888,7 +2888,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-agent-runtime"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2917,7 +2917,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-client"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2941,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-config-api",
@@ -2960,7 +2960,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config-api"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -2969,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-contract-export"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "hex",
  "qaqh-config-api",
@@ -2992,7 +2992,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-daemon"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3035,7 +3035,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-dsaccount"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3051,7 +3051,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ffi"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "android_logger",
  "log",
@@ -3066,7 +3066,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-file-tools"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3093,7 +3093,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-gate"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "anyhow",
  "futures",
@@ -3111,7 +3111,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-goal"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-ringing-contract",
@@ -3124,7 +3124,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-harmony-napi"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "napi-build-ohos",
  "napi-derive-ohos",
@@ -3137,7 +3137,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-lsp"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "async-lsp",
  "futures",
@@ -3159,7 +3159,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-marketplace"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3171,7 +3171,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-mcp"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "axum",
  "libc",
@@ -3190,7 +3190,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-memwatch"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -3199,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-permission"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-policy",
@@ -3212,14 +3212,14 @@ dependencies = [
 
 [[package]]
 name = "qaqh-policy"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qaqh-process-tools"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "anyhow",
  "libc",
@@ -3243,7 +3243,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-profile"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-types",
@@ -3257,7 +3257,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-bun"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3266,7 +3266,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-core"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3274,7 +3274,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-sdk"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3283,7 +3283,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-tools"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "qaqh-policy",
  "qaqh-ptc-core",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-pty"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "anyhow",
  "libc",
@@ -3306,7 +3306,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "qaqh-profile",
  "qaqh-ringing-contract",
@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-contract"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "qaqh-types",
  "schemars 1.2.3",
@@ -3332,7 +3332,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-runtime"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-memwatch",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-runtime"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "libc",
  "log",
@@ -3391,7 +3391,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-sandbox"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "landlock",
  "libc",
@@ -3407,7 +3407,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-session"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "hex",
  "log",
@@ -3429,7 +3429,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-siwc"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3445,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-skills"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "include_dir",
  "serde",
@@ -3455,7 +3455,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-subagent"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3471,7 +3471,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-tool-core"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "anyhow",
  "log",
@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-types"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3498,7 +3498,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-workspace"
-version = "4.0.1"
+version = "4.0.2"
 dependencies = [
  "anyhow",
  "chrono",

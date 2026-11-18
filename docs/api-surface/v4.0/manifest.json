@@ -5,7 +5,7 @@
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "91290ab3291e483b299f4a1e4e00cb28f5731b5885c15e520365b1bda70bc674",
+  "contract_hash": "2e605fa72ba52a7d622e39f232a93fe81a99c4ecd5b7ab2c7bf42cadc57224d8",
   "files": [
     {
       "path": "constants.ts",
@@ -701,7 +701,7 @@
     },
     {
       "path": "cs/ShellOpenParams.cs",
-      "sha256": "9758712ef8c21b25807b2848c215b1b185b9e1d0a3b66f4f1d75d65e54d4b547"
+      "sha256": "b48b7ad83abf5b45cc68aa4e2c5e143bfc86b5b51f8bba4f9ce38b68bcb9f69e"
     },
     {
       "path": "cs/ShellStreamControl.cs",
@@ -1333,7 +1333,7 @@
     },
     {
       "path": "fixtures/service-shell-open-params.json",
-      "sha256": "d84c3be26347362db9b75d2f8aea842a636a744637a9a574c4ffab7040895232"
+      "sha256": "41a6c8bb58c6825c4129a9c786995cbd32cd7f5a832c13445477bf658ab63163"
     },
     {
       "path": "fixtures/service-shell-open-result.json",
@@ -1597,7 +1597,7 @@
     },
     {
       "path": "types/qaqh/ConversationSendMessage.ts",
-      "sha256": "4e46e81e3aa9aea8c5b44fa84245cd51ef6d2654b99b3020e0433498eb12dc93"
+      "sha256": "8e092738ac054f2662801ffcfa090c58d69eb6a037a4621860117ffa72735c3d"
     },
     {
       "path": "types/qaqh/CredentialSource.ts",
@@ -2197,7 +2197,7 @@
     },
     {
       "path": "types/qaqh/ShellOpenParams.ts",
-      "sha256": "1da23dda22aba8b6ecebc58b745ca44773a29c850c8f28c2ea9d897f6d7bc9c8"
+      "sha256": "d24beffecc798cee3873b8392198621685380bfe122f9ac524e994bd8fcce2fe"
     },
     {
       "path": "types/qaqh/ShellStreamControl.ts",
@@ -2493,7 +2493,7 @@
     },
     {
       "path": "types/qaqh/WidgetContext.ts",
-      "sha256": "741ce0210119bf8953a6b97df8e122ea1a632b2e28a0f1ff077a7ba9f292a44f"
+      "sha256": "312965c20f9d33cfd5a47511b205ff7df09084ced5d702eab76ec965a299e424"
     },
     {
       "path": "types/qaqh/WidgetRef.ts",

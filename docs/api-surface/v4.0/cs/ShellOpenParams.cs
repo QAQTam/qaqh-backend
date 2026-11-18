@@ -20,5 +20,8 @@ public sealed record ShellOpenParams
     [JsonPropertyName("cwd")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string Cwd { get; init; }
+    [JsonPropertyName("shell")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string Shell { get; init; }
 }
 

@@ -4,8 +4,8 @@ import type { WidgetRef } from "./WidgetRef";
 
 /**
  * widget-directive §4：widget→模型的结构化状态回流。user-send 一等字段，
- * daemon 把它作为回合内存在记忆 reminder 注入 provider 上下文——不落时间线、
- * 不拼用户可见文本；缺失/版本不符只少上下文，不失败回合。
+ * daemon 把它落库为 durable Input 并作为提醒通道注入 provider 上下文——
+ * 与发出的消息同字节、下一回合逐字节重建（零反转）；缺失/版本不符只少上下文。
  */
 export type WidgetContext = { session_id: string, widget: WidgetRef, 
 /**

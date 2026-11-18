@@ -197,7 +197,9 @@ impl AgentRegistry {
         // system 参数 → messages 数组为空），Anthropic 协议与智谱网关都要求
         // messages 非空——6/6 handoff 后继首轮 400「[1214] messages 参数非法」
         // （官方线同样会拒）。同一份文档以 user 形态重发立即成功，故改走
-        // user 注入；goal 续跑仍走 as_system（追加在非空历史上，合法）。
+        // user 注入。goal 续跑/exec 终态仍走 as_system：落库保持 system actor
+        // （UI/审计口径），重建层已把模型面角色统一给成 user——中段 system 这个
+        // 异形在角色映射层根除，本 bug 整类不再依赖投递侧绕开。
         let input = ConversationSendMessage {
             text: snapshot.doc,
             images: vec![],

@@ -48,7 +48,7 @@ use super::sdk_common::{
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, block_on, empty_request_noop_done_event,
-    empty_request_sync_error, is_cancelled, normalize_skill_envelope,
+    empty_request_sync_error, is_cancelled,
 };
 use super::types::{
     EFFORT_LADDER, ProviderConfig, ResponsesCompat, StreamEvent, normalize_reasoning_effort,
@@ -1932,7 +1932,6 @@ pub fn chat_stream_responses(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
     let projected = project_responses_messages(&messages, &provider.responses_compat);
     // 空输入保护：`input: []` 会被上游判 400 且不可重试 → 整回合 Fatal。
     // 与退役前同语义：本地收口，零 HTTP 请求（instructions 单条不算 input）。
@@ -1974,7 +1973,6 @@ pub(crate) fn chat_stream_responses_plan(
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
     let declarations = plan_declarations(plan, descriptions)?;
-    let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
     let projected = project_responses_messages(&messages, &provider.responses_compat);
     if projected.iter().all(|m| m.role == Role::System) {
         on_event(empty_request_noop_done_event());
@@ -2018,7 +2016,6 @@ pub fn chat_sync_responses(
     if provider.responses_compat.siwc_plan {
         return collect_plan_stream(provider, model, messages, max_tokens);
     }
-    let messages = normalize_skill_envelope(provider, messages)?;
     let projected = project_responses_messages(&messages, &provider.responses_compat);
     if projected.iter().all(|m| m.role == Role::System) {
         log::warn!("responses: input 为空（无任何可投影消息），sync 短路，不发请求");

@@ -38,7 +38,8 @@ pub struct ConversationSendMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_terminal: Option<SubagentTerminalNotification>,
     /// widget-directive §4：用户确认 widget follow-up 时携带的 modelContent 快照。
-    /// 直进回合 reminder（`<widget-state>`），绝不拼进用户可见文本、永不落盘。
+    /// 直进回合 reminder（请求瞬态尾的 `<widget-state>`），绝不拼进用户可见文
+    /// 本、永不落盘。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub widget_context: Option<WidgetContext>,
 }

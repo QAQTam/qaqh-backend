@@ -735,8 +735,8 @@ mod tests {
         let messages = loop_.assemble_context().await.expect("assemble context");
         let system_input = messages
             .iter()
-            .find(|message| message.role == "system")
-            .expect("system input must reach provider context");
+            .find(|message| message.role == "user")
+            .expect("system actor 输入必须以 user 角色到达 provider 上下文");
         assert!(matches!(
             system_input.content.as_slice(),
             [
@@ -744,6 +744,245 @@ mod tests {
                 qaqh_types::ContentBlock::Image { mime_type, data }
             ] if text == "result from child" && mime_type == "image/png" && data == "aW1hZ2U="
         ));
+    }
+
+    /// 出站不变量（钉死）：≥2 次请求的 durable 历史只能是 append——A+B+C
+    /// 每个字节逐次原样重现，任何 B'/A'（折叠、摘要、改写、重排）都不允许。
+    /// 出站前拼装的消息向量与服务端实际收到的 wire 逐条相等；工具调用、
+    /// 上下文窗口提醒、goal 注入这些侵入消息只追加、不改写历史前缀。
+    #[tokio::test]
+    async fn provider_requests_are_pure_append_with_no_tampering() {
+        // 哨兵串刻意取得独一无二：一旦被压缩/摘要/加前缀尾注，contains 仍为真
+        // 但 exact == 1 与「不得作为更长串子串」两条会同时抓到。
+        const A: &str = "ALPHA-SENTINEL-SEQ01";
+        const B: &str = "BRAVO-SENTINEL-SEQ02";
+        const C: &str = "CHARLIE-SENTINEL-SEQ03";
+        const TOOL: &str = "TOOLCALL-INTRUSIVE-SEQ04";
+        const REMINDER: &str = "CTXWINDOW-INTRUSIVE-SEQ05";
+        const GOAL: &str = "GOALINJECT-INTRUSIVE-SEQ06";
+
+        fn text_msg(role: &str, text: &str) -> qaqh_types::Message {
+            qaqh_types::Message {
+                msg_id: None,
+                role: role.into(),
+                name: None,
+                content: vec![qaqh_types::ContentBlock::Text { text: text.into() }],
+            }
+        }
+
+        /// Chat SDK 的 user 投影是 `{"role":"user","content":"..."}`；
+        /// assistant/tool 是 `content:[{...}]`。两种情况都取回可见文本。
+        fn wire_text(message: &serde_json::Value) -> String {
+            match message.get("content") {
+                Some(serde_json::Value::String(text)) => text.clone(),
+                Some(serde_json::Value::Array(parts)) => parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(|text| text.as_str()))
+                    .collect(),
+                _ => String::new(),
+            }
+        }
+
+        fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
+            match value {
+                serde_json::Value::String(text) => out.push(text.clone()),
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        collect_strings(item, out);
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    for (_, item) in map {
+                        collect_strings(item, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let (server, base_url) = sse_server();
+        let captured: Arc<std::sync::Mutex<Vec<String>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        spawn_sse_script(
+            server,
+            vec![CHAT_SSE.to_string(), CHAT_SSE.to_string()],
+            Arc::clone(&captured),
+        );
+
+        let mut provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        provider.retry = Some(qaqh_types::RetrySpec {
+            max_retries: 1,
+            ..Default::default()
+        });
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        // ── 出站前拼装：A+B+C，逐字节送出门 ──
+        let first: Vec<qaqh_types::Message> = vec![
+            text_msg("user", A),
+            text_msg("user", B),
+            text_msg("user", C),
+        ];
+        let outcome1 = crate::provider_job::run_round(
+            spec.clone(),
+            first.clone(),
+            "SES-APPEND".into(),
+            cancel_rx.clone(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            outcome1.error.is_none(),
+            "第一次请求必须真实出发: {:?}",
+            outcome1.error
+        );
+
+        // ── 侵入消息：工具调用 + 上下文窗口提醒 + goal 注入，纯追加 ──
+        let mut second = first.clone();
+        second.push(qaqh_types::Message {
+            msg_id: None,
+            role: "assistant".into(),
+            name: None,
+            content: vec![qaqh_types::ContentBlock::ToolUse {
+                id: "call-append".into(),
+                name: "read_image".into(),
+                input: serde_json::json!({ "path": TOOL }),
+            }],
+        });
+        // 真实回执：网关不再补 "missing tool result"，wire 逐条等于出站前拼装。
+        second.push(qaqh_types::Message {
+            msg_id: None,
+            role: "tool".into(),
+            name: None,
+            content: vec![qaqh_types::ContentBlock::ToolResult {
+                tool_use_id: "call-append".into(),
+                result: qaqh_types::ToolResult::ok(TOOL),
+            }],
+        });
+        second.push(text_msg("user", REMINDER));
+        second.push(text_msg("user", GOAL));
+
+        let outcome2 = crate::provider_job::run_round(
+            spec,
+            second.clone(),
+            "SES-APPEND".into(),
+            cancel_rx,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            outcome2.error.is_none(),
+            "第二次请求必须真实出发: {:?}",
+            outcome2.error
+        );
+
+        let bodies = captured
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "必须恰好两次出站请求，实际 {} 次",
+            bodies.len()
+        );
+        let parsed: Vec<serde_json::Value> = bodies
+            .iter()
+            .map(|body| serde_json::from_str(body).expect("请求体必须是 JSON"))
+            .collect();
+        let messages: Vec<&Vec<serde_json::Value>> = parsed
+            .iter()
+            .map(|body| {
+                body.get("messages")
+                    .and_then(|value| value.as_array())
+                    .expect("请求体必须含 messages 数组")
+            })
+            .collect();
+
+        // 出站后 == 出站前：第一条请求 wire 逐条等于拼装的 A / B / C。
+        assert_eq!(
+            messages[0].len(),
+            3,
+            "第一次请求不应夹带其他消息: {}",
+            bodies[0]
+        );
+        for (index, sentinel) in [A, B, C].iter().enumerate() {
+            assert_eq!(messages[0][index]["role"], "user", "第 {index} 条角色被改写");
+            assert_eq!(
+                &wire_text(&messages[0][index]),
+                sentinel,
+                "第 {index} 条消息出站后被改写（A'/B'）: {}",
+                bodies[0]
+            );
+        }
+
+        // ≥2 次请求纯 append：第二次的前缀逐字节等于第一次整体。
+        assert!(
+            messages[1].len() > messages[0].len(),
+            "第二次请求必须严格追加，实际长度 {} -> {}",
+            messages[0].len(),
+            messages[1].len()
+        );
+        assert_eq!(
+            &messages[1][..messages[0].len()],
+            messages[0].as_slice(),
+            "第二次请求的前缀（A+B+C）被篡改：{}",
+            bodies[1]
+        );
+
+        // 不允许任何 A' / B'：哨兵必须原样出现恰好一次，且不得作为更长串的子串。
+        for (round, body) in parsed.iter().enumerate() {
+            let mut strings = Vec::new();
+            collect_strings(body, &mut strings);
+            for sentinel in [A, B, C] {
+                let exact = strings.iter().filter(|text| *text == sentinel).count();
+                assert_eq!(
+                    exact, 1,
+                    "第 {} 次请求：{sentinel} 必须原样出现恰好一次，实际 {exact}",
+                    round + 1
+                );
+                let mutated: Vec<&String> = strings
+                    .iter()
+                    .filter(|text| text.contains(sentinel) && *text != sentinel)
+                    .collect();
+                assert!(
+                    mutated.is_empty(),
+                    "第 {} 次请求：发现 {sentinel} 的篡改变体（A'/B'）: {mutated:?}",
+                    round + 1
+                );
+            }
+        }
+
+        // 侵入消息原样追加进第二次请求。user 提醒/goal 是裸文本串；工具参数与
+        // 回执会被网关合法包裹（function.arguments 的 JSON、<qaqh_tool_result>
+        // 信封），只核对哨兵逐字节出现在其中，不冒充「整串相等」。
+        let mut second_strings = Vec::new();
+        collect_strings(&parsed[1], &mut second_strings);
+        for sentinel in [REMINDER, GOAL] {
+            assert_eq!(
+                second_strings.iter().filter(|text| *text == sentinel).count(),
+                1,
+                "侵入消息 {sentinel} 必须原样追加且不被改写: {}",
+                bodies[1]
+            );
+        }
+        assert!(
+            second_strings.iter().any(|text| text.contains(TOOL)),
+            "工具调用/回执必须把 {TOOL} 逐字节带上: {}",
+            bodies[1]
+        );
     }
 }
 
@@ -1358,6 +1597,18 @@ mod handoff_tests {
         format!("data: {delta}\n\ndata: {tool}\n\ndata: {error}\n\n")
     }
 
+    /// 终态响应携带参数截断的 ToolUse：finish_reason=tool_calls + 半截 args，
+    /// 没有 error 尾帧。gate finalize 落 Null input → classify → Incomplete。
+    /// 这是与流中断相邻、此前漏掉重试的那条边界。
+    fn corrupt_tool_terminal_body() -> String {
+        let call = serde_json::json!({"choices":[{"index":0,"delta":{"content":"我先读取配置",
+            "tool_calls":[{"index":0,"id":"call_x1","type":"function",
+            "function":{"name":"read_file","arguments":"{\"path\":\"conf"}}]},"finish_reason":null}]});
+        let done = serde_json::json!({"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],
+            "usage":cache_usage()});
+        format!("data: {call}\n\ndata: {done}\n\ndata: [DONE]\n\n")
+    }
+
     /// 可重试的 mid-stream error 尾帧(未识别 token → ProviderInternal 瞬态),
     /// attempt 残段为纯文本 → A 路(prefill+seed):attempt-2 的块 = seed +
     /// 续写段,一条块承载完整文本;失败 attempt 已见的 usage 不丢。
@@ -1529,6 +1780,44 @@ mod handoff_tests {
         );
     }
 
+    /// 终态 Incomplete + 损坏 ToolUse 与流中断同律：也必须走 B 路重试，
+    /// 而不是直接 provider_incomplete 判死（相邻边界漏重试的回归）。
+    #[tokio::test]
+    async fn terminal_corrupt_tool_retries_instead_of_failing_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, corrupt_tool_terminal_body()),
+                (200, text_body("收到，将重新调用")),
+            ],
+            vec![],
+            10_000,
+            0.0,
+        )
+        .await;
+        h.loop_
+            .send_input(input("终态坏工具重发"))
+            .expect("send input");
+
+        let state = wait_until(&h.owners, |value| {
+            value["activity"] == "idle" && timeline_tool_result(value).contains("cut off")
+        })
+        .await;
+        assert_eq!(
+            h.requests.lock().unwrap().len(),
+            2,
+            "终态损坏工具也必须重发一次，不得直接判死"
+        );
+        let second = &h.requests.lock().unwrap()[1];
+        assert!(
+            second.contains("call_x1"),
+            "失败注入必须携带原 call_id: {second}"
+        );
+        let outcome = &state["turns"][0]["outcome"]["data"];
+        assert!(outcome["error"].is_null(), "B 路完成后无失败事实: {outcome}");
+    }
+
     /// A 路:纯文本截断 → prefill 前缀 + seed 续写。第二次请求带尾部
     /// assistant 消息;attempt-2 的块 = seed + 续写段,一条块承载完整文本,
     /// 历史不残留 prefill 临时消息。
@@ -1572,12 +1861,13 @@ mod handoff_tests {
         );
     }
 
-    /// 占用页脚挂在本轮最后一条工具结果的信封正文尾部：实时遥测，不进历史事实。
+    /// 占用页脚 append 进工具结果正文：落库与发送同一份字节，消息即历史。
     ///
-    /// 回归：页脚挂载按 `ContentBlock::Text` 匹配，而工具消息的正文块是
-    /// `ToolResult`——永远落空，读数从未真正到达模型。
+    /// 回归：页脚只进模型投影时，下一回合重建读回的是不带页脚的原文，
+    /// 前缀缓存从页脚位置起整段击穿（2026-11-17 复盘）。现在页脚在 dispatch
+    /// 后即拼进结果 text，落库与 tool_result_message 共用它，零字节反转。
     #[tokio::test]
-    async fn context_footer_rides_the_last_tool_result_of_the_round() {
+    async fn context_footer_appends_into_tool_result_and_is_durable() {
         let dir = tempfile::tempdir().expect("tempdir");
         // 第一轮：handoff 缺正文 → 工具失败，回合继续；读数 960/1000 → 96%。
         // 第二轮：直接收尾。第二条请求里那条工具结果应带页脚。
@@ -1615,10 +1905,65 @@ mod handoff_tests {
             requests[1].contains("[#ctx 96% · 0k/1k"),
             "第二条请求的最后一条工具结果应带占用页脚（读数 960/1000）"
         );
-        // 实时遥测不进 durable timeline：重放读到的仍是不带页脚的原文。
+        // 消息即历史：页脚已拼进结果正文并落库，重放读到的必须带同一份页脚。
         assert!(
-            !timeline_tool_result(&state).contains("[#ctx"),
-            "历史事实不得携带页脚"
+            timeline_tool_result(&state).contains("[#ctx 96% · 0k/1k"),
+            "历史必须与发往模型的字节一致（零字节反转）"
+        );
+    }
+
+    /// widget 快照作为 durable Input 落库：首轮发出、次轮从历史逐字节重建。
+    /// 回归（2026-11-18）：旧形态只进请求瞬态尾，下一回合重建丢失该字节，
+    /// 前缀缓存从快照位置击穿。
+    #[tokio::test]
+    async fn widget_snapshot_is_durable_and_rebuilt_byte_identical() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let h = harness(
+            dir.path(),
+            vec![(200, text_body("one")), (200, text_body("two"))],
+            vec![],
+            10_000,
+            0.0,
+        )
+        .await;
+        let mut first = input("首轮带快照");
+        first.widget_context = Some(qaqh_ringing_contract::commands::WidgetContext {
+            session_id: "SES-HANDOFF".into(),
+            widget: qaqh_ringing_contract::commands::WidgetRef {
+                path: "/w/.qaqh/widgets/SES-HANDOFF/chart.html".into(),
+                title: Some("chart".into()),
+            },
+            model_content: serde_json::json!({"score": 42}),
+        });
+        h.loop_.send_input(first).expect("send input");
+        let state = wait_until(&h.owners, idle_with_turns).await;
+
+        // 首轮请求带快照，且快照已落库为 actor=widget-state 的 Input。
+        {
+            let requests = h.requests.lock().unwrap();
+            assert!(
+                requests[0].contains("<widget-state>"),
+                "首轮请求必须带 widget 快照"
+            );
+        }
+        let timeline = serde_json::to_string(&state["timeline"]).expect("timeline");
+        assert!(
+            timeline.contains("widget-state") && timeline.contains("score"),
+            "快照必须落库为 durable Input: {timeline}"
+        );
+
+        // 第二轮不带 widget_context，但重建请求仍逐字节带上同一份快照。
+        h.loop_.send_input(input("次轮不带快照")).expect("send input");
+        wait_until(&h.owners, |v| {
+            v["activity"] == "idle"
+                && v["turns"].as_array().is_some_and(|t| t.len() >= 2)
+        })
+        .await;
+        let requests = h.requests.lock().unwrap();
+        assert!(
+            requests[1].contains("<widget-state>") && requests[1].contains("score"),
+            "次轮重建必须逐字节带上落库的快照（消息即历史）: {}",
+            &requests[1][..requests[1].len().min(600)]
         );
     }
 
@@ -1730,9 +2075,10 @@ mod handoff_tests {
     // `attach.receiver` 拿到的同一批帧（出站口排队前的最后一站；不含 axum
     // mpsc(64) 序列化与网络，故这是延迟**下界**，不是 TCP 到屏时间）。
     //
-    // 已知缺陷（本守卫当前应红）。修复方向：让 answer 终帧在首个工具进度帧
-    // 之前落地，或工具卡片延后到 ToolDeclared（其 seq 已在完整文本帧之后）
-    // 再建；修复后本测试自动转为回归守卫。
+    // 已修复并转为回归守卫：工具帧落地前先把正文全文冲刷到同一个 answer
+    // block（provider_job::flush_text_before_tool），流末兜底按已发布长度
+    // 判重，不再在工具帧之后补发一帧全文。上游正常顺序下 answer 的
+    // MessageDelta 序列必须连续。
 
     use qaqh_ringing_contract::events::{SessionEvent, SessionEventFrame};
     use qaqh_ringing_contract::state::TimelineEntry;

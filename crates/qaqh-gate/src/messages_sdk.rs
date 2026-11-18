@@ -24,9 +24,7 @@ use super::sdk_common::{
     adopt_identity, apply_management_headers, empty_stream_retry, insert_header,
     roomy_response_limits, sdk_error_detail, sdk_retry_policy, tool_names_by_id, tool_result_name,
 };
-use super::transport::{
-    RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
-};
+use super::transport::{RetryPolicy as GateRetryPolicy, block_on, is_cancelled};
 use super::types::{ProviderConfig, StreamEvent, stored_reasoning_kind};
 use super::usage_semantics::{self as semantics, Scope};
 
@@ -107,23 +105,6 @@ fn extract_text(content: &[ContentBlock]) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// 运行时动态注入的特征前缀——**与 `qaqh-runtime` registry 的
-/// `GOAL_CONTINUATION_MARKER`/`EXEC_TERMINAL_MARKER` 及 transport.rs 的
-/// skill envelope 前缀同源，改动必须三处同步**。这些文本以 system 角色落在
-/// timeline 尾部，语义是"刚刚发生的事"。
-const DYNAMIC_INJECTION_PREFIXES: &[&str] = &[
-    "<qaqh_goal_continuation",
-    "<qaqh_exec_session_terminal",
-    "<skill_context_envelope",
-];
-
-fn is_dynamic_injection(text: &str) -> bool {
-    let head = text.trim_start();
-    DYNAMIC_INJECTION_PREFIXES
-        .iter()
-        .any(|prefix| head.starts_with(prefix))
-}
-
 /// Project harness history onto the SDK's neutral model. Wire-level rules
 /// (same-role alternation, tool_result placement, orphan pairing) are left to
 /// the SDK normalization layer; only harness semantics live here: system
@@ -140,22 +121,29 @@ pub(crate) fn project_messages(
     let mut system_parts: Vec<String> = Vec::new();
     let mut projected: Vec<WireMessage> = Vec::new();
     let mut img_idx = image_index_base;
+    // system/developer 只在**头部连段**提升进顶层；出了头部连段就原位 user。
+    let mut in_head_system = true;
 
     for (msg_index, msg) in messages.iter().enumerate() {
+        if !matches!(msg.role.as_str(), "system" | "developer") {
+            in_head_system = false;
+        }
         match msg.role.as_str() {
             "system" | "developer" => {
                 if let Some(t) = extract_text(&msg.content) {
-                    if is_dynamic_injection(&t) {
-                        // 2026-11-17 复盘：提升进顶层 system 会把"刚发生"的
-                        // 触发搬离尾部注意力位——部分模型据此把请求读成"用户
-                        // 空发消息"或拿上一轮自述当用户话语（qwen3.8-flash @
-                        // wire=messages 实测空回/答非所问）。Anthropic 协议
-                        // 没有 in-message system，忠实映射就是原位 user 轮
-                        // （Claude Code 同款姿势），顶层 system 同时保持字节
-                        // 稳定（前缀缓存不再被每条通知击穿）。
-                        projected.push(WireMessage::new(mutil_ai::Role::User, vec![Part::text(t)]));
-                    } else {
+                    if in_head_system {
                         system_parts.push(t);
+                    } else {
+                        // Anthropic 协议没有 in-message system。中段 system
+                        // 提升进顶层会同时击穿两样东西：顶层 system 的字节稳定
+                        // （每条通知都让前缀缓存归零）与"刚发生"的尾部注意力位
+                        // （2026-11-17 复盘：qwen3.8-flash 实测空回/答非所问；
+                        // BUG-2026-11-15-03：提升后 messages 为空被上游 400）。
+                        // 忠实映射就是原位 user 轮（Claude Code 同款姿势）。
+                        // 重建层（assemble_context）已把 System 通知统一给成
+                        // user 角色；这里是不进重建、直接注入的外部调用面的同一条
+                        // 规则，不是按文本嗅探的特例（marker 三处同步已废）。
+                        projected.push(WireMessage::new(mutil_ai::Role::User, vec![Part::text(t)]));
                     }
                 }
             }
@@ -747,7 +735,6 @@ pub fn chat_stream_messages(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
     // 历史一律全量发送：gate 侧不做增量过滤，wire 级修补由 SDK normalize 负责。
     let mut request = ChatRequest::new(project_messages(messages, 0));
     request.tools = convert_tools(tools);
@@ -829,7 +816,6 @@ pub fn chat_sync_messages(
     messages: Vec<Message>,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let messages = normalize_skill_envelope(provider, messages)?;
     // 同流式路径：全量历史，无增量过滤。
     let mut request = ChatRequest::new(project_messages(messages, 0));
     request.prompt_cache = prompt_cache_enabled();
@@ -1292,31 +1278,41 @@ mod tests {
         );
     }
 
-    /// 2026-11-17 复盘护栏：goal/exec 尾部通知必须原位渲染为 user 轮——
-    /// 顶层 system 保持字节稳定（前缀缓存不被通知击穿），请求尾部带着新鲜
-    /// 触发事件（模型不再"看不见刚发生的事"）。
+    /// 通用投影规则护栏：system 只有头部连段提升顶层；出了头部连段就原位
+    /// user——顶层 system 保持字节稳定（前缀缓存不被通知击穿），请求尾部带着
+    /// 新鲜触发事件（模型不再"看不见刚发生的事"）。不再按 marker 文本嗅探
+    /// （重建层已把 System 通知给成 user 角色，这条规则是角色层的通用语义）。
     #[test]
-    fn dynamic_injection_stays_in_place_as_user_turn() {
+    fn mid_history_system_projects_in_place_as_user() {
         let notice = "<qaqh_exec_session_terminal exec_session_id=\"x\">done</qaqh_exec_session_terminal>";
         let msgs = vec![
             Message::system("stable prompt"),
             Message::user("hi"),
             qa_msg("assistant", vec![ContentBlock::text("report")]),
             qa_msg("system", vec![ContentBlock::text(notice)]),
+            qa_msg("developer", vec![ContentBlock::text("plain mid notice")]),
         ];
         let projected = project_messages(msgs, 0);
-        assert_eq!(projected.len(), 4, "system + user + assistant + notice-as-user");
+        assert_eq!(
+            projected.len(),
+            5,
+            "system + user + assistant + 两条中段通知原位 user"
+        );
         assert_eq!(projected[0].role, mutil_ai::Role::System);
         let Part::Text { text, .. } = &projected[0].parts[0] else {
             panic!("top entry must be system text");
         };
         assert_eq!(text, "stable prompt", "top system must stay byte-stable");
         let last = projected.last().expect("tail entry");
-        assert_eq!(last.role, mutil_ai::Role::User, "notice projects in place as user");
+        assert_eq!(
+            last.role,
+            mutil_ai::Role::User,
+            "无 marker 的中段 developer 也原位 user"
+        );
         let Part::Text { text, .. } = &last.parts[0] else {
             panic!("notice must project as user text");
         };
-        assert!(text.starts_with("<qaqh_exec_session_terminal"));
+        assert_eq!(text, "plain mid notice");
         // 归一化后仍是合法 Anthropic 请求：尾部 user，顶层 system 单条。
         let norm = normalized(&ChatRequest::new(projected));
         assert_eq!(norm.system.as_deref(), Some("stable prompt"));

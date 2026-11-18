@@ -40,9 +40,7 @@ use super::sdk_common::{
     empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
     tool_names_by_id, tool_result_name, uuid_simple,
 };
-use super::transport::{
-    RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
-};
+use super::transport::{RetryPolicy as GateRetryPolicy, block_on, is_cancelled};
 use super::types::{
     ProviderConfig, StreamEvent, clamp_effort_to_allowlist, normalize_reasoning_effort,
     stored_reasoning_kind,
@@ -564,7 +562,6 @@ pub fn chat_stream_gemini(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
     let request = build_request(
         provider,
         project_messages(messages, 0),
@@ -597,7 +594,6 @@ pub fn chat_sync_gemini(
     messages: Vec<Message>,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let messages = normalize_skill_envelope(provider, messages)?;
     let request = build_request(
         provider,
         project_messages(messages, 0),

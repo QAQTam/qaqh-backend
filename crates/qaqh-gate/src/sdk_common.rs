@@ -36,10 +36,22 @@ pub(crate) enum Outcome {
 /// 无状态 API 每轮重放全部历史；工具图只在消化它的那一轮内有像素价值，
 /// 其后的轮次以 [`STALE_IMAGE_STUB`] 说明行替代——像素不再重发（省图片
 /// token 与上下文窗口），顺带消除 stale 图的每轮 `load_image_b64` 磁盘重读。
-/// 返回最后一条 user 消息的下标；工具消息位于它之前 ⇒ stale。
-/// 历史中没有 user 消息时返回 None（保守不丢弃，兼容最小重放）。
+///
+/// 边界 = **已获应答**（其下标之后还有 assistant 消息）的最后一条落库 user
+/// 消息的下标；工具消息位于它之前 ⇒ stale。两种消息不构成消化信号：
+/// - 带 `name` 的 user 消息走的是提醒通道＝请求瞬态尾（`<widget-state>` 快照），
+///   它永不落库、恒挂请求尾部；把它当边界，本回合刚产出的图会在同回合下一次
+///   请求里被误判 stale 丢像素（2026-11-17 瞬态尾改造的实测回归）；
+/// - 尚未被应答的 user（steer 插话、新回合首条输入）同样不当边界——宁可多
+///   重发一轮像素，也不提前丢前沿图。
+/// 找不到边界时返回 None（保守不丢弃，兼容最小重放）。
 pub(crate) fn stale_image_boundary(messages: &[Message]) -> Option<usize> {
-    messages.iter().rposition(|message| message.role == "user")
+    let last_assistant = messages
+        .iter()
+        .rposition(|message| message.role == "assistant" && message.name.is_none())?;
+    messages[..last_assistant]
+        .iter()
+        .rposition(|message| message.role == "user" && message.name.is_none())
 }
 
 /// stale 工具图被丢弃时补进 tool 结果正文的说明行（模型据此知道图存在过、

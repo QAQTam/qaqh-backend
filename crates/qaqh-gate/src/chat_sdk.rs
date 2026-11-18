@@ -33,9 +33,7 @@ use super::sdk_common::{
     empty_stream_retry, insert_header, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
     split_url, tool_names_by_id, tool_result_name, uuid_simple,
 };
-use super::transport::{
-    RetryPolicy as GateRetryPolicy, block_on, is_cancelled, normalize_skill_envelope,
-};
+use super::transport::{RetryPolicy as GateRetryPolicy, block_on, is_cancelled};
 use super::types::{
     ProviderConfig, StreamEvent, clamp_effort_to_allowlist, normalize_reasoning_effort,
     stored_reasoning_kind,
@@ -770,7 +768,6 @@ pub fn chat_stream_chat(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut dyn FnMut(StreamEvent),
 ) -> anyhow::Result<()> {
-    let messages = normalize_skill_envelope(provider, messages).map_err(anyhow::Error::msg)?;
     // 历史一律全量发送：gate 侧不做增量过滤。
     let request = build_chat_request(
         provider,
@@ -813,7 +810,6 @@ pub fn chat_sync_chat(
     messages: Vec<Message>,
     max_tokens: u32,
 ) -> Result<String, String> {
-    let messages = normalize_skill_envelope(provider, messages)?;
     // 同流式路径：全量历史，无增量过滤。
     let request = build_chat_request(
         provider,

@@ -243,8 +243,6 @@ pub struct ProviderConfig {
     /// deterministic codegen (do_sample=false). None means don't send the field.
     pub do_sample: Option<bool>,
 
-    /// Whether the endpoint accepts a system message after history/tools.
-    pub supports_tail_system: bool,
     /// Responses API capability differences from the OpenAI reference semantics.
     /// Configured from the endpoint's `EndpointCompat` so new endpoints need a
     /// config change, never gate code.
@@ -425,7 +423,6 @@ impl ProviderConfig {
             supports_reasoning_content: true,
             require_provider_parameters: false,
             do_sample,
-            supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
             opencode_headers: None,
@@ -467,7 +464,6 @@ impl ProviderConfig {
             supports_reasoning_content: false,
             require_provider_parameters: false,
             do_sample: None,
-            supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
             opencode_headers: None,
@@ -514,7 +510,6 @@ impl ProviderConfig {
             supports_reasoning_content: true,
             require_provider_parameters: false,
             do_sample: None,
-            supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
             opencode_headers: None,
@@ -555,7 +550,6 @@ impl ProviderConfig {
             supports_reasoning_content: true,
             require_provider_parameters: false,
             do_sample: None,
-            supports_tail_system: true,
             responses_compat: ResponsesCompat::default(),
             prompt_cache_key: None,
             opencode_headers: None,

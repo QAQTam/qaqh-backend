@@ -643,6 +643,7 @@ impl QaqhService {
                     cols: params.cols,
                     rows: params.rows,
                     cwd: params.cwd.clone(),
+                    shell: params.shell.clone(),
                 },
             )
             .map(Into::into)

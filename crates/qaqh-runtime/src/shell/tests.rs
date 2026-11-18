@@ -117,7 +117,10 @@ fn typed_bytes_come_back_through_the_live_ring_not_a_journal() {
 fn resize_reports_the_kernel_truth() {
     let registry = ShellRegistry::new();
     let info = registry
-        .open("device-test-2", ShellOpen { cols: Some(90), rows: Some(30), cwd: None })
+        .open(
+            "device-test-2",
+            ShellOpen { cols: Some(90), rows: Some(30), cwd: None, shell: None },
+        )
         .expect("open shell");
     assert_eq!((info.cols, info.rows), (90, 30), "open 的尺寸必须来自请求,不是硬编码");
 
@@ -250,4 +253,44 @@ fn explicit_close_does_not_rewrite_a_recorded_terminal_fact() {
     // 表已经摘掉了，close 只能报「不存在」——它没有机会把一个已逝会话改写成 closed。
     assert!(registry.close("device-test-6", &info.id).is_err());
     assert_eq!(*attach.stopped.borrow_and_update(), Some(reason));
+}
+
+/// D4 修订：`shell` 是闭集枚举名，不是可执行路径。未知名当场拒绝、**不**落回
+/// 默认壳；合法名回来的 label 必须是 daemon 侧解析的结果，不是入参回显。
+#[test]
+fn shell_enum_rejects_unknown_names_and_resolves_known_ones() {
+    let registry = ShellRegistry::new();
+    match registry.open(
+        "device-test-7",
+        ShellOpen {
+            shell: Some("rm -rf /".into()),
+            ..Default::default()
+        },
+    ) {
+        Err(error) => assert!(error.contains("unknown shell name"), "{error}"),
+        Ok(info) => {
+            let _ = registry.close("device-test-7", &info.id);
+            panic!("任意可执行名不许开出 shell");
+        }
+    }
+
+    // 本机必有的壳名（Windows 系统 cmd / POSIX 系统 sh），label 核钉住后的路径。
+    let info = registry
+        .open(
+            "device-test-7",
+            ShellOpen {
+                cols: Some(80),
+                rows: Some(24),
+                cwd: None,
+                shell: Some(if cfg!(windows) { "cmd" } else { "sh" }.into()),
+            },
+        )
+        .expect("闭集名开启");
+    let expected = if cfg!(windows) { "cmd" } else { "/sh" };
+    assert!(
+        info.shell.to_lowercase().contains(expected),
+        "label 应是 daemon 解析路径，实得 {}",
+        info.shell
+    );
+    assert!(registry.close("device-test-7", &info.id).is_ok());
 }

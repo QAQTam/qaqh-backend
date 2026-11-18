@@ -1,6 +1,7 @@
 # ADR-0028 用户 shell 终端落后端：复用 `qaqh-pty`；数据面走 ws（supersede ADR-0017 决策 6）
 
 状态: **已采纳 · 切片 1–5 已实施（实测，见 §切片 4/§切片 5 落地记录）· §D3 已裁定 = 候选 B（ws 数据面），并显式 supersede ADR-0017 决策 6 与 §被否选项第 4 条 · §切片 5 施工前置已裁定 = 方案 A（Rust `qaqh-client` feature + napi 四口）· 净行数判定 Δ = −9 通过，候选 A 未启用**
+· 2026-11-17 晚：**§D4 已修订**（`shell.open` 加闭集壳名枚举）+ **切片 6 已实施**（composer 终端菜单与底部 overlay），实测见 §切片 6 落地记录
 · 起草日期 2026-11-17 · 裁定人 所有者 · 起草人 QAQ agent
 
 > 切片 5 只做完了**机器可验**的那一半：`shell.open → ws 订阅 → 打字/resize → exit`
@@ -132,6 +133,19 @@
    必须回头改候选 A，而不是把两套并存当成解决方案。
 
 **D4 控制面命令取最小集。** `shell.open` / `shell.close` / `shell.list` 三条（`shell.write` 与 `shell.output` 是否成命令取决于 D3 选型）。`shell.open` 只吃 `{cwd?, cols?, rows?}`——**shell 由 daemon 决定**，客户端不传可执行名：少一个参数就少一条注入面，而"进程归后端所有"本就是这次迁移的理由。`qaqh-runtime::registry::detect_shell()` 已实测**不是**可复用件：它只是把 `qaqh_workspace::bootstrap_exec_shell()`（agent 的**命令执行** shell）打进启动日志，与"用户登录 shell"不同面，故 shell 侧自带 `default_shell_argv()`（Windows `powershell.exe`，Unix `$SHELL` 落回 `/bin/bash`），与前端旧实现语义对齐。
+>
+> **D4 修订（2026-11-17 晚，所有者裁定，实测见 §切片 6 落地记录）**：`shell.open` 加可选
+> `shell` 字段——composer 要给用户 pwsh/bash/cmd 的**选择菜单**，"客户端完全不传壳名"
+> 不再覆盖这个场景。原裁决的注入面论证没有被推翻，被推翻的是它的实现形态：客户端传的
+> 仍是**枚举名而非路径**，argv 解析整段留在 daemon ——
+> `qaqh_process_tools::exec::user_shell_argv()` 复用 exec 模型面 `shell=` 参数背后的
+> **同一张词表**（`Shell::from_name`）与**同一条钉序**（git-bash 绝对路径、
+> cmd/WindowsPowerShell 的 System32 钉死，审计 M2），不构成第二份探测实现；未知名在
+> 注册表当场拒绝、**不**落回默认壳（打错字不许开出一个用户没要的交互进程——宪法 5）。
+> `None` = 原 `default_shell_argv()` 路径，逐字未动。`ShellOpenParams` 的 serde 派生
+> **不**拒未知字段，所以「新前端 + 旧 daemon」= `shell` 参数被静默丢弃、开出默认壳——
+> 菜单选择要真生效必须换带本修订的 daemon（这条兼容事实写在这里，就是因为机器面上
+> 没有任何一道闸会替你拦住它）。
 
 **D5 生命周期与 exec 面同律 + 一条 shell 独有 idle 回收。** kill 只有三条显式路（`shell.close` / device revoke / daemon shutdown），断联不 kill。无人观看超 TTL 才回收，实现为既有 60s 任务里新增一次 `ShellRegistry::sweep_idle(ttl)`（切片 2 已提供该函数），配置项 `shell_idle_reap_secs`（缺省 600，0=关）与 `session_idle_unload_secs` 同纪律；**有观看者时 sweep 绝不动手**（切片 2 已测）。
 
@@ -449,3 +463,60 @@ RingingClient 走服务面，ws 订阅……」。实施时**生命周期三条�
   不可编译/不可运行验证，同 §切片 1 那条欠账。
 - 客户端 shell 面在 **TUI / Android / HarmonyOS** 上未接线（feature 默认不开，接口已就位）。
   本轮只动 Electron。
+
+## §切片 6 落地记录（2026-11-17 晚，§D4 修订 + composer 终端菜单）
+
+### 裁定（所有者）与形状
+
+- composer「启动终端」钮 + 三角菜单三档 pwsh/bash/cmd；选中后**底部滑入 overlay
+  盖住 composer 面**——「独立单次 shell，exec 归 exec」，抽屉里的旧交互终端入口
+  （切片 5 之前遗留的挂载位）整块退役，两入口不并存（宪规 4/反重复）。
+- 尺寸 = **上限 clamp 210 列 × 70 行**：网格仍按容器实测（ResizeObserver→
+  `resize` 帧那条活路原样保留），大屏封顶即止，小窗不出条不缩字号。
+- daemon 由所有者自行重编打包；overlay 色值逐字走 `.composer-menu` 同一组
+  token（`--surface/--border-strong/--shadow-panel`）。
+
+### 落点
+
+| 面 | 落点 |
+|---|---|
+| argv 解析 | `qaqh-process-tools/src/exec/shell.rs` 新 `pub fn user_shell_argv()`：登录形态（PowerShell/WindowsPowerShell 加 `-NoLogo`，其余裸 path），`exec/mod.rs` re-export。**刻意薄**：词表/钉序全部委托给 `Shell::from_name`+`path()`，本函数不自己认路径 |
+| 注册表 | `qaqh-runtime/src/shell/mod.rs`：`ShellOpen.shell`，`open()` 三分支（`None`→原默认路径；`Some(合法名)`→exec 词表；`Some(未知名)`→`Err("unknown shell name")` 当场拒） |
+| wire | `service_methods.rs` 的 `ShellOpenParams` 加 ts-optional `shell`；`service.rs` 透传；exporter fixture `shell: Some("pwsh")` |
+| 契约 | export 重切 4 文件（`types/qaqh/ShellOpenParams.ts`、`cs/ShellOpenParams.cs`、`fixtures/service-shell-open-params.json`、`manifest.json`）；revision 未 bump（口径同切片 3 更正记录末行：服务方法不吃 `COMMAND_CONTRACT_REVISION`） |
+| 前端 | `ShellTerminal.tsx`（`kind` prop + MAX clamp）、`Composer.tsx`（钮+菜单+overlay 惰性挂载）、`composer.css`（overlay 一套 + `.shell-terminal` 自 `exec-drawer.css` 迁入）、`ExecSessionDrawer.tsx` 拆除（含孤儿 `desktopHost` import）、`docs/webui-feature-surface.yaml` 补 `user-shell-terminal` 条目、镜像 `ShellOpenParams.ts` 从金标准整文件拷贝 |
+
+### 实测（本轮读数，命令即出处）
+
+- `cargo check -p qaqh-runtime -p qaqh-process-tools -p qaqh-contract-export --all-targets -j 4` → exit 0
+- `cargo test -p qaqh-runtime --lib shell::` → **7 passed / 0 failed**（6 存量 + 新
+  `shell_enum_rejects_unknown_names_and_resolves_known_ones`：`"rm -rf /"` 必须被拒且
+  不开进程；本机名（Windows `cmd` / 其他 `/sh`）开启后 label 必须是 daemon 钉住后的路径）
+- `cargo run -p qaqh-contract-export -- export --out docs/api-surface/v4.0` → exit 0；
+  `check --against` → **exit 0**；前端镜像与金标准 **SHA256 相同**（Get-FileHash 实测）
+- `cargo test -p qaqh-daemon --bins -j 4 -- shell_stream route_table sdk_shell_stream`
+  → **4 passed / 0 failed**（首跑 101 是命令行滑铁：`-j 4` 放 `--` 之后被 test 二进制
+  当参数吃，报 `Unrecognized option: 'j'`——不是代码问题，重排即绿）
+- electron：根 `pnpm typecheck` exit 0、`pnpm -C webui typecheck` exit 0（首跑红一条
+  `TS2353 'shell' 不在 ShellOpenParams`——等镜像重切即绿，**镜像必须等 exporter，不许手改**）、
+  `pnpm test` 82 tests / 81 pass / 0 fail / 1 skipped（存量），shell-bridge 三条契约
+  测试原样通过（主进程桥零改动，napi 面未动）
+
+### 未验证 / 新坑（如实）
+
+- **GUI 人肉点击未做**（含本切片新增的：点终端钮→选档→overlay 滑入→打字回显→点 X
+  收走）。等价机器断言仍是切片 5 那两条（`sdk_shell_stream_round_trip` 等）。
+- **新前端 + 旧 daemon = `shell` 参数被 serde 静默丢弃**，菜单选了也白选（落默认壳）。
+  这是本轮唯一一条**没有任何闸会拦**的错配，安装位那份 daemon 换掉之前，验收 ①–⑤
+  点了也不算数。坑与解法都记在 §D4 修订段末尾。
+- `user_shell_argv` 的 unix 臂与 `shell` 枚举的 unix 端到端（bash 交互 spawn）：本机
+  Windows 不可验证，欠账归 §切片 1 同款（CI 三平台未跑）。
+
+### 被否留痕（本切片新增，防重提）
+
+- **在桥里包 `shell.open`**：复刻切片 5「两条入口」教训被否——生命周期照旧走
+  `transport.query`，overlay 只发 kind 与几何。
+- **前端探测本机装了哪些壳来禁用菜单项**：探测权在 daemon（`Shell::available`），
+  前端猜 PATH 就是第二份事实源；选不存在的名就让后端当场报错，错误文案已在 UI 面。
+- **把 overlay 塞回后台执行抽屉**：所有者裁定否（"exec 的归 exec，composer 是独立
+  单次 shell，不可混为一谈"）。
