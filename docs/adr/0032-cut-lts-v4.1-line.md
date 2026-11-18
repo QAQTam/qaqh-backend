@@ -79,5 +79,7 @@
 - [x] 金标准 `docs/api-surface/v4.1/` 机器重切 + rebaseline + pin-frozen
 - [x] 本地守卫验证（`check-lts-api-surface.py` / exporter `check --against v4.1` / ledger 自检）
 - [x] 本 ADR + `docs/lts-v4.1-maintenance.md`
-- [ ] 推分支后核对 GitHub Actions 三 workflow 实跑结果（本地不可替）
+- [x] 推分支后核对 GitHub Actions 三 workflow 实跑结果（2026-11-19 实测全绿：LTS API guard
+      2m42s / Surface policy 2m42s / Rust SDK contract 首跑红于内嵌 TS 消费者的 v3 `driver`
+      探针，`d2107ec1` 适配 v4.1 字段后绿）
 - [ ] `v4.1.0` tag 与首发：线就绪后由所有者另发
