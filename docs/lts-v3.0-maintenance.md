@@ -1,6 +1,9 @@
 # LTS v3.0 维护发版说明书
 
 > 适用分支:`LTS-v3.0` · 起点版本:`v3.0.0`(tag 于 main @ `f9b3a7f8` 切出,与 LTS 分支同源)
+> **范围修订（ADR-0031，2026-11-19）**：tag ≠ LTS。本文纪律只绑定 LTS 冻结线；main 线
+> （v4+）的 `contract-refreeze` 去处是**新版本位**（minor bump + 金标准机器重切 + tag），
+> 不强制开新 LTS 线——§8 仅在所有者显式开 LTS 线时按原样适用。
 > 配套 CI:`.github/workflows/release.yml`(发版)、`.github/workflows/sdk-contract.yml`(契约校验)、
 > `.github/workflows/lts-api-guard.yml`(冻结守卫)
 > 决策台账:`docs/adr/`——本文写**怎么做**,`docs/adr/` 写**为什么这样定、以及哪些方案被否**。
@@ -294,10 +297,12 @@ LTS 生命周期内**禁止**升级这个 pin(path 依赖行为随它变);升级
 `main` **未加保护**（快车，规则见 `docs/adr/0001` §决策）。
 
 
-## 8. 换锁：开新 LTS 线（`contract-refreeze` 的唯一去处）
+## 8. 换锁：开新 LTS 线（v3 时代 `contract-refreeze` 的唯一去处；v4+ main 线改为新版本位，见 ADR-0031）
 
 §1 说"换锁不是冻结"，但一直没写怎么走 —— 这一节就是那条路。凡动导出物（`contract_hash` 会变）
 的改动只能落到这里：
+
+> **v4+ 修订（ADR-0031，2026-11-19）**：main 线上 `contract-refreeze` 的去处已改为**新版本位**（minor bump + 金标准机器重切 + tag），本节仅在所有者显式开新 LTS 线时按原样适用。
 
 1. **先写 ADR**（模板 `docs/adr/README.md`），至少含：新 `contract_revision` 值、被破坏的
    capability 清单、迁移窗口、ADR-0005 配对测试结论。无 ADR 的 refreeze 不批。

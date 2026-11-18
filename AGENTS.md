@@ -23,12 +23,12 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 12. 使用sed修改文件必须参带rg确保修改正确.
 13. 必须在工作前使用todo工具让用户知道你的修改流程
 14. 涉及到新的库时可以用find-docs skills去找最新API避免旧版用法性能低下或不可用
-15. 契约面改动必须先分类再提交,三选一:`[contract-refreeze]`(wire 实变:增删产物或类型字段变化,禁入已冻结线,只能开新 LTS 线并 bump revision)、`[guard-tightening]`(只改 `snapshots/*` 基线,导出物逐字节不变,可进 LTS)、`[doc-only-refresh]`(导出物字节变但去掉注释后 wire 视图相同 —— 典型如给 DTO 加 doc 注释导致 `contract_hash` 变化,可进 LTS 且不需 bump revision)。判据由 `scripts/check-surface-change-policy.py` 自己算,不由提交者声明的标签决定:谎报 doc-only 会被 wire 实变列表当场戳穿。
+15. 契约面改动必须先分类再提交,三选一:`[contract-refreeze]`(wire 实变:增删产物或类型字段变化,禁入已冻结线;main 线的去处是新版本位——minor bump + 金标准机器重切 + tag,不强制开新 LTS 线(tag≠LTS,ADR-0031;revision 三戳只在命令目录/事件读模型词表/wire 协议实变时 bump,服务方法与 additive 增量不强制)、`[guard-tightening]`(只改 `snapshots/*` 基线,导出物逐字节不变,可进 LTS)、`[doc-only-refresh]`(导出物字节变但去掉注释后 wire 视图相同 —— 典型如给 DTO 加 doc 注释导致 `contract_hash` 变化,可进 LTS 且不需 bump revision)。判据由 `scripts/check-surface-change-policy.py` 自己算(v4 时代该脚本已随 LTS 闸门剥离,官方判据为 exporter `check --against`,见 ADR-0027 §背景 5),不由提交者声明的标签决定:谎报 doc-only 会被 wire 实变列表当场戳穿。
 16. 路由只能在两张表里声明(`RINGING_V2_HTTP_ROUTES` / `CONTROL_PLANE_ROUTES`);出现字面量 `.route("…")`/`.nest(`/`.merge(` 即为错误。金标准与快照只能由机器写(exporter / `--rebaseline`),手改金标准等同作弊。
 17. 契约与闸门的决策一律落在 `docs/adr/`;动冻结面先读对应 ADR,被否的方案也要写进去防重提。引用 ADR 时必须看状态字段,**不得把"已采纳(未实施)"当成"已完成"**。
 18. 新闸门落地必须**反证**它真会红(用真实历史提交或临时插违规),并且要看 CI 的步骤明细而不是 job 绿灯 —— `continue-on-error` 会掩盖步骤失败;报错误行号的 lint 本身就是新的误导源。
 19. 本仓存在并发写入者:动同类文件前先 `git fetch` 并与 `origin/LTS-v3.0` 比对,合并后维持 **`main` ⊇ `LTS-v3.0`** 的超集不变量;撞车(同一缺陷被各自修两次)要在 ADR 留痕而不是悄悄 rebase 掉。
 20. 验证优先用官方命令(`check --against docs/api-surface/v3.0`、`check-lts-api-surface.py`、`cargo test -p <改动涉及的 crate>`),不要每次手搓等价比对;本机资源受限时 `--release` 全量构建交 CI(见规则 7/10)。
-21. 本仓库为LTS仓，遵循用户空间（前后端API）不可变，内核空间（后端）保持对外一致或同等效力下可以发生部分小破坏性变化或以exp设计接线。
+21. LTS 属性按线承载而非按仓：LTS 分支（现为 LTS-v3.0 / LTS-v3.1）遵循用户空间（前后端API）不可变，内核空间（后端）保持对外一致或同等效力下可以发生部分小破坏性变化或以exp设计接线；main 线（v4+）是开发快车兼发版线，`v*` tag 是版本化交付、不默认携带 LTS 承诺（tag≠LTS，ADR-0031），是否开设新 LTS 线由所有者显式决定。
 22. 本仓禁止直接使用git checkout，可以使用更加安全的新用法。
 23. shell新增uutils组件替换pwsh7的部分实现，调用时LLM可以较为自然的调用uutils

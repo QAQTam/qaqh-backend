@@ -7,6 +7,9 @@
 > `lts-api-guard.yml`(冻结守卫)、`surface-policy.yml`(改动分类)
 > 决策台账:`docs/adr/`——本文写**怎么做**,`docs/adr/` 写**为什么这样定、以及哪些方案被否**。
 > 上一代锁的历史登记在 `docs/lts-v3.0-maintenance.md`(v3.0 金标准树保留至 EOL,只读)。
+> **范围修订（ADR-0031，2026-11-19）**：tag ≠ LTS——main 线（v4+）发版与 LTS 解耦，
+> `contract-refreeze` 在 main 的去处是**新版本位**（minor bump + 金标准机器重切）而非
+> 强制开 v3.2 或新 LTS 线；本文纪律只绑定 LTS-v3.1 冻结线。
 
 ## 0. 分支模型:kernel / user-space
 
