@@ -82,6 +82,13 @@ cache_reported_requests: number,
  */
 handoff_from_session_id?: string | null, 
 /**
+ * 毫秒精度的会话创建时刻：`created_at` 的秒粒度是历史用户空间契约（冻结，
+ * 不改），但开箱仪式这类 12s 级窗口需要毫秒——加法补一个键，旧客户端不读，
+ * 零破坏。写方（`session.list` / `session.meta` 投影）从业务行的
+ * `created_at_ms` 原样带入。
+ */
+created_at_ms?: number | null, 
+/**
  * 会话标题（首个用户请求启动时开始生成并冻结；persisted）。
  * 先写首条用户消息的截断回退标题，再由并行的异步 LLM 总结覆盖；每次写入
  * 都经 v2 Meta SSE 即时通知前端。

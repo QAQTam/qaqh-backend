@@ -481,6 +481,9 @@ pub struct SessionListRow {
     pub ephemeral: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+    /// ADR-0016 血缘:内核 fork 写入的直接前驱。批量列表过去没带这一列,
+    /// 导致 `session.list` 的后继侧开箱判据永远读空(手抄漂移的现行案例)。
+    pub handoff_from_session_id: Option<String>,
 }
 
 pub fn list_sessions(
@@ -493,7 +496,8 @@ pub fn list_sessions(
                 tool_mode, model_selection, settings_revision,
                 (SELECT COUNT(*) FROM turns WHERE turns.session_id = sessions.session_id)
                     AS turn_count,
-                archived, ephemeral, created_at_ms, updated_at_ms
+                archived, ephemeral, created_at_ms, updated_at_ms,
+                handoff_from_session_id
          FROM sessions
          WHERE (?1 = 1 OR archived = 0)
          ORDER BY updated_at_ms DESC
@@ -516,6 +520,7 @@ pub fn list_sessions(
             ephemeral: row.get::<_, i64>(10)? != 0,
             created_at_ms: row.get(11)?,
             updated_at_ms: row.get(12)?,
+            handoff_from_session_id: row.get(13)?,
         })
     })?;
     rows.collect()

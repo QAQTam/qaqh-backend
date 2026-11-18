@@ -56,6 +56,9 @@ public sealed record SessionMeta
     [JsonPropertyName("handoff_from_session_id")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? HandoffFromSessionId { get; init; }
+    [JsonPropertyName("created_at_ms")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public long? CreatedAtMs { get; init; }
     [JsonPropertyName("title")]
     public string? Title { get; init; }
     [JsonPropertyName("cwd")]

@@ -79,6 +79,12 @@ pub struct SessionMeta {
     /// 建行同事务写入）。`None` = 非交接会话。旧存量缺席 = None（零迁移）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff_from_session_id: Option<String>,
+    /// 毫秒精度的会话创建时刻：`created_at` 的秒粒度是历史用户空间契约（冻结，
+    /// 不改），但开箱仪式这类 12s 级窗口需要毫秒——加法补一个键，旧客户端不读，
+    /// 零破坏。写方（`session.list` / `session.meta` 投影）从业务行的
+    /// `created_at_ms` 原样带入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_at_ms: Option<u64>,
 
     // ── Runtime fields (not persisted) ──
     /// If set, this seed is passed as a CLI argument to the agent subprocess for auto-restore on startup.
@@ -256,6 +262,7 @@ mod tests {
             usage_requests: 6,
             cache_reported_requests: 7,
             handoff_from_session_id: Some("ses_parent".into()),
+            created_at_ms: Some(1_000),
             title: Some("Bun 引导 daemon".into()),
             cwd: Some("F:\\code\\qaqh".into()),
             resume_session: Some("skip-me".into()),
@@ -291,6 +298,7 @@ mod tests {
             "compact_covered_through_msg_id",
             "compact_skip",
             "created_at",
+            "created_at_ms",
             "custom_tools",
             "cwd",
             "ephemeral",

@@ -1,11 +1,11 @@
 {
   "format_version": 1,
   "wire_version": 2,
-  "backend_version": "4.0.1",
+  "backend_version": "4.0.2",
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "2e605fa72ba52a7d622e39f232a93fe81a99c4ecd5b7ab2c7bf42cadc57224d8",
+  "contract_hash": "b5fb6288d2a4aba47342442a64b325e4a3bc416258ffb9ee5506ce26e1a8a6d9",
   "files": [
     {
       "path": "constants.ts",
@@ -633,7 +633,7 @@
     },
     {
       "path": "cs/SessionListEntry.cs",
-      "sha256": "70663e1fd8f4e4f41b34822ff575efe6cf7aa8ff4a5f6240b4d60a4481e44f51"
+      "sha256": "23020210c20e679c069d7859f65c0aac50b569eec0d648574e3ed983661b701a"
     },
     {
       "path": "cs/SessionListParams.cs",
@@ -645,7 +645,7 @@
     },
     {
       "path": "cs/SessionMeta.cs",
-      "sha256": "779511dd2da13d43cb9e1ba201f42c3efb55f68e96f7ddf5917ebac18a970984"
+      "sha256": "22125b97d0b11e39df748b8c54ff17f1ba7991584f83ff687423894b4f6db613"
     },
     {
       "path": "cs/SessionMetaParams.cs",
@@ -1097,7 +1097,7 @@
     },
     {
       "path": "fixtures/pair-result.json",
-      "sha256": "5adac942fec575182fe730f1c2adea389f9e088780a552dea89eb058efb4ef2d"
+      "sha256": "ba8790f95f4efeac03d24651aa686ae41ddfc9c7ead09982cacc4532c2a57f0d"
     },
     {
       "path": "fixtures/pair-token-params.json",
@@ -1137,7 +1137,7 @@
     },
     {
       "path": "fixtures/service-daemon-version-result.json",
-      "sha256": "7c2a19accf04035cb6e073896850aceb6be408feeba17bca8b5cb43538122bac"
+      "sha256": "329af562d7738c795f60594575bdbfe5e8d27af9c13b10e667b65c9c3f92a02b"
     },
     {
       "path": "fixtures/service-diagnostics-memory-snapshot-params.json",
@@ -2129,7 +2129,7 @@
     },
     {
       "path": "types/qaqh/SessionListEntry.ts",
-      "sha256": "b337c482bec50f0fd26a870deaeeb904a6654da9616e421bb784db222b60713e"
+      "sha256": "d2879f1d85f5a651440d1f08a2ea44f7c298ce8be87bb508a9c6555dd3c205ca"
     },
     {
       "path": "types/qaqh/SessionListParams.ts",
@@ -2141,7 +2141,7 @@
     },
     {
       "path": "types/qaqh/SessionMeta.ts",
-      "sha256": "79b5e5b737c9181e251f3ee7b12ee539b152cca7b91db13394bd7ea6027f2435"
+      "sha256": "482ce59da9f039e46580cfcac91088ec1cef43ef5995e11b0052795c7b8d92b9"
     },
     {
       "path": "types/qaqh/SessionMetaParams.ts",

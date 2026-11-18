@@ -35,6 +35,7 @@ pub(crate) fn read(
         handoff_from_session_id: row.handoff_from_session_id,
         turn_count: turn_count.max(0) as usize,
         created_at: (row.created_at_ms.max(0) as u64) / 1000,
+        created_at_ms: Some(row.created_at_ms.max(0) as u64),
         updated_at: (row.updated_at_ms.max(0) as u64) / 1000,
         ..SessionMeta::default()
     })

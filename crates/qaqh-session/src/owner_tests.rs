@@ -430,6 +430,96 @@ mod tests {
         });
     }
 
+    /// 大输出外置(`TOOL_OUTPUT_INLINE_MAX_BYTES`):超阈值的工具终态输出,
+    /// 事件与快照视图都出 Ref,全文落 `session_contents` 可按需读回——
+    /// Inline 不再是唯一形态;模型回放读 messages 表,不受本行影响。
+    #[test]
+    fn large_tool_output_is_externalized_to_content_ref() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-EXT".into(),
+                    parent_session_id: None,
+                    title: "大输出外置".into(),
+                    title_source: Some("auto".into()),
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            owner.start_turn("T1", None).await.expect("start turn");
+
+            let lifecycle = owner.lifecycle();
+            let run = lifecycle.started("C9", "grep", None);
+            let big = "x".repeat(40 * 1024);
+            lifecycle.finished(
+                run,
+                ToolSettlement {
+                    call_id: "C9".into(),
+                    tool_name: "grep".into(),
+                    outcome: ToolCallOutcome::Completed,
+                    output_text: Some(big.clone()),
+                    output_truncated: false,
+                    metrics: None,
+                    code_delta: None,
+                    effects: vec![],
+                },
+            );
+
+            let content_id = loop {
+                match recv_event(&mut rx) {
+                    SessionEvent::ToolFinished {
+                        call_id, output, ..
+                    } if call_id.as_ref() == "C9" => match output {
+                        Some(ContentValue::Ref { content_ref }) => {
+                            break content_ref
+                                .hash()
+                                .as_str()
+                                .trim_start_matches("sha256:")
+                                .to_string();
+                        }
+                        other => panic!("超阈值输出必须是 Ref,实际 {other:?}"),
+                    },
+                    SessionEvent::ToolFinished { output, .. } => {
+                        panic!("意外的 call_id 终态: {output:?}")
+                    }
+                    _ => continue,
+                }
+            };
+
+            let entry = owners
+                .db()
+                .read_blocking(|conn| store::get_session_content(conn, "SES-EXT", &content_id))
+                .expect("read content");
+            let Some((_media, bytes, _truncated)) = entry else {
+                panic!("外置全文必须落 session_contents");
+            };
+            assert_eq!(bytes, big.as_bytes(), "全文逐字节可回读");
+
+            let state = owner.snapshot().await.expect("snapshot");
+            let tool = state
+                .tools
+                .iter()
+                .find(|item| item.call_id.as_ref() == "C9")
+                .expect("tool row");
+            assert!(
+                matches!(tool.output, Some(ContentValue::Ref { .. })),
+                "快照视图同样投影 Ref,不留 inline 副本"
+            );
+        });
+    }
+
     /// B01 边界:首帧 seq = 0;快照水位 = "下一个将分配的 seq";水位读取后的
     /// 下一帧 seq **等于**水位(相等边界必须被客户端处理,不是跳过)。
     /// 提交回执语义:submit_request 完成时"落库 + emit"已在泵内完成。

@@ -21,8 +21,8 @@ use qaqh_ringing_contract::events::{
     ExecOutputSource, InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
 };
 use qaqh_ringing_contract::fact::{
-    BlockId, ContentValue, InputId, InteractionDecision, InteractionId, ToolCallId,
-    ToolCallOutcome, ToolMetrics, TurnId,
+    BlockId, ContentHash, ContentRef, ContentValue, InputId, InteractionDecision, InteractionId,
+    ToolCallId, ToolCallOutcome, ToolMetrics, TurnId,
 };
 use qaqh_ringing_contract::state::{
     CodeDelta, ExecSessionView, InteractionView, SessionState, TimelineEntry, ToolCallState,
@@ -42,6 +42,11 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// 消灭的是「缺口即掐流」的活锁,不是 resync 本身。
 const REPLAY_FRAME_CAP: usize = 2 * EVENT_CHANNEL_CAPACITY;
 const REPLAY_BYTE_CAP: usize = 4 * 1024 * 1024;
+
+/// 工具终态输出直存 inline 的字节上限;超过即外置进 `session_contents`,
+/// 行与事件只带 ref(见 `OwnerMsg::Settle`)。阈值取 32 KiB:edit/write 的
+/// 回执与小 diff 保持 inline 即得,只有真正的大正文才走按需拉取。
+const TOOL_OUTPUT_INLINE_MAX_BYTES: usize = 32 * 1024;
 
 /// 会话事件回放尾。定序纪律:「先入环、后广播」(`emit`)与「先 grab receiver、
 /// 后读环」(`attach_after`)交错时,每帧要么已在环内被 replay 覆盖,要么其
@@ -1264,6 +1269,25 @@ impl OwnerPump {
                         return;
                     }
                 };
+                // UI 投影外置(阈值见 TOOL_OUTPUT_INLINE_MAX_BYTES):大工具输出
+                // 全文进 session_contents(sha256 为 id),行与事件只带 ref。
+                // 这不影响模型环——模型回放读 messages 表的 ToolResult 块,
+                // model.text 已被 tool_side_fold 裁剪;`tool_calls.output_text`
+                // 纯是 UI 投影列,Inline→Ref 只换呈现形态,不改任何事实。
+                // 收益:快照载荷、实时事件帧、回放环(REPLAY 侧 Ref 只计 64 字节)
+                // 同时不再被数百 KB 正文压住。
+                let externalized: Option<(String, String)> = settlement
+                    .output_text
+                    .as_ref()
+                    .filter(|text| text.len() > TOOL_OUTPUT_INLINE_MAX_BYTES)
+                    .map(|text| {
+                        use sha2::Digest as _;
+                        (hex::encode(sha2::Sha256::digest(text.as_bytes())), text.clone())
+                    });
+                let (output_text, output_ref) = match &externalized {
+                    Some((content_id, _)) => (None, Some(content_id.clone())),
+                    None => (settlement.output_text.clone(), None),
+                };
                 let finish = store::ToolCallFinish {
                     call_id: settlement.call_id.clone(),
                     session_id: self.session_id.clone(),
@@ -1274,8 +1298,8 @@ impl OwnerPump {
                         .outcome
                         .exec_session_id()
                         .map(|id| id.as_str().to_string()),
-                    output_text: settlement.output_text.clone(),
-                    output_ref: None,
+                    output_text,
+                    output_ref,
                     output_truncated: settlement.output_truncated,
                     meta_json: settlement
                         .metrics
@@ -1289,10 +1313,21 @@ impl OwnerPump {
                         .as_ref()
                         .and_then(|d| serialize_typed(&who, "code_delta", d)),
                 };
-                if let Err(error) = self
-                    .db
-                    .write_blocking(move |conn| store::finish_tool_call(conn, &finish))
-                {
+                let content_write = externalized.clone();
+                let content_session_id = self.session_id.clone();
+                if let Err(error) = self.db.write_blocking(move |conn| {
+                    if let Some((content_id, text)) = &content_write {
+                        store::put_session_content(
+                            conn,
+                            &content_session_id,
+                            content_id,
+                            "text/plain; charset=utf-8",
+                            text.as_bytes(),
+                            false,
+                        )?;
+                    }
+                    store::finish_tool_call(conn, &finish)
+                }) {
                     log::error!(
                         "[owner] tool {} finish not recorded: {error}",
                         settlement.call_id
@@ -1303,9 +1338,16 @@ impl OwnerPump {
                     call_id: ToolCallId::new(settlement.call_id),
                     outcome: settlement.outcome.clone(),
                     exec_session_id: settlement.outcome.exec_session_id().cloned(),
-                    output: settlement
-                        .output_text
-                        .map(|text| ContentValue::Inline { text }),
+                    output: match &externalized {
+                        Some((content_id, _)) => Some(ContentValue::Ref {
+                            content_ref: ContentRef::new(ContentHash::new(
+                                store::canonical_content_ref(content_id),
+                            )),
+                        }),
+                        None => settlement
+                            .output_text
+                            .map(|text| ContentValue::Inline { text }),
+                    },
                     output_truncated: settlement.output_truncated,
                     metrics: settlement.metrics,
                     code_delta: settlement.code_delta,
