@@ -147,13 +147,32 @@ refreeze 落 main 版本位吸收，不取道 LTS-v4.1 分支；`subagent.spawn`
       session 41 / subagent 14 全绿；daemon+client `cargo check` 绿。
       并发留痕：一次 `-j 8` 偶发（handoff 重试时序测试）单测两连绿排除，
       非本切片引入。
-- [ ] 切片 C+D（refreeze 一次）：Team 根开关（SessionSettingsPatch additive +
-      条件注册）+ `TeamResponse.board`/`TeamBoard*` 删除 + `TeamAgentSnapshot`
-      诚实化 + `TaskView` additive + `subagent.spawn` 变体删除 + board 机构删除
-      + 金标准重切 + 版本位 bump；姊妹仓同批改。
-- [ ] 冒烟：`smoke-subagent.ps1` 扩展——lead 建任务（带 write_scopes）→ 子级 CAS
-      认领 → 子级终态合流回父（"已完成"）→ lead wait 收答；根开关关态反证
-      （工具不在场）。
+- [x] 切片 C+D（refreeze 一次）：Team 根开关（SessionSettingsPatch additive
+      `team_mode` + 仅根可改 + 后代继承存活根 + 协作面按根条件注册：
+      AGENT/TEAM/ROOT/ROOT_TEAM 四组注册器）；`TeamResponse.board`/
+      `TeamBoard*`/`TeamDelta`/`TaskBoardDelta`/`TeamTaskSnapshot`/board_types
+      词表整体删除；`TeamAgentSnapshot` 诚实化（`Idle` 变体新增、nickname 取
+      spawn effect、residency 按 registry 实例在场判定、`role`/
+      `current_task_id` 死字段删除）；`TaskView` additive
+      （write_scopes/ready/write_scope_warnings）；`subagent.spawn` wire 变体
+      删除（退役反证闸门
+      `subagent_spawn_wire_word_is_retired_and_rejected`）；board 机构删除
+      （board_tools.rs/BoardHost/BOARD_HOST/db board fns/schema 11 DROP 板表
+      ——数据随表删除,本仓无日志重放面,直接删比 dsh 的"保留无消费者记录"
+      更诚实）；schema 11（sessions.team_mode 列）。
+      三戳 bump：`ringing-commands-11`（命令词表实变）/
+      `ringing-session-4`（读模型实变）；wire_version 2 不动（协议帧未变）。
+      金标准：v4.0 就地机器重切（沿 ADR-0027 先例），
+      `qaqh-contract-export check --against docs/api-surface/v4.0` EXIT=0，
+      导出物净删 12 文件（board 词表族）。**版本位治理注记**：main 沿用
+      v4.0 目录就地重切未开新目录，与 LTS-v4.1 分支的 v4.1 目录关系留待
+      所有者按 ADR-0032 协调（main ⊇ branch 超集不变量不受影响）。
+      定向验证（`cargo test -j 2`）：agent-runtime 53 / client 60 / ringing 20 /
+      runtime 59 / session 41 / subagent 14 全绿；workspace `cargo check` 绿。
+- [ ] 冒烟扩展：`smoke-subagent.ps1` 真实 daemon+模型回合（建任务→CAS 认领→
+      终态合流→wait 收答 + 根开关关态反证）。**未跑**——需要真实模型环境
+      （隔离 daemon + API key），留给有环境的会话执行；脚本本身的工具面
+      断言更新随该会话一起落。
 - [ ] 并发留痕（规则 19）：实施期共享树同文件改动按既有纪律部分暂存。
 
 ## 参考
