@@ -3,4 +3,9 @@ import type { ModelSelection } from "./ModelSelection";
 import type { SettingValue } from "./SettingValue";
 import type { ToolsSettingPatch } from "./ToolsSettingPatch";
 
-export type SessionSettingsPatch = { model_selection?: SettingValue<ModelSelection> | null, tools?: ToolsSettingPatch | null, };
+export type SessionSettingsPatch = { model_selection?: SettingValue<ModelSelection> | null, tools?: ToolsSettingPatch | null, 
+/**
+ * AgentTeam 根开关(ADR-0033 切片D additive):按根会话保存,后代继承
+ * 存活根的模式;协作工具(task_*)按此条件注册,缺省关。仅根可改。
+ */
+team_mode?: boolean | null, };

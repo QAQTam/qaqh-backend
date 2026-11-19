@@ -531,7 +531,6 @@ async fn dispatch(
         | RingingCommand::WorkspaceDelete {}
         | RingingCommand::WorkspaceMoveSession { .. }
         | RingingCommand::WorkspaceDetach {}
-        | RingingCommand::SubagentSpawn { .. }
         | RingingCommand::GoalSet { .. }
         | RingingCommand::GoalGet {}
         | RingingCommand::GoalClear {}

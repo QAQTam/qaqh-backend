@@ -184,17 +184,6 @@ pub enum RingingCommand {
     WorkspaceMoveSession { workspace_id: String },
     #[serde(rename = "workspace.detach")]
     WorkspaceDetach {},
-    #[serde(rename = "subagent.spawn")]
-    SubagentSpawn {
-        #[serde(default)]
-        tools: Vec<String>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        /// 显式指定子代理的 provider+model 选择；缺省继承父会话行的
-        /// model_selection。端点/密钥/max_tokens 一律由目录解析，禁止裸传。
-        selection: Option<qaqh_profile::ModelSelection>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        workspace: Option<String>,
-    },
     #[serde(rename = "todo.set")]
     TodoSet { args: serde_json::Value },
     #[serde(rename = "todo.cancel")]
@@ -252,7 +241,6 @@ impl RingingCommand {
             Self::WorkspaceDelete { .. } => "workspace.delete",
             Self::WorkspaceMoveSession { .. } => "workspace.move_session",
             Self::WorkspaceDetach { .. } => "workspace.detach",
-            Self::SubagentSpawn { .. } => "subagent.spawn",
             Self::TodoSet { .. } => "todo.set",
             Self::TodoCancel { .. } => "todo.cancel",
             Self::PlanAction { .. } => "plan.action",

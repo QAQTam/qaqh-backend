@@ -5,11 +5,11 @@
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "b5fb6288d2a4aba47342442a64b325e4a3bc416258ffb9ee5506ce26e1a8a6d9",
+  "contract_hash": "23c83eef4d3c80828331e9266a0a1dcc367a164439841e5ff1c04544820e9653",
   "files": [
     {
       "path": "constants.ts",
-      "sha256": "73dcd609bebfa894bfcc58bbfc1116b984bfc32dc7741a882de9a50dc986e515"
+      "sha256": "25194bc4394072909b149fb5d9ce7d12a06297362e18532945c1b690e25551f7"
     },
     {
       "path": "coverage.json",
@@ -105,7 +105,7 @@
     },
     {
       "path": "cs/ContractConstants.cs",
-      "sha256": "91a579d99d58d71b3e955f3973af1397ff9e42d4329fc5234ac2f4eaaf790329"
+      "sha256": "7d8a66d46b392887ea05e8a0aa4f3546f083dfb506426f032cd70d6f1f61d2ee"
     },
     {
       "path": "cs/ContractJson.cs",
@@ -437,7 +437,7 @@
     },
     {
       "path": "cs/RingingCommand.cs",
-      "sha256": "84b4bb0045c8c60ab3771d6056c320fe1056f018e3678ebf4f269f26b94d5600"
+      "sha256": "aa602c3bece04ed90ee1cf5ede7feaa220958970b9ca8290d33c2190aa8c68cb"
     },
     {
       "path": "cs/RingingCommandAck.cs",
@@ -657,7 +657,7 @@
     },
     {
       "path": "cs/SessionSettingsPatch.cs",
-      "sha256": "5c285ea262910df658a998e41c1a5940be38d83067f66e9314f4e5f7afbb2fba"
+      "sha256": "0b3532d8b5d636e608f7c3cf40377b957aa2ffc6dbe1e681d21098d29592f5eb"
     },
     {
       "path": "cs/SessionState.cs",
@@ -825,7 +825,7 @@
     },
     {
       "path": "cs/TaskView.cs",
-      "sha256": "5696492558d001597c0fa787496c03e4b85f0757cc5632824ef7ee6c77675dcf"
+      "sha256": "498a3c8fc56a279fb0a02457eea616336fcd8fa9a4821f10137544694c4c6c78"
     },
     {
       "path": "cs/TeamActor.cs",
@@ -837,35 +837,11 @@
     },
     {
       "path": "cs/TeamAgentSnapshot.cs",
-      "sha256": "4993c9d9aafa783a81f2dcb739ab1fe8c2ac409f450867a2e5f7144e6602a635"
+      "sha256": "cefb7df7c92e7e89eb859067e7abbb37dcf6a766ad1eb59a5fe3aded0588efaf"
     },
     {
       "path": "cs/TeamAgentStatus.cs",
-      "sha256": "4cec0397e23e01fc465abaec633f03f91e3d6c8d9eb02bc7715c63614fb322c1"
-    },
-    {
-      "path": "cs/TeamBoardChannel.cs",
-      "sha256": "aa6a997f39ca2436dd86fc43cf158bce7ffb8a4067233662b43948d77b0568d3"
-    },
-    {
-      "path": "cs/TeamBoardPost.cs",
-      "sha256": "820d0d57cd04c29f0d76859becf50bdf788ed99881bf514ab24b46f59d02e514"
-    },
-    {
-      "path": "cs/TeamBoardSnapshot.cs",
-      "sha256": "8e3ef1c935e771d2d31ed756bc6ff2f7e6b3858b22997127b6373a9e211d80fb"
-    },
-    {
-      "path": "cs/TeamBoardSubscription.cs",
-      "sha256": "9e6ea2151f0266996629a6b50e9b4aacb268f11ea6aeed4d49dc915c6b7ddfc6"
-    },
-    {
-      "path": "cs/TeamBoardSubscriptionTarget.cs",
-      "sha256": "3258cafee88f31110937c88d0e23f0033a5789b2eae1b2900132efcbf0bbfb67"
-    },
-    {
-      "path": "cs/TeamBoardThread.cs",
-      "sha256": "fa7464d464f3ab8470e3cb90dc776120ced97235ca677d1fa53671f532d98142"
+      "sha256": "96615502e1210430dc56475ddc745c33962a4e43edefbb67a7bce13d94753f5c"
     },
     {
       "path": "cs/TeamInboxSummary.cs",
@@ -873,7 +849,7 @@
     },
     {
       "path": "cs/TeamResponse.cs",
-      "sha256": "1a87479dfb5cb7454cbc8393074c96c4b280e15067ca4fe13fc37b9a4252e491"
+      "sha256": "415e6aba1c5111b0fd5a2807404e45574afdacd141838086caf0a447bebefd5f"
     },
     {
       "path": "cs/TeamSnapshot.cs",
@@ -1025,7 +1001,7 @@
     },
     {
       "path": "fixtures/bootstrap-response.json",
-      "sha256": "5d35e21660356e8b1ad8dd8b15ca3a27ddc2efef8fc4626d32117f3aa82c7600"
+      "sha256": "2f5c4bb66aa0a10c7f7164fb718bd52ea0d915e46d422d729b366376845e95a1"
     },
     {
       "path": "fixtures/command-ack-accepted.json",
@@ -1045,7 +1021,7 @@
     },
     {
       "path": "fixtures/command-attach.json",
-      "sha256": "b3deaa07ea2315f91d1b9199ae5975070213c0a06191761fdd21393126bbe3bd"
+      "sha256": "7261c4528f45b3601e64f54a8011f439be1f4c221bb4ddc39d1086f6962901c0"
     },
     {
       "path": "fixtures/command-status-accepted.json",
@@ -1085,11 +1061,11 @@
     },
     {
       "path": "fixtures/open-request.json",
-      "sha256": "b0fd6d743c51f3b6dfb460948b9353bd285c16924cb5a4b860c851c6477544ba"
+      "sha256": "bceb5d4a84efc1df58c22583b86bc3687dacdf61ae39bf78660f32a39f275aa8"
     },
     {
       "path": "fixtures/open-response.json",
-      "sha256": "44cf921ecac40abb9be8c37246bfe9b0ed188410e4ded85165b1e3a861550c0b"
+      "sha256": "81926018e6f32abad79b11f307899b9e430e2902207ef250076d3c4c318ac1b8"
     },
     {
       "path": "fixtures/pair-params.json",
@@ -1465,11 +1441,11 @@
     },
     {
       "path": "fixtures/team-response.json",
-      "sha256": "8444c265e0a6689daead7b81ec2c398434aee8c7b2e90c2dd19b0bd8013f4503"
+      "sha256": "cfd6c74893e95e5c20346443a6ce5395fd29707de71a35858809401ef7bfeeba"
     },
     {
       "path": "index.ts",
-      "sha256": "a8256e7d08b9877ac0d471e17b3b342dffae04d6a05900e06b455565913a9495"
+      "sha256": "8ecbb49563c91ff65a309cb8bbe58811bf2dd359096b185eec1dfe9f3a64234a"
     },
     {
       "path": "node.ts",
@@ -1925,7 +1901,7 @@
     },
     {
       "path": "types/qaqh/RingingCommand.ts",
-      "sha256": "1d4e5e06dcad4c8fafda4bdf8aa4c5117c295f4be92696312eedec78744751e2"
+      "sha256": "fe19241d5a4637add89864277511b2dc179158308a7b585a7f8d1d323f996028"
     },
     {
       "path": "types/qaqh/RingingCommandAck.ts",
@@ -2153,7 +2129,7 @@
     },
     {
       "path": "types/qaqh/SessionSettingsPatch.ts",
-      "sha256": "f8e9a56e46ae3a89d79766b645ad5ff7d8e84a3b624296637ec62743bdb8c284"
+      "sha256": "e8e733ef83ad3c1185b7023f40968b475a8e6c277444e9dde6029c658fde51cc"
     },
     {
       "path": "types/qaqh/SessionState.ts",
@@ -2325,7 +2301,7 @@
     },
     {
       "path": "types/qaqh/TaskView.ts",
-      "sha256": "2db9adf71a697e75a511edb87388ba997fcc0589305d1ff55d2f00d84c84e24b"
+      "sha256": "c48fea31f0e087f057556a8a961b65a7788f65f5678b6d9480cb290753735269"
     },
     {
       "path": "types/qaqh/TeamActor.ts",
@@ -2337,35 +2313,11 @@
     },
     {
       "path": "types/qaqh/TeamAgentSnapshot.ts",
-      "sha256": "009f40134135fde666b01ba3e6e4cb35e44bb7e41611a4af31200b90b0797d4c"
+      "sha256": "d58d7a4baea2f6b58c38e456f938a8db506ce418c6bc4cd05cc8a2e4bfacf82a"
     },
     {
       "path": "types/qaqh/TeamAgentStatus.ts",
-      "sha256": "c643d470e9808896ecbbb2fea121c974cdaa06551166310f53c75afc9cdeef01"
-    },
-    {
-      "path": "types/qaqh/TeamBoardChannel.ts",
-      "sha256": "31d0aa6e9264b70f5845a264bb0bc4f35bec8819061a4a2eed04a1192805e4f9"
-    },
-    {
-      "path": "types/qaqh/TeamBoardPost.ts",
-      "sha256": "1fc0c828a386c8dd303e6ddecb7abc19872603ec261aef0374bfad8788b1c67a"
-    },
-    {
-      "path": "types/qaqh/TeamBoardSnapshot.ts",
-      "sha256": "5fba5c92636f2b4c2ef723127e4a774d50387b9e15abdfc93556fcf00308363a"
-    },
-    {
-      "path": "types/qaqh/TeamBoardSubscription.ts",
-      "sha256": "0a23e0d75e57803185518963ad821d4a606660971895696c1f3b4f61479d82dc"
-    },
-    {
-      "path": "types/qaqh/TeamBoardSubscriptionTarget.ts",
-      "sha256": "1908bbb4a908cc3cf63a051db83fe812aa1c37a489e27630c451810ed03d6fa3"
-    },
-    {
-      "path": "types/qaqh/TeamBoardThread.ts",
-      "sha256": "c0ca129bdb16f6d7643a7567d640bd14e937895bfe446791b81772376c286c50"
+      "sha256": "525c917c685d564b172695dac9e7cc03d4d43edaebf3caa73d4aff4315f3e570"
     },
     {
       "path": "types/qaqh/TeamId.ts",
@@ -2377,7 +2329,7 @@
     },
     {
       "path": "types/qaqh/TeamResponse.ts",
-      "sha256": "4afb37ec99d70145347c22a56d3e191b4b19b6c3436cc9f00afd744b75634bfd"
+      "sha256": "56996624e296f2b877800569ff22987509a4fd56490e7c83e0a2039b48a400c7"
     },
     {
       "path": "types/qaqh/TeamSnapshot.ts",

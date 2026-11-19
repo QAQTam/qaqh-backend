@@ -34,20 +34,15 @@ use qaqh_workspace::{ToolManager, ToolRisk};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-mod board_tools;
 mod host;
 mod task_tools;
 pub use host::{
-    AgentOutcome, BoardChannel, BoardChannelCreateRequest, BoardHost, BoardListRequest,
-    BoardNotificationSkip, BoardPost, BoardPostOutcome, BoardPostRequest, BoardSnapshot,
-    BoardSubscription, BoardSubscriptionAction, BoardSubscriptionRequest, BoardSubscriptionTarget,
-    BoardSubscriptionTargetKind, BoardThread, BoardThreadCreateRequest, InterruptAgentRequest,
-    InterruptedAgent, ListedAgent, ListedAgentResidency, ListedAgentStatus,
-    SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, SubagentHost,
-    TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
-    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListPage, TaskListRequest,
-    TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, board_host, host,
-    install_board_host, install_host, install_task_host, normalize_write_scope, task_host,
+    AgentOutcome, InterruptAgentRequest, InterruptedAgent, ListedAgent, ListedAgentResidency,
+    ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest,
+    SpawnedSubagent, SubagentHost, TaskBoardArtifact, TaskBoardHost, TaskBoardTask,
+    TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
+    TaskListPage, TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome,
+    WaitAgentRequest, host, install_host, install_task_host, normalize_write_scope, task_host,
     task_is_ready, write_scope_warnings,
 };
 
@@ -698,20 +693,14 @@ pub fn register(mgr: &mut ToolManager) {
     mgr.register_typed(InterruptAgentTool);
 }
 
-/// Register the collaboration surface (task_*/board_*) alongside the agent
-/// tools. Production sessions receive both registrars (ADR-0014 切片E); the
-/// board is keyed by the caller's root tree, so lead and teammates share it.
+/// Register the collaboration surface (task_*). ADR-0033 切片D:留言板词表
+/// 退役——通信只走 canonical mailbox(send_message),协调走任务板。
 pub fn register_collaboration_tools(mgr: &mut ToolManager) {
     mgr.register_typed(task_tools::TaskCreateTool);
     mgr.register_typed(task_tools::TaskClaimTool);
     mgr.register_typed(task_tools::TaskUpdateTool);
     mgr.register_typed(task_tools::TaskCloseTool);
     mgr.register_typed(task_tools::TaskListTool);
-    mgr.register_typed(board_tools::BoardChannelCreateTool);
-    mgr.register_typed(board_tools::BoardThreadCreateTool);
-    mgr.register_typed(board_tools::BoardPostTool);
-    mgr.register_typed(board_tools::BoardSubscribeTool);
-    mgr.register_typed(board_tools::BoardListTool);
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
@@ -1097,11 +1086,6 @@ mod tests {
             "task_update",
             "task_close",
             "task_list",
-            "board_channel_create",
-            "board_thread_create",
-            "board_post",
-            "board_subscribe",
-            "board_list",
         ] {
             let handler = manager
                 .lookup(name)

@@ -387,10 +387,8 @@ impl Client {
     }
 
     /// `GET /ringing/v2/sessions/{seed}/team`。
-    /// Team projection 快照：roster（以 `AgentPath` 为主）+ inbox + task board +
-    /// message board。deltas 在 per-seed 单流上以
-    /// [`fact::ProjectionPayload::TeamDelta`] 到达；壳层应当 **先拉一次快照、再应用
-    /// delta**，不要只靠 delta 增量拼状态。
+    /// Team projection 快照：roster + inbox + task board(ADR-0033:留言板退役,
+    /// TeamDelta 死契约随之删除;快照即全部状态)。
     pub async fn team_v2(&self, session_id: &str) -> Result<TeamResponse> {
         let state = self.require_v2_session().await?;
         let path = format!("{RINGING_V2_BASE_PATH}/sessions/{session_id}/team");
@@ -549,14 +547,6 @@ mod tests {
                 "tasks": [],
                 "revision": 0,
                 "last_fact_seq": 0
-            },
-            "board": {
-                "revision": 0,
-                "last_fact_seq": 0,
-                "channels": [],
-                "threads": [],
-                "posts": [],
-                "subscriptions": []
             }
         });
 

@@ -4,4 +4,8 @@ import type { SessionId } from "./SessionId";
 import type { TeamAgentResidency } from "./TeamAgentResidency";
 import type { TeamAgentStatus } from "./TeamAgentStatus";
 
-export type TeamAgentSnapshot = { agent_id: SessionId, agent_path: AgentPath, nickname?: string | null, role?: string | null, status: TeamAgentStatus, residency: TeamAgentResidency, parent_agent_path?: AgentPath | null, current_task_id?: string | null, };
+export type TeamAgentSnapshot = { agent_id: SessionId, agent_path: AgentPath, 
+/**
+ * 同事名(spawn 时的 agent_name;ADR-0033:名字必须诚实上册)。
+ */
+nickname?: string | null, status: TeamAgentStatus, residency: TeamAgentResidency, parent_agent_path?: AgentPath | null, };

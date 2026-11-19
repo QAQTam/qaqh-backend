@@ -83,12 +83,15 @@ impl CommandRejection {
 /// `-9`（2026-11-13，ADR-0015 §已决 2，所有者拍板）：新增 `goal.set` / `goal.get` /
 /// `goal.clear` 命令 + `goal_exists` / `no_goal` 拒绝码 ⇒ 与 `-8` 同律 bump。
 /// 代价与 `-8` 相同（未重编旧客户端 open 即拒），账记 ADR-0010 攒着的清单。
-pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-10";
+/// ADR-0033:`subagent.spawn` wire 命令删除 = 命令词表实变,代际 bump。
+pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-11";
 
 /// 会话读模型/事件词表契约代际(spec §11)。管理事件与读模型的破坏性变化;
 /// open 与 bootstrap 均携带,客户端必须严格校验。首个显式修订 = ringing-session-2,
 /// 当前无该字段的读模型视为隐式第 1 代。
-pub const SESSION_CONTRACT_REVISION: &str = "ringing-session-3";
+/// ADR-0033:TeamResponse.board 删除/TeamAgentSnapshot 诚实化/TaskView 与
+/// SessionSettingsPatch additive = 读模型词表实变,代际 bump。
+pub const SESSION_CONTRACT_REVISION: &str = "ringing-session-4";
 
 /// RingingV2 唯一公共命令信封。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -253,10 +256,6 @@ impl RingingCommand {
                 | Self::TodoSet { .. }
                 | Self::TodoCancel { .. }
                 | Self::PlanAction { .. }
-                // ADR-0014：subagent.spawn 的 target 就是父会话——血缘由命令
-                // target 表达（service handler 同口径）。此前误列 global 操作，
-                // 信封校验与 handler 互相矛盾，wire 入口两种 target 都被拒。
-                | Self::SubagentSpawn { .. }
         )
     }
 
@@ -310,6 +309,10 @@ pub struct SessionSettingsPatch {
     pub model_selection: Option<SettingValue<qaqh_types::ModelSelection>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<ToolsSettingPatch>,
+    /// AgentTeam 根开关(ADR-0033 切片D additive):按根会话保存,后代继承
+    /// 存活根的模式;协作工具(task_*)按此条件注册,缺省关。仅根可改。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1049,39 +1052,19 @@ mod tests {
         envelope.validate().expect("valid v2 command envelope");
     }
 
-    /// ADR-0014 冒烟实测缺陷回归：subagent.spawn 的血缘由命令 target（父会话）
-    /// 表达，service handler 要求 Session target；信封校验曾误列 global 操作，
-    /// 两种 target 互相矛盾导致 wire 入口永远被拒（工具路径不经信封故单测全绿）。
+    /// ADR-0033 切片D：`subagent.spawn` wire 命令退役——spawn 是模型工具面的
+    /// 唯一入口（工具面可 fork），wire 变体删除后同名词表必须被拒绝反序列化，
+    /// 不能静默吞掉。取代 ADR-0014 的信封 target 回归（入口已不存在）。
     #[test]
-    fn subagent_spawn_envelope_targets_the_parent_session() {
-        let command = RingingCommand::SubagentSpawn {
-            tools: vec![],
-            selection: None,
-            workspace: None,
-        };
-        assert!(command.requires_session_target());
-        assert!(!command.is_global_operation());
-        let envelope = RingingV2CommandEnvelope::new(
-            "cmd-spawn",
-            CommandTarget::Session {
-                session_id: "parent-1".into(),
-            },
-            command,
-        )
-        .with_client_identity("instance-1", "session-1");
-        envelope
-            .validate()
-            .expect("session-targeted spawn envelope");
-        let global = RingingV2CommandEnvelope::new(
-            "cmd-spawn-global",
-            CommandTarget::Global,
-            RingingCommand::SubagentSpawn {
-                tools: vec![],
-                selection: None,
-                workspace: None,
-            },
-        )
-        .with_client_identity("instance-1", "session-1");
-        assert_eq!(global.validate(), Err("target_mismatch"));
+    fn subagent_spawn_wire_word_is_retired_and_rejected() {
+        let legacy = serde_json::json!({
+            "type": "subagent.spawn",
+            "tools": [],
+        });
+        let deserialized: Result<RingingCommand, _> = serde_json::from_value(legacy);
+        assert!(
+            deserialized.is_err(),
+            "subagent.spawn 已从命令词表删除，不得再被反序列化"
+        );
     }
 }

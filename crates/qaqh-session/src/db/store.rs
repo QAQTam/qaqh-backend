@@ -246,14 +246,6 @@ pub fn delete_session_tree(conn: &mut Connection, root: &str) -> Result<Vec<Stri
             tx.execute(&format!("DELETE FROM {table} WHERE session_id = ?1"), [id])?;
         }
         tx.execute("DELETE FROM team_tasks WHERE root_session_id = ?1", [id])?;
-        tx.execute(
-            "DELETE FROM board_channels WHERE root_session_id = ?1",
-            [id],
-        )?;
-        tx.execute(
-            "DELETE FROM board_subscriptions WHERE root_session_id = ?1",
-            [id],
-        )?;
         tx.execute("DELETE FROM sessions WHERE session_id = ?1", [id])?;
     }
     tx.commit()?;
@@ -2040,6 +2032,33 @@ pub fn session_content_owners(
     )?;
     let rows = statement.query_map([bare_content_id(content_id)], |row| row.get(0))?;
     rows.collect()
+}
+
+
+
+/// ADR-0033:AgentTeam 根开关(sessions.team_mode)。仅根会话可置位,
+/// 后代继承存活根的模式——写入只经本函数,读取用 session_team_mode。
+pub fn set_session_team_mode(
+    conn: &Connection,
+    session_id: &str,
+    flag: bool,
+    now_ms: i64,
+) -> rusqlite::Result<usize> {
+    conn.execute(
+        "UPDATE sessions SET team_mode = ?2, updated_at_ms = ?3 WHERE session_id = ?1",
+        params![session_id, i64::from(flag), now_ms],
+    )
+}
+
+/// 读取根开关:会话不存在返回 false(缺省关,与旧行为一致)。
+pub fn session_team_mode(conn: &Connection, session_id: &str) -> bool {
+    conn.query_row(
+        "SELECT team_mode FROM sessions WHERE session_id = ?1",
+        params![session_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|flag| flag != 0)
+    .unwrap_or(false)
 }
 
 #[cfg(test)]

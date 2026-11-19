@@ -5,4 +5,16 @@ import type { TaskId } from "./TaskId";
 import type { TaskState } from "./TaskState";
 import type { TeamActor } from "./TeamActor";
 
-export type TaskView = { task_id: TaskId, title: string, description_ref?: SessionContentRef | null, state: TaskState, owner?: TeamActor | null, claim_epoch: number, depends_on?: Array<TaskId>, artifacts?: Array<TaskArtifact>, acceptance?: Array<string>, result_ref?: SessionContentRef | null, created_by: TeamActor, created_at_ms: number, updated_at_ms: number, };
+export type TaskView = { task_id: TaskId, title: string, description_ref?: SessionContentRef | null, state: TaskState, owner?: TeamActor | null, claim_epoch: number, depends_on?: Array<TaskId>, artifacts?: Array<TaskArtifact>, acceptance?: Array<string>, 
+/**
+ * advisory 文件触及范围(ADR-0033 切片D additive,dsh 同律)。
+ */
+write_scopes?: Array<string>, 
+/**
+ * 派生值:open 且全部依赖达标(读取侧投影,不入库)。
+ */
+ready: boolean, 
+/**
+ * 与进行中任务 write_scopes 前缀相交警告(advisory,绝不阻止)。
+ */
+write_scope_warnings?: Array<string>, result_ref?: SessionContentRef | null, created_by: TeamActor, created_at_ms: number, updated_at_ms: number, };

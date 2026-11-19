@@ -256,8 +256,9 @@ impl QaqhService {
         let SessionSettingsPatch {
             model_selection,
             tools,
+            team_mode,
         } = &patch;
-        if model_selection.is_none() && tools.is_none() {
+        if model_selection.is_none() && tools.is_none() && team_mode.is_none() {
             return Err(QaqhError::invalid(
                 "session.settings.patch: at least one setting is required",
             ));
@@ -278,6 +279,28 @@ impl QaqhService {
         }
         if let Some(tools) = tools {
             apply_tools_patch(&mut meta, tools)?;
+        }
+
+        // ADR-0033:team_mode 仅根可改(后代继承存活根);独立写路径,
+        // 与 settings revision 解耦(切换不 bump settings revision)。
+        if let Some(flag) = team_mode {
+            if self.owners.session_parent(session_id).map_err(QaqhError::message)?.is_some() {
+                return Err(QaqhError::invalid(
+                    "session.settings.patch: team_mode is root-only; descendants inherit the root",
+                ));
+            }
+            let root = session_id.to_string();
+            let flag = *flag;
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or_default();
+            self.owners
+                .db()
+                .write_blocking(move |conn| {
+                    qaqh_session::db::store::set_session_team_mode(&conn, &root, flag, now_ms)
+                })
+                .map_err(|error| QaqhError::context("team_mode write failed", error.to_string()))?;
         }
 
         let revision = crate::session_meta::patch_with_settings_revision(

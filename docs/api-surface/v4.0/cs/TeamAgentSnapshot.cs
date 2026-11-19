@@ -18,9 +18,6 @@ public sealed record TeamAgentSnapshot
     [JsonPropertyName("nickname")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Nickname { get; init; }
-    [JsonPropertyName("role")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Role { get; init; }
     [JsonPropertyName("status")]
     public TeamAgentStatus Status { get; init; }
     [JsonPropertyName("residency")]
@@ -28,8 +25,5 @@ public sealed record TeamAgentSnapshot
     [JsonPropertyName("parent_agent_path")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ParentAgentPath { get; init; }
-    [JsonPropertyName("current_task_id")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? CurrentTaskId { get; init; }
 }
 

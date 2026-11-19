@@ -10,6 +10,6 @@ public static class ContractConstants
     public const string RingingV2BasePath = "/ringing/v2";
     public const string ClientSessionHeader = "X-QAQH-Client-Session-Id";
     public const ulong MaxSafeInteger = 9007199254740991;
-    public const string CommandContractRevision = "ringing-commands-10";
-    public const string SessionContractRevision = "ringing-session-3";
+    public const string CommandContractRevision = "ringing-commands-11";
+    public const string SessionContractRevision = "ringing-session-4";
 }

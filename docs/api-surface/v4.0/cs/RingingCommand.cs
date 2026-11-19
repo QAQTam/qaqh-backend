@@ -47,7 +47,6 @@ namespace Qaqh.Sdk.Contract;
 [JsonDerivedType(typeof(RingingCommandWorkspaceDelete), "workspace.delete")]
 [JsonDerivedType(typeof(RingingCommandWorkspaceMoveSession), "workspace.move_session")]
 [JsonDerivedType(typeof(RingingCommandWorkspaceDetach), "workspace.detach")]
-[JsonDerivedType(typeof(RingingCommandSubagentSpawn), "subagent.spawn")]
 [JsonDerivedType(typeof(RingingCommandTodoSet), "todo.set")]
 [JsonDerivedType(typeof(RingingCommandTodoCancel), "todo.cancel")]
 [JsonDerivedType(typeof(RingingCommandPlanAction), "plan.action")]
@@ -272,18 +271,6 @@ public sealed record RingingCommandWorkspaceMoveSession : RingingCommand
 }
 
 public sealed record RingingCommandWorkspaceDetach : RingingCommand;
-
-public sealed record RingingCommandSubagentSpawn : RingingCommand
-{
-    [JsonPropertyName("tools")]
-    public string[] Tools { get; init; }
-    [JsonPropertyName("selection")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public ModelSelection? Selection { get; init; }
-    [JsonPropertyName("workspace")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? Workspace { get; init; }
-}
 
 public sealed record RingingCommandTodoSet : RingingCommand
 {

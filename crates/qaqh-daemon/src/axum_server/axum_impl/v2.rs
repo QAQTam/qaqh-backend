@@ -239,7 +239,7 @@ pub(crate) async fn handle_bootstrap_v2(
     json_response(StatusCode::OK, &response)
 }
 
-/// `GET /ringing/v2/sessions/{seed}/team` — team roster + task/message board snapshots.
+/// `GET /ringing/v2/sessions/{seed}/team` — team roster + task board snapshot(ADR-0033:留言板退役)。
 ///
 /// 花名册由业务库血缘重建:根会话 + `sessions.parent_session_id` 直指的子代理,
 /// 状态读各自的业务行;任务板/留言板仍来自 team aggregates。增量在
@@ -272,15 +272,36 @@ pub(crate) async fn handle_team_snapshot_v2(
         }
     };
     let root_path = qaqh_ringing_contract::fact::AgentPath::root();
+    // ADR-0033:花名册诚实化——状态读真话(Idle≠Running),名字取 spawn effect,
+    // residency 按 registry 实例在场判定,不再硬编码。
+    let spawn_names = owners
+        .db()
+        .read_blocking(|conn| qaqh_session::db::view::spawn_names(conn))
+        .unwrap_or_default();
+    let root_status = match owners.session_run_state(&session_id) {
+        Ok(qaqh_session::owner::SessionRunState::Waiting) => {
+            qaqh_ringing_contract::team::TeamAgentStatus::WaitingUser
+        }
+        Ok(qaqh_session::owner::SessionRunState::Idle) => {
+            qaqh_ringing_contract::team::TeamAgentStatus::Idle
+        }
+        _ => qaqh_ringing_contract::team::TeamAgentStatus::Running,
+    };
+    let root_loaded = state
+        .service
+        .agent_residency_loaded(&session_id)
+        .unwrap_or(true);
     let mut agents = vec![qaqh_ringing_contract::team::TeamAgentSnapshot {
         agent_id: qaqh_ringing_contract::fact::SessionId::new(session_id.clone()),
         agent_path: root_path.clone(),
-        nickname: None,
-        role: None,
-        status: qaqh_ringing_contract::team::TeamAgentStatus::Running,
-        residency: qaqh_ringing_contract::team::TeamAgentResidency::Loaded,
+        nickname: spawn_names.get(&session_id).cloned(),
+        status: root_status,
+        residency: if root_loaded {
+            qaqh_ringing_contract::team::TeamAgentResidency::Loaded
+        } else {
+            qaqh_ringing_contract::team::TeamAgentResidency::Unloaded
+        },
         parent_agent_path: None,
-        current_task_id: None,
     }];
     for child in &children {
         let status = match owners.session_run_state(child) {
@@ -290,11 +311,9 @@ pub(crate) async fn handle_team_snapshot_v2(
             Ok(qaqh_session::owner::SessionRunState::Waiting) => {
                 qaqh_ringing_contract::team::TeamAgentStatus::WaitingUser
             }
-            Ok(qaqh_session::owner::SessionRunState::Cancelling) => {
-                qaqh_ringing_contract::team::TeamAgentStatus::Running
-            }
-            Ok(qaqh_session::owner::SessionRunState::Idle) => {
-                qaqh_ringing_contract::team::TeamAgentStatus::Running
+            Ok(qaqh_session::owner::SessionRunState::Idle)
+            | Ok(qaqh_session::owner::SessionRunState::Cancelling) => {
+                qaqh_ringing_contract::team::TeamAgentStatus::Idle
             }
             Ok(qaqh_session::owner::SessionRunState::NeverStarted) => {
                 qaqh_ringing_contract::team::TeamAgentStatus::PendingInit
@@ -307,15 +326,21 @@ pub(crate) async fn handle_team_snapshot_v2(
             qaqh_ringing_contract::fact::AgentPath::parse_absolute(&format!("/root/{child}"))
                 .unwrap_or(root_path.clone())
         });
+        let loaded = state
+            .service
+            .agent_residency_loaded(child)
+            .unwrap_or(false);
         agents.push(qaqh_ringing_contract::team::TeamAgentSnapshot {
             agent_id: qaqh_ringing_contract::fact::SessionId::new(child.clone()),
             agent_path: path.clone(),
-            nickname: None,
-            role: None,
+            nickname: spawn_names.get(child).cloned(),
             status,
-            residency: qaqh_ringing_contract::team::TeamAgentResidency::Unloaded,
+            residency: if loaded {
+                qaqh_ringing_contract::team::TeamAgentResidency::Loaded
+            } else {
+                qaqh_ringing_contract::team::TeamAgentResidency::Unloaded
+            },
             parent_agent_path: Some(root_path.clone()),
-            current_task_id: None,
         });
     }
     // 投递监视:inter-agent 信封从 canonical blocks 投影进 inbox 摘要
@@ -375,18 +400,11 @@ pub(crate) async fn handle_team_snapshot_v2(
             return api_error_response(StatusCode::BAD_REQUEST, "team_unavailable", &error);
         }
     };
-    let board = match state.service.board_snapshot(&session_id) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return api_error_response(StatusCode::BAD_REQUEST, "board_unavailable", &error);
-        }
-    };
     let response = TeamResponse {
         schema: TEAM_SCHEMA.to_owned(),
         session_id,
         team,
         tasks,
-        board,
     };
     json_response(StatusCode::OK, &response)
 }

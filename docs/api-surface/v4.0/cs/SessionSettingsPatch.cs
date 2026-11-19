@@ -17,5 +17,8 @@ public sealed record SessionSettingsPatch
     [JsonPropertyName("tools")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ToolsSettingPatch? Tools { get; init; }
+    [JsonPropertyName("team_mode")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? TeamMode { get; init; }
 }
 

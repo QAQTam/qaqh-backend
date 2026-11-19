@@ -19,7 +19,5 @@ public sealed record TeamResponse
     public TeamSnapshot Team { get; init; }
     [JsonPropertyName("tasks")]
     public TaskBoardSnapshot Tasks { get; init; }
-    [JsonPropertyName("board")]
-    public TeamBoardSnapshot Board { get; init; }
 }
 

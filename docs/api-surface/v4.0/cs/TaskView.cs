@@ -34,6 +34,14 @@ public sealed record TaskView
     [JsonPropertyName("acceptance")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string[] Acceptance { get; init; }
+    [JsonPropertyName("write_scopes")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[] WriteScopes { get; init; }
+    [JsonPropertyName("ready")]
+    public bool Ready { get; init; }
+    [JsonPropertyName("write_scope_warnings")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string[] WriteScopeWarnings { get; init; }
     [JsonPropertyName("result_ref")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? ResultRef { get; init; }

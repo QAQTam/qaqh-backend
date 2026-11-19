@@ -255,6 +255,20 @@ pub(crate) struct SubagentSpawnOptions<'a> {
     pub(crate) fork: bool,
 }
 
+impl AgentRegistry {
+
+    /// ADR-0033:花名册 residency 诚实化——实例在场即 Loaded(含子会话)。
+
+    pub fn is_loaded(&self, session_id: &str) -> bool {
+
+        self.instances.contains_key(session_id)
+
+    }
+
+}
+
+
+
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。

@@ -15,6 +15,8 @@ public enum TeamAgentStatus
     PendingInit,
     [JsonStringEnumMemberName("running")]
     Running,
+    [JsonStringEnumMemberName("idle")]
+    Idle,
     [JsonStringEnumMemberName("waiting_user")]
     WaitingUser,
     [JsonStringEnumMemberName("interrupted")]

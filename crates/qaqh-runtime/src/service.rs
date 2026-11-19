@@ -514,9 +514,6 @@ impl QaqhService {
             | RingingCommand::WorkspaceDetach { .. } => {
                 handlers::workspace::handle_ringing(self, target, command)
             }
-            RingingCommand::SubagentSpawn { .. } => {
-                handlers::session::handle_ringing(self, target, command)
-            }
             RingingCommand::GoalSet { .. }
             | RingingCommand::GoalGet {}
             | RingingCommand::GoalClear {} => handlers::goal::handle_ringing(self, target, command),

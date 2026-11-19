@@ -13,7 +13,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use super::DbError;
 use super::store::now_ms;
 
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -29,6 +29,7 @@ CREATE TABLE sessions (
     frozen_annotation TEXT,
     settings_revision INTEGER NOT NULL DEFAULT 0,
     archived          INTEGER NOT NULL DEFAULT 0,
+    team_mode         INTEGER NOT NULL DEFAULT 0,
     ephemeral         INTEGER NOT NULL DEFAULT 0,
     -- ADR-0015 切片F：handoff 工作链。from = 封箱来源会话(客户端 fork 时传);
     -- sealed = 内核在 handoff 成功时刻写的封箱标记(续跑引擎据此跳过死线)。
@@ -206,48 +207,7 @@ CREATE TABLE team_task_acceptance (
     items_json TEXT NOT NULL
 );
 
-CREATE TABLE board_channels (
-    channel_id      TEXT PRIMARY KEY,
-    root_session_id TEXT NOT NULL,
-    name            TEXT NOT NULL,
-    topic           TEXT,
-    created_by      TEXT NOT NULL,
-    created_at_ms   INTEGER NOT NULL
-);
-CREATE INDEX idx_board_channels_root ON board_channels(root_session_id);
 
-CREATE TABLE board_threads (
-    thread_id       TEXT PRIMARY KEY,
-    channel_id      TEXT NOT NULL REFERENCES board_channels(channel_id) ON DELETE CASCADE,
-    title           TEXT NOT NULL,
-    task_id         TEXT,
-    created_by      TEXT NOT NULL,
-    created_at_ms   INTEGER NOT NULL
-);
-CREATE INDEX idx_board_threads_root ON board_threads(channel_id, created_at_ms, thread_id);
-
-CREATE TABLE board_posts (
-    post_id           TEXT PRIMARY KEY,
-    root_session_id   TEXT NOT NULL,
-    thread_id         TEXT NOT NULL REFERENCES board_threads(thread_id) ON DELETE CASCADE,
-    task_id           TEXT,
-    author_path       TEXT NOT NULL,
-    author_session_id TEXT,
-    body              TEXT NOT NULL,
-    reply_to          TEXT,
-    created_at_ms     INTEGER NOT NULL
-);
-CREATE INDEX idx_board_posts_root ON board_posts(root_session_id, created_at_ms);
-
-CREATE TABLE board_subscriptions (
-    root_session_id TEXT NOT NULL,
-    target_kind     TEXT NOT NULL,
-    target_id       TEXT NOT NULL,
-    subscriber_path TEXT NOT NULL,
-    subscribed      INTEGER NOT NULL,
-    updated_at_ms   INTEGER NOT NULL,
-    PRIMARY KEY (root_session_id, target_kind, target_id, subscriber_path)
-);
 "#;
 
 /// team_tasks 的 v10 形态——升级步进 9→10 的"确保表"真源,与 DDL_TEAM 内的
@@ -328,6 +288,7 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
         // schema 9 → 10:任务板 write_scopes 纯增量(ADR-0033 切片B)。
         Some(9) => {
             upgrade_9_to_10(&tx)?;
+            upgrade_10_to_11(&tx)?;
         }
         Some(found) if found < SCHEMA_VERSION => {
             return Err(DbError::SchemaTooOld {
@@ -369,6 +330,21 @@ fn upgrade_9_to_10(tx: &Transaction<'_>) -> Result<(), DbError> {
         tx.execute_batch("ALTER TABLE team_tasks ADD COLUMN write_scopes TEXT;")
             .map_err(|error| DbError::Corrupt(format!("upgrade 9→10 ddl: {error}")))?;
     }
+    Ok(())
+}
+
+/// schema 10 → 11(ADR-0033 切片D):sessions.team_mode 根开关纯增量;
+/// 留言板表整体退役——机构删除,数据随表 DROP(dsh 保留无消费者的历史
+/// 记录;本仓无日志重放面,直接删表更诚实)。
+fn upgrade_10_to_11(tx: &Transaction<'_>) -> Result<(), DbError> {
+    tx.execute_batch(
+        "ALTER TABLE sessions ADD COLUMN team_mode INTEGER NOT NULL DEFAULT 0;
+         DROP TABLE IF EXISTS board_posts;
+         DROP TABLE IF EXISTS board_subscriptions;
+         DROP TABLE IF EXISTS board_threads;
+         DROP TABLE IF EXISTS board_channels;",
+    )
+    .map_err(|error| DbError::Corrupt(format!("upgrade 10→11 ddl: {error}")))?;
     Ok(())
 }
 

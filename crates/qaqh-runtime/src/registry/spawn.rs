@@ -8,14 +8,24 @@ use crate::error::{QaqhError, QaqhResult};
 /// ADR-0014 切片 D/E：会话工具面的单一事实源——agent 面（spawn/send/wait/
 /// list/cancel）+ 协作面（task_*/board_*）。`spawn_session_inprocess` 与表面
 /// 测试共用；增删会话工具必须经此，白名单天花板仍在 assemble 的 apply_init 生效。
-pub(crate) const SESSION_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
+/// ADR-0033:基础会话工具面 = agent 五件(所有会话,不分根/子)。
+pub(crate) const AGENT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] =
+    &[qaqh_subagent::register];
+
+/// ADR-0033:team 开启时的协作面(task_* 五件)——按根 team_mode 条件注册。
+pub(crate) const TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register,
     qaqh_subagent::register_collaboration_tools,
 ];
 
 /// ADR-0015：根会话工具面 = 会话工具面 + goal 三件套。子会话是派生瞬时体,
 /// goal 语义只挂根(Codex 对 review 子代理禁用 goals 同律)。
-pub(crate) const ROOT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
+/// ADR-0015:根会话工具面 = 会话工具面 + goal 三件套(team 关)。
+pub(crate) const ROOT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] =
+    &[qaqh_subagent::register, qaqh_goal::register];
+
+/// ADR-0033:根会话 + team 开启 = agent 面 + 协作面 + goal。
+pub(crate) const ROOT_TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register,
     qaqh_subagent::register_collaboration_tools,
     qaqh_goal::register,
@@ -409,11 +419,38 @@ impl AgentRegistry {
             .session_parent(session_id)
             .map_err(QaqhError::message)?
             .is_some();
+        // ADR-0033:协作面按根 team_mode 条件注册(后代继承存活根的模式)。
+        let root_session_id = if is_child {
+            self.owners
+                .session_parent(session_id)
+                .map_err(QaqhError::message)?
+                .unwrap_or_else(|| session_id.to_string())
+        } else {
+            session_id.to_string()
+        };
+        let team_mode = self
+            .owners
+            .db()
+            .read_blocking({
+                let root = root_session_id.clone();
+                move |conn| {
+                    Ok::<_, qaqh_session::db::DbError>(qaqh_session::db::store::session_team_mode(&conn, &root))
+                }
+            })
+            .unwrap_or(false);
         if is_child {
             input.sandbox = qaqh_agent_runtime::session_agent::assembly::subagent_sandbox();
-            input.tool_registrars = SESSION_TOOL_REGISTRARS;
+            input.tool_registrars = if team_mode {
+                TEAM_TOOL_REGISTRARS
+            } else {
+                AGENT_TOOL_REGISTRARS
+            };
         } else {
-            input.tool_registrars = ROOT_TOOL_REGISTRARS;
+            input.tool_registrars = if team_mode {
+                ROOT_TEAM_TOOL_REGISTRARS
+            } else {
+                ROOT_TOOL_REGISTRARS
+            };
         }
         // ADR-0014：子代理工具面进入每个会话（spawn/send/wait/list/cancel）。
         // ADR-0014 切片E：协作工具面（task_*/board_*）同路进入每个会话——
@@ -462,36 +499,45 @@ impl AgentRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::SESSION_TOOL_REGISTRARS;
+    use super::{AGENT_TOOL_REGISTRARS, ROOT_TEAM_TOOL_REGISTRARS, TEAM_TOOL_REGISTRARS};
 
-    /// 切片E 闸门：生产会话工具面 = agent 五件 + 协作十件，一个不少。
-    /// 注册器列表被削（回到悬置状态）时本测试必须红。
+    /// ADR-0033 闸门：基础面 = agent 五件；team 开启的会话再加 task_* 五件；
+    /// 留言板词表不得复活。
     #[test]
-    fn session_surface_carries_agent_and_collaboration_tools() {
-        let manager = qaqh_workspace::registration::build_tool_manager(SESSION_TOOL_REGISTRARS);
-        let defs = manager.all_defs();
+    fn team_mode_switches_the_collaboration_surface() {
+        let agent = qaqh_workspace::registration::build_tool_manager(AGENT_TOOL_REGISTRARS);
         for name in [
             "spawn_subagent",
             "send_message",
             "wait_agent",
             "list_agents",
             "interrupt_agent",
+        ] {
+            assert!(agent.lookup(name).is_some(), "{name} must be callable");
+        }
+        for name in ["task_create", "task_list", "board_post", "board_list"] {
+            assert!(
+                agent.lookup(name).is_none(),
+                "{name} must be absent without team mode"
+            );
+        }
+
+        let team = qaqh_workspace::registration::build_tool_manager(TEAM_TOOL_REGISTRARS);
+        for name in [
             "task_create",
             "task_claim",
             "task_update",
             "task_close",
             "task_list",
-            "board_channel_create",
-            "board_thread_create",
-            "board_post",
-            "board_subscribe",
-            "board_list",
         ] {
-            assert!(manager.lookup(name).is_some(), "{name} must be callable");
+            assert!(team.lookup(name).is_some(), "{name} must be callable");
             assert!(
-                defs.iter().any(|def| def.function.name == name),
-                "{name} must be advertised"
+                team.lookup("board_post").is_none() && team.lookup("board_list").is_none(),
+                "board_* must stay retired (ADR-0033)"
             );
         }
+
+        let root_team = qaqh_workspace::registration::build_tool_manager(ROOT_TEAM_TOOL_REGISTRARS);
+        assert!(root_team.lookup("create_goal").is_some(), "goal 仍只挂根");
     }
 }

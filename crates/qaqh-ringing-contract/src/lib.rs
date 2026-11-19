@@ -25,14 +25,14 @@ pub use state::{
 // 审批正文（JSON-in-JSON 边界）与其余契约类型同权：既能被 `state::` 路径拿到，
 // 也必须能从 crate 根导出进契约（ADR-0004 §决策 3）。
 pub use state::PermissionRequestDetails;
-pub use team::{TaskBoardSnapshot, TeamBoardSnapshot, TeamSnapshot};
+pub use team::{TaskBoardSnapshot, TeamSnapshot};
 pub use workspace::{WorkspaceEntry, WorkspaceMeta};
 
 /// `/team` 端点 schema 判别值(契约锁定:客户端按字面量校验)。
 pub const TEAM_SCHEMA: &str = "qaqh.ringing.team/v1";
 
 /// `GET /ringing/v2/sessions/{seed}/team` 的 typed 响应:roster + inbox
-/// (`team`)、task board(`tasks`)、message board(`board`)一次拿全。
+/// (`team`)与任务板(`tasks`)。ADR-0033:留言板(`board`)整体退役。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct TeamResponse {
@@ -40,7 +40,6 @@ pub struct TeamResponse {
     pub session_id: String,
     pub team: TeamSnapshot,
     pub tasks: TaskBoardSnapshot,
-    pub board: TeamBoardSnapshot,
 }
 
 #[cfg(test)]
@@ -98,15 +97,6 @@ mod tests {
                 "revision": 0,
                 "last_fact_seq": 0,
                 "tasks": []
-            },
-            "board": {
-                "board_id": null,
-                "revision": 0,
-                "last_fact_seq": 0,
-                "channels": [],
-                "threads": [],
-                "posts": [],
-                "subscriptions": []
             }
         });
         let response: TeamResponse =

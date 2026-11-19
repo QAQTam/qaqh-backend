@@ -240,7 +240,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
     qaqh_subagent::install_host(Arc::new(service.clone()));
     qaqh_subagent::install_task_host(Arc::new(service.clone()));
-    qaqh_subagent::install_board_host(Arc::new(service.clone()));
     // ADR-0015：goal 工具宿主（create_goal/update_goal/get_goal 直达进程内）。
     qaqh_goal::install_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_ringing_runtime::RingingLeaseStore::new()));

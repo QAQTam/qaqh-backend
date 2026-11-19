@@ -2,7 +2,7 @@
 
 use serde_json::{Value, json};
 
-use qaqh_ringing::{CommandTarget, RingingCommand, SessionCreateResult};
+use qaqh_ringing::SessionCreateResult;
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::QaqhService;
@@ -335,93 +335,3 @@ fn create_business_row(
         .map_err(|error| format!("create business row for {error_session_id}: {error}"))
 }
 
-pub(crate) fn handle_ringing(
-    service: &QaqhService,
-    target: &CommandTarget,
-    command: &RingingCommand,
-) -> QaqhResult<Value> {
-    let RingingCommand::SubagentSpawn {
-        tools,
-        selection,
-        workspace,
-    } = command
-    else {
-        return Err(QaqhError::invalid(format!(
-            "{} is not a subagent mutation",
-            command.name()
-        )));
-    };
-    // ADR-0014：subagent.spawn 的目标就是父会话——血缘由命令目标表达，
-    // 不再从线程局部 runtime context 猜父。
-    let CommandTarget::Session {
-        session_id: parent_session_id,
-    } = target
-    else {
-        return Err(QaqhError::invalid(
-            "subagent.spawn must target the parent session",
-        ));
-    };
-    spawn_subagent(
-        service,
-        parent_session_id,
-        tools,
-        selection.as_ref(),
-        workspace.as_deref(),
-    )
-}
-
-fn spawn_subagent(
-    service: &QaqhService,
-    parent_session_id: &str,
-    tools: &[String],
-    selection: Option<&qaqh_types::ModelSelection>,
-    workspace: Option<&str>,
-) -> QaqhResult<Value> {
-    // 提交侧 fail-fast：显式 selection 必须能在当前目录解析（不存在/禁用/
-    // 缺档位即拒绝），与 session.settings.patch 同纪律。缺省 = 继承父会话行。
-    if let Some(selection) = selection {
-        let catalog = qaqh_config::watch::authoritative()
-            .map(|cfg| cfg.profiles_catalog.clone())
-            .unwrap_or_default();
-        qaqh_profile::resolve_model_selection(&catalog, selection).map_err(QaqhError::message)?;
-    }
-    let workspace = workspace
-        .map(str::trim)
-        .filter(|workspace| !workspace.is_empty() && *workspace != ".");
-    // ADR-0014：子代理 = 带血缘的新会话。id 与普通会话同规则；名字取
-    // canonical id 前段（[a-z0-9_] 语法），cwd/白名单/模型选择落子会话行。
-    // 会话 id 是 ULID（Crockford 大写）——必须小写化才过 path 段校验；
-    // 冒烟实测：直接截取大写前段会被 agent path 拒绝（wire 入口专属缺陷）。
-    let session_id = service.sessions.allocate_session();
-    let requested_name = format!(
-        "sub_{}",
-        session_id
-            .replace('-', "")
-            .chars()
-            .take(12)
-            .collect::<String>()
-            .to_lowercase()
-    );
-    service
-        .registry()
-        .map_err(QaqhError::message)?
-        .spawn_subagent_v2(
-            &session_id,
-            parent_session_id,
-            &requested_name,
-            crate::registry::SubagentSpawnOptions {
-                tools,
-                selection,
-                workspace,
-                ephemeral: false,
-                // wire 冻结命令不带 mode：恒 fresh。fork 经工具面 mode 参数。
-                fork: false,
-            },
-        )
-        .map_err(QaqhError::message)?;
-    log::info!(
-        "[subagent] spawned child session seed={session_id} parent={parent_session_id} tools={}",
-        tools.len()
-    );
-    Ok(json!({ "session_id": session_id }))
-}

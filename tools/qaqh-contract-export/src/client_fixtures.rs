@@ -18,7 +18,7 @@ use qaqh_ringing_contract::fact::{
 use qaqh_ringing_contract::state::{InteractionView, PermissionRequestDetails};
 use qaqh_ringing_contract::team::{
     TaskBoardSnapshot, TaskView, TeamAgentResidency, TeamAgentSnapshot, TeamAgentStatus,
-    TeamBoardSnapshot, TeamInboxSummary, TeamSnapshot,
+    TeamInboxSummary, TeamSnapshot,
 };
 use qaqh_ringing_contract::{SessionBootstrap, SessionEvent, SessionEventFrame, TEAM_SCHEMA};
 
@@ -93,21 +93,17 @@ fn write_team(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
                     agent_id: session_id(),
                     agent_path: agent_path("/root"),
                     nickname: Some("main".into()),
-                    role: None,
                     status: TeamAgentStatus::Running,
                     residency: TeamAgentResidency::Loaded,
                     parent_agent_path: None,
-                    current_task_id: None,
                 },
                 TeamAgentSnapshot {
                     agent_id: child_session_id(),
                     agent_path: agent_path("/root/writer"),
                     nickname: Some("writer".into()),
-                    role: None,
                     status: TeamAgentStatus::Completed,
                     residency: TeamAgentResidency::Unloaded,
                     parent_agent_path: Some(agent_path("/root")),
-                    current_task_id: None,
                 },
             ],
             // ADR-0019：署名是 InterAgentActor union——同根 path、跨根 session id，
@@ -139,7 +135,6 @@ fn write_team(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             last_fact_seq: 0,
             tasks: Vec::<TaskView>::new(),
         },
-        board: TeamBoardSnapshot::default(),
     };
     super::write_fixture(stage, "team-response.json", &response)
 }
