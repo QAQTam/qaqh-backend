@@ -63,6 +63,8 @@
 | [0029](0029-retire-exec-notify-single-channel-long-poll.md) | 砍掉 exec 订阅终态推送，回归单通道长轮询（取代 0026；codex unified_exec 同款：空 poll 5s–300s、非空 ≤30s，终态只经读取通道） | 已采纳 · 机构整体砍除（manager/工具面/桥/权限/registry/service/daemon/模板/skill）；验证结果见落地清单；git fetch 比对受限已登记 |
 | [0030](0030-exec-output-delta-pump-coalescing.md) | exec 输出 delta 泵侧合帧：帧频与 DB 写放大的源端上限（P0 修复 F 第一半） | 提议中 · 泵侧 20ms/256KiB 合帧批，wire 零变更；折叠/熔断、前端降级 pull、exec ws 隔离流列为非目标 |
 | [0031](0031-tag-not-lts-release-model.md) | tag ≠ LTS：发版与冻结线解耦（规则 15/21 松绑修订） | 已采纳 · refreeze 在 main 的去处=新版本位（minor bump + 机器重切），不再强制开 LTS；三戳只随命令/事件词表与 wire 协议实变 bump；LTS-v3.x 纪律不动 |
+| [0032](0032-cut-lts-v4.1-line.md) | 切 LTS-v4.1 线：新一期 LTS 开发，金标准等机器按需恢复（真源 `da33cbae^`） | 已采纳 · 分支 `LTS-v4.1` 自 main `bb28211b` 切出，线版本 4.1.0；tag 待线就绪另发 |
+| [0033](0033-agent-team-2-colleagues-over-sessions.md) | AgentTeam 2.0：同事=会话，一块任务板一条通道（学 dsh：board 退役、任务板对齐、根开关、wire refreeze 一次吸收） | 已采纳（2026-11-20 所有者拍板"全部落main"）· 切片 A/B wire-clean 先行；切片 C+D wire 实变按 ADR-0031 main 版本位吸收；前端同批 |
 
 ## 阅读顺序
 

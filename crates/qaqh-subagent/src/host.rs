@@ -136,19 +136,21 @@ pub struct WaitAgentRequest<'a> {
     /// Cooperative cancellation probe. The host polls this between reads so a
     /// cancelled turn does not remain blocked until the wait deadline.
     pub should_cancel: &'a dyn Fn() -> bool,
-    /// Agent paths or ids to wait on.
+    /// Session ids (primary) or paths of the colleagues to wait on.
     ///
-    /// Empty keeps the mailbox semantics (wait for the caller's own mailbox
-    /// watermark). Non-empty switches to **outcome** semantics: the wait ends
-    /// once every target's canonical session run state is settled (no active
-    /// turn, not never-started). ADR-0014：独立结果面退役，终态即会话状态。
+    /// Required: the wait ends once every target's canonical session run state
+    /// is settled (no active turn, not never-started). ADR-0033：wait 单语义
+    /// ——mailbox 水位等待退役，消息到达由回合边界合流承载，模型不显式等待。
     pub targets: &'a [String],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitAgentOutcome {
-    Activity { activity_fact_seq: u64 },
-    TimedOut { activity_fact_seq: u64 },
+    /// Every target settled (no active turn, not never-started).
+    Settled,
+    /// The wait deadline elapsed before every target settled.
+    TimedOut,
+    /// The surrounding turn was cancelled.
     Cancelled,
 }
 
@@ -471,10 +473,10 @@ pub trait SubagentHost: Send + Sync {
         request: SendAgentMessageRequest<'_>,
     ) -> Result<SentAgentMessage, String>;
 
-    /// Wait for the caller's mailbox watermark to advance.
+    /// Wait until every target colleague's session run state settles.
     ///
-    /// This deliberately returns no message body. The runtime merges accepted
-    /// queue-only communications at the next turn/lap boundary.
+    /// ADR-0033：单语义——targets 必填；返回只报 Settled/TimedOut/Cancelled，
+    /// 各目标的状态与终态摘要由工具层快照回读。
     fn wait_agent(&self, request: WaitAgentRequest<'_>) -> Result<WaitAgentOutcome, String>;
 
     /// Interrupt the target agent's current turn without unloading or deleting

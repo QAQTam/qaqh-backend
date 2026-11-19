@@ -240,38 +240,12 @@ impl SubagentHost for QaqhService {
             should_cancel,
             targets,
         } = request;
-        if !targets.is_empty() {
-            return self.wait_for_agent_outcomes(
-                caller_session_id,
-                timeout,
-                should_cancel,
-                targets,
-            );
+        if targets.is_empty() {
+            // ADR-0033：wait 单语义（只等目标终态）。mailbox 水位模式与其
+            // 50ms 内存轮询退役——消息到达由回合边界合流承载，无需显式等待。
+            return Err("wait_agent requires at least one target session id".to_string());
         }
-        // 输入到达检测 = 回合循环的内存队列(排队输入 + 未合并 steer)。
-        // 旧 canonical commit 通知随旧框架退役;50ms 轮询对工具等待足够。
-        let deadline = Instant::now() + timeout;
-        loop {
-            if should_cancel() {
-                return Ok(WaitAgentOutcome::Cancelled);
-            }
-            if Instant::now() >= deadline {
-                return Ok(WaitAgentOutcome::TimedOut {
-                    activity_fact_seq: 0,
-                });
-            }
-            {
-                let registry = self.registry()?;
-                if let Some(loop_) = registry.loop_for(caller_session_id)
-                    && loop_.pending_inputs() > 0
-                {
-                    return Ok(WaitAgentOutcome::Activity {
-                        activity_fact_seq: 1,
-                    });
-                }
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        self.wait_for_agent_outcomes(caller_session_id, timeout, should_cancel, targets)
     }
 
     fn interrupt_agent(
@@ -888,15 +862,11 @@ impl QaqhService {
                 )
             });
             if all_finished {
-                return Ok(WaitAgentOutcome::Activity {
-                    activity_fact_seq: 0,
-                });
+                return Ok(WaitAgentOutcome::Settled);
             }
             let now = Instant::now();
             if now >= deadline {
-                return Ok(WaitAgentOutcome::TimedOut {
-                    activity_fact_seq: 0,
-                });
+                return Ok(WaitAgentOutcome::TimedOut);
             }
             std::thread::sleep(
                 deadline

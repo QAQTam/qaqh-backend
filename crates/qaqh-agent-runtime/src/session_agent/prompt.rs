@@ -47,10 +47,10 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
          本会话，并由客户端拿这份文档开新会话继续推进。\n\
          口头总结不算交接（新会话读不到它）；不要拖到请求被拒才动。\n",
     );
-    // ADR-0014 切片F：团队协作策略——lead 与子级同一份静态文本（稳定前缀
-    // 保 KV cache），与协作工具声明同进同退。借鉴 dsh team:policy，适配本仓
-    // 工具名（claim_epoch CAS；无 task_get，task_list 直返全量）。writeScopes
-    // 结构化字段属 v3.1 wire 实变，落地前以标题/验收 criteria 承载 scope。
+    // ADR-0033：团队协作策略——lead 与同事同一份静态文本（稳定前缀保 KV
+    // cache），与协作工具声明同进同退。语义对齐 dsh team:policy 及其
+    // inbox-only-agent-wait 决策：任务变更永不通知、需要行动就发明确消息；
+    // 完成答复经终态合流自动到达；同事一律按 session id 寻址。
     let has_team_tools = spec
         .tools
         .as_ref()
@@ -58,15 +58,18 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
     if has_team_tools {
         prompt.push_str(
             "\n[Team policy]\n\
-             Split write work into disjoint scopes; record each task's expected file scope in its \
-             title or acceptance criteria, and use task dependencies (task_update add_dependency) \
-             when work must be ordered. Write-scope overlap is advisory, not a lock. Shared-task \
-             workflow is task_list, task_claim with the current claim_epoch (compare-and-set: a \
-             stale claim fails, re-read and retry), perform the work, then task_close complete. \
-             Task readiness never starts an owner. The root agent must wait_agent for required \
-             teammates before giving the final answer. Task changes do not end wait_agent calls, \
-             add inbox messages, or start idle agents. Use send_message when another agent needs \
-             to act on a task.\n",
+             Colleagues are conversations you start with spawn_subagent; address them by \
+             session id (send_message, wait_agent, interrupt_agent). Split write work into \
+             disjoint scopes; record each task's expected file scope in its title or \
+             acceptance criteria, and use task dependencies (task_update add_dependency) \
+             when work must be ordered. Write-scope overlap is advisory, not a lock. \
+             Shared-task workflow is task_list, task_claim with the current claim_epoch \
+             (compare-and-set: a stale claim fails, re-read and retry), perform the work, \
+             then task_close complete. Task readiness never starts an owner. Task changes \
+             never notify anyone: when a teammate must act on a task, send them a message; \
+             completion answers arrive automatically when their turn ends. The root agent \
+             must wait_agent for required teammates (by session id) before giving the \
+             final answer.\n",
         );
     }
     // 命名指令与工具声明同进同退：用户命名或子代理会话都不出现；auto 标题

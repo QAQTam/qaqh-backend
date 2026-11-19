@@ -44,18 +44,13 @@ pub enum ToolRisk {
 /// without widening the textual tool-result protocol.
 #[derive(Debug, Clone)]
 pub enum ToolEffect {
-    /// A subagent actor has been created and is waiting for its canonical
-    /// `SubagentSpawned` fact before the task is delivered.
+    /// A colleague conversation has been created (ADR-0033: 同事=会话) and its
+    /// task delivered. Fields mirror the frozen `ToolEffectInfo::SubagentSpawned`
+    /// projection one-to-one — the spawn effect has no runtime-only fields.
     SubagentSpawned {
-        session_id: String,
         child_session_id: String,
         name: String,
         task_text: String,
-        parent_session_id: String,
-        parent_agent_path: String,
-        child_agent_path: String,
-        spawn_tools: Vec<String>,
-        spawn_ephemeral: bool,
     },
 }
 

@@ -89,30 +89,17 @@ pub enum SpawnMode {
     Fork,
 }
 
+/// ADR-0033：模型可见 JSON 恒为 `{session_id, name, content}` 三键——session id
+/// 是同事的唯一寻址（send/wait/interrupt 一律用它），不再暴露 timeis/status
+/// 信封遗留与 `session_id==child_session_id` 双 ID。`task_text` 仅供内部 effect。
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 pub struct SpawnSubagentOutput {
-    timeis: String,
-    status: String,
     session_id: String,
-    #[serde(skip)]
-    #[schemars(skip)]
-    child_session_id: String,
     name: String,
-    parent_agent_path: String,
-    child_agent_path: String,
     content: String,
     #[serde(skip)]
     #[schemars(skip)]
     task_text: String,
-    #[serde(skip)]
-    #[schemars(skip)]
-    parent_session_id: String,
-    #[serde(skip)]
-    #[schemars(skip)]
-    spawn_tools: Vec<String>,
-    #[serde(skip)]
-    #[schemars(skip)]
-    spawn_ephemeral: bool,
 }
 
 impl ToolProjection for SpawnSubagentOutput {
@@ -137,15 +124,9 @@ impl ToolProjection for SpawnSubagentOutput {
 
     fn effects(&self) -> Vec<qaqh_tool_core::ToolEffect> {
         vec![qaqh_tool_core::ToolEffect::SubagentSpawned {
-            session_id: self.session_id.clone(),
-            child_session_id: self.child_session_id.clone(),
+            child_session_id: self.session_id.clone(),
             name: self.name.clone(),
             task_text: self.task_text.clone(),
-            parent_session_id: self.parent_session_id.clone(),
-            parent_agent_path: self.parent_agent_path.clone(),
-            child_agent_path: self.child_agent_path.clone(),
-            spawn_tools: self.spawn_tools.clone(),
-            spawn_ephemeral: self.spawn_ephemeral,
         }]
     }
 }
@@ -203,7 +184,8 @@ impl TypedTool for ListAgentsTool {
             "List logical agents at or below a path prefix in the current root tree: status \
              (pending_init/running/waiting_user/interrupted/completed/errored), residency \
              and terminal outcome — check what a teammate is doing before steering it. \
-             Defaults to /root. Relative prefixes resolve below the caller. Parallel sessions \
+             Defaults to /root. `agent_id` IS the session id — that is how you address the \
+             agent (send_message / wait_agent / interrupt_agent). Parallel sessions \
              in OTHER root trees are not enumerated here; reach them by session id \
              (send_message; ids come from the journal tool's file attribution).",
             qaqh_workspace::permission::ToolCategory::Read,
@@ -307,13 +289,13 @@ impl TypedTool for SendMessageTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "send_message",
-            "Send a canonical message to another conversation. to: AgentPath in the current \
-             root tree, or a session id for cross-root delivery (discover ids via the journal \
-             tool's file attribution or from spawn/subagent results). mode: queue (default, \
-             merged at the turn boundary), trigger (start a turn when idle), steer/interject \
-             (merge into the running turn). The recipient sees your text as a plain user \
-             message without sender metadata — open with who you are (your session id/path) \
-             and what you ask, so it can answer or reply back to you.",
+            "Send a canonical message to another conversation. to: a session id (primary, \
+              ADR-0033 — the id returned by spawn_subagent or listed by list_agents) or an \
+              AgentPath; cross-root delivery requires the session id. mode: queue (default, \
+              merged at the turn boundary), trigger (start a turn when idle), steer/interject \
+              (merge into the running turn). The recipient sees your text as a plain user \
+              message without sender metadata — open with who you are (your session id) \
+              and what you ask, so it can answer or reply back to you.",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(30),
@@ -348,9 +330,9 @@ pub struct WaitAgentArgs {
     /// Timeout in milliseconds. Defaults to 30000.
     #[serde(default)]
     timeout_ms: Option<u64>,
-    /// Agent paths or ids to wait on. Omit to wait on the caller's mailbox.
-    #[serde(default)]
-    targets: Option<Vec<String>>,
+    /// Session ids (primary) or paths to wait on. Required — the call returns
+    /// each target's status and terminal outcome once every target finished.
+    targets: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -410,7 +392,7 @@ impl TypedTool for WaitAgentTool {
         // descriptor must not kill a valid long wait before it returns.
         ToolMeta::new(
             "wait_agent",
-            "Wait for agents to finish. With `targets` (agent paths or ids) the call returns each target's status and terminal outcome (final answer) once every target finished — use this instead of polling. Without `targets` it waits for a mailbox update and returns no message content; queued communications are merged by the runtime at the next turn boundary.",
+            "Wait for the given colleagues to finish. Returns each target's status and terminal outcome (final answer) once every target finished — use this instead of polling. Targets are session ids (from spawn_subagent/list_agents).",
             qaqh_workspace::permission::ToolCategory::Read,
             ToolRisk::ReadOnly,
             Duration::from_millis(WAIT_AGENT_MAX_TIMEOUT_MS),
@@ -441,7 +423,16 @@ impl TypedTool for WaitAgentTool {
             )
         })?;
         let should_cancel = || ctx.cancellation.is_cancelled();
-        let targets = args.targets.unwrap_or_default();
+        let targets = args.targets;
+        if targets.is_empty() {
+            // ADR-0033：wait 单语义——只等目标终态；mailbox 水位模式随 50ms
+            // 内存轮询一起退役，消息到达靠回合边界合流，无需模型显式等待。
+            return Err(subagent_error(
+                "missing_targets",
+                "wait_agent: at least one target session id is required",
+                "Pass the session ids returned by spawn_subagent or list_agents.",
+            ));
+        }
         match host
             .wait_agent(WaitAgentRequest {
                 caller_session_id: &ctx.session_id,
@@ -456,19 +447,15 @@ impl TypedTool for WaitAgentTool {
                     "Check that the caller has a committed canonical mailbox.",
                 )
             })? {
-            WaitAgentOutcome::Activity { .. } => {
+            WaitAgentOutcome::Settled => {
                 let agents = wait_agent_snapshot(&host, &ctx.session_id, &targets);
                 Ok(WaitAgentOutput {
-                    message: if targets.is_empty() {
-                        "Wait completed. Mailbox activity detected.".to_string()
-                    } else {
-                        format!("Wait completed: {} target(s) finished.", agents.len())
-                    },
+                    message: format!("Wait completed: {} target(s) finished.", agents.len()),
                     timed_out: false,
                     agents,
                 })
             }
-            WaitAgentOutcome::TimedOut { .. } => {
+            WaitAgentOutcome::TimedOut => {
                 let agents = wait_agent_snapshot(&host, &ctx.session_id, &targets);
                 Ok(WaitAgentOutput {
                     message: "Wait timed out.".to_string(),
@@ -523,7 +510,7 @@ fn wait_targets_from_listing(listed: &[ListedAgent], targets: &[String]) -> Vec<
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct InterruptAgentArgs {
-    /// Absolute AgentPath or caller-relative target.
+    /// Session id (primary, from spawn_subagent/list_agents) or AgentPath.
     target: String,
 }
 
@@ -589,7 +576,7 @@ impl TypedTool for InterruptAgentTool {
             return Err(subagent_error(
                 "missing_target",
                 "interrupt_agent target is required",
-                "Provide an AgentPath such as /root/review_code.",
+                "Provide the target session id (from spawn_subagent/list_agents) or an AgentPath.",
             ));
         }
         let host = host().ok_or_else(|| {
@@ -627,7 +614,7 @@ fn handle_agent_message(
         return Err(subagent_error(
             "missing_target",
             "agent message target is required",
-            "Provide an AgentPath such as /root/review_code.",
+            "Provide the target session id (from spawn_subagent/list_agents) or an AgentPath.",
         ));
     }
     if args.message.trim().is_empty() {
@@ -681,7 +668,7 @@ impl TypedTool for SpawnSubagentTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "spawn_subagent",
-            "Spawn a child conversation (subagent) for a focused task and deliver the task immediately. Returns the child session id and agent path; its final answer arrives as a canonical message when the turn ends - do not poll. Track with list_agents, chat with send_message, cancel with interrupt_agent. agent_name = verb+task phrase (e.g. 'explore_task'). mode: fresh (default) = the child does not see this conversation; fork = the child inherits your completed turns (not the current in-flight turn) - use fork when the task needs the history you already built.",
+            "Spawn a colleague conversation for a focused task and deliver the task immediately. Returns the child session id and name — the session id is the ONLY address you need: send_message(to=<session id>), wait_agent(targets=[<session id>]), interrupt_agent(target=<session id>). Its final answer arrives as a canonical message when the turn ends - do not poll. agent_name = verb+task phrase (e.g. 'explore_task'). mode: fresh (default) = the colleague does not see this conversation; fork = it inherits your completed turns (not the current in-flight turn) - use fork when the task needs the history you already built.",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(180),
@@ -915,10 +902,18 @@ fn handle_spawn_subagent(
             "Check host/daemon logs.",
         ));
     }
-    let session_id = spawned.session_id;
-    let child_session_id = spawned.child_session_id;
-    let parent_agent_path = spawned.parent_agent_path;
-    let child_agent_path = spawned.child_agent_path;
+    // ADR-0033：seed 与 child 是同一个 UUID（历史双 ID 收编）——模型面只暴露
+    // 子会话 id 一个名字。
+    let SpawnedSubagent {
+        session_id,
+        child_session_id,
+        child_agent_path,
+        ..
+    } = spawned;
+    debug_assert_eq!(
+        session_id, child_session_id,
+        "spawn seed 与 child session id 必须同值（ADR-0033 双 ID 收编）"
+    );
 
     // ── 2. Deliver the task as a canonical inter-agent message. The child's
     // turn terminal routes the answer back to this session's mailbox. ──
@@ -939,21 +934,13 @@ fn handle_spawn_subagent(
         "[SUBAGENT] '{name}' child conversation created (seed={session_id}, path={child_agent_path}); task delivered"
     );
     let content = format!(
-        "Subagent '{name}' spawned at {child_agent_path} (session {child_session_id}); task delivered. Its final answer arrives as a message when the turn ends — do not poll. Track with list_agents; chat with send_message; cancel with interrupt_agent(target=\"{child_agent_path}\")."
+        "Colleague '{name}' spawned (session {child_session_id}); task delivered. Address it by session id: send_message(to=\"{child_session_id}\"), wait_agent(targets=[\"{child_session_id}\"]), interrupt_agent(target=\"{child_session_id}\"). Its final answer arrives as a message when the turn ends — do not poll."
     );
     Ok(SpawnSubagentOutput {
-        timeis: qaqh_workspace::now_utc8(),
-        status: "ok".to_string(),
-        session_id,
-        child_session_id,
+        session_id: child_session_id,
         name,
-        parent_agent_path,
-        child_agent_path,
         content,
         task_text,
-        parent_session_id: ctx.session_id.clone(),
-        spawn_tools: tools.clone(),
-        spawn_ephemeral: false,
     })
 }
 
@@ -1053,7 +1040,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_agent_schema_is_registered_with_optional_timeout() {
+    fn wait_agent_schema_requires_targets_and_optional_timeout() {
         let mut manager = ToolManager::new();
         register(&mut manager);
 
@@ -1066,10 +1053,12 @@ mod tests {
                 .expect("properties")
                 .contains_key("timeout_ms")
         );
-        assert!(
-            handler.input_schema.get("required").is_none(),
-            "timeout_ms must default to the bounded 30s wait"
-        );
+        // ADR-0033 闸门：targets 必选（单语义 = 只等目标终态）。
+        let required = handler.input_schema["required"]
+            .as_array()
+            .expect("targets must be a required param");
+        assert_eq!(required.len(), 1);
+        assert_eq!(required[0], "targets");
     }
 
     #[test]
@@ -1197,18 +1186,11 @@ mod tests {
     #[test]
     fn typed_output_model_and_display_share_the_same_payload() {
         let output = SpawnSubagentOutput {
-            timeis: "UTC+8 2026-09-23 12:00".to_string(),
-            status: "ok".to_string(),
-            session_id: "sub-seed".to_string(),
-            child_session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
+            session_id: "0198f1a0-0000-7000-8000-000000000003".to_string(),
             name: "review_code".to_string(),
-            parent_agent_path: "/root".to_string(),
-            child_agent_path: "/root/review_code".to_string(),
-            content: "Subagent 'review_code' spawned at /root/review_code".to_string(),
+            content: "Colleague 'review_code' spawned (session 0198f1a0); task delivered."
+                .to_string(),
             task_text: "[TASK]\nreview".to_string(),
-            parent_session_id: "root-seed".to_string(),
-            spawn_tools: vec![],
-            spawn_ephemeral: false,
         };
         let model = match output.model_blocks().into_iter().next() {
             Some(ToolContentBlock::Text { text }) => text,
@@ -1218,22 +1200,34 @@ mod tests {
             !model.contains("process_id"),
             "subagent must not expose an exec process handle: {model}"
         );
-        assert!(model.contains("\"child_agent_path\":\"/root/review_code\""));
-        assert!(model.contains("\"session_id\":\"sub-seed\""));
-        assert!(model.contains("\"content\":\"Subagent 'review_code' spawned"));
+        // ADR-0033 闸门：模型可见 JSON 恰三键（session_id/name/content）——
+        // timeis/status 信封遗留、双 ID、path 词汇一律不进模型面。
+        let parsed: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&model).expect("spawn output model block must be valid JSON");
+        assert_eq!(
+            parsed.len(),
+            3,
+            "spawn output model JSON must carry exactly three keys: {model}"
+        );
+        for key in ["session_id", "name", "content"] {
+            assert!(parsed.contains_key(key), "missing {key}: {model}");
+        }
+        assert!(model.contains("\"session_id\":\"0198f1a0"));
         assert!(
-            !model.contains("child_session_id"),
-            "canonical child identity is an internal effect, not model-visible JSON"
+            !model.contains("child_session_id")
+                && !model.contains("timeis")
+                && !model.contains("agent_path"),
+            "内部身份/信封遗留/path 词汇不得出现在模型面: {model}"
         );
         let display = output.display(&serde_json::json!({}));
         assert_eq!(
             display.summary.as_deref(),
-            Some("Subagent 'review_code' spawned at /root/review_code")
+            Some("Colleague 'review_code' spawned (session 0198f1a0); task delivered.")
         );
         match display.body {
             qaqh_tool_core::tool_api::ToolBody::Subagent { name, session_id } => {
                 assert_eq!(name, "review_code");
-                assert_eq!(session_id, "sub-seed");
+                assert_eq!(session_id, "0198f1a0-0000-7000-8000-000000000003");
             }
             other => panic!("unexpected subagent display body: {other:?}"),
         }
