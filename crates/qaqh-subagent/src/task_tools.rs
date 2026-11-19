@@ -24,6 +24,11 @@ pub struct TaskCreateArgs {
     /// Optional sha256 content id for the full description.
     #[serde(default)]
     description_ref: Option<String>,
+    /// Advisory workspace-relative file or directory prefixes this task expects
+    /// to modify (dsh write_scopes 同律). Overlap with in-progress tasks is
+    /// reported as a warning, never a block.
+    #[serde(default)]
+    write_scopes: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -53,6 +58,9 @@ pub struct TaskUpdateArgs {
     /// Replacement acceptance criteria (action=set_acceptance).
     #[serde(default)]
     acceptance: Option<Vec<String>>,
+    /// Target member (session id) for action=reassign. Root-only.
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -74,6 +82,21 @@ pub struct TaskListArgs {
     /// Filter by state: open | claimed | completed | closed | cancelled.
     #[serde(default)]
     state: Option<String>,
+    /// Owner filter (session id or agent path); cannot combine with unowned.
+    #[serde(default)]
+    owner: Option<String>,
+    /// Filter tasks by whether they have no owner; cannot combine with owner.
+    #[serde(default)]
+    unowned: Option<bool>,
+    /// Filter by derived readiness (all dependencies completed/closed).
+    #[serde(default)]
+    ready: Option<bool>,
+    /// Zero-based result offset. Defaults to 0.
+    #[serde(default)]
+    cursor: Option<u64>,
+    /// Number of rows, 1 through 100. Defaults to 50.
+    #[serde(default)]
+    limit: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -115,6 +138,9 @@ impl ToolProjection for TaskOutput {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct TaskListOutput {
     tasks: Vec<TaskBoardTask>,
+    /// Present when more pages remain after this one (cursor offset).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<u64>,
 }
 
 impl TaskListOutput {
@@ -154,7 +180,7 @@ impl TypedTool for TaskCreateTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "task_create",
-            "Create a task in the current root tree's shared task board.",
+            "Create one unowned pending task on the shared task board. Declare expected write scopes (advisory workspace-relative prefixes) so overlapping in-progress work is flagged.",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(30),
@@ -171,6 +197,7 @@ impl TypedTool for TaskCreateTool {
                 caller_session_id: &ctx.session_id,
                 title: &args.title,
                 description_ref: args.description_ref.as_deref(),
+                write_scopes: args.write_scopes.as_deref().unwrap_or(&[]),
             })
             .map_err(|error| task_error("task_create_failed", error))?;
         Ok(TaskOutput { task })
@@ -219,7 +246,7 @@ impl TypedTool for TaskUpdateTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "task_update",
-            "Add a dependency, attach an artifact, or replace acceptance criteria.",
+            "Add a dependency, attach an artifact, replace acceptance criteria, or reassign the owner (action=reassign with owner; root-only).",
             qaqh_workspace::permission::ToolCategory::Exec,
             ToolRisk::Administrative,
             Duration::from_secs(30),
@@ -240,6 +267,7 @@ impl TypedTool for TaskUpdateTool {
                 artifact_ref: args.artifact_ref.as_deref(),
                 media_type: args.media_type.as_deref(),
                 acceptance: args.acceptance.as_deref(),
+                owner: args.owner.as_deref(),
             })
             .map_err(|error| task_error("task_update_failed", error))?;
         Ok(TaskOutput { task })
@@ -289,7 +317,7 @@ impl TypedTool for TaskListTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "task_list",
-            "List tasks in the current root tree's shared task board.",
+            "List shared tasks, including readiness, owner, revision, blockers, and write-scope warnings. Filter by state, owner, unowned, or ready; page with cursor/limit.",
             qaqh_workspace::permission::ToolCategory::Read,
             ToolRisk::ReadOnly,
             Duration::from_secs(30),
@@ -301,13 +329,21 @@ impl TypedTool for TaskListTool {
         ctx: &ToolCallContext,
         args: TaskListArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let tasks = task_host_or_error("task_list")?
+        let page = task_host_or_error("task_list")?
             .task_list(TaskListRequest {
                 caller_session_id: &ctx.session_id,
                 state: args.state.as_deref(),
+                owner: args.owner.as_deref(),
+                unowned: args.unowned,
+                ready: args.ready,
+                cursor: args.cursor,
+                limit: args.limit,
             })
             .map_err(|error| task_error("task_list_failed", error))?;
-        Ok(TaskListOutput { tasks })
+        Ok(TaskListOutput {
+            tasks: page.tasks,
+            next_cursor: page.next_cursor,
+        })
     }
 }
 

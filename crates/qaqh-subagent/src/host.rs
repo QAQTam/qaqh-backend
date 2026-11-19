@@ -181,6 +181,17 @@ pub struct TaskBoardTask {
     pub artifacts: Vec<TaskBoardArtifact>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acceptance: Vec<String>,
+    /// advisory 文件触及范围(工作区相对前缀;ADR-0033 切片B,dsh write_scopes 同律)。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_scopes: Vec<String>,
+    /// 未完成任务的全部依赖已达标(open 才可能 ready;派生值,不入库)。
+    pub ready: bool,
+    /// 与其他进行中(claimed)任务的 write_scopes 前缀相交警告;绝不阻止操作。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub write_scope_warnings: Vec<String>,
+    /// Owner 的 session id(与 owner path 双轨;寻址权威见 ADR-0033)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_session_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_ref: Option<String>,
     pub created_at_ms: i64,
@@ -288,6 +299,8 @@ pub enum TaskUpdateAction {
     AddDependency,
     AttachArtifact,
     SetAcceptance,
+    /// Root-only: assign the task to another member (open/claimed → claimed).
+    Reassign,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -303,6 +316,8 @@ pub struct TaskCreateRequest<'a> {
     pub caller_session_id: &'a str,
     pub title: &'a str,
     pub description_ref: Option<&'a str>,
+    /// advisory 文件触及范围(工作区相对前缀);空 = 不声明。
+    pub write_scopes: &'a [String],
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +337,8 @@ pub struct TaskUpdateRequest<'a> {
     pub artifact_ref: Option<&'a str>,
     pub media_type: Option<&'a str>,
     pub acceptance: Option<&'a [String]>,
+    /// Target member (session id or path) for action=reassign; root-only.
+    pub owner: Option<&'a str>,
 }
 
 #[derive(Debug, Clone)]
@@ -336,7 +353,91 @@ pub struct TaskCloseRequest<'a> {
 #[derive(Debug, Clone)]
 pub struct TaskListRequest<'a> {
     pub caller_session_id: &'a str,
+    /// Filter by state: open | claimed | completed | closed | cancelled.
     pub state: Option<&'a str>,
+    /// Owner filter (agent path or session id); cannot combine with `unowned`.
+    pub owner: Option<&'a str>,
+    /// Filter tasks by whether they have no owner; cannot combine with `owner`.
+    pub unowned: Option<bool>,
+    /// Filter by derived readiness.
+    pub ready: Option<bool>,
+    /// Zero-based result offset. Defaults to 0.
+    pub cursor: Option<u64>,
+    /// Number of rows, 1 through 100. Defaults to 50.
+    pub limit: Option<u64>,
+}
+
+/// write_scope 归一化(ADR-0033 切片B):trim、反斜杠归一为正斜杠、剥掉
+/// `./` 与前导 `/`,拒绝空串与超长项。advisory 数据——宽容但不接受垃圾。
+pub fn normalize_write_scope(raw: &str) -> Result<String, String> {
+    let normalized: String = raw
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .trim_start_matches('/')
+        .trim_end_matches('/')
+        .to_string();
+    if normalized.is_empty() || normalized == "." {
+        return Err(format!("write scope {raw:?} is empty after normalization"));
+    }
+    if normalized.len() > 256 {
+        return Err(format!(
+            "write scope {raw:?} exceeds 256 characters after normalization"
+        ));
+    }
+    Ok(normalized)
+}
+
+/// 前缀相交判定:补尾斜杠后做前缀比较,避免 `src` 误盖 `src2`。
+fn scope_overlaps(a: &str, b: &str) -> bool {
+    let a = if a.ends_with('/') { a.to_string() } else { format!("{a}/") };
+    let b = if b.ends_with('/') { b.to_string() } else { format!("{b}/") };
+    a.starts_with(&b) || b.starts_with(&a)
+}
+
+/// 任务就绪派生(不入库):open 且全部依赖达标(completed/closed)。
+/// 依赖状态缺失(看板里找不到的 id)按未达标处理——fail-closed。
+pub fn task_is_ready(
+    task: &TaskBoardTask,
+    all: &std::collections::HashMap<String, &TaskBoardTask>,
+) -> bool {
+    if task.state != "open" {
+        return false;
+    }
+    task.depends_on.iter().all(|dep| {
+        all.get(dep).is_some_and(|dep_task| {
+            dep_task.state == "completed" || dep_task.state == "closed"
+        })
+    })
+}
+
+/// 与进行中(claimed)任务的 write_scopes 前缀相交警告——任何任务视图都携带
+/// (认领前即可预判冲突);advisory:只警告,不阻止认领或授权写入。
+pub fn write_scope_warnings(task: &TaskBoardTask, board: &[&TaskBoardTask]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if task.write_scopes.is_empty() {
+        return warnings;
+    }
+    for other in board {
+        if other.task_id == task.task_id
+            || other.state != "claimed"
+            || other.write_scopes.is_empty()
+        {
+            continue;
+        }
+        for scope in &task.write_scopes {
+            for other_scope in &other.write_scopes {
+                if scope_overlaps(scope, other_scope) {
+                    let warning =
+                        format!("write scope {scope:?} overlaps claimed task {}", other.task_id);
+                    if !warnings.contains(&warning) {
+                        warnings.push(warning);
+                    }
+                }
+            }
+        }
+    }
+    warnings
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -393,6 +494,14 @@ pub struct BoardListRequest<'a> {
     pub post_limit: Option<usize>,
 }
 
+/// `task_list` 的分页结果(dsh 同律:还有下一页时带 next_cursor)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskListPage {
+    pub tasks: Vec<TaskBoardTask>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+}
+
 /// In-process task board host. The team aggregate is keyed by the caller's
 /// root session id; implementations must reject cross-tree access.
 pub trait TaskBoardHost: Send + Sync {
@@ -400,7 +509,7 @@ pub trait TaskBoardHost: Send + Sync {
     fn task_claim(&self, request: TaskClaimRequest<'_>) -> Result<TaskBoardTask, String>;
     fn task_update(&self, request: TaskUpdateRequest<'_>) -> Result<TaskBoardTask, String>;
     fn task_close(&self, request: TaskCloseRequest<'_>) -> Result<TaskBoardTask, String>;
-    fn task_list(&self, request: TaskListRequest<'_>) -> Result<Vec<TaskBoardTask>, String>;
+    fn task_list(&self, request: TaskListRequest<'_>) -> Result<TaskListPage, String>;
 }
 
 static TASK_HOST: OnceLock<Arc<dyn TaskBoardHost>> = OnceLock::new();

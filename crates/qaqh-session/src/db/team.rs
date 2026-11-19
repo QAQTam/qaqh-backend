@@ -32,6 +32,8 @@ pub struct TeamTaskRow {
     pub owner_session_id: Option<String>,
     pub claim_epoch: i64,
     pub result_ref: Option<String>,
+    /// advisory 文件触及范围(工作区相对前缀;ADR-0033 切片B)。
+    pub write_scopes: Vec<String>,
     pub created_by: String,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
@@ -47,22 +49,33 @@ pub struct NewTeamTask<'a> {
     pub root_session_id: &'a str,
     pub title: &'a str,
     pub description_ref: Option<&'a str>,
+    /// advisory 文件触及范围;空切片落 NULL。
+    pub write_scopes: &'a [String],
     pub created_by: &'a str,
     pub created_at_ms: i64,
 }
 
 pub fn task_insert(conn: &Connection, task: &NewTeamTask<'_>) -> rusqlite::Result<()> {
+    let write_scopes = if task.write_scopes.is_empty() {
+        None
+    } else {
+        Some(
+            serde_json::to_string(task.write_scopes)
+                .expect("write_scopes json serialization cannot fail"),
+        )
+    };
     conn.execute(
         "INSERT INTO team_tasks
             (task_id, root_session_id, title, description_ref, state, claim_epoch,
-             created_by, created_at_ms, updated_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?7)",
+             write_scopes, created_by, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7, ?8, ?8)",
         params![
             task.task_id,
             task.root_session_id,
             task.title,
             task.description_ref,
             TASK_OPEN,
+            write_scopes,
             task.created_by,
             task.created_at_ms,
         ],
@@ -71,7 +84,7 @@ pub fn task_insert(conn: &Connection, task: &NewTeamTask<'_>) -> rusqlite::Resul
 }
 
 const TASK_COLUMNS: &str = "task_id, root_session_id, title, description_ref, state,
-    owner_path, owner_session_id, claim_epoch, result_ref, created_by,
+    owner_path, owner_session_id, claim_epoch, result_ref, write_scopes, created_by,
     created_at_ms, updated_at_ms";
 
 fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTaskRow> {
@@ -85,9 +98,15 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamTaskRow> {
         owner_session_id: row.get(6)?,
         claim_epoch: row.get(7)?,
         result_ref: row.get(8)?,
-        created_by: row.get(9)?,
-        created_at_ms: row.get(10)?,
-        updated_at_ms: row.get(11)?,
+        // 与 acceptance 同律:advisory 数据解析失败按空处理,不让坏范围
+        // 阻断整个任务板读取面。
+        write_scopes: row
+            .get::<_, Option<String>>(9)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default(),
+        created_by: row.get(10)?,
+        created_at_ms: row.get(11)?,
+        updated_at_ms: row.get(12)?,
         depends_on: Vec::new(),
         artifacts: Vec::new(),
         acceptance: Vec::new(),
@@ -176,7 +195,8 @@ pub fn task_count(conn: &Connection, root_session_id: &str) -> rusqlite::Result<
     )
 }
 
-/// 认领:仅 open 可认领,epoch 单调递增。
+/// 认领:仅 open 可认领,epoch 单调递增;未满足的依赖阻塞认领(dsh 同律:
+/// 只有全部依赖完成后任务才可 claim)。
 pub fn task_claim(
     conn: &Connection,
     root_session_id: &str,
@@ -185,6 +205,12 @@ pub fn task_claim(
     owner_session_id: &str,
     now_ms: i64,
 ) -> Result<(), String> {
+    let unmet = unmet_dependency_count(conn, root_session_id, task_id)?;
+    if unmet > 0 {
+        return Err(format!(
+            "task {task_id} is not ready: {unmet} unmet dependencies"
+        ));
+    }
     let changed = conn
         .execute(
             "UPDATE team_tasks SET state = ?4, owner_path = ?5, owner_session_id = ?6,
@@ -203,6 +229,60 @@ pub fn task_claim(
         .map_err(|error| error.to_string())?;
     if changed == 0 {
         return Err(format!("task {task_id} is not open; claim requires Open"));
+    }
+    Ok(())
+}
+
+/// 未满足依赖数:依赖行缺失或依赖任务未达 completed/closed 都算未满足。
+/// team_task_dependencies 无 root 列——以任务自身的 root 圈定范围,
+/// 依赖经 task_id(全局主键)关联到其所属任务。
+fn unmet_dependency_count(
+    conn: &Connection,
+    root_session_id: &str,
+    task_id: &str,
+) -> Result<i64, String> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM team_task_dependencies d
+         JOIN team_tasks t ON t.task_id = d.task_id AND t.root_session_id = ?2
+         LEFT JOIN team_tasks p ON p.task_id = d.depends_on
+         WHERE d.task_id = ?1
+           AND (p.task_id IS NULL OR p.state NOT IN ('completed','closed'))",
+        params![task_id, root_session_id],
+        |row| row.get(0),
+    )
+    .map_err(|error| error.to_string())
+}
+
+/// 根指派(ADR-0033 切片B,dsh reassign 同律):open/claimed 均可指派,落为
+/// claimed;epoch 单调递增使并发中的旧 claim 视图失效(CAS 纪律)。仅根可调,
+/// 权限检查在宿主层收口。
+pub fn task_reassign(
+    conn: &Connection,
+    root_session_id: &str,
+    task_id: &str,
+    owner_path: &str,
+    owner_session_id: &str,
+    now_ms: i64,
+) -> Result<(), String> {
+    let changed = conn
+        .execute(
+            "UPDATE team_tasks SET state = ?3, owner_path = ?4, owner_session_id = ?5,
+                claim_epoch = claim_epoch + 1, updated_at_ms = ?6
+             WHERE task_id = ?1 AND root_session_id = ?2 AND state IN ('open','claimed')",
+            params![
+                task_id,
+                root_session_id,
+                TASK_CLAIMED,
+                owner_path,
+                owner_session_id,
+                now_ms
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if changed == 0 {
+        return Err(format!(
+            "task {task_id} not found or is terminal; reassign requires an active task"
+        ));
     }
     Ok(())
 }
@@ -690,4 +770,61 @@ pub fn board_subscriptions(
         })
     })?
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().expect("in-memory db");
+        crate::db::schema::initialize(&mut conn).expect("initialize schema");
+        conn
+    }
+
+    fn insert(conn: &Connection, task_id: &str, scopes: &[&str]) {
+        task_insert(
+            conn,
+            &NewTeamTask {
+                task_id,
+                root_session_id: "root",
+                title: task_id,
+                description_ref: None,
+                write_scopes: &scopes.iter().map(|scope| scope.to_string()).collect::<Vec<_>>(),
+                created_by: "/root",
+                created_at_ms: 1,
+            },
+        )
+        .expect("insert task");
+    }
+
+    /// ADR-0033 切片B 闸门:write_scopes 落库读回、依赖未达标阻塞认领、
+    /// 达标后可认领、根指派换 owner 且 epoch 单调递增。
+    #[test]
+    fn write_scopes_round_trip_claim_gate_and_reassign() {
+        let conn = test_conn();
+        insert(&conn, "t-blocked", &["src"]);
+        insert(&conn, "t-dep", &[]);
+
+        let row = task_get(&conn, "root", "t-blocked").unwrap().unwrap();
+        assert_eq!(row.write_scopes, vec!["src".to_string()], "scopes 落库读回");
+        let plain = task_get(&conn, "root", "t-dep").unwrap().unwrap();
+        assert!(plain.write_scopes.is_empty(), "空范围落 NULL 读回空");
+
+        task_add_dependency(&conn, "root", "t-blocked", "t-dep", 3).unwrap();
+        let error = task_claim(&conn, "root", "t-blocked", "/root", "root", 4).unwrap_err();
+        assert!(error.contains("not ready"), "依赖未达标阻塞认领: {error}");
+
+        task_claim(&conn, "root", "t-dep", "/root", "root", 5).unwrap();
+        task_complete(&conn, "root", "t-dep", "/root", None, 6).unwrap();
+        task_claim(&conn, "root", "t-blocked", "/root", "root", 7).unwrap();
+        let before = task_get(&conn, "root", "t-blocked").unwrap().unwrap();
+        assert_eq!(before.state, TASK_CLAIMED);
+
+        task_reassign(&conn, "root", "t-blocked", "/root/worker", "worker-ses", 7).unwrap();
+        let after = task_get(&conn, "root", "t-blocked").unwrap().unwrap();
+        assert_eq!(after.owner_path.as_deref(), Some("/root/worker"));
+        assert_eq!(after.owner_session_id.as_deref(), Some("worker-ses"));
+        assert!(after.claim_epoch > before.claim_epoch, "reassign 递增 epoch");
+    }
 }

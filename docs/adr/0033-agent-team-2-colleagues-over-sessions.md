@@ -129,8 +129,24 @@ refreeze 落 main 版本位吸收，不取道 LTS-v4.1 分支；`subagent.spawn`
       定向验证（`cargo test -j 8`）：tool-core 74 绿 / subagent 11 绿 /
       agent-runtime 53 绿（含 policy 闸门）/ runtime lib 59 绿。
       契约导出物零变化（未触碰任何冻结类型）。
-- [ ] 切片 B（wire-clean）：任务板 write_scopes/ready/重叠警告/reassign/游标
-      —— 工具面 + `db/team.rs` 迁移 + 派生纯函数 + 闸门测试（先红后绿）。
+- [x] 切片 B（wire-clean）：任务板 write_scopes/ready/重叠警告/reassign/游标
+      —— schema 9→10（`upgrade_9_to_10`：确保表 + pragma 幂等加列，容忍旧代
+      夹具库缺 team 表）；`task_create` 带 `write_scopes`（归一化+去重，≤16）；
+      `task_list` 带 owner/unowned/ready 过滤 + cursor/limit 游标（1..=100）；
+      `task_update` 增 `reassign`（仅根，目标经注册器解析 path+session id
+      双轨落库，epoch 递增使旧 CAS 视图失效）；认领 ready 闸门（依赖未达标
+      拒绝，db 层 SQL 收口）；ready/warnings 全板派生（`task_dtos` 整板投影）。
+      闸门：`write_scopes_round_trip_claim_gate_and_reassign`（db 层）、
+      `write_scope_normalization_is_lenient_but_rejects_garbage`、
+      `task_readiness_requires_open_and_all_deps_terminal`、
+      `scope_warnings_flag_only_claimed_overlaps_and_respect_prefix_boundary`
+      （真前缀边界：`src` 不误盖 `src2`；open 任务视图也携带警告——认领前
+      预判冲突）。wire `TaskView`/`TeamTaskSnapshot` 未动（write_scopes 进
+      wire 属切片 D）。
+      定向验证（`cargo test -j 2`）：agent-runtime 53 / runtime 59 /
+      session 41 / subagent 14 全绿；daemon+client `cargo check` 绿。
+      并发留痕：一次 `-j 8` 偶发（handoff 重试时序测试）单测两连绿排除，
+      非本切片引入。
 - [ ] 切片 C+D（refreeze 一次）：Team 根开关（SessionSettingsPatch additive +
       条件注册）+ `TeamResponse.board`/`TeamBoard*` 删除 + `TeamAgentSnapshot`
       诚实化 + `TaskView` additive + `subagent.spawn` 变体删除 + board 机构删除

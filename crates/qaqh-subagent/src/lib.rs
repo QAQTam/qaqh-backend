@@ -45,9 +45,10 @@ pub use host::{
     InterruptedAgent, ListedAgent, ListedAgentResidency, ListedAgentStatus,
     SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest, SpawnedSubagent, SubagentHost,
     TaskBoardArtifact, TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest,
-    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction,
-    TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, board_host, host, install_board_host,
-    install_host, install_task_host, task_host,
+    TaskCloseAction, TaskCloseRequest, TaskCreateRequest, TaskListPage, TaskListRequest,
+    TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome, WaitAgentRequest, board_host, host,
+    install_board_host, install_host, install_task_host, normalize_write_scope, task_host,
+    task_is_ready, write_scope_warnings,
 };
 
 /// 子代理固定身份提示：注入到子代理任务文本的 `[SYSTEM]` 段。
@@ -1323,5 +1324,85 @@ mod tests {
         assert_eq!(by_id.len(), 1, "未知目标被忽略");
         assert_eq!(by_id[0].agent_path, "/root/explore");
         assert!(by_id[0].outcome.is_none(), "未结束的目标没有终态摘要");
+    }
+
+    // ── ADR-0033 切片B 闸门:write_scopes 归一化/就绪派生/重叠警告 ──
+
+    fn board_task(task_id: &str, state: &str, scopes: &[&str], deps: &[&str]) -> TaskBoardTask {
+        TaskBoardTask {
+            task_id: task_id.to_string(),
+            title: String::new(),
+            state: state.to_string(),
+            owner: None,
+            claim_epoch: 0,
+            depends_on: deps.iter().map(|dep| dep.to_string()).collect(),
+            artifacts: Vec::new(),
+            acceptance: Vec::new(),
+            write_scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            ready: false,
+            write_scope_warnings: Vec::new(),
+            owner_session_id: None,
+            result_ref: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+        }
+    }
+
+    #[test]
+    fn write_scope_normalization_is_lenient_but_rejects_garbage() {
+        assert_eq!(
+            normalize_write_scope("./src/api\\v2/").unwrap(),
+            "src/api/v2",
+            "反斜杠归一 + ./ 剥除 + 尾斜杠剥除"
+        );
+        assert_eq!(normalize_write_scope("/abs/path").unwrap(), "abs/path");
+        assert!(normalize_write_scope("").is_err());
+        assert!(normalize_write_scope("  . ").is_err());
+        assert!(normalize_write_scope(&"x".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn task_readiness_requires_open_and_all_deps_terminal() {
+        let done = board_task("dep-1", "completed", &[], &[]);
+        let wip = board_task("dep-2", "claimed", &[], &[]);
+        let missing = board_task("dep-3", "open", &[], &[]);
+        let index = std::collections::HashMap::from([
+            ("dep-1".to_string(), &done),
+            ("dep-2".to_string(), &wip),
+        ]);
+
+        let ready = board_task("t", "open", &[], &["dep-1"]);
+        assert!(task_is_ready(&ready, &index));
+
+        let blocked = board_task("t", "open", &[], &["dep-2"]);
+        assert!(!task_is_ready(&blocked, &index), "未完成依赖阻塞就绪");
+
+        let dangling = board_task("t", "open", &[], &["dep-3"]);
+        assert!(!task_is_ready(&dangling, &index), "依赖缺失 fail-closed");
+
+        let claimed = board_task("t", "claimed", &[], &[]);
+        assert!(!task_is_ready(&claimed, &index), "claimed 不是 ready");
+    }
+
+    #[test]
+    fn scope_warnings_flag_only_claimed_overlaps_and_respect_prefix_boundary() {
+        let claimed_a = board_task("a", "claimed", &["src"], &[]);
+        let claimed_b = board_task("b", "claimed", &["src/api"], &[]);
+        let claimed_far = board_task("c", "claimed", &["src2"], &[]);
+        let open_task = board_task("d", "open", &["src/tests"], &[]);
+        let board = vec![&claimed_a, &claimed_b, &claimed_far, &open_task];
+
+        let warnings = write_scope_warnings(&claimed_a, &board);
+        assert_eq!(
+            warnings,
+            vec!["write scope \"src\" overlaps claimed task b"],
+            "真前缀相交才警告;src2 不算(src 边界),open 任务不作为冲突方"
+        );
+        assert!(write_scope_warnings(&claimed_far, &board).is_empty());
+        // open 任务也携带警告:认领前即可预判与在飞工作的冲突。
+        assert_eq!(
+            write_scope_warnings(&open_task, &board),
+            vec!["write scope \"src/tests\" overlaps claimed task a"]
+        );
     }
 }

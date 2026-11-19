@@ -13,7 +13,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use super::DbError;
 use super::store::now_ms;
 
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -181,6 +181,7 @@ CREATE TABLE team_tasks (
     owner_session_id TEXT,
     claim_epoch      INTEGER NOT NULL DEFAULT 0,
     result_ref       TEXT,
+    write_scopes     TEXT,
     created_by       TEXT NOT NULL,
     created_at_ms    INTEGER NOT NULL,
     updated_at_ms    INTEGER NOT NULL
@@ -249,6 +250,27 @@ CREATE TABLE board_subscriptions (
 );
 "#;
 
+/// team_tasks 的 v10 形态——升级步进 9→10 的"确保表"真源,与 DDL_TEAM 内的
+/// CREATE 保持逐字段一致。
+const DDL_TEAM_TASKS_V10: &str = r#"
+CREATE TABLE IF NOT EXISTS team_tasks (
+    task_id          TEXT PRIMARY KEY,
+    root_session_id  TEXT NOT NULL,
+    title            TEXT NOT NULL,
+    description_ref  TEXT,
+    state            TEXT NOT NULL,
+    owner_path       TEXT,
+    owner_session_id TEXT,
+    claim_epoch      INTEGER NOT NULL DEFAULT 0,
+    result_ref       TEXT,
+    write_scopes     TEXT,
+    created_by       TEXT NOT NULL,
+    created_at_ms    INTEGER NOT NULL,
+    updated_at_ms    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_team_tasks_root ON team_tasks(root_session_id, state);
+"#;
+
 /// 初始化 schema:空库建到最新版;已有库校验版本并按步进升级,比代码新直接报错。
 pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
     // 版本读取、去重、DDL 和版本提交共用写事务,避免并发启动重复决定迁移。
@@ -275,29 +297,37 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
                 supported: SCHEMA_VERSION,
             });
         }
-        // schema 5 → 6(spec-exec-session-lifecycle §9.3)后接 6→7、7→8、8→9:
+        // schema 5 → 6(spec-exec-session-lifecycle §9.3)后接 6→7、7→8、8→9、9→10:
         // 链式执行,否则旧代库会跳过后续的数据归一。
         Some(5) => {
             upgrade_5_to_6(&tx)?;
             upgrade_6_to_7(&tx)?;
             upgrade_7_to_8(&tx)?;
             upgrade_8_to_9(&tx)?;
+            upgrade_9_to_10(&tx)?;
         }
         // schema 6 → 7:content id 形态收口(裸 hex),数据归一在新 daemon
-        // 对外服务前完成;随后接 7→8 存量 effects 归一、8→9 goal 表。
+        // 对外服务前完成;随后接 7→8 存量 effects 归一、8→9 goal 表、9→10 任务板。
         Some(6) => {
             upgrade_6_to_7(&tx)?;
             upgrade_7_to_8(&tx)?;
             upgrade_8_to_9(&tx)?;
+            upgrade_9_to_10(&tx)?;
         }
         // schema 7 → 8:skills 裁剪的存量 effects 归一(ADR-0010)。
         Some(7) => {
             upgrade_7_to_8(&tx)?;
             upgrade_8_to_9(&tx)?;
+            upgrade_9_to_10(&tx)?;
         }
         // schema 8 → 9:goal 表纯增量(ADR-0015)。
         Some(8) => {
             upgrade_8_to_9(&tx)?;
+            upgrade_9_to_10(&tx)?;
+        }
+        // schema 9 → 10:任务板 write_scopes 纯增量(ADR-0033 切片B)。
+        Some(9) => {
+            upgrade_9_to_10(&tx)?;
         }
         Some(found) if found < SCHEMA_VERSION => {
             return Err(DbError::SchemaTooOld {
@@ -316,6 +346,29 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
         [SCHEMA_VERSION],
     )?;
     tx.commit()?;
+    Ok(())
+}
+
+/// schema 9 → 10(ADR-0033 切片B):任务板 `write_scopes` 纯增量列。
+///
+/// advisory 文件触及范围(JSON 字符串数组),NULL = 无范围;存量行不回填。
+/// 纯加列,不改任何既有语义——认领就绪判定/重叠警告在读取侧派生。
+/// 旧代夹具库(≤9)可能尚无 team 表:先确保表存在(幂等),再按 pragma
+/// 幂等加列——重复执行不炸。
+fn upgrade_9_to_10(tx: &Transaction<'_>) -> Result<(), DbError> {
+    tx.execute_batch(DDL_TEAM_TASKS_V10)
+        .map_err(|error| DbError::Corrupt(format!("upgrade 9→10 ensure table: {error}")))?;
+    let has_column: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('team_tasks') WHERE name = 'write_scopes'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| DbError::Corrupt(format!("upgrade 9→10 inspect: {error}")))?;
+    if has_column == 0 {
+        tx.execute_batch("ALTER TABLE team_tasks ADD COLUMN write_scopes TEXT;")
+            .map_err(|error| DbError::Corrupt(format!("upgrade 9→10 ddl: {error}")))?;
+    }
     Ok(())
 }
 

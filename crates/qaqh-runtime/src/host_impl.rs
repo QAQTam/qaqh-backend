@@ -26,8 +26,8 @@ use qaqh_subagent::{
     ListedAgentResidency, ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage,
     SpawnSubagentRequest, SpawnedSubagent, SubagentHost, TaskBoardArtifact, TaskBoardHost,
     TaskBoardTask, TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest,
-    TaskCreateRequest, TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome,
-    WaitAgentRequest,
+    TaskCreateRequest, TaskListPage, TaskListRequest, TaskUpdateAction, TaskUpdateRequest,
+    WaitAgentOutcome, WaitAgentRequest,
 };
 
 use super::QaqhService;
@@ -322,6 +322,17 @@ impl TaskBoardHost for QaqhService {
         if request.title.trim().is_empty() {
             return Err("task title must not be empty".to_string());
         }
+        // ADR-0033 切片B:write_scopes 归一化 + 去重;advisory,只拒绝垃圾不阻止。
+        let mut write_scopes: Vec<String> = Vec::new();
+        for scope in request.write_scopes {
+            let normalized = qaqh_subagent::normalize_write_scope(scope)?;
+            if !write_scopes.contains(&normalized) {
+                write_scopes.push(normalized);
+            }
+        }
+        if write_scopes.len() > 16 {
+            return Err("a task may declare at most 16 write scopes".to_string());
+        }
         let caller = self.caller_context(request.caller_session_id)?;
         let description_ref = request
             .description_ref
@@ -368,6 +379,7 @@ impl TaskBoardHost for QaqhService {
                         root_session_id: &caller.root_session_id,
                         title: &title,
                         description_ref: description_ref.as_deref(),
+                        write_scopes: &write_scopes,
                         created_by: &caller.actor_path,
                         created_at_ms: now,
                     },
@@ -423,6 +435,26 @@ impl TaskBoardHost for QaqhService {
         let artifact_ref = request.artifact_ref.map(str::to_string);
         let media_type = request.media_type.map(str::to_string);
         let acceptance = request.acceptance.map(<[String]>::to_vec);
+        // ADR-0033 切片B:reassign 仅根(agent id == root id),目标经注册器解析
+        // 成 path+session id 双轨落库(与 claim 同构)。
+        let (reassign_path, reassign_session_id) = if action == TaskUpdateAction::Reassign {
+            if caller.actor_session_id != caller.root_session_id {
+                return Err("task reassign is root-only; ask the root agent".to_string());
+            }
+            let owner = request
+                .owner
+                .ok_or_else(|| "task_update reassign requires owner".to_string())?;
+            let target = {
+                let mut registry = self.registry()?;
+                registry.resolve_agent_for_caller(request.caller_session_id, owner)?
+            };
+            (
+                target.agent_path.as_str().to_string(),
+                target.agent_id.as_str().to_string(),
+            )
+        } else {
+            (String::new(), String::new())
+        };
         self.owners
             .db()
             .write_blocking(move |conn| match action {
@@ -500,6 +532,15 @@ impl TaskBoardHost for QaqhService {
                     )
                     .map_err(qaqh_session::db::DbError::Corrupt)
                 }
+                TaskUpdateAction::Reassign => dbteam::task_reassign(
+                    conn,
+                    &caller.root_session_id,
+                    &closure_task_id,
+                    &reassign_path,
+                    &reassign_session_id,
+                    now,
+                )
+                .map_err(qaqh_session::db::DbError::Corrupt),
             })
             .map_err(|error| format!("task_update failed: {error}"))?;
         self.task_get(&caller_session, &task_id)
@@ -566,21 +607,52 @@ impl TaskBoardHost for QaqhService {
         self.task_get(&caller_session, &task_id)
     }
 
-    fn task_list(&self, request: TaskListRequest<'_>) -> Result<Vec<TaskBoardTask>, String> {
+    fn task_list(&self, request: TaskListRequest<'_>) -> Result<TaskListPage, String> {
+        if request.owner.is_some() && request.unowned.is_some() {
+            return Err("owner and unowned filters cannot be combined".to_string());
+        }
         let caller = self.caller_context(request.caller_session_id)?;
         let state_filter = request
             .state
             .map(parse_task_state)
             .transpose()?
             .map(|state| task_state_wire(&state).to_string());
-        let tasks = self
+        let root = caller.root_session_id.clone();
+        let rows = self
             .owners
             .db()
             .read_blocking(move |conn| {
-                dbteam::task_list(conn, &caller.root_session_id, state_filter.as_deref())
+                dbteam::task_list(conn, &root, state_filter.as_deref())
             })
             .map_err(|error| format!("task_list failed: {error}"))?;
-        Ok(tasks.iter().map(task_to_dto).collect())
+        let mut tasks = task_dtos(&rows);
+        if let Some(owner) = request.owner {
+            tasks.retain(|task| {
+                task.owner.as_deref() == Some(owner)
+                    || task.owner_session_id.as_deref() == Some(owner)
+            });
+        }
+        if let Some(unowned) = request.unowned {
+            tasks.retain(|task| task.owner.is_none() == unowned);
+        }
+        if let Some(ready) = request.ready {
+            tasks.retain(|task| task.ready == ready);
+        }
+        let limit = request.limit.unwrap_or(50);
+        if limit == 0 || limit > 100 {
+            return Err("limit must be an integer from 1 through 100".to_string());
+        }
+        let cursor = request.cursor.unwrap_or(0);
+        let next = cursor.saturating_add(limit);
+        let next_cursor = usize::try_from(next)
+            .map(|next| (next < tasks.len()).then_some(next as u64))
+            .unwrap_or(None);
+        let tasks = tasks
+            .into_iter()
+            .skip(usize::try_from(cursor).unwrap_or(usize::MAX))
+            .take(limit as usize)
+            .collect();
+        Ok(TaskListPage { tasks, next_cursor })
     }
 }
 
@@ -890,14 +962,16 @@ impl QaqhService {
 
     fn task_get(&self, caller_session_id: &str, task_id: &str) -> Result<TaskBoardTask, String> {
         let caller = self.caller_context(caller_session_id)?;
-        let owned_task = task_id.to_string();
-        let task = self
+        let root = caller.root_session_id.clone();
+        let rows = self
             .owners
             .db()
-            .read_blocking(move |conn| dbteam::task_get(conn, &caller.root_session_id, &owned_task))
+            .read_blocking(move |conn| dbteam::task_list(conn, &root, None))
             .map_err(|error| format!("task read failed: {error}"))?;
-        task.as_ref()
-            .map(task_to_dto)
+        // ADR-0033 切片B:ready/warnings 是全板派生值,单任务读取也走整板投影。
+        task_dtos(&rows)
+            .into_iter()
+            .find(|task| task.task_id == task_id)
             .ok_or_else(|| format!("task not found: {task_id}"))
     }
 
@@ -1033,10 +1107,31 @@ fn task_to_dto(task: &dbteam::TeamTaskRow) -> TaskBoardTask {
             })
             .collect(),
         acceptance: task.acceptance.clone(),
+        write_scopes: task.write_scopes.clone(),
+        ready: false,
+        write_scope_warnings: Vec::new(),
+        owner_session_id: task.owner_session_id.clone(),
         result_ref: task.result_ref.clone(),
         created_at_ms: task.created_at_ms,
         updated_at_ms: task.updated_at_ms,
     }
+}
+
+/// ADR-0033 切片B:整板投影——ready 与 write-scope 警告是全板派生值,
+/// 单独行推不出来。先建只读视图再回填,规避借用冲突。
+fn task_dtos(rows: &[dbteam::TeamTaskRow]) -> Vec<TaskBoardTask> {
+    let dtos: Vec<TaskBoardTask> = rows.iter().map(task_to_dto).collect();
+    let readonly: Vec<TaskBoardTask> = dtos.clone();
+    let board: Vec<&TaskBoardTask> = readonly.iter().collect();
+    let index: std::collections::HashMap<String, &TaskBoardTask> =
+        readonly.iter().map(|task| (task.task_id.clone(), task)).collect();
+    let mut dtos = dtos;
+    for (position, dto) in dtos.iter_mut().enumerate() {
+        let view = &readonly[position];
+        dto.ready = qaqh_subagent::task_is_ready(view, &index);
+        dto.write_scope_warnings = qaqh_subagent::write_scope_warnings(view, &board);
+    }
+    dtos
 }
 
 fn task_view_of_row(task: &dbteam::TeamTaskRow) -> qaqh_ringing_contract::team::TaskView {
