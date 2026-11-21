@@ -2,6 +2,7 @@
 //! `&mut Capture` 串行完成；调用方在线程间共享时必须在同一把锁内调用。
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 pub const TRANSCRIPT_BYTES: usize = 1024 * 1024;
 pub const MODEL_PENDING_BYTES: usize = 256 * 1024;
@@ -38,6 +39,19 @@ pub struct OutputSnapshot {
     pub invalid_utf8_bytes: u64,
     pub transcript_head: Vec<OutputChunk>,
     pub transcript_tail: Vec<OutputChunk>,
+}
+
+/// 每批输出发布时随行的轻量水位（ADR-0030 补充决策）。
+///
+/// 与 [`OutputSnapshot`] 的区别：不带 head/tail transcript——发布通路的消费者
+/// 只需要累计偏移与 16KiB preview；preview 用 `Arc<str>` 承载，使同一批的
+/// 下游信箱条目共享这一份拷贝，而不是逐条复制。
+#[derive(Debug, Clone)]
+pub struct ExecOutputWatermark {
+    pub next_offset: u64,
+    pub preview: Arc<str>,
+    pub preview_start_offset: u64,
+    pub capture_omitted_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -130,6 +144,18 @@ impl Capture {
             invalid_utf8_bytes: self.invalid_utf8_bytes,
             transcript_head: self.head.iter().cloned().collect(),
             transcript_tail: self.tail.iter().cloned().collect(),
+        }
+    }
+
+    /// 发布通路用的轻量水位：不 clone transcript head/tail。
+    pub fn watermark(&self) -> ExecOutputWatermark {
+        ExecOutputWatermark {
+            next_offset: self.next_offset,
+            preview: Arc::from(self.preview.as_str()),
+            preview_start_offset: self.next_offset.saturating_sub(self.preview.len() as u64),
+            capture_omitted_bytes: self
+                .next_offset
+                .saturating_sub((self.head_bytes + self.tail_bytes) as u64),
         }
     }
 

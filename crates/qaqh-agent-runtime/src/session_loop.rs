@@ -1919,20 +1919,26 @@ impl SessionLoop {
                 .await
                 .ok();
         }
-        self.owner
-            .append_block(TimelineEntry::AssistantBlock {
-                block_id: BlockId::new(blocks.answer_block_id.clone()),
-                turn_id: turn.clone(),
-                ord: 0,
-                block_kind: AssistantBlockKind::Answer,
-                content: ContentValue::Inline { text: answer },
-                model: blocks.model.clone(),
-                usage: outcome.usage.clone(),
-                generated_ms: outcome.generated_ms,
-                opaque: outcome.opaque_items.clone(),
-            })
-            .await
-            .ok();
+        // 纯工具调用轮 answer 恒空:空文本且无 opaque 锚点时不 seal,否则
+        // 每个工具轮都落库并广播一个空 assistant 块(UI 冒空气泡,快照
+        // bootstrap 也原样携带)。opaque 是 Responses 回放锚点,非空必须
+        // 照常落库。守卫与 seal_partial 的 answer 分支一致。
+        if !answer.is_empty() || !outcome.opaque_items.is_empty() {
+            self.owner
+                .append_block(TimelineEntry::AssistantBlock {
+                    block_id: BlockId::new(blocks.answer_block_id.clone()),
+                    turn_id: turn.clone(),
+                    ord: 0,
+                    block_kind: AssistantBlockKind::Answer,
+                    content: ContentValue::Inline { text: answer },
+                    model: blocks.model.clone(),
+                    usage: outcome.usage.clone(),
+                    generated_ms: outcome.generated_ms,
+                    opaque: outcome.opaque_items.clone(),
+                })
+                .await
+                .ok();
+        }
     }
 
     /// 中断路径的 seal:只保留已流出文本。

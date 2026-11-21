@@ -11,6 +11,7 @@ mod tests {
     use qaqh_ringing_contract::events::{
         InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
     };
+    use qaqh_ringing_contract::events::ExecOutputSource;
     use qaqh_ringing_contract::fact::{
         ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionDecision,
         InteractionId, InteractionKind, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId,
@@ -18,11 +19,13 @@ mod tests {
     use qaqh_ringing_contract::state::{
         CodeDelta, InteractionView, TimelineEntry, ToolCallState, ToolEffectInfo, TurnOutcome,
     };
+    use qaqh_ringing_contract::state::{ExecSessionOutcome, ExecSessionState, ExecSessionView};
+    use qaqh_ringing_contract::fact::{ExecSessionId, SessionId};
     use qaqh_tool_core::{ExecOutputStream, ExecProgressEvent};
 
     use crate::db::store;
     use crate::owner::{
-        OwnerDirectory, ToolSettlement, append_exec_log, exec_output_log_path,
+        ExecSessionSettlement, OwnerDirectory, ToolSettlement, append_exec_log, exec_output_log_path,
         read_exec_output_log_range,
     };
 
@@ -1090,6 +1093,329 @@ mod tests {
             let state = owner.snapshot().await.expect("snapshot after reject");
             assert_eq!(state.turns.len(), 2, "T1 仍在,新开的 T4 也在");
             assert_eq!(state.timeline.len(), 1, "拒绝不得动任何块");
+        });
+    }
+
+    fn running_exec_view(exec_id: &str, session_id: &str) -> ExecSessionView {
+        ExecSessionView {
+            id: ExecSessionId::new(exec_id),
+            owner_session_id: SessionId::new(session_id),
+            origin_turn_id: TurnId::new("T1"),
+            origin_call_id: ToolCallId::new("C1"),
+            state: ExecSessionState::Running,
+            tty: false,
+            command: "flood".into(),
+            cwd: None,
+            started_at_ms: 0,
+            finished_at_ms: None,
+            next_offset: 0,
+            output_preview: String::new(),
+            preview_start_offset: 0,
+            output_complete: false,
+            capture_omitted_bytes: 0,
+            stream_dropped_bytes: 0,
+            output: None,
+        }
+    }
+
+    fn settle_finished(transcript: Option<String>) -> (String, Option<String>) {
+        let state_json = serde_json::to_string(&ExecSessionState::Finished {
+            outcome: ExecSessionOutcome::Exited { exit_code: 0 },
+        })
+        .expect("terminal state serializable");
+        (state_json, transcript)
+    }
+
+    /// ADR-0030 T1/T2/T4/T5/T6：洪峰合帧——文本无损、offset 全局连续、
+    /// source run 切分、单帧不越批字节帽；定序不变量：emit 前日志必已含
+    /// 至 end_offset 的全文，DB 水位与到达拼接一致。
+    #[test]
+    fn exec_output_flood_coalesces_losslessly_into_source_runs() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-COAL".into(),
+                    parent_session_id: None,
+                    title: "洪峰合帧".into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            let lifecycle = owner.lifecycle();
+            let exec_id = "execs_01COALEXECSESSION000000000000";
+            lifecycle.exec_session_upsert(running_exec_view(exec_id, "SES-COAL"));
+
+            let unit = "a".repeat(2 * 1024); // 400×2KiB = 800KiB > 256KiB 批帽
+            let mut expected_log = String::new();
+            let mut offset = 0u64;
+            let mut feeds = 0usize;
+            {
+                let mut feed = |text: &str, source: ExecOutputSource| {
+                    let end = offset + text.len() as u64;
+                    lifecycle.exec_session_output(
+                        exec_id,
+                        offset,
+                        end,
+                        source,
+                        text.to_string(),
+                        end,
+                        Arc::from("pv"),
+                        offset,
+                        0,
+                        0,
+                    );
+                    expected_log.push_str(text);
+                    offset = end;
+                    feeds += 1;
+                };
+                for _ in 0..199 {
+                    feed(&unit, ExecOutputSource::Stdout);
+                }
+                feed("stderr-run", ExecOutputSource::Stderr);
+                feed("stderr-run", ExecOutputSource::Stderr);
+                for _ in 0..199 {
+                    feed(&unit, ExecOutputSource::Stdout);
+                }
+            }
+            assert_eq!(feeds, 400);
+            // Request 让位 ⇒ 此前所有 delta 必已 flush（T6 顺序 + T5 尾批）。
+            owner.flush().expect("barrier");
+
+            let mut started_seen = false;
+            let mut deltas: Vec<(ExecOutputSource, u64, u64, String)> = Vec::new();
+            loop {
+                match rx.try_recv() {
+                    Ok(frame) => match frame.event {
+                        SessionEvent::ExecSessionStarted { .. } => started_seen = true,
+                        SessionEvent::ExecSessionOutputDelta {
+                            exec_session_id,
+                            start_offset,
+                            end_offset,
+                            source,
+                            text,
+                        } => {
+                            assert_eq!(exec_session_id.as_str(), exec_id);
+                            deltas.push((source, start_offset, end_offset, text));
+                        }
+                        _ => {}
+                    },
+                    Err(broadcast::error::TryRecvError::Empty) => break,
+                    Err(error) => panic!("broadcast: {error}"),
+                }
+            }
+            assert!(started_seen, "会话建立必须先于任何输出");
+            // 合帧生效：帧数远小于灌入条数（泵在 20ms 窗口内连收）。
+            assert!(
+                deltas.len() < feeds,
+                "合帧未生效：{} 条单帧",
+                deltas.len()
+            );
+            let mut cursor = 0u64;
+            let mut reconstructed = String::new();
+            for (source, start, end, text) in &deltas {
+                assert_eq!(*start, cursor, "delta offset 全局连续（跨 run 不留缝）");
+                assert!(
+                    text.len() <= 256 * 1024,
+                    "单帧 {} B 越批字节帽",
+                    text.len()
+                );
+                cursor = *end;
+                reconstructed.push_str(text);
+            }
+            assert_eq!(reconstructed, expected_log, "到达序拼接无损无重");
+            assert!(
+                deltas
+                    .iter()
+                    .filter(|(source, ..)| *source == ExecOutputSource::Stderr)
+                    .count()
+                    >= 1,
+                "stderr run 必须作为独立 source 帧出现"
+            );
+            // stderr 两条相邻灌入应合成同一 run 的一帧（run 内合帧）。
+            let stderr_run = deltas
+                .iter()
+                .filter(|(source, ..)| *source == ExecOutputSource::Stderr)
+                .count();
+            assert!(
+                stderr_run <= 2 && deltas.iter().any(|(s, .., text)| *s
+                    == ExecOutputSource::Stderr && text == "stderr-runstderr-run"),
+                "相邻同 source 灌入须并为单帧，got {stderr_run}"
+            );
+            assert_eq!(cursor, expected_log.len() as u64);
+
+            // 定序不变量的落点：日志全文 = 到达序拼接；DB 水位 = 总字节。
+            let path = exec_output_log_path(owners.db(), "SES-COAL", exec_id)
+                .expect("log path");
+            let logged = std::fs::read(&path).expect("log readable");
+            assert_eq!(logged.len(), expected_log.len());
+            let row = owners
+                .db()
+                .read_blocking(|conn| store::exec_session_by_id(conn, exec_id))
+                .expect("db")
+                .expect("row");
+            assert_eq!(row.next_offset, expected_log.len() as u64);
+        });
+    }
+
+    /// ADR-0030 T3 + ADR-0033：settle 先 flush 前缀再对账；日志存在时行
+    /// output_text=None（不再把全文复制进行与 WAL）；文件短于库水位 ⇒
+    /// 落盘丢字节如实标 truncated。
+    #[test]
+    fn settle_flushes_prefix_then_keeps_row_free_of_full_text() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-SETTLE".into(),
+                    parent_session_id: None,
+                    title: "settle 落盘面".into(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            let lifecycle = owner.lifecycle();
+
+            // 会话 A：日志完整 ⇒ truncated=false 且行不带全文。
+            let exec_a = "execs_01SETTLEAFULL00000000000000000";
+            lifecycle.exec_session_upsert(running_exec_view(exec_a, "SES-SETTLE"));
+            let payload = "x".repeat(320 * 1024);
+            let chunk_size = 16 * 1024usize;
+            let mut start = 0u64;
+            for chunk in payload.as_bytes().chunks(chunk_size) {
+                let text = std::str::from_utf8(chunk).expect("ascii payload");
+                lifecycle.exec_session_output(
+                    exec_a,
+                    start,
+                    start + chunk.len() as u64,
+                    ExecOutputSource::Stdout,
+                    text.to_string(),
+                    start + chunk.len() as u64,
+                    Arc::from("pv"),
+                    0,
+                    0,
+                    0,
+                );
+                start += chunk.len() as u64;
+            }
+            let (state_json, transcript) = settle_finished(Some("capped-transcript".into()));
+            lifecycle.exec_session_finished(ExecSessionSettlement {
+                exec_session_id: exec_a.into(),
+                state_json,
+                finished_at_ms: store::now_ms(),
+                output_complete: true,
+                output_content_id: None,
+                output_text: transcript,
+                output_truncated: false,
+                output_preview: "pv".into(),
+                preview_start_offset: 0,
+            });
+            loop {
+                match recv_event(&mut rx) {
+                    SessionEvent::ExecSessionFinished { .. } => break,
+                    SessionEvent::ExecSessionStarted { .. }
+                    | SessionEvent::ExecSessionOutputDelta { .. } => {}
+                    other => panic!("unexpected event before finish: {other:?}"),
+                }
+            }
+            let row = owners
+                .db()
+                .read_blocking(|conn| store::exec_session_by_id(conn, exec_a))
+                .expect("db")
+                .expect("row");
+            assert_eq!(row.next_offset, 320 * 1024);
+            assert!(
+                row.output_content_id.is_none(),
+                "日志存在时不得把全文复制进 content store（ADR-0033）"
+            );
+            assert!(row.output_complete, "文件字节==水位 ⇒ 完整");
+            let path = exec_output_log_path(owners.db(), "SES-SETTLE", exec_a).expect("path");
+            assert_eq!(std::fs::metadata(&path).expect("meta").len(), 320 * 1024);
+
+            // 会话 B：日志短于水位（append 曾丢字节）⇒ truncated 如实 true。
+            let exec_b = "execs_01SETTLEBGAP000000000000000000";
+            lifecycle.exec_session_upsert(running_exec_view(exec_b, "SES-SETTLE"));
+            let total = 4 * 16 * 1024u64;
+            for i in 0..4u64 {
+                lifecycle.exec_session_output(
+                    exec_b,
+                    i * 16 * 1024,
+                    (i + 1) * 16 * 1024,
+                    ExecOutputSource::Stdout,
+                    "y".repeat(16 * 1024),
+                    (i + 1) * 16 * 1024,
+                    Arc::from("pv"),
+                    0,
+                    0,
+                    0,
+                );
+            }
+            owner.flush().expect("barrier: 批已 flush 进日志");
+            let path_b = exec_output_log_path(owners.db(), "SES-SETTLE", exec_b).expect("path b");
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path_b)
+                .expect("open for truncation")
+                .set_len(40 * 1024)
+                .expect("shrink log");
+            let (state_json, transcript) = settle_finished(Some("transcript-b".into()));
+            lifecycle.exec_session_finished(ExecSessionSettlement {
+                exec_session_id: exec_b.into(),
+                state_json,
+                finished_at_ms: store::now_ms(),
+                output_complete: true,
+                output_content_id: None,
+                output_text: transcript,
+                output_truncated: false,
+                output_preview: "pv".into(),
+                preview_start_offset: 0,
+            });
+            loop {
+                match recv_event(&mut rx) {
+                    SessionEvent::ExecSessionFinished { .. } => break,
+                    SessionEvent::ExecSessionStarted { .. }
+                    | SessionEvent::ExecSessionOutputDelta { .. } => {}
+                    other => panic!("unexpected event before finish B: {other:?}"),
+                }
+            }
+            let row_b = owners
+                .db()
+                .read_blocking(|conn| store::exec_session_by_id(conn, exec_b))
+                .expect("db")
+                .expect("row b");
+            assert_eq!(row_b.next_offset, total);
+            assert!(
+                !row_b.output_complete,
+                "文件 40KiB < 水位 64KiB ⇒ 落盘丢字节必须把 output_complete 降级（前端横幅依此字段）"
+            );
+            assert!(
+                row_b.output_content_id.is_none(),
+                "日志存在（哪怕有缺口）也不得把全文副本写进 content store"
+            );
         });
     }
 }

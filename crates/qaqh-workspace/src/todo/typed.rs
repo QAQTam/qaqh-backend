@@ -104,7 +104,7 @@ impl From<&TodoItem> for TodoItemView {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Replace the whole task list with one plain-text block (one line per todo).
+/// Replace the whole todo list with one plain-text block (one line per todo).
 /// Line format: `- [ ]|~|x|- title [| description [| evidence]]` —
 /// markers: `[ ]` pending, `[~]` in_progress (parallel allowed), `[x]` done,
 /// `[-]` cancelled. Titles are identities: duplicates rejected; renames are
@@ -116,9 +116,9 @@ pub struct TodoWriteArgs {
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Set one task's status by its exact title (loop for batches).
+/// Set one todo item's status by its exact title (loop for batches).
 pub struct TodoUpdateArgs {
-    /// Exact title of the target task.
+    /// Exact title of the target todo item.
     pub title: String,
     /// pending | in_progress | completed | cancelled.
     pub status: TodoStatusView,
@@ -482,7 +482,7 @@ impl TypedTool for TodoWriteTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "todo_write",
-            "Replace the whole task list (full-replace) with one plain-text block. One line per todo: `- [ ]|~|x|- title [| description [| evidence]]` (markers: [ ] pending, [~] in_progress — parallel allowed, [x] completed, [-] cancelled). Titles are identities: duplicates rejected, renames are delete+create. Empty list clears the plan.",
+            "Replace the whole todo list (full-replace) with one plain-text block — your per-session plan, not the team task board. One line per todo: `- [ ]|~|x|- title [| description [| evidence]]` (markers: [ ] pending, [~] in_progress — parallel allowed, [x] completed, [-] cancelled). Titles are identities: duplicates rejected, renames are delete+create. Empty list clears the plan.",
             ToolCategory::Write,
             ToolRisk::Write,
             Duration::from_secs(15),
@@ -508,7 +508,7 @@ impl TypedTool for TodoUpdateTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "todo_update",
-            "Set one task's status: {title, status, evidence?}. One task per call — loop for batches.",
+            "Set one todo item's status: {title, status, evidence?}. One item per call — loop for batches.",
             ToolCategory::Write,
             ToolRisk::Write,
             Duration::from_secs(15),

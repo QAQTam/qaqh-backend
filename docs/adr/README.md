@@ -61,10 +61,11 @@
 | [0027](0027-v4-0-gold-standard-recut-for-tool-image-ref.md) | 在 `main` 上就地机器重切 v4.0 金标准，追认 `ToolImageRef` + `TimelineEntry.images` | **已采纳 · 已实施**（2026-11-17 所有者裁定：用户空间不可变只在 LTS 仓、当前无 LTS 发版计划）· `check` 实测 exit 1→0 · 已知不严格：`ringing-commands-10`/`ringing-session-3`/`wire_version 2` 三戳**未 bump**，禁止当成 refreeze 免记账的先例 |
 | [0028](0028-user-shell-terminal-on-backend.md) | 用户 shell 终端落后端：复用 `qaqh-pty`，前端 node-pty 退役；数据面走 ws | **已采纳 · 切片 1+2 已实施（实测：pty 2 passed / runtime shell 3 passed / runtime lib 54 passed）· 切片 3–5 未实施** · 生命周期考据：断联**不** kill（`ExecStopReason` 无 client 档），owner=`instance_key` 而非 `session_id`，idle 回收挂既有 60s sweep · **§D3 已裁定 = B（ws）并显式 supersede ADR-0017 决策 6 与§被否选项第 4 条**，ADR-0017 头部加了指回注记；候选 A（长轮询 offset 区间读）留作显式回退 · §更正记录列出第一版 7 处未实测引用 |
 | [0029](0029-retire-exec-notify-single-channel-long-poll.md) | 砍掉 exec 订阅终态推送，回归单通道长轮询（取代 0026；codex unified_exec 同款：空 poll 5s–300s、非空 ≤30s，终态只经读取通道） | 已采纳 · 机构整体砍除（manager/工具面/桥/权限/registry/service/daemon/模板/skill）；验证结果见落地清单；git fetch 比对受限已登记 |
-| [0030](0030-exec-output-delta-pump-coalescing.md) | exec 输出 delta 泵侧合帧：帧频与 DB 写放大的源端上限（P0 修复 F 第一半） | 提议中 · 泵侧 20ms/256KiB 合帧批，wire 零变更；折叠/熔断、前端降级 pull、exec ws 隔离流列为非目标 |
+| [0030](0030-exec-output-delta-pump-coalescing.md) | exec 输出 delta 泵侧合帧：帧频与 DB 写放大的源端上限（P0 修复 F 第一半） | 已采纳并实施（经 0034 承接，2026-11-20）· 泵侧 20ms/256KiB 合帧批，wire 零变更；折叠/熔断、前端降级 pull、exec ws 隔离流仍为非目标 |
 | [0031](0031-tag-not-lts-release-model.md) | tag ≠ LTS：发版与冻结线解耦（规则 15/21 松绑修订） | 已采纳 · refreeze 在 main 的去处=新版本位（minor bump + 机器重切），不再强制开 LTS；三戳只随命令/事件词表与 wire 协议实变 bump；LTS-v3.x 纪律不动 |
 | [0032](0032-cut-lts-v4.1-line.md) | 切 LTS-v4.1 线：新一期 LTS 开发，金标准等机器按需恢复（真源 `da33cbae^`） | 已采纳 · 分支 `LTS-v4.1` 自 main `bb28211b` 切出，线版本 4.1.0；tag 待线就绪另发 |
 | [0033](0033-agent-team-2-colleagues-over-sessions.md) | AgentTeam 2.0：同事=会话，一块任务板一条通道 | 已采纳并实施（切片 A/B/C+D 全落 main，见落地清单；`[contract-refreeze]` 三戳 bump + v4.0 金标准重切 EXIT=0）· 冒烟待真实模型环境 · 前端同批（姊妹仓）未动 |
+| [0034](0034-exec-flood-memory-surface.md) | exec 洪峰内存面：源端水位 Arc 共享 + 全文权威源=日志文件（P0，修订 0017 决策 3 写入面） | 已采纳并实施 · reader 64KiB + 同 run 合帧 + `ExecOutputWatermark(Arc<str>)`；settle 不读日志内容，对账降级 `output_complete`，content 复制废除；wire 形状零变更 |
 
 ## 阅读顺序
 

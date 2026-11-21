@@ -12,6 +12,7 @@ use qaqh_process_tools::exec_session::{
     ExecManagerError, ExecManagerErrorKind, ExecSessionManager, ExecSessionPoll,
     ExecSessionPublisher, ExecSessionResult, ExecSessionStart,
 };
+use qaqh_process_tools::exec_session::capture::ExecOutputWatermark;
 use qaqh_ringing_contract::fact::{
     ToolCallOutcome, ToolCancellationReason, ToolError, ToolInterruptionReason, ToolMetrics,
 };
@@ -50,7 +51,7 @@ impl ExecSessionPublisher for OwnerExecPublisher {
         end_offset: u64,
         source: qaqh_ringing_contract::events::ExecOutputSource,
         text: String,
-        snapshot: qaqh_process_tools::exec_session::capture::OutputSnapshot,
+        watermark: &ExecOutputWatermark,
         stream_dropped_bytes: u64,
     ) {
         self.lifecycle.exec_session_output(
@@ -59,10 +60,10 @@ impl ExecSessionPublisher for OwnerExecPublisher {
             end_offset,
             source,
             text,
-            snapshot.next_offset,
-            snapshot.output_preview,
-            snapshot.preview_start_offset,
-            snapshot.capture_omitted_bytes,
+            watermark.next_offset,
+            Arc::clone(&watermark.preview),
+            watermark.preview_start_offset,
+            watermark.capture_omitted_bytes,
             stream_dropped_bytes,
         );
     }

@@ -1,6 +1,6 @@
 # ADR-0030 exec 输出 delta 泵侧合帧：帧频与 DB 写放大的源端上限（P0 修复 F 第一半）
 
-状态: `提议中` · 起草日期 2026-11-19 · 起草人 QAQ agent · 决策人 仓库所有者（待拍板）
+状态: `已采纳并实施`（经 [ADR-0034](0034-exec-flood-memory-surface.md) 承接，2026-11-20 所有者拍板"可以落地，挂 P0"）· 起草日期 2026-11-19 · 起草人 QAQ agent
 
 > 一句话：exec 输出洪峰今天**逐块直发**，每 ≤8KiB 块在单线程 owner 泵上消耗一次日志 append +
 > 一次 SQLite 写事务 + 一次 SSE 广播帧；本 ADR 在泵上加"合帧批"，把帧频钳到窗口/字节帽上限，
@@ -120,11 +120,20 @@ ADR-0017 决策 1 的定序不变量：**客户端见过 offset X 的 delta ⇒ 
 
 ## 落地清单
 
-- [ ] 仓库所有者拍板本 ADR
-- [ ] `owner.rs`：两常量 + 泵循环批状态机（闭包内持有 `lifecycle_rx`；
-      `ExecSessionOutput` 开批/续批/让位/超时 flush；flush = 一次 append + 一次 DB 写 +
-      按 run emit）
-- [ ] T1–T6 落 `qaqh-session` 测试；`cargo test -p qaqh-session` 全绿
-- [ ] exporter `check --against docs/api-surface/v4.0` 零新差异，留痕
+- [x] 仓库所有者拍板（2026-11-20，随 ADR-0034 一并落地）
+- [x] `owner.rs`：两常量 + 泵循环批状态机 `run_pump_loop`（开批/续批/让位/超时 flush；
+      flush = 一次 append + 一次 DB 写 + 按 run emit = `flush_exec_output`）
+- [x] T1–T6 落 `qaqh-session` 测试（`exec_output_flood_coalesces_losslessly_into_source_runs`
+      承载 T1/T2/T4/T5/T6，`settle_flushes_prefix_then_keeps_row_free_of_full_text` 承载 T3；
+      `cargo test -p qaqh-session owner_tests` 14/14 绿，2026-11-20）
+- [x] exporter `check --against docs/api-surface/v4.1` 零新差异，留痕（线已推进 v4.1）
 - [ ] P0 报告 §6 修复 F 条目加注："合帧一半由 ADR-0030 承接；折叠/熔断仍开放"
-- [ ] `docs/adr/README.md` 索引登记
+- [x] `docs/adr/README.md` 索引登记
+
+## 实施时补充决策（2026-11-20，经 ADR-0034，不构成对本 ADR 被否选项的翻案）
+
+- 生产端 reader 批量 2048B→64KiB、`publish_chunks` 同批同源合帧、水位 `Arc<str>` 共享——
+  这削减的是**信箱条目数与每条目大小**（本 ADR 决策 4 自认"字节不减速"的上半段缺口），
+  不是替代泵侧合帧：泵的写事务上限仍由本 ADR 的窗口/批帽钳制。
+- "被否选项·publisher 侧合帧"的否决理由（无时间维度、泵写事务一帧未减）依然成立且未被
+  推翻；本节是"泵侧合帧 + 源端条目削减"两半互补的落地记录，见 ADR-0034 决策 1。

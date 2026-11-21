@@ -16,7 +16,7 @@ use qaqh_ringing_contract::state::{
 };
 use qaqh_types::{ExecSessionId, ToolCallOutcome, ToolCancellationReason, ToolInterruptionReason};
 
-use super::capture::{Capture, ModelRead, OutputChunk, OutputSnapshot, OutputSource};
+use super::capture::{Capture, ExecOutputWatermark, ModelRead, OutputChunk, OutputSource};
 
 const SESSION_LIMIT: usize = 8;
 const GLOBAL_LIMIT: usize = 32;
@@ -109,7 +109,7 @@ pub trait ExecSessionPublisher: std::fmt::Debug + Send + Sync + 'static {
         end_offset: u64,
         source: ExecOutputSource,
         text: String,
-        snapshot: OutputSnapshot,
+        watermark: &ExecOutputWatermark,
         stream_dropped_bytes: u64,
     );
     fn finish(&self, view: ExecSessionView, transcript: String, truncated: bool);
@@ -896,9 +896,12 @@ fn spawn_reader(
     std::thread::Builder::new()
         .name(format!("exec-read-{}", session.id.as_str()))
         .spawn(move || {
-            // Invalid UTF-8 expands to at most three output bytes per input
-            // byte. This keeps each append within one public event boundary.
-            let mut buffer = [0u8; 2048];
+            // 单次 read 拉 64KiB（对齐 exec::pipe 的 MAX_READ_CHUNK），把洪峰的
+            // publish/信箱条目数按 32x 削减。wire 帧帽不因此变大：append_text
+            // 内部仍按 MAX_EVENT_BYTES 切块分账 offset，publish_chunks 只把
+            // 同一批的同源相邻段合回一帧；解码最坏 ×3 膨胀仍 < ADR-0030 的
+            // 泵批帽 EXEC_OUTPUT_COALESCE_MAX_BYTES(256KiB)。
+            let mut buffer = [0u8; 64 * 1024];
             loop {
                 match reader.read(&mut buffer) {
                     Ok(0) => break,
@@ -944,18 +947,35 @@ fn finish_source(session: &ManagedSession, source: OutputSource) {
 }
 
 fn publish_chunks(session: &ManagedSession, chunks: &[OutputChunk], core: &SessionCore) {
-    let snapshot = core.capture.snapshot();
-    for chunk in chunks {
-        session.publisher.output(
-            &session.id,
-            chunk.start_offset,
-            chunk.end_offset,
-            contract_source(chunk.source),
-            chunk.text.clone(),
-            snapshot.clone(),
-            core.stream_dropped_bytes,
-        );
+    if chunks.is_empty() {
+        return;
     }
+    // 一批 chunks 恒同源且 offset 连续：它们来自同一次 append_bytes/
+    // finish_source 调用，capture 在同一把锁内顺序分配 offset。合帧只改
+    // 可观测的帧边界（更少、更大），offset 语义与日志字节完全不变
+    // （ADR-0030 补充决策；定序不变量仍在泵侧）。
+    debug_assert!(
+        chunks.windows(2).all(|w| w[0].source == w[1].source
+            && w[0].end_offset == w[1].start_offset),
+        "capture 在一批内按同源连续 offset 分配"
+    );
+    let watermark = core.capture.watermark();
+    let source = chunks[0].source;
+    let start_offset = chunks[0].start_offset;
+    let end_offset = chunks[chunks.len() - 1].end_offset;
+    let text = chunks
+        .iter()
+        .map(|chunk| chunk.text.as_str())
+        .collect::<String>();
+    session.publisher.output(
+        &session.id,
+        start_offset,
+        end_offset,
+        contract_source(source),
+        text,
+        &watermark,
+        core.stream_dropped_bytes,
+    );
 }
 
 fn contract_source(source: OutputSource) -> ExecOutputSource {
@@ -1516,7 +1536,7 @@ mod tests {
             end_offset: u64,
             source: ExecOutputSource,
             text: String,
-            _snapshot: OutputSnapshot,
+            _watermark: &ExecOutputWatermark,
             _stream_dropped_bytes: u64,
         ) {
             self.outputs

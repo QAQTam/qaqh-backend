@@ -142,6 +142,13 @@ Line |
 | **B'** | L4 | 历史组装图像 Arc 共享（**不动** `ImageBlock` 冻结形状） | `qaqh-agent-runtime` |
 | ~~H2~~ | — | 客户端 Reset 退避——**移出本期**（命中锁面需 §7 登记；H1' 落地后触发面归零，防御性代码按宪法 5 不写） | — |
 
+> **2026-11-20 补注（F 条目）**：修复 F 的**合帧一半**（帧频/信箱条目上限，L2 放大器）
+> 由 [ADR-0030](adr/0030-exec-output-delta-pump-coalescing.md) 承接，并随
+> [ADR-0034](adr/0034-exec-flood-memory-surface.md) 落地（泵侧 20ms/256KiB 合帧 + 源端
+> reader 64KiB 批、同 run 合帧、水位 `Arc<str>` 共享——exec 洪峰 daemon OOM 事故驱动，
+> 挂 P0）。**重复错误行折叠与速率熔断（终止子进程）仍开放**——0030 决策 4 明列非目标，
+> 需独立裁定。
+
 H1' 落地后，本报告 §5 三测试**同 PR 翻转为回归守卫**：①实验组断言补发帧且流不掐；
 ②断言 `resync_cycles == 0` 且 `delivered > 0`；③断言追帧送达、不掐流。
 

@@ -16,6 +16,7 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::time::{Duration, Instant};
 
 use qaqh_ringing_contract::events::{
     ExecOutputSource, InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
@@ -42,6 +43,11 @@ const EVENT_CHANNEL_CAPACITY: usize = 1024;
 /// 消灭的是「缺口即掐流」的活锁,不是 resync 本身。
 const REPLAY_FRAME_CAP: usize = 2 * EVENT_CHANNEL_CAPACITY;
 const REPLAY_BYTE_CAP: usize = 4 * 1024 * 1024;
+
+/// ADR-0030：泵侧合帧窗口与批字节帽。常量，不设配置面（ADR-0029 决策 6 同律）。
+/// 窗口自批内首条起算；洪峰下先被字节帽切断，窗口只兜低频尾批。
+const EXEC_OUTPUT_COALESCE_WINDOW: Duration = Duration::from_millis(20);
+const EXEC_OUTPUT_COALESCE_MAX_BYTES: usize = 256 * 1024;
 
 /// 工具终态输出直存 inline 的字节上限;超过即外置进 `session_contents`,
 /// 行与事件只带 ref(见 `OwnerMsg::Settle`)。阈值取 32 KiB:edit/write 的
@@ -202,7 +208,9 @@ enum OwnerMsg {
         source: ExecOutputSource,
         text: String,
         next_offset: u64,
-        output_preview: String,
+        /// 采集端每批克隆一次的 Arc 共享水位(ADR-0030 补充决策):
+        /// 信箱积压时 preview 只有一份物理拷贝,泵合帧只取批内末条。
+        output_preview: Arc<str>,
         preview_start_offset: u64,
         capture_omitted_bytes: u64,
         stream_dropped_bytes: u64,
@@ -232,6 +240,27 @@ pub struct SessionOwner {
     replay: Arc<ReplayRing>,
 }
 
+/// 泵侧合帧批条目（ADR-0030 决策 2）：`OwnerMsg::ExecSessionOutput` 拆出的载荷。
+struct ExecOutputEntry {
+    start_offset: u64,
+    end_offset: u64,
+    source: ExecOutputSource,
+    text: String,
+    next_offset: u64,
+    output_preview: Arc<str>,
+    preview_start_offset: u64,
+    capture_omitted_bytes: u64,
+    stream_dropped_bytes: u64,
+}
+
+/// 单一 exec 会话的连续 delta 合帧批；deadline 自首条起算。
+struct ExecOutputBatch {
+    exec_session_id: String,
+    entries: Vec<ExecOutputEntry>,
+    bytes: usize,
+    deadline: Instant,
+}
+
 impl SessionOwner {
     /// 创建 owner 并启动业务顺序泵线程。
     pub fn new(session_id: impl Into<String>, db: Arc<Db>) -> SessionOwner {
@@ -250,9 +279,7 @@ impl SessionOwner {
         std::thread::Builder::new()
             .name(format!("qaqh-owner-{session_id}"))
             .spawn(move || {
-                while let Ok(msg) = lifecycle_rx.recv() {
-                    pump.process(msg);
-                }
+                run_pump_loop(&pump, &lifecycle_rx);
             })
             .expect("spawn session owner thread");
         SessionOwner {
@@ -1174,7 +1201,7 @@ impl ToolLifecycle {
         source: ExecOutputSource,
         text: String,
         next_offset: u64,
-        output_preview: String,
+        output_preview: Arc<str>,
         preview_start_offset: u64,
         capture_omitted_bytes: u64,
         stream_dropped_bytes: u64,
@@ -1218,6 +1245,79 @@ struct OwnerPump {
 impl OwnerPump {
     fn emit(&self, event: SessionEvent) {
         emit(&self.events, &self.next_seq, &self.replay, event);
+    }
+
+    /// ADR-0030 决策 2：flush = 现单条语义原样放大到批，三步顺序不变
+    /// （先 append 日志 → 再 update progress → 后 emit）。append 一次拼接写入；
+    /// DB 写取批内末条的累计水位（单调状态，末条即全批末态）；emit 按 source
+    /// run 切分，跨 run offset 连续。失败语义不变：append 失败响亮报错不阻断
+    /// 实时流，DB 写不进去则整批不 emit（缺口由 settle 对账如实暴露）。
+    fn flush_exec_output(&self, batch: ExecOutputBatch) {
+        let ExecOutputBatch {
+            exec_session_id,
+            entries,
+            ..
+        } = batch;
+        if let Some(path) = exec_output_log_path(&self.db, &self.session_id, &exec_session_id) {
+            let combined = entries
+                .iter()
+                .map(|entry| entry.text.as_str())
+                .collect::<String>();
+            if let Err(error) = append_exec_log(&path, &combined) {
+                log::error!("[owner] exec log append {exec_session_id}: {error}");
+            }
+        }
+        let last = entries
+            .last()
+            .expect("批由首条 entry 建立，批内不可能为空");
+        let row_id = exec_session_id.clone();
+        let next_offset = last.next_offset;
+        let preview = Arc::clone(&last.output_preview);
+        let preview_start_offset = last.preview_start_offset;
+        let capture_omitted_bytes = last.capture_omitted_bytes;
+        let stream_dropped_bytes = last.stream_dropped_bytes;
+        let updated = self.db.write_blocking(move |conn| {
+            store::update_exec_session_progress(
+                conn,
+                &row_id,
+                next_offset,
+                &preview,
+                preview_start_offset,
+                capture_omitted_bytes,
+                stream_dropped_bytes,
+            )
+        });
+        match updated {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => {
+                log::error!(
+                    "[owner] exec session {exec_session_id} output progress failed: {error}"
+                );
+                return;
+            }
+        }
+        let mut runs: Vec<(ExecOutputSource, u64, u64, String)> = Vec::new();
+        for entry in entries {
+            match runs.last_mut() {
+                Some(run) if run.0 == entry.source && run.2 == entry.start_offset => {
+                    run.2 = entry.end_offset;
+                    run.3.push_str(&entry.text);
+                }
+                _ => runs.push((entry.source, entry.start_offset, entry.end_offset, entry.text)),
+            }
+        }
+        for (source, start_offset, end_offset, text) in runs {
+            self.emit(SessionEvent::ExecSessionOutputDelta {
+                exec_session_id: qaqh_ringing_contract::fact::ExecSessionId::new(
+                    exec_session_id.clone(),
+                ),
+                start_offset,
+                end_offset,
+                source,
+                text,
+            });
+        }
     }
 
     /// 活跃回合:工具行落库时的回合归属。
@@ -1386,85 +1486,47 @@ impl OwnerPump {
                 // 会话建立必须先于其任何输出;started 事件在 upsert 路径发出。
                 self.emit(event);
             }
-            OwnerMsg::ExecSessionOutput {
-                exec_session_id,
-                start_offset,
-                end_offset,
-                source,
-                text,
-                next_offset,
-                output_preview,
-                preview_start_offset,
-                capture_omitted_bytes,
-                stream_dropped_bytes,
-            } => {
-                if let Some(path) =
-                    exec_output_log_path(&self.db, &self.session_id, &exec_session_id)
-                {
-                    if let Err(error) = append_exec_log(&path, &text) {
-                        log::error!("[owner] exec log append {exec_session_id}: {error}");
-                    }
-                }
-                let row_id = exec_session_id.clone();
-                let updated = self.db.write_blocking(move |conn| {
-                    store::update_exec_session_progress(
-                        conn,
-                        &row_id,
-                        next_offset,
-                        &output_preview,
-                        preview_start_offset,
-                        capture_omitted_bytes,
-                        stream_dropped_bytes,
-                    )
-                });
-                match updated {
-                    Ok(true) => {}
-                    Ok(false) => return,
-                    Err(error) => {
-                        log::error!(
-                            "[owner] exec session {exec_session_id} output progress failed: {error}"
-                        );
-                        return;
-                    }
-                }
-                self.emit(SessionEvent::ExecSessionOutputDelta {
-                    exec_session_id: qaqh_ringing_contract::fact::ExecSessionId::new(
-                        exec_session_id,
-                    ),
-                    start_offset,
-                    end_offset,
-                    source,
-                    text,
-                });
+            OwnerMsg::ExecSessionOutput { .. } => {
+                unreachable!("ExecSessionOutput 已由 run_pump_loop 合帧消费（ADR-0030 决策 1）")
             }
             OwnerMsg::ExecSessionSettle(settlement) => {
                 let exec_session_id = settlement.exec_session_id.clone();
-                // 全量输出源 = append-only 日志(ADR-0017 决策 3):settle 读全文替代
-                // manager 侧 head+tail 封顶 transcript,并按「日志字节 vs 水位」对账——
-                // 短于水位 ⇒ 落盘曾丢字节,如实标 truncated。日志缺席回退封顶 transcript。
-                let log_text = exec_output_log_path(&self.db, &self.session_id, &exec_session_id)
-                    .and_then(|path| match std::fs::read_to_string(&path) {
-                        Ok(text) => Some(text),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(error) => {
-                            log::error!("[owner] exec log read {exec_session_id}: {error}");
-                            None
-                        }
-                    })
-                    .filter(|text| !text.is_empty());
-                let (output_text, output_truncated) = if let Some(text) = log_text {
-                    let water_line = self
-                        .db
-                        .read_blocking(|conn| {
-                            store::exec_session_by_id(conn, &exec_session_id).map(|row| {
-                                row.map(|session_row| session_row.next_offset).unwrap_or(0)
+                let logged_bytes =
+                    exec_output_log_path(&self.db, &self.session_id, &exec_session_id)
+                        .and_then(|path| std::fs::metadata(&path).ok())
+                        .map(|meta| meta.len())
+                        .filter(|len| *len > 0);
+                // ADR-0033（修订 ADR-0017 决策 3 的写入面）：全文权威源 = append-only
+                // 日志文件本身，读取面由 `exec_session.output` 区间读承载（决策 2）。
+                // settle **不读日志内容**：旧实现 read_to_string 全文 → sha256 →
+                // `session_contents` BLOB 复制——同一批字节在洪峰时刻被读入内存两份
+                // 并永久双存（文件 + SQLite 200MB 级重复）。对账只比「文件字节 vs 库
+                // 水位」（metadata，O(1) 内存）：日志存在 ⇒ content 复制不再发生
+                // （output_text=None），落盘缺口如实降级 output_complete（宪规 5，
+                // 前端"仅显示尾部"横幅依此字段）。日志缺席（append 曾失败/旧会话）
+                // 回退封顶 transcript（≤1MiB，原路径）。
+                let (output_text, output_truncated, output_complete) = match logged_bytes {
+                    Some(logged) => {
+                        let water_line = self
+                            .db
+                            .read_blocking(|conn| {
+                                store::exec_session_by_id(conn, &exec_session_id).map(|row| {
+                                    row.map(|session_row| session_row.next_offset).unwrap_or(0)
+                                })
                             })
-                        })
-                        .unwrap_or(0);
-                    let logged = text.len() as u64;
-                    (Some(text), logged < water_line)
-                } else {
-                    (settlement.output_text.clone(), settlement.output_truncated)
+                            .unwrap_or(0);
+                        let gap = logged < water_line;
+                        (
+                            None,
+                            settlement.output_truncated || gap,
+                            settlement.output_complete && !gap,
+                        )
+                    }
+                    None => (
+                        settlement.output_text.clone(),
+                        settlement.output_truncated,
+                        settlement.output_complete,
+                    ),
                 };
                 let changed = self
                     .db
@@ -1474,7 +1536,7 @@ impl OwnerPump {
                             &settlement.exec_session_id,
                             &settlement.state_json,
                             settlement.finished_at_ms,
-                            settlement.output_complete,
+                            output_complete,
                             settlement.output_content_id.as_deref(),
                             output_text.as_deref(),
                             output_truncated,
@@ -1512,6 +1574,99 @@ impl OwnerPump {
                     }
                 }
             }
+        }
+    }
+}
+
+/// 泵主循环：串行消费信箱；同一 exec 会话的 `ExecSessionOutput` 连批合帧
+/// （ADR-0030 决策 1），其余消息一律先 flush 当前批再原样处理 ⇒ 全局处理
+/// 顺序与到达顺序一致，settle 的日志对账永远看得到已 flush 的前缀。
+fn run_pump_loop(pump: &OwnerPump, rx: &mpsc::Receiver<OwnerMsg>) {
+    let mut batch: Option<ExecOutputBatch> = None;
+    loop {
+        let msg = match &batch {
+            None => match rx.recv() {
+                Ok(msg) => msg,
+                Err(_) => return,
+            },
+            Some(opened) => {
+                let now = Instant::now();
+                if now >= opened.deadline {
+                    let finished = batch.take().expect("match 刚确认批存在");
+                    pump.flush_exec_output(finished);
+                    continue;
+                }
+                match rx.recv_timeout(opened.deadline - now) {
+                    Ok(msg) => msg,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        let finished = batch.take().expect("match 刚确认批存在");
+                        pump.flush_exec_output(finished);
+                        continue;
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        let finished = batch.take().expect("match 刚确认批存在");
+                        pump.flush_exec_output(finished);
+                        return;
+                    }
+                }
+            }
+        };
+        let (exec_session_id, entry) = match msg {
+            OwnerMsg::ExecSessionOutput {
+                exec_session_id,
+                start_offset,
+                end_offset,
+                source,
+                text,
+                next_offset,
+                output_preview,
+                preview_start_offset,
+                capture_omitted_bytes,
+                stream_dropped_bytes,
+            } => (
+                exec_session_id,
+                ExecOutputEntry {
+                    start_offset,
+                    end_offset,
+                    source,
+                    text,
+                    next_offset,
+                    output_preview,
+                    preview_start_offset,
+                    capture_omitted_bytes,
+                    stream_dropped_bytes,
+                },
+            ),
+            other => {
+                if let Some(finished) = batch.take() {
+                    pump.flush_exec_output(finished);
+                }
+                pump.process(other);
+                continue;
+            }
+        };
+        let bytes = entry.text.len();
+        let same = batch
+            .as_ref()
+            .is_some_and(|opened| opened.exec_session_id == exec_session_id);
+        if same {
+            let opened = batch.as_mut().expect("same 刚匹配到本批");
+            opened.bytes += bytes;
+            opened.entries.push(entry);
+            if opened.bytes >= EXEC_OUTPUT_COALESCE_MAX_BYTES {
+                let finished = batch.take().expect("same 刚匹配到本批");
+                pump.flush_exec_output(finished);
+            }
+        } else {
+            if let Some(finished) = batch.take() {
+                pump.flush_exec_output(finished);
+            }
+            batch = Some(ExecOutputBatch {
+                exec_session_id,
+                entries: vec![entry],
+                bytes,
+                deadline: Instant::now() + EXEC_OUTPUT_COALESCE_WINDOW,
+            });
         }
     }
 }
