@@ -243,6 +243,8 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     qaqh_subagent::install_board_host(Arc::new(service.clone()));
     // ADR-0015：goal 工具宿主（create_goal/update_goal/get_goal 直达进程内）。
     qaqh_goal::install_host(Arc::new(service.clone()));
+    // ADR-0033 切片 2：worktree 工具宿主（source_workspace 解析直达会话库）。
+    qaqh_gitx::install_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_ringing_runtime::RingingLeaseStore::new()));
     let (shutdown, _) = watch::channel(false);
     // Route OS signals through the same loop/process shutdown path as the control endpoint.

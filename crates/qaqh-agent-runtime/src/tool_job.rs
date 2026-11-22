@@ -338,6 +338,34 @@ impl WorkspaceToolPort {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
     }
 
+    /// ADR-0033：绑定会话的 workspace 热切换（回合边界解析）。
+    ///
+    /// 根相同 = 无操作。根变化时整体重建快照的 workspace 侧：workspace_root
+    /// 替换 + 沙箱 spec 按同一权限档位重派生（writable_roots 必须跟随新根，
+    /// 否则 exec 沙箱仍锚定旧根），trusted_dirs 保持现状重挂。只在回合边界
+    /// 调用（`SessionLoop::effective_workspace`），不引入 dispatch 级重派生。
+    pub fn swap_workspace_root(&self, root: std::path::PathBuf) {
+        let mut policy = self
+            .policy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if policy.workspace_root == root {
+            return;
+        }
+        policy.workspace_root = root.clone();
+        policy.sandbox_spec = qaqh_workspace::tool_api::SandboxSpec::for_permission(
+            root,
+            policy.permission_level,
+            policy.sandbox_spec.enabled,
+        )
+        .with_trusted_roots(policy.trusted_dirs.iter().cloned());
+        *self
+            .policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = policy;
+    }
+
     /// Replace the per-session and global tool filters, returning the catalog
     /// that the model may use after both filters are applied.
     pub fn update_tool_allowlists(
@@ -407,6 +435,15 @@ impl WorkspaceToolPort {
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .sandbox
+            .clone()
+    }
+
+    /// 当前沙箱策略只读视图（workspace 热切换后 writable_roots 的断言入口）。
+    pub fn sandbox_spec(&self) -> qaqh_workspace::tool_api::SandboxSpec {
+        self.policy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .sandbox_spec
             .clone()
     }
 
@@ -955,4 +992,73 @@ fn code_delta_of(result: &qaqh_workspace::execution::ToolExecResult) -> Option<C
         files_deleted: delta.files_deleted,
         file: delta.file.clone(),
     })
+}
+
+#[cfg(test)]
+mod swap_workspace_root_tests {
+    #![allow(clippy::unwrap_used)]
+
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use super::{ToolPolicySnapshot, WorkspaceToolPort};
+
+    /// 构造带 lifecycle 的最小 port（owner 泵挂独立 temp db，TempDir 由测试持有）。
+    fn port(dir: &tempfile::TempDir, root: &Path) -> WorkspaceToolPort {
+        let owners = Arc::new(
+            qaqh_session::owner::OwnerDirectory::open(dir.path().join("qaqh.db"))
+                .expect("open owners db"),
+        );
+        let owner = owners.get_or_create("SES-SWAP");
+        WorkspaceToolPort::new(
+            "SES-SWAP",
+            Arc::new(std::sync::Mutex::new(
+                qaqh_workspace::registration::build_tool_manager(&[]),
+            )),
+            ToolPolicySnapshot::workspace_write(root),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        )
+    }
+
+    /// ADR-0033：workspace 热切换必须连沙箱 spec 一起重派生——writable_roots
+    /// 跟随新根，否则 exec 沙箱仍锚定旧根（切换等于没切）。
+    #[test]
+    fn swap_replaces_root_and_rederives_sandbox_spec() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_root = dir.path().join("ws-old");
+        let new_root = dir.path().join("ws-new");
+        let port = port(&dir, &old_root);
+        assert_eq!(port.workspace_root(), old_root);
+        assert!(port.sandbox_spec().writable_roots.contains(&old_root));
+
+        port.swap_workspace_root(new_root.clone());
+        assert_eq!(port.workspace_root(), new_root);
+        let spec = port.sandbox_spec();
+        assert!(spec.writable_roots.contains(&new_root), "writable roots follow the new root");
+        assert!(!spec.writable_roots.contains(&old_root), "old root must not linger");
+
+        // 同根 = 无操作（幂等）。
+        port.swap_workspace_root(new_root.clone());
+        assert_eq!(port.workspace_root(), new_root);
+    }
+
+    /// trusted_dirs 是用户明确的信任决定：workspace 切换不得把它抖掉。
+    #[test]
+    fn swap_keeps_trusted_dirs_writable() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_root = dir.path().join("ws-old");
+        let new_root = dir.path().join("ws-new");
+        let trusted = dir.path().join("shared");
+        let port = port(&dir, &old_root);
+        port.trust_dir(trusted.clone());
+
+        port.swap_workspace_root(new_root.clone());
+        let spec = port.sandbox_spec();
+        assert!(spec.writable_roots.contains(&new_root));
+        assert!(
+            spec.writable_roots.contains(&trusted),
+            "user-granted trust must survive the workspace switch"
+        );
+    }
 }

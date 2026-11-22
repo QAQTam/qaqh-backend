@@ -26,6 +26,8 @@ pub enum Command {
     Session(SessionCommand),
     /// `todo.*` / `plan.*`
     Task(TaskCommand),
+    /// `gitx.*`（ADR-0033：worktree 隔离与 git 快照）
+    Gitx(GitxCommand),
 }
 
 impl Command {
@@ -41,6 +43,7 @@ impl Command {
                 Ok(Self::Session(decode(method, params)?))
             }
             "todo" | "plan" => Ok(Self::Task(decode(method, params)?)),
+            "gitx" => Ok(Self::Gitx(decode(method, params)?)),
             _ => Err(QaqhError::UnknownMethod {
                 method: method.to_string(),
             }),
@@ -194,3 +197,30 @@ pub type TodoListArgs = crate::ringing::service_methods::TodoListParams;
 pub struct PlanReadArgs {
     pub session_id: String,
 }
+
+// ─────────────────────────── Gitx ────────────────────────────
+
+/// `gitx.*`（ADR-0033）：worktree 隔离与 git 快照的领域命令。
+#[derive(Debug, Deserialize)]
+#[serde(tag = "method")]
+pub enum GitxCommand {
+    #[serde(rename = "gitx.snapshot")]
+    GitxSnapshot(GitxSnapshotArgs),
+    #[serde(rename = "gitx.worktree_list")]
+    GitxWorktreeList(GitxWorktreeListArgs),
+    #[serde(rename = "gitx.worktree_create")]
+    GitxWorktreeCreate(GitxWorktreeCreateArgs),
+    #[serde(rename = "gitx.worktree_remove")]
+    GitxWorktreeRemove(GitxWorktreeRemoveArgs),
+    #[serde(rename = "gitx.worktree_bind")]
+    GitxWorktreeBind(GitxWorktreeBindArgs),
+    #[serde(rename = "gitx.worktree_unbind")]
+    GitxWorktreeUnbind(GitxWorktreeUnbindArgs),
+}
+
+pub type GitxSnapshotArgs = crate::ringing::service_methods::GitxSnapshotParams;
+pub type GitxWorktreeListArgs = crate::ringing::service_methods::GitxWorktreeListParams;
+pub type GitxWorktreeCreateArgs = crate::ringing::service_methods::GitxWorktreeCreateParams;
+pub type GitxWorktreeRemoveArgs = crate::ringing::service_methods::GitxWorktreeRemoveParams;
+pub type GitxWorktreeBindArgs = crate::ringing::service_methods::GitxWorktreeBindParams;
+pub type GitxWorktreeUnbindArgs = crate::ringing::service_methods::GitxWorktreeUnbindParams;

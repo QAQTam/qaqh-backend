@@ -696,3 +696,186 @@ async fn sdk_shell_stream_round_trip_against_the_served_daemon() {
 
     server.abort();
 }
+
+/// 从剥过 ANSI 的可见文本里按出现顺序抽 `SEQX<n>` 序号（不引 regex：dep 面不为
+/// 一条测试添重）。命令回显里的 `SEQX-$_` 剥掉符号后是 `SEQX` 后跟 `p`，天然不误匹配。
+fn seqx_tokens(text: &str) -> Vec<u64> {
+    let bytes = text.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        if &bytes[i..i + 4] == b"SEQX" {
+            let mut j = i + 4;
+            let mut value = 0u64;
+            let mut digits = 0;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                value = value * 10 + u64::from(bytes[j] - b'0');
+                digits += 1;
+                j += 1;
+            }
+            if digits > 0 {
+                tokens.push(value);
+                i = j;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    tokens
+}
+
+/// Lagged → resync 的接缝上，同一段字节**绝不允许**投递第二遍。
+///
+/// 压法：洪峰（~30MB）打到一半时客户端停读 3s —— TCP 背压把服务端的
+/// `frames.recv()` 钉住，broadcast 环（512 帧）溢出 ⇒ 服务端在洪峰中途重取回放尾；
+/// 之后限速抽干，让接缝在洪峰还热着的时候反复经过；静默后再从服务端权威总数
+/// （`shell.list` 的 `output_offset`）显式 attach 一发，把两条 resync 臂都压到。
+/// 断言只有一个口径：剥 ANSI 后抽出的 `SEQX<n>` 序号全程**严格递增** —— 回退就是
+/// 同一段字节被送了两遍。缺口（序号跳跃）允许：环只有 256KiB，落后超过一个环按
+/// 设计只补尾巴（D3 约束 3，不发明第二套 resync 协议）。
+///
+/// 刻意**不发** `attach{from_offset: delivered}`（客户端自己的字节计数）：落后超过
+/// 一个环之后那个数已不是合法续读点（中间有洞），按它重取会把已收到的尾巴重发
+/// 一遍 —— 那是 `qaqh-client/src/shell_stream.rs` 头注里明写的「刻意接受的语义」，
+/// 不是这里要抓的缺陷；本测试只锁服务端自己的 resync 绝不重发。
+///
+/// 修复前这条测试对竞态窗口是概率红的（重叠窗只有订阅→环快照那几微秒）；修复后
+/// 「resync 后水位 = next_offset」让不重复成为确定性事实，这条测试锁的就是它。
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shell_stream_lagged_resync_never_repeats_bytes() {
+    const SEQ_LINES: u64 = 30_000;
+    let state = test_state();
+    let app = build_router(state.clone());
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server_app = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, server_app).await.expect("serve");
+    });
+
+    let (lease, _) = open_lease(&app, ADMIN, "ws-lag-resync-instance").await;
+    let (_, opened) = service_call(
+        &app,
+        ADMIN,
+        &lease,
+        "shell.open",
+        json!({ "cols": 110, "rows": 30 }),
+    )
+    .await;
+    let shell_id = opened["id"].as_str().expect("shell id").to_owned();
+
+    let uri = qaqh_ringing::shell_stream_path(&shell_id);
+    let (mut socket, _) =
+        tokio_tungstenite::connect_async(ws_request(addr, &uri, ADMIN, &lease))
+            .await
+            .expect("ws handshake");
+
+    // 洪峰：30000 行 × ~1KB ≈ 30MB。行尾填充把读泵的 8KB buffer 压满，
+    // 让 512 帧的 broadcast 环在停读窗口内必然溢出。
+    let command = format!("1..{SEQ_LINES} | ForEach-Object {{ \"SEQX-$_\" + ('p'*980) }}\r");
+    socket
+        .send(WsMessage::text(
+            serde_json::to_string(&ShellStreamControl::Stdin {
+                bytes: STANDARD.encode(command.as_bytes()),
+            })
+            .expect("control frame"),
+        ))
+        .await
+        .expect("send flood command");
+
+    // ① 停读 3s：TCP 背压 → 服务端 sink 阻塞 → broadcast 环溢出 → Lagged。
+    tokio::time::sleep(Duration::from_millis(3000)).await;
+
+    // ② 限速抽干：每帧让出 1ms，让客户端持续落后于读泵 ⇒ 服务端在洪峰中途反复
+    //    Lagged→resync。不发任何 attach：见上（计数在截断后不是合法续读点）。
+    let mut seen: Vec<u8> = Vec::new();
+    let drain_deadline = Instant::now() + Duration::from_secs(120);
+    let mut quiet_since = Instant::now();
+    loop {
+        assert!(Instant::now() < drain_deadline, "120s 没抽干洪峰");
+        match tokio::time::timeout(Duration::from_millis(250), socket.next()).await {
+            Err(_elapsed) => {
+                if quiet_since.elapsed() > Duration::from_secs(3) {
+                    break;
+                }
+            }
+            Ok(None) => panic!("下行流提前结束"),
+            Ok(Some(Err(error))) => panic!("ws 帧错误: {error}"),
+            Ok(Some(Ok(WsMessage::Close(_)))) => break,
+            Ok(Some(Ok(WsMessage::Binary(bytes)))) => {
+                seen.extend_from_slice(&bytes);
+                quiet_since = Instant::now();
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                panic!("洪峰阶段不该有下行控制帧: {text}");
+            }
+            Ok(Some(Ok(other))) => panic!("意外帧: {other:?}"),
+        }
+    }
+
+    // ③ 显式 attach 臂 + 回放/实时接缝：洪峰静默后读权威总数，从那里 attach。
+    //    回放为空、订阅与快照之间的重叠帧被 next_offset 水位挡住 ⇒ 不产生重复序号。
+    let (_, listed) = service_call(&app, ADMIN, &lease, "shell.list", json!({})).await;
+    let output_offset = listed["shells"][0]["output_offset"]
+        .as_u64()
+        .expect("shell.list 必须带 output_offset");
+    socket
+        .send(WsMessage::text(
+            serde_json::to_string(&ShellStreamControl::Attach {
+                from_offset: Some(output_offset),
+            })
+            .expect("control frame"),
+        ))
+        .await
+        .expect("send attach at authoritative offset");
+    // attach 之后再收 1.5s：有任何泄漏（重叠帧没被水位挡住）就并进来一起断言。
+    let attach_window = Duration::from_millis(1500);
+    let attach_started = Instant::now();
+    loop {
+        let remaining = attach_window.saturating_sub(attach_started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, socket.next()).await {
+            Err(_elapsed) => break,
+            Ok(None) => panic!("attach 阶段下行流提前结束"),
+            Ok(Some(Err(error))) => panic!("attach 阶段 ws 帧错误: {error}"),
+            Ok(Some(Ok(WsMessage::Close(_)))) => break,
+            Ok(Some(Ok(WsMessage::Binary(bytes)))) => seen.extend_from_slice(&bytes),
+            Ok(Some(Ok(WsMessage::Text(text)))) => {
+                panic!("attach 阶段不该有下行控制帧: {text}");
+            }
+            Ok(Some(Ok(other))) => panic!("意外帧: {other:?}"),
+        }
+    }
+
+    // ④ 断言：序号严格递增（重复 = 回退 = 红）；缺口允许；尾行必须到场
+    //    （环恒保有尾巴，最后一次 resync 的回放一定覆盖到当前总数）。
+    let tokens = seqx_tokens(&visible(&seen));
+    assert!(
+        tokens.len() >= 600,
+        "洪峰没被观测到（token 只有 {} 个），压法失效",
+        tokens.len()
+    );
+    for window in tokens.windows(2) {
+        assert!(
+            window[1] > window[0],
+            "序号回退 = 字节重复投递：{} 之后出现 {}",
+            window[0],
+            window[1]
+        );
+    }
+    assert_eq!(*tokens.last().expect("tokens 非空"), SEQ_LINES, "尾行必须到场");
+
+    let (_, closed) = service_call(
+        &app,
+        ADMIN,
+        &lease,
+        "shell.close",
+        json!({ "shell_id": shell_id }),
+    )
+    .await;
+    assert_eq!(closed["reason"], json!("closed"), "{closed}");
+    server.abort();
+}

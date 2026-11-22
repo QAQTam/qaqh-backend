@@ -187,6 +187,8 @@ pub(super) fn write(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // registry have been wired; the exporter must never infer completion.
     // timeline / approvals.device / content.download 的后端契约已由 DTO/handler
     // 测试钉住；remote（TLS/远端 transport）验收仍不在本轮范围。
+    // gitx.worktree（ADR-0033）不再需要 pending 行：6 个方法已进 TYPED_METHODS，
+    // capability 行由 typed_descriptors 循环自动生成（service.gitx.*）。
     for (id, reason) in [(
         "daemon.control",
         "control endpoints not in first typed slice",

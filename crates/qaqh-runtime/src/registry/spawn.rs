@@ -6,11 +6,13 @@ use super::*;
 use crate::error::{QaqhError, QaqhResult};
 
 /// ADR-0014 切片 D/E：会话工具面的单一事实源——agent 面（spawn/send/wait/
-/// list/cancel）+ 协作面（task_*/board_*）。`spawn_session_inprocess` 与表面
-/// 测试共用；增删会话工具必须经此，白名单天花板仍在 assemble 的 apply_init 生效。
+/// list/cancel）+ 协作面（task_*/board_*）+ worktree 面（worktree_*，ADR-0033）。
+/// `spawn_session_inprocess` 与表面测试共用；增删会话工具必须经此，白名单
+/// 天花板仍在 assemble 的 apply_init 生效。
 pub(crate) const SESSION_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register,
     qaqh_subagent::register_collaboration_tools,
+    qaqh_gitx::register,
 ];
 
 /// ADR-0015：根会话工具面 = 会话工具面 + goal 三件套。子会话是派生瞬时体,
@@ -18,6 +20,7 @@ pub(crate) const SESSION_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRe
 pub(crate) const ROOT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register,
     qaqh_subagent::register_collaboration_tools,
+    qaqh_gitx::register,
     qaqh_goal::register,
 ];
 
@@ -34,6 +37,18 @@ pub(crate) fn session_cwd(
         .flatten()
         .and_then(|row| row.cwd)
         .filter(|cwd| !cwd.is_empty() && cwd != ".")
+}
+
+/// ADR-0033：会话 workspace 的回合边界重解析闭包。
+///
+/// 单一路径复用 [`ensure_session_workspace`]（含绑定 fallback 与失效响亮
+/// warn）；解析失败（如用户工作区消失）返回 `None`，loop 侧保持现状。
+pub(crate) fn workspace_resolver(
+    owners: std::sync::Arc<qaqh_session::owner::OwnerDirectory>,
+) -> qaqh_agent_runtime::session_loop::WorkspaceResolver {
+    std::sync::Arc::new(move |session_id: &str| {
+        ensure_session_workspace(&owners, session_id).ok()
+    })
 }
 
 /// Resolve the directory a session's tools run in.
@@ -62,6 +77,28 @@ pub(crate) fn ensure_session_workspace(
                 std::fs::create_dir_all(&path).map_err(|error| {
                     format!("create session workspace {}: {error}", path.display())
                 })?;
+            }
+            // ADR-0033 决策 3/4：绑定会话的工具 workspace 动态落到 worktree 根；
+            // `sessions.cwd` 保持源工作区（`.qaqh` 工件锚点）。绑定失效（worktree
+            // 目录被清理）时响亮回退到 cwd，绝不静默沿用 worktree 假设。
+            match qaqh_gitx::WorktreeManager::new(&path).record_for_session(session_id) {
+                Ok(Some(record)) if record.path.is_dir() => return Ok(record.path),
+                Ok(Some(record)) => {
+                    log::warn!(
+                        "session {session_id} is bound to worktree {} but it is missing; \
+                         falling back to workspace root {}",
+                        record.path.display(),
+                        path.display()
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!(
+                        "session {session_id} worktree binding lookup failed: {error}; \
+                         falling back to workspace root {}",
+                        path.display()
+                    );
+                }
             }
             Ok(path)
         }
@@ -420,10 +457,15 @@ impl AgentRegistry {
         // 宿主已由 daemon 安装（server.rs install_task_host/install_board_host），
         // 板按根树键控，lead 与子级共用同一注册器；白名单天花板仍在 apply_init 生效。
         let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
-        // ADR-0014：终态回传路由注入（loop 报告终态，registry 判定血缘）。
+        // ADR-0033：终态回传路由注入（loop 报告终态，registry 判定血缘）。
         if let Some(router) = &self.terminal_router {
             loop_.set_terminal_port(router.clone());
         }
+        // ADR-0033：回合边界 workspace 重解析——绑定会话的下一回合自动落到
+        // worktree 根（或解绑/移除后回到源工作区），无需 AgentReloadConfig 广播。
+        loop_.set_workspace_resolver(workspace_resolver(std::sync::Arc::clone(
+            &self.owners,
+        )));
 
         self.instances.insert(
             session_id.to_string(),
@@ -464,7 +506,7 @@ impl AgentRegistry {
 mod tests {
     use super::SESSION_TOOL_REGISTRARS;
 
-    /// 切片E 闸门：生产会话工具面 = agent 五件 + 协作十件，一个不少。
+    /// 切片E 闸门：生产会话工具面 = agent 五件 + 协作十件 + worktree 五件，一个不少。
     /// 注册器列表被削（回到悬置状态）时本测试必须红。
     #[test]
     fn session_surface_carries_agent_and_collaboration_tools() {
@@ -486,6 +528,11 @@ mod tests {
             "board_post",
             "board_subscribe",
             "board_list",
+            "worktree_list",
+            "worktree_create",
+            "worktree_bind",
+            "worktree_unbind",
+            "worktree_remove",
         ] {
             assert!(manager.lookup(name).is_some(), "{name} must be callable");
             assert!(

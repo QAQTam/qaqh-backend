@@ -1,6 +1,15 @@
 //! 新回合循环测试:Stop 回合端到端(输入 → 流式 → seal → 终态),
 //! 全部状态/事件经 SessionOwner 的 SQLite 业务表与单流广播。
 
+// 文件级（mod 外）测试的导入：ADR-0033 workspace 重解析用例在 mod 外直挂。
+use std::sync::Arc;
+
+use qaqh_session::owner::OwnerDirectory;
+
+use crate::provider_job::ProviderRequestSpec;
+use crate::session_loop::SessionLoop;
+use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2377,4 +2386,51 @@ mod handoff_tests {
             "工具展示帧插在 answer 的两帧 MessageDelta 之间 → 前端呈现『半句 → 工具卡片 → 事后补全』"
         );
     }
+}
+
+/// ADR-0033：回合边界 workspace 重解析——resolver 落新根时端口快照与环境块
+/// cwd 一并热切换（沙箱 writable roots 跟随）；None / 同根解析保持现状。
+#[test]
+fn effective_workspace_follows_resolver_at_turn_boundary() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ws = dir.path().join("ws");
+    let owners =
+        Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open owners db"));
+    let owner = owners.get_or_create("SES-WSWAP");
+    let port = Arc::new(WorkspaceToolPort::new(
+        "SES-WSWAP",
+        Arc::new(std::sync::Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(&[]),
+        )),
+        ToolPolicySnapshot::workspace_write(ws.clone()),
+        owner.lifecycle(),
+        Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+    ));
+    let spec = ProviderRequestSpec::new(
+        qaqh_gate::ProviderConfig::responses("https://example.com", "", "m", None),
+        1024,
+    );
+    let loop_ = SessionLoop::new("SES-WSWAP", owner, port.clone(), spec, ws.clone());
+
+    // 未注入钩子：维持现状。
+    assert_eq!(loop_.effective_workspace(), ws);
+    assert_eq!(port.workspace_root(), ws);
+
+    // resolver 落 worktree 根：快照 + cwd 一并切换，沙箱 writable roots 跟随。
+    let wt = ws.join(".qaqh").join("worktree").join("feature-wt");
+    std::fs::create_dir_all(&wt).expect("create worktree dir");
+    let resolved = wt.clone();
+    loop_.set_workspace_resolver(Arc::new(move |_| Some(resolved.clone())));
+    assert_eq!(loop_.effective_workspace(), wt);
+    assert_eq!(port.workspace_root(), wt, "端口快照必须跟随新根");
+    assert!(
+        port.sandbox_spec().writable_roots.contains(&wt),
+        "沙箱 writable roots 必须跟随新根（否则 exec 锚定旧根）"
+    );
+
+    // 同根解析与 None 解析都保持现状（不抖动、不回退到失效路径）。
+    assert_eq!(loop_.effective_workspace(), wt);
+    loop_.set_workspace_resolver(Arc::new(|_| None));
+    assert_eq!(loop_.effective_workspace(), wt);
+    assert_eq!(port.workspace_root(), wt);
 }

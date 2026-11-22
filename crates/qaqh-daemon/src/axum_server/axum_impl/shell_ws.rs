@@ -144,8 +144,12 @@ async fn stream_shell(
                 Err(RecvError::Lagged(_)) => {
                     // 慢观看者不许钉住读泵,也不许让它带着缺口继续看：拿已交付水位重新
                     // attach 取有界回放尾。attach 失败（会话已被收割）即结束这条流。
-                    if resync(&service, &owner, &shell_id, &mut sink, &mut frames, watermark).await.is_err() {
-                        break;
+                    // 水位必须提到返回的 next_offset：订阅先于环快照，订阅与快照之间
+                    // 广播出的那批帧已经含在回放里，拿旧水位去重就会整批再发一遍
+                    // （同一段打印两遍，还会把客户端的 delivered 计数推过服务端总数）。
+                    match resync(&service, &owner, &shell_id, &mut sink, &mut frames, watermark).await {
+                        Ok(fresh_watermark) => watermark = fresh_watermark,
+                        Err(StreamGone) => break,
                     }
                 }
                 // 所有 Sender 都掉线 = 注册表与读泵都已放手 = 这条会话已经收摊。
@@ -175,8 +179,10 @@ async fn stream_shell(
                         match control {
                             qaqh_ringing::ShellStreamControl::Attach { from_offset } => {
                                 // 客户端主动重建屏幕（`from_offset` 缺席 = 整段缓冲尾再来一遍）。
-                                if resync(&service, &owner, &shell_id, &mut sink, &mut frames, from_offset.unwrap_or(0)).await.is_err() {
-                                    break;
+                                // 与 Lagged 同律：水位提到 next_offset，重叠帧不重发。
+                                match resync(&service, &owner, &shell_id, &mut sink, &mut frames, from_offset.unwrap_or(0)).await {
+                                    Ok(fresh_watermark) => watermark = fresh_watermark,
+                                    Err(StreamGone) => break,
                                 }
                             }
                             qaqh_ringing::ShellStreamControl::Stdin { bytes } => {
@@ -242,7 +248,9 @@ async fn stream_shell(
 }
 
 /// 重新订阅并补放：`from_offset` 由调用方给（落后重取 = 已交付水位；显式 attach =
-/// 客户端要的起点）。返回 Err 表示这条流没有继续的意义了（会话没了 / 客户端走了）。
+/// 客户端要的起点）。成功时返回新 attach 的 `next_offset`，调用方必须把它提为
+/// 自己的交付水位（理由见两处调用点）。返回 Err 表示这条流没有继续的意义了
+/// （会话没了 / 客户端走了）。
 async fn resync(
     service: &QaqhService,
     owner: &str,
@@ -250,16 +258,17 @@ async fn resync(
     sink: &mut WsSink,
     frames: &mut FrameReceiver,
     from_offset: u64,
-) -> Result<(), StreamGone> {
+) -> Result<u64, StreamGone> {
     let fresh = service
         .shell_attach(owner, shell_id, from_offset)
         .map_err(|error| {
             log::debug!("[shell] {shell_id} 重取失败（会话已收摊）: {error}");
             StreamGone
         })?;
+    let next_offset = fresh.next_offset;
     send_replay(sink, fresh.replay).await?;
     *frames = fresh.frames;
-    Ok(())
+    Ok(next_offset)
 }
 
 async fn send_replay(sink: &mut WsSink, replay: Vec<u8>) -> Result<(), StreamGone> {

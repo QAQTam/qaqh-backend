@@ -74,6 +74,14 @@ enum HandoffPressure {
 /// 已有产出」的掐流类失败。保守默认 1 次。
 const MAX_TURN_RETRIES: u32 = 1;
 
+/// ADR-0033：会话 workspace 的回合边界重解析钩子。
+///
+/// registry 在装配期注入（闭包捕获 owners，单一路径 =
+/// `ensure_session_workspace`）。返回 `None` = 无解析结果（未绑定工作区、
+/// 解析失败）→ 维持现状；`Some(根)` 且与当前不同 → 端口 policy 快照与环境
+/// 块 cwd 一并热切换，下一回合生效。
+pub type WorkspaceResolver = std::sync::Arc<dyn Fn(&str) -> Option<PathBuf> + Send + Sync>;
+
 /// 回合循环:一个会话一个实例;回合互斥、输入排队、交互登记都在这里。
 pub struct SessionLoop {
     session_id: String,
@@ -92,6 +100,9 @@ pub struct SessionLoop {
     lsp_projection_seeded: AtomicBool,
     /// ADR-0014：终态通知端口（registry 注入；未注入 = 不回传）。
     terminal_port: RwLock<Option<TurnTerminalPort>>,
+    /// ADR-0033：回合边界 workspace 重解析钩子（装配期注入，见
+    /// [`WorkspaceResolver`]）。
+    workspace_resolver: RwLock<Option<WorkspaceResolver>>,
 }
 
 struct LoopInner {
@@ -211,6 +222,7 @@ impl SessionLoop {
             mcp_projection_gen: AtomicU64::new(0),
             lsp_projection_seeded: AtomicBool::new(false),
             terminal_port: RwLock::new(None),
+            workspace_resolver: RwLock::new(None),
         })
     }
 
@@ -224,6 +236,54 @@ impl SessionLoop {
             .terminal_port
             .write()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(port);
+    }
+
+    /// ADR-0033：装配期注入 workspace 重解析钩子（registry 侧捕获 owners）。
+    pub fn set_workspace_resolver(&self, resolver: WorkspaceResolver) {
+        *self
+            .workspace_resolver
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolver);
+    }
+
+    /// 本回合生效的工作区根：注册表绑定落 worktree 时热切换端口快照与环境块
+    /// cwd（ADR-0033 决策 3/4 的派生式同步）。
+    ///
+    /// 只在回合边界调用（工具调用互斥，无并发回合），切换经
+    /// [`WorkspaceToolPort::swap_workspace_root`] 连沙箱 spec 一起重派生；
+    /// 解析为 `None` / 与当前相同 / 未注入钩子时保持现状，绝不静默沿用失效
+    /// 路径——失效回退的响亮 warn 在 `ensure_session_workspace` 里。
+    pub(crate) fn effective_workspace(&self) -> PathBuf {
+        let current = self
+            .cwd
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let resolver = self
+            .workspace_resolver
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let Some(resolver) = resolver else {
+            return current;
+        };
+        let Some(resolved) = resolver(&self.session_id) else {
+            return current;
+        };
+        if resolved == current {
+            return current;
+        }
+        self.port.swap_workspace_root(resolved.clone());
+        *self
+            .cwd
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = resolved.clone();
+        log::info!(
+            "[loop] {} workspace re-resolved to {} at turn boundary",
+            self.session_id,
+            resolved.display()
+        );
+        resolved
     }
 
     /// 当前活动回合(无则 None)。
@@ -549,11 +609,7 @@ impl SessionLoop {
                 return;
             }
         };
-        let cwd = self
-            .cwd
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let cwd = self.effective_workspace();
         let system = prompt::system_prompt(&self.current_spec(), &cwd, &self.session_id);
         messages.insert(
             0,
