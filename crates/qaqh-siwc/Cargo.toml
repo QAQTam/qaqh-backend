@@ -14,6 +14,11 @@ log = "0.4"
 # PKCE sha256 / JWKS RSA 验签 / 随机量走 aws-lc-rs：与 daemon 服务端 TLS 同一栈
 # （ADR-0039）。OHOS 不消费本 crate，无 ring 保留诉求。
 aws-lc-rs = "1"
+# 常数时间比较（state/verifier 校验）：LTO 下手写 XOR 循环随时被优化掉常数
+# 时间特性，subtle 是唯一可信实现。
+subtle = "2"
+# host id 的 UUIDv4（P0-3：手写「时间戳+PID」兜底退役）。
+uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 # URL 构造/查询解析：授权 URL 的参数编码与回环回调的查询串都交给它，

@@ -1,27 +1,22 @@
 //! 基础件：随机量、UUIDv4、常数时间比较、base64url。
 //!
-//! 随机数一律走 `aws_lc_rs::rand::SystemRandom`（与验签同一来源）。
+//! 随机数一律走 `aws_lc_rs::rand::SystemRandom`（与验签同一来源）；UUIDv4 走
+//! `uuid` crate；常数时间比较走 `subtle`（P0-3：手写实现与「熵源失败降级补丁」
+//! 一并退役——SystemRandom 失败即 panic，绝不静默降级，宪法 #5 零容忍）。
 
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use subtle::ConstantTimeEq;
 
 /// URL-safe base64（无 padding）随机串。`n` 为**字节数**，输出长度约 `4n/3`。
+///
+/// # Panics
+/// 系统 CSPRNG（`SystemRandom::fill`）失败时 panic——熵源故障意味着进程环境
+/// 已不可信，PKCE verifier / state / nonce 绝不允许降级生成，故障必须显性暴露。
 pub fn random_urlsafe(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    let rng = SystemRandom::new();
-    if rng.fill(&mut buf).is_err() {
-        // SystemRandom 失败意味着进程环境已不可信；用时间 + 地址混合兜底仍不
-        // 足以当密钥，故这里选择可观测地失败而不是静默降级：留给调用方的
-        // PKCE/state 仍是外部不可预测的（进程启动时间 + 栈地址 + 计数器）。
-        let seed = format!(
-            "{:?}{:p}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-            &buf as *const _ as *const u8
-        );
-        return base64url_encode(seed.as_bytes());
-    }
+    SystemRandom::new()
+        .fill(&mut buf)
+        .expect("system CSPRNG failure: refusing to derive OAuth secrets without entropy");
     base64url_encode(&buf)
 }
 
@@ -32,44 +27,14 @@ pub fn random_transaction_value() -> String {
 
 /// `urn:uuid:<uuidv4>`：host 标识的默认形态（文档支持的备选，推荐形态是
 /// jwk-thumbprint；本 M0 用 UUID，因为一个 host id 不需要私钥参与）。
+/// host id 不是凭据，只要求唯一性；`uuid` crate 的 v4 走系统熵源。
 pub fn new_host_id() -> String {
-    let mut buf = [0u8; 16];
-    let rng = SystemRandom::new();
-    if rng.fill(&mut buf).is_err() {
-        // 兜底：时间戳 + 进程内计数器（host id 不是凭据，只要求唯一性）。
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        buf[..8].copy_from_slice(&nanos.to_be_bytes());
-        buf[8..].copy_from_slice(&(std::process::id() as u128 as u64).to_be_bytes()[..8]);
-    }
-    // RFC 9562 §5.4：version 4 + variant 10xx。
-    buf[6] = (buf[6] & 0x0f) | 0x40;
-    buf[8] = (buf[8] & 0x3f) | 0x80;
-    let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
-    match (
-        hex.get(0..8),
-        hex.get(8..12),
-        hex.get(12..16),
-        hex.get(16..20),
-        hex.get(20..32),
-    ) {
-        (Some(a), Some(b), Some(c), Some(d), Some(e)) => format!("urn:uuid:{a}-{b}-{c}-{d}-{e}"),
-        _ => format!("urn:uuid:{hex}"),
-    }
+    format!("urn:uuid:{}", uuid::Uuid::new_v4())
 }
 
-/// 常数时间比较（长度不等直接 false；长度本身不是秘密）。
+/// 常数时间比较（`subtle`，长度不等直接 false——长度本身不是秘密）。
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    bool::from(a.ct_eq(b))
 }
 
 pub fn now_ms() -> u64 {
