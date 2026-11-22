@@ -1230,6 +1230,7 @@ mod tests {
                 std::path::PathBuf::from("/tmp/workspace"),
             ),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::from_secs(180),
             cancellation: qaqh_tool_core::tool_api::CancellationToken::new(),
             progress: None,

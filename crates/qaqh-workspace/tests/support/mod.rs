@@ -11,6 +11,7 @@ pub fn context(workspace: impl Into<std::path::PathBuf>) -> ToolCallContext {
         sandbox: SandboxMode::Main,
         sandbox_spec: SandboxSpec::disabled(),
         exec_default_shell: None,
+            exec_max_output_chars: None,
         timeout: std::time::Duration::ZERO,
         cancellation: CancellationToken::new(),
         progress: None,

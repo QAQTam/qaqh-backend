@@ -380,6 +380,7 @@ pub(super) fn exec_ask_user(args: &Value) -> crate::ToolResult {
         sandbox: SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(".")),
         exec_default_shell: None,
+            exec_max_output_chars: None,
         timeout: std::time::Duration::ZERO,
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,

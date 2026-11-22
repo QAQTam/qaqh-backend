@@ -275,6 +275,7 @@ mod tests {
                 "/tmp/ws",
             )),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::from_secs(10),
             cancellation: CancellationToken::new(),
             progress: None,

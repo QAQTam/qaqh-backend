@@ -1089,6 +1089,7 @@ mod tests {
                         std::path::PathBuf::from("/tmp/ws"),
                     ),
                     exec_default_shell: None,
+            exec_max_output_chars: None,
                     timeout: prepared.effective_timeout,
                     cancellation: crate::tool_api::CancellationToken::new(),
                     progress: None,

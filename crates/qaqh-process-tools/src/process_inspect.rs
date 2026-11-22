@@ -38,6 +38,40 @@ pub struct ProcessArgs {
 #[serde(transparent)]
 pub struct ProcessOutput(#[schemars(with = "serde_json::Value")] serde_json::Value);
 
+/// `process` 工具的显示投影（P0-2：原门面注入钩子 `hooks::PROJECT_PROCESS`
+/// 退役——投影单一事实源收归本 crate；对 `{"status": ..., "content": ...}`
+/// 输出形状就地投影，与旧门面版语义一致）。
+pub fn project_process(args: &serde_json::Value, output: &str) -> ToolDisplay {
+    let action = args
+        .get("action")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("process");
+    let view: Option<serde_json::Value> = serde_json::from_str(output).ok();
+    let status = view
+        .as_ref()
+        .and_then(|view| view.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    let body = view
+        .as_ref()
+        .and_then(|view| view.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| output.to_string());
+    ToolDisplay::new(
+        qaqh_tool_core::tool_api::ToolHeader::Other {
+            label: format!("process {action}"),
+        },
+        qaqh_tool_core::tool_api::ToolBody::Text {
+            text: body,
+            truncated: false,
+        },
+    )
+    .with_summary(status.unwrap_or_else(|| "process".to_string()))
+}
+
 impl ToolProjection for ProcessOutput {
     fn model_blocks(&self) -> Vec<ToolContentBlock> {
         vec![ToolContentBlock::Text {
@@ -46,7 +80,7 @@ impl ToolProjection for ProcessOutput {
     }
 
     fn display(&self, args: &serde_json::Value) -> ToolDisplay {
-        crate::hooks::project_process(args, &self.0.to_string())
+        project_process(args, &self.0.to_string())
     }
 }
 
@@ -266,7 +300,7 @@ fn process_error(code: &str, message: impl Into<String>, hint: &str) -> ToolExec
 }
 
 pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_display_fn("process", crate::hooks::project_process);
+    mgr.register_display_fn("process", project_process);
     mgr.register_typed_tool(ProcessTool);
 }
 

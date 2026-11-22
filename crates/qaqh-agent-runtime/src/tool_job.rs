@@ -645,6 +645,7 @@ impl WorkspaceToolPort {
             // sandbox.enabled=false.
             sandbox_spec: policy.sandbox_spec.clone(),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation,
             progress: None,

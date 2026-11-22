@@ -339,6 +339,7 @@ fn legacy_tool_call_context(
         )
         .with_trusted_roots(with_global_trusted(|s| s.set().clone())),
         exec_default_shell: None,
+            exec_max_output_chars: None,
         timeout: Duration::ZERO,
         cancellation,
         progress: None,

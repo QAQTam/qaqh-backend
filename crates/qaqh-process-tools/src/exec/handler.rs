@@ -225,7 +225,8 @@ pub(crate) fn run_exec(
     let argv = shell.derive_exec_args_with(&shell_command, extra_args);
 
     // ── Execution limits / cwd / env ──
-    let policy_default = crate::hooks::exec_max_output_chars().unwrap_or(u32::MAX);
+    // P0-2：上限随 ToolCallContext 显式到达（fold policy 在执行入口注入）。
+    let policy_default = ctx.exec_max_output_chars.unwrap_or(u32::MAX);
     let max_output_chars = args
         .max_output_chars
         .filter(|&n| (100..=200_000).contains(&n))

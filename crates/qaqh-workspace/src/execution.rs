@@ -74,6 +74,7 @@ pub fn execute_authorized(
             true,
         ),
         exec_default_shell: None,
+            exec_max_output_chars: None,
         timeout: Duration::ZERO,
         cancellation,
         progress: None,
@@ -252,6 +253,9 @@ pub fn execute_authorized_with_context(
     // 进度通道 sender 在此直通注入 handler。此前该 sender 在 prepare 阶段被
     // `_progress_tx` 丢弃，exec 全程零 realtime tool_progress。
     exec_ctx.exec_progress = progress_tx;
+    // P0-2：exec 输出字符上限随 fold policy 显式落进上下文（原 hooks 钩子的
+    // 线程态穿越退役——handler 据此截断，NoFold 时 None = 调用侧缺省兜底）。
+    exec_ctx.exec_max_output_chars = crate::tool_side_fold::policy().exec_max_output_chars();
     let _ = (authorized_workspace, authorized_resources);
     // 审计对象 before 指纹：派发前按与 finalize 同源的 args 口径快照
     // file_state 账本（键一致，命中即 before，未命中为 None）。
@@ -598,6 +602,7 @@ pub fn execute_with_context(
                     true,
                 ),
                 exec_default_shell: None,
+            exec_max_output_chars: None,
                 timeout: Duration::ZERO,
                 cancellation,
                 progress: None,
@@ -826,6 +831,7 @@ mod tests {
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1018,6 +1024,7 @@ mod tests {
                 workspace.path().to_path_buf(),
             ),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1071,6 +1078,7 @@ mod tests {
                 workspace.path().to_path_buf(),
             ),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1116,6 +1124,7 @@ mod tests {
                 crate::runtime::active_workspace_root(),
             ),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation,
             progress: None,
