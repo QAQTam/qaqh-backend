@@ -43,12 +43,11 @@ pub(crate) enum ModelToolPlan {}
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, adopt_identity,
-    apply_management_headers, empty_stream_retry, insert_header, roomy_response_limits,
+    apply_management_headers, empty_stream_backoff, insert_header, roomy_response_limits,
     sdk_error_detail, sdk_retry_policy, split_url, tool_result_name,
 };
 use super::transport::{
-    RetryPolicy as GateRetryPolicy, block_on, empty_request_noop_done_event,
-    empty_request_sync_error, is_cancelled,
+    RetryPolicy as GateRetryPolicy, SseTrace, empty_request_noop_done_event, is_cancelled,
 };
 use super::types::{
     EFFORT_LADDER, ProviderConfig, ResponsesCompat, StreamEvent, normalize_reasoning_effort,
@@ -1416,7 +1415,7 @@ struct Resps {
 }
 
 impl Resps {
-    fn emit_tool_progress(&mut self, index: usize, on_event: &mut dyn FnMut(StreamEvent)) {
+    fn emit_tool_progress(&mut self, index: usize, on_event: &mut (dyn FnMut(StreamEvent) + Send)) {
         let Some((id, name, args)) = self.tools.get(&index) else {
             return;
         };
@@ -1450,7 +1449,7 @@ async fn consume(
     provider: &ProviderConfig,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
     plan: Option<&ModelToolPlan>,
 ) -> Outcome {
     let compat = provider.responses_compat.clone();
@@ -1908,7 +1907,7 @@ async fn run_sdk_stream(
     provider: &ProviderConfig,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
     plan: Option<&ModelToolPlan>,
 ) -> Outcome {
     let watch = CancelWatch::start(cancel);
@@ -1921,7 +1920,7 @@ async fn run_sdk_stream(
 }
 
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
-pub fn chat_stream_responses(
+pub async fn chat_stream_responses(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,
@@ -1930,7 +1929,7 @@ pub fn chat_stream_responses(
     effort: Option<String>,
     user_id: Option<String>,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> anyhow::Result<()> {
     let projected = project_responses_messages(&messages, &provider.responses_compat);
     // 空输入保护：`input: []` 会被上游判 400 且不可重试 → 整回合 Fatal。
@@ -1946,22 +1945,42 @@ pub fn chat_stream_responses(
     let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
     let (adapter, hub) = build_adapter(provider, model, &policy);
     let options = build_options(provider, &policy);
-    empty_stream_retry(
-        &policy,
-        "upstream closed stream before any content",
-        cancel,
-        on_event,
-        |traced| {
-            block_on(run_sdk_stream(
-                &adapter, &request, &options, provider, &hub, cancel, traced, None,
-            ))
-        },
-    )
+    // SDK 负责 HTTP 层重试；驱动只补空流掐断的整请求重试（同其余三面）。
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        if is_cancelled(cancel) {
+            return Err(anyhow::anyhow!("cancelled by user"));
+        }
+        let mut trace = SseTrace::from_env();
+        let mut traced = |event: StreamEvent| {
+            trace.record(&event);
+            on_event(event)
+        };
+        match run_sdk_stream(
+            &adapter, &request, &options, provider, &hub, cancel, &mut traced, None,
+        )
+        .await
+        {
+            Outcome::Completed => return Ok(()),
+            Outcome::Fatal(e) => return Err(e),
+            Outcome::EmptyStream => {
+                empty_stream_backoff(
+                    attempt,
+                    &policy,
+                    "upstream closed stream before any content",
+                    cancel,
+                    on_event,
+                )
+                .await?;
+            }
+        }
+    }
 }
 
 #[cfg(feature = "native-tool-plan")]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn chat_stream_responses_plan(
+pub(crate) async fn chat_stream_responses_plan(
     provider: &ProviderConfig,
     messages: Vec<Message>,
     plan: &ModelToolPlan,
@@ -1970,7 +1989,7 @@ pub(crate) fn chat_stream_responses_plan(
     effort: Option<String>,
     user_id: Option<String>,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> anyhow::Result<()> {
     let declarations = plan_declarations(plan, descriptions)?;
     let projected = project_responses_messages(&messages, &provider.responses_compat);
@@ -1983,100 +2002,43 @@ pub(crate) fn chat_stream_responses_plan(
     let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
     let (adapter, hub) = build_adapter(provider, &provider.model, &policy);
     let options = build_options(provider, &policy);
-    empty_stream_retry(
-        &policy,
-        "upstream closed stream before any content",
-        cancel,
-        on_event,
-        |traced| {
-            block_on(run_sdk_stream(
-                &adapter,
-                &request,
-                &options,
-                provider,
-                &hub,
-                cancel,
-                traced,
-                Some(plan),
-            ))
-        },
-    )
-}
-
-pub fn chat_sync_responses(
-    provider: &ProviderConfig,
-    model: &str,
-    messages: Vec<Message>,
-    max_tokens: u32,
-) -> Result<String, String> {
-    // 套餐用量直连路由要求**每个** HTTP 推理请求都带 `store:false` + `stream:true`
-    // （文档 preview-limitations），所以非流式的 `complete_with` 不能用于这条路由。
-    // 压缩（compact）走的就是本入口——直接报「不支持」会平白丢一个功能，
-    // 因此 plan 模式改走流式接口把文本收集回来。
-    if provider.responses_compat.siwc_plan {
-        return collect_plan_stream(provider, model, messages, max_tokens);
-    }
-    let projected = project_responses_messages(&messages, &provider.responses_compat);
-    if projected.iter().all(|m| m.role == Role::System) {
-        log::warn!("responses: input 为空（无任何可投影消息），sync 短路，不发请求");
-        return Err(empty_request_sync_error());
-    }
-    let request = build_request(provider, projected, None, max_tokens, None, None, false);
-    let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
-    let (adapter, _hub) = build_adapter(provider, model, &policy);
-    let options = build_options(provider, &policy);
-    match block_on(adapter.complete_with(&request, &options)) {
-        Ok(response) => {
-            let out = mutil_ai::ChatResponse::text(&response);
-            // BUG-2026-09-13-20：模型只输出 reasoning/工具调用时不得把空
-            // 摘要当成功（compact 会污染压缩后上下文）。
-            if out.trim().is_empty() {
-                return Err("compact: no content in responses response".to_string());
-            }
-            Ok(out)
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        if is_cancelled(cancel) {
+            return Err(anyhow::anyhow!("cancelled by user"));
         }
-        Err(e) => {
-            let (_msg, full) = sdk_error_detail("Responses", &e, &provider.api_key);
-            Err(full)
+        let mut trace = SseTrace::from_env();
+        let mut traced = |event: StreamEvent| {
+            trace.record(&event);
+            on_event(event)
+        };
+        match run_sdk_stream(
+            &adapter,
+            &request,
+            &options,
+            provider,
+            &hub,
+            cancel,
+            &mut traced,
+            Some(plan),
+        )
+        .await
+        {
+            Outcome::Completed => return Ok(()),
+            Outcome::Fatal(e) => return Err(e),
+            Outcome::EmptyStream => {
+                empty_stream_backoff(
+                    attempt,
+                    &policy,
+                    "upstream closed stream before any content",
+                    cancel,
+                    on_event,
+                )
+                .await?;
+            }
         }
     }
-}
-
-/// plan 模式下的同步语义：驱动**流式**接口并收集文本（见 `chat_sync_responses` 的注释）。
-fn collect_plan_stream(
-    provider: &ProviderConfig,
-    model: &str,
-    messages: Vec<Message>,
-    max_tokens: u32,
-) -> Result<String, String> {
-    let mut text = String::new();
-    let mut failure: Option<String> = None;
-    let cancel = Arc::new(AtomicBool::new(false));
-    let result = chat_stream_responses(
-        provider,
-        model,
-        messages,
-        None,
-        max_tokens,
-        None,
-        None,
-        Some(&cancel),
-        &mut |event| match event {
-            StreamEvent::ContentDelta(delta) => text.push_str(&delta),
-            StreamEvent::Error { kind, message } => {
-                failure = Some(format!("{kind:?}: {message}"));
-            }
-            _ => {}
-        },
-    );
-    if let Some(failure) = failure {
-        return Err(failure);
-    }
-    result.map_err(|e| format!("responses (plan usage, streaming): {e}"))?;
-    if text.trim().is_empty() {
-        return Err("compact: no content in responses response".to_string());
-    }
-    Ok(text)
 }
 
 #[cfg(test)]

@@ -37,10 +37,10 @@ use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, StreamState, apply_management_headers,
-    empty_stream_retry, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
+    empty_stream_backoff, roomy_response_limits, sdk_error_detail, sdk_retry_policy,
     tool_names_by_id, tool_result_name, uuid_simple,
 };
-use super::transport::{RetryPolicy as GateRetryPolicy, block_on, is_cancelled};
+use super::transport::{RetryPolicy as GateRetryPolicy, SseTrace, is_cancelled};
 use super::types::{
     ProviderConfig, StreamEvent, clamp_effort_to_allowlist, normalize_reasoning_effort,
     stored_reasoning_kind,
@@ -378,7 +378,7 @@ async fn run_sdk_stream(
     api_key: &str,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Outcome {
     let watch = CancelWatch::start(cancel);
     let mut options = options.clone();
@@ -394,7 +394,7 @@ async fn consume(
     api_key: &str,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Outcome {
     let mut stream = match adapter.stream_with(request, options).await {
         Ok(s) => s,
@@ -551,7 +551,7 @@ async fn consume(
 }
 
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
-pub fn chat_stream_gemini(
+pub async fn chat_stream_gemini(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,
@@ -560,7 +560,7 @@ pub fn chat_stream_gemini(
     effort: Option<String>,
     _user_id: Option<String>,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> anyhow::Result<()> {
     let request = build_request(
         provider,
@@ -575,56 +575,33 @@ pub fn chat_stream_gemini(
     let options = build_options(provider, &policy, true);
     let api_key = provider.api_key.as_str();
 
-    empty_stream_retry(
-        &policy,
-        "upstream closed stream before any content",
-        cancel,
-        on_event,
-        |traced| {
-            block_on(run_sdk_stream(
-                &adapter, &request, &options, api_key, &hub, cancel, traced,
-            ))
-        },
-    )
-}
-
-pub fn chat_sync_gemini(
-    provider: &ProviderConfig,
-    model: &str,
-    messages: Vec<Message>,
-    max_tokens: u32,
-) -> Result<String, String> {
-    let request = build_request(
-        provider,
-        project_messages(messages, 0),
-        None,
-        max_tokens,
-        None,
-        false,
-    );
-    let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
-    let (adapter, _hub) = build_adapter(provider, model, &policy);
-    let options = build_options(provider, &policy, false);
-    match block_on(adapter.complete_with(&request, &options)) {
-        Ok(response) => {
-            let out: String = response
-                .message
-                .parts
-                .iter()
-                .filter_map(|p| match p {
-                    Part::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            if out.is_empty() {
-                return Err("compact: no content in gemini response".to_string());
-            }
-            Ok(out)
+    // SDK 负责 HTTP 层重试；驱动只补空流掐断的整请求重试（同其余三面）。
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        if is_cancelled(cancel) {
+            return Err(anyhow::anyhow!("cancelled by user"));
         }
-        Err(e) => {
-            let (_msg, full) = sdk_error_detail("Gemini", &e, &provider.api_key);
-            Err(format!("compact request failed: {full}"))
+        let mut trace = SseTrace::from_env();
+        let mut traced = |event: StreamEvent| {
+            trace.record(&event);
+            on_event(event)
+        };
+        match run_sdk_stream(&adapter, &request, &options, api_key, &hub, cancel, &mut traced)
+            .await
+        {
+            Outcome::Completed => return Ok(()),
+            Outcome::Fatal(e) => return Err(e),
+            Outcome::EmptyStream => {
+                empty_stream_backoff(
+                    attempt,
+                    &policy,
+                    "upstream closed stream before any content",
+                    cancel,
+                    on_event,
+                )
+                .await?;
+            }
         }
     }
 }

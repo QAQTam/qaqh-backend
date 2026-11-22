@@ -17,8 +17,7 @@ use reqwest::header::{HeaderName, HeaderValue};
 use qaqh_types::{ContentBlock, Message, UsageInfo};
 
 use super::transport::{
-    RetryPolicy as GateRetryPolicy, SseTrace, http_error_description, is_cancelled,
-    sleep_with_cancel,
+    RetryPolicy as GateRetryPolicy, http_error_description, sleep_with_cancel,
 };
 use super::types::{ProviderConfig, StreamEvent, safe_provider_error_body};
 
@@ -155,7 +154,7 @@ impl StreamState {
     pub(crate) fn finalize(
         self,
         synth_missing_tool_ids: bool,
-        on_event: &mut dyn FnMut(StreamEvent),
+        on_event: &mut (dyn FnMut(StreamEvent) + Send),
     ) {
         let mut blocks: Vec<ContentBlock> = Vec::new();
         if !self.reasoning.is_empty() {
@@ -362,7 +361,7 @@ impl ToolCallAnnouncer {
         &mut self,
         tools: &HashMap<usize, (String, String, String)>,
         index: usize,
-        on_event: &mut dyn FnMut(StreamEvent),
+        on_event: &mut (dyn FnMut(StreamEvent) + Send),
     ) {
         let Some((id, name, args)) = tools.get(&index) else {
             return;
@@ -570,8 +569,8 @@ fn now_unix_secs() -> i64 {
 
 /// Bridges the harness `AtomicBool` cancel flag to the SDK
 /// `CancellationToken` (which its backoff sleeps and stream reads observe).
-/// The watcher only needs to run inside the crate `block_on` runtime; it is
-/// aborted when the guard drops.
+/// The watcher is spawned onto the host Tokio runtime (the async context the
+/// stream entry was awaited from) and aborted when the guard drops.
 pub(crate) struct CancelWatch {
     token: CancellationToken,
     done: Arc<AtomicBool>,
@@ -637,7 +636,7 @@ impl RetryHub {
         }
     }
 
-    pub(crate) fn drain(&self, on_event: &mut dyn FnMut(StreamEvent)) {
+    pub(crate) fn drain(&self, on_event: &mut (dyn FnMut(StreamEvent) + Send)) {
         while let Some(ev) = self
             .pending
             .lock()
@@ -730,57 +729,45 @@ pub(crate) fn apply_management_headers(
     }
 }
 
-/// Retry driver for the one error class the SDK does not cover: a 2xx
-/// response whose stream dies before any content (busy-shedding endpoints
-/// return no error code). Everything else — 429/5xx, transport jitter,
-/// Retry-After — is retried inside the SDK, which emits the `Retrying`
-/// events through `on_event`.
-pub(crate) fn empty_stream_retry(
+/// EmptyStream 收口（SDK 重试循环的共享尾段）。
+///
+/// SDK 不覆盖的一类重试：2xx 响应的流在产出任何内容前就断了
+/// （busy-shedding 端点不回错误码）。其余一切——429/5xx、传输抖动、
+/// Retry-After——都在 SDK 内部重试并经 `on_event` 发 `Retrying` 事件。
+///
+/// attempt 循环体在各 SDK 入口内联（唯一差异是那次 `run_sdk_stream` 调用），
+/// 共享的记账/退避收口在此；全部具体类型，宿主 runtime 的 Send 校验无
+/// 泛型 HRTB 拖累（P0-1：`FALLBACK_RT` 已物理删除，驱动全程跑在宿主上）。
+///
+/// `attempt` 从 1 计（刚失败的那次）。预算用尽 → `Error` 事件 + Fatal；
+/// 未尽 → `Retrying` 事件 + 可取消退避（`Ok(())` = 继续下一 attempt）。
+pub(crate) async fn empty_stream_backoff(
+    attempt: u32,
     policy: &GateRetryPolicy,
     final_error: &str,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
-    mut run_attempt: impl FnMut(&mut dyn FnMut(StreamEvent)) -> Outcome,
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> anyhow::Result<()> {
-    let mut attempt = 0u32;
-    loop {
-        attempt += 1;
-        if is_cancelled(cancel) {
-            return Err(anyhow::anyhow!("cancelled by user"));
-        }
-        let mut trace = SseTrace::from_env();
-        let mut traced = |event: StreamEvent| {
-            trace.record(&event);
-            // 直接用 `&mut` 借用回调：闭包只在本次尝试内活着，
-            // 由 `run_attempt` 同步调用，不需要（也不再需要）裸指针。
-            on_event(event)
-        };
-        match run_attempt(&mut traced) {
-            Outcome::Completed => return Ok(()),
-            Outcome::Fatal(e) => return Err(e),
-            Outcome::EmptyStream => {
-                if attempt >= policy.max_retries {
-                    traced(StreamEvent::Error {
-                        // 上游 2xx 后零内容掐流：不是传输抖动（SDK 已重试过那些），
-                        // 而是这次流式响应本身没有可用终态。
-                        kind: ErrorKind::StreamProtocol,
-                        message: final_error.to_string(),
-                    });
-                    return Err(anyhow::anyhow!("{final_error}"));
-                }
-                let delay = policy.delay_for(attempt);
-                traced(StreamEvent::Retrying {
-                    attempt,
-                    max_retries: policy.max_retries,
-                    delay_secs: delay.as_secs(),
-                    error: "stream closed early (no content)".into(),
-                });
-                if sleep_with_cancel(delay, cancel) {
-                    return Err(anyhow::anyhow!("cancelled by user"));
-                }
-            }
-        }
+    if attempt >= policy.max_retries {
+        on_event(StreamEvent::Error {
+            // 上游 2xx 后零内容掐流：不是传输抖动（SDK 已重试过那些），
+            // 而是这次流式响应本身没有可用终态。
+            kind: ErrorKind::StreamProtocol,
+            message: final_error.to_string(),
+        });
+        return Err(anyhow::anyhow!("{final_error}"));
     }
+    let delay = policy.delay_for(attempt);
+    on_event(StreamEvent::Retrying {
+        attempt,
+        max_retries: policy.max_retries,
+        delay_secs: delay.as_secs(),
+        error: "stream closed early (no content)".into(),
+    });
+    if sleep_with_cancel(delay, cancel).await {
+        return Err(anyhow::anyhow!("cancelled by user"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

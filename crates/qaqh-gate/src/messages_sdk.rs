@@ -21,10 +21,10 @@ use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, StreamState, ToolCallAnnouncer,
-    adopt_identity, apply_management_headers, empty_stream_retry, insert_header,
+    adopt_identity, apply_management_headers, empty_stream_backoff, insert_header,
     roomy_response_limits, sdk_error_detail, sdk_retry_policy, tool_names_by_id, tool_result_name,
 };
-use super::transport::{RetryPolicy as GateRetryPolicy, block_on, is_cancelled};
+use super::transport::{RetryPolicy as GateRetryPolicy, SseTrace, is_cancelled};
 use super::types::{ProviderConfig, StreamEvent, stored_reasoning_kind};
 use super::usage_semantics::{self as semantics, Scope};
 
@@ -473,7 +473,7 @@ async fn run_sdk_stream(
     api_key: &str,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Outcome {
     // SDK 的退避睡眠/流读取只观察 CancellationToken；CancelWatch 用 50ms
     // 轮询把 harness 的 AtomicBool 桥接进去（对齐旧实现的取消粒度）。
@@ -502,7 +502,7 @@ async fn consume(
     api_key: &str,
     hub: &RetryHub,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> Outcome {
     let mut stream = match adapter.stream_with(request, options).await {
         Ok(s) => s,
@@ -724,7 +724,7 @@ fn reconcile_absent_tool_calls(
 }
 
 #[allow(clippy::too_many_arguments)] // 参数面塑形另立项（PLAN D-5）
-pub fn chat_stream_messages(
+pub async fn chat_stream_messages(
     provider: &ProviderConfig,
     model: &str,
     messages: Vec<Message>,
@@ -733,7 +733,7 @@ pub fn chat_stream_messages(
     effort: Option<String>,
     user_id: Option<String>,
     cancel: Option<&Arc<AtomicBool>>,
-    on_event: &mut dyn FnMut(StreamEvent),
+    on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> anyhow::Result<()> {
     // 历史一律全量发送：gate 侧不做增量过滤，wire 级修补由 SDK normalize 负责。
     let mut request = ChatRequest::new(project_messages(messages, 0));
@@ -768,24 +768,43 @@ pub fn chat_stream_messages(
 
     // SDK 负责 HTTP 层重试（429/5xx/transport、Retry-After、Retrying 事件）；
     // 驱动只补它没覆盖的一类：2xx 后空流掐断，整请求重试无损。
-    empty_stream_retry(
-        &policy,
-        "upstream closed stream before any content",
-        cancel,
-        on_event,
-        |traced| {
-            block_on(run_sdk_stream(
-                &adapter,
-                &request,
-                &options,
-                &usage_scope,
-                &provider.api_key,
-                &hub,
-                cancel,
-                traced,
-            ))
-        },
-    )
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        if is_cancelled(cancel) {
+            return Err(anyhow::anyhow!("cancelled by user"));
+        }
+        let mut trace = SseTrace::from_env();
+        let mut traced = |event: StreamEvent| {
+            trace.record(&event);
+            on_event(event)
+        };
+        match run_sdk_stream(
+            &adapter,
+            &request,
+            &options,
+            &usage_scope,
+            &provider.api_key,
+            &hub,
+            cancel,
+            &mut traced,
+        )
+        .await
+        {
+            Outcome::Completed => return Ok(()),
+            Outcome::Fatal(e) => return Err(e),
+            Outcome::EmptyStream => {
+                empty_stream_backoff(
+                    attempt,
+                    &policy,
+                    "upstream closed stream before any content",
+                    cancel,
+                    on_event,
+                )
+                .await?;
+            }
+        }
+    }
 }
 
 /// Anthropic 面显式缓存断点（`cache_control: {"type":"ephemeral"}`）总开关。
@@ -800,7 +819,7 @@ fn prompt_cache_enabled() -> bool {
 }
 
 /// usage 口径判定的作用域键：会话 id 优先（同一端点不同会话互不污染），
-/// 没有会话身份（`chat_sync` 的 compact/title）时退回端点身份。
+/// 未提供会话身份（`user_id` 缺席）时退回端点身份。
 fn usage_scope(provider: &ProviderConfig, model: &str, user_id: Option<&str>) -> Scope {
     let key = user_id
         .map(str::trim)
@@ -808,53 +827,6 @@ fn usage_scope(provider: &ProviderConfig, model: &str, user_id: Option<&str>) ->
         .map(str::to_string)
         .unwrap_or_else(|| format!("{}|{model}", provider.base_url.trim().trim_end_matches('/')));
     Scope::new(provider.cache_usage_semantics, key)
-}
-
-pub fn chat_sync_messages(
-    provider: &ProviderConfig,
-    model: &str,
-    messages: Vec<Message>,
-    max_tokens: u32,
-) -> Result<String, String> {
-    // 同流式路径：全量历史，无增量过滤。
-    let mut request = ChatRequest::new(project_messages(messages, 0));
-    request.prompt_cache = prompt_cache_enabled();
-    if provider.supports_thinking && max_tokens < 4096 {
-        return Err(format!(
-            "model {model}: configured max_tokens {max_tokens} is below the 4096 minimum \
-             for sync thinking; raise the model's max_output_tokens in providers.toml"
-        ));
-    }
-    request.max_output_tokens = Some(max_tokens);
-
-    let policy = GateRetryPolicy::from_spec(provider.retry.as_ref());
-    let (adapter, _hub) = build_adapter(provider, model, &policy);
-    let options = build_options(provider, None, &policy);
-    let result = block_on(adapter.complete_with(&request, &options));
-    match result {
-        Ok(response) => {
-            let out: String = response
-                .message
-                .parts
-                .iter()
-                .filter_map(|p| match p {
-                    Part::Text { text, .. } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("");
-            if out.is_empty() {
-                return Err("compact: no content in anthropic response".to_string());
-            }
-            Ok(out)
-        }
-        Err(e) => {
-            let (_msg, full) = sdk_error_detail("Anthropic", &e, &provider.api_key);
-            // sync 路径（compact/title）沿用旧文案：重试已由 SDK 内部完成，
-            // 终态错误统一冠以 "compact request failed"。
-            Err(format!("compact request failed: {full}"))
-        }
-    }
 }
 
 #[cfg(test)]

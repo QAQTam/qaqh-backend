@@ -13,6 +13,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
+/// 共享测试 runtime：gate 已原生 async（P0-1 后 crate 不再持有任何 runtime），
+/// 这批同步 `#[test]` 用一个多线程 runtime 桥接——与 `#[tokio::test]` 同一
+/// 性质的测试基建，仅存在于测试二进制。
+static TEST_RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("gate test runtime")
+});
+
 fn make_provider(mock: &MockServer) -> ProviderConfig {
     ProviderConfig::chat(
         &mock.base_url(),
@@ -32,19 +42,35 @@ fn collect_events(
     messages: Vec<Message>,
     tools: Option<Vec<ToolDef>>,
 ) -> Vec<StreamEvent> {
-    let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
-        provider,
-        messages,
-        tools,
-        4096,
-        Some("high".into()),
-        None, // user_id
-        None, // cancel
-        &mut |ev| events.push(ev),
-    );
-    assert!(result.is_ok(), "chat_stream failed: {:?}", result);
-    events
+    collect_events_with_effort(provider, messages, tools, Some("high".into()))
+}
+
+/// effort 可调变体：anthropic 面 4096 tokens + effort=high 会撞生产侧的
+/// thinking 预算闸（4096 < 4096+1024）。与 effort 语义无关的用例传 `None`
+/// ——生产语义本来就是「不强制思考，交端点默认」（存量欠账：该闸上线时
+/// 这批 anthropic 用例没跟上，main 基线已红）。
+fn collect_events_with_effort(
+    provider: &ProviderConfig,
+    messages: Vec<Message>,
+    tools: Option<Vec<ToolDef>>,
+    effort: Option<String>,
+) -> Vec<StreamEvent> {
+    TEST_RT.block_on(async {
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let result = qaqh_gate::chat_stream(
+            provider,
+            messages,
+            tools,
+            4096,
+            effort,
+            None, // user_id
+            None, // cancel
+            &mut |ev| events.push(ev),
+        )
+        .await;
+        assert!(result.is_ok(), "chat_stream failed: {:?}", result);
+        events
+    })
 }
 
 fn event_text(ev: &StreamEvent) -> Option<&str> {
@@ -324,7 +350,7 @@ fn http_error_401() {
     let mock = MockServer::new(scenario);
     let provider = make_provider(&mock);
     let mut events = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
         None,
@@ -333,7 +359,7 @@ fn http_error_401() {
         None,
         None,
         &mut |event| events.push(event),
-    );
+    ));
     assert!(result.is_err(), "401 should return error");
     let err = result.unwrap_err().to_string();
     assert!(err.contains("401"), "error should mention 401");
@@ -362,7 +388,7 @@ fn provider_text_only_overflow_reports_structured_error_kind() {
         ("responses", make_responses_provider(&mock)),
     ] {
         let mut events = Vec::new();
-        let result = qaqh_gate::chat_stream(
+        let result = TEST_RT.block_on(qaqh_gate::chat_stream(
             &provider,
             vec![Message::user("hi")],
             None,
@@ -371,7 +397,7 @@ fn provider_text_only_overflow_reports_structured_error_kind() {
             None,
             None,
             &mut |event| events.push(event),
-        );
+        ));
         assert!(result.is_err(), "{label}: overflow must fail the request");
         let kinds: Vec<qaqh_gate::ErrorKind> = events
             .iter()
@@ -395,7 +421,7 @@ fn responses_http_error_401_does_not_leak_body() {
     let scenario = vec![SseChunk::error(401, "Invalid API key: sk-real-secret")];
     let mock = MockServer::new(scenario);
     let provider = ProviderConfig::responses(&mock.base_url(), "sk-test-key", "test-model", None);
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
         None,
@@ -404,7 +430,7 @@ fn responses_http_error_401_does_not_leak_body() {
         None,
         None,
         &mut |_| {},
-    );
+    ));
     assert!(result.is_err(), "401 should return error");
     let err = result.unwrap_err().to_string();
     assert!(err.contains("401"), "error should mention 401: {err}");
@@ -427,7 +453,7 @@ fn retry_then_success() {
     let mock = MockServer::new_sequential(scenarios);
     let provider = make_provider(&mock);
     let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("retry test")],
         None,
@@ -436,7 +462,7 @@ fn retry_then_success() {
         None,
         None,
         &mut |ev| events.push(ev),
-    );
+    ));
     assert!(result.is_ok(), "should succeed after retry");
     let texts: Vec<&str> = events.iter().filter_map(event_text).collect();
     assert_eq!(texts, vec!["Success after retry!"], "should get final text");
@@ -469,26 +495,29 @@ fn cancel_during_stream() {
 
     // Spawn gate in a thread with a cancel that fires after first event
     let handle = std::thread::spawn(move || {
-        let _ = qaqh_gate::chat_stream(
-            &provider,
-            vec![Message::user("cancel me")],
-            None,
-            4096,
-            None,
-            None,
-            Some(&cancel_flag),
-            &mut |ev| {
-                match &ev {
-                    StreamEvent::ContentDelta(t) if t == "Starting..." => {
-                        // Cancel after receiving first chunk
-                        cancel_flag.store(true, Ordering::SeqCst);
+        TEST_RT.block_on(async {
+            let _ = qaqh_gate::chat_stream(
+                &provider,
+                vec![Message::user("cancel me")],
+                None,
+                4096,
+                None,
+                None,
+                Some(&cancel_flag),
+                &mut |ev| {
+                    match &ev {
+                        StreamEvent::ContentDelta(t) if t == "Starting..." => {
+                            // Cancel after receiving first chunk
+                            cancel_flag.store(true, Ordering::SeqCst);
+                        }
+                        _ => {}
                     }
-                    _ => {}
-                }
-                events.push(ev);
-            },
-        );
-        events
+                    events.push(ev);
+                },
+            )
+            .await;
+            events
+        })
     });
 
     let events = handle.join().unwrap();
@@ -636,60 +665,6 @@ fn default_provider_tool_history_is_unchanged() {
     let request = mock.last_request_json().expect("request body");
     assert!(request.get("provider").is_none());
     assert!(request["messages"][1].get("content").is_none());
-}
-
-/// #315 回归锁：sync 路径必须能在**没有 Tokio runtime 上下文**的线程上跑。
-///
-/// 真实调用方 `engine_title.rs` 用裸 `std::thread::spawn` 起 `session-title` 线程
-/// 调 `chat_sync`，那个线程没有 runtime。旧实现写的是 `block_on( ... .send())`
-/// —— `.send()` 是 `block_on` 的**实参**，先于它求值；而 reqwest 的
-/// `RequestBuilder::send` 是普通 fn，内部立刻构造 `tokio::time::sleep`，
-/// 于是在无 runtime 线程上 panic「there is no reactor running」，LLM 标题永不生效。
-///
-/// 本用例刻意用 plain `#[test]`（**不是** `#[tokio::test]`）：测试线程没有 runtime
-/// 上下文，正是生产里那条线程的等价环境。修复前本用例必 panic，修复后正常返回。
-#[test]
-fn openai_sync_works_without_tokio_runtime_context() {
-    let mock = MockServer::new(vec![SseChunk::json_body(json!({
-        "id": "chatcmpl-1",
-        "object": "chat.completion",
-        "choices": [{
-            "index": 0,
-            "message": { "role": "assistant", "content": "Hello sync" },
-            "finish_reason": "stop"
-        }],
-        "usage": { "prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3 }
-    }))]);
-    let provider = make_provider(&mock);
-
-    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("hi")], 64);
-    assert_eq!(
-        out.ok().as_deref(),
-        Some("Hello sync"),
-        "无 runtime 线程上的 sync 调用必须正常返回，而不是 panic"
-    );
-}
-
-/// 同上，Anthropic 适配器（`message_api.rs` 的 sync 站点）——同一形态的第二处，
-/// 由 #315 复核时发现（issue 原文把这一处记成 `:993`，实际是 `:991`）。
-#[test]
-fn anthropic_sync_works_without_tokio_runtime_context() {
-    let mock = MockServer::new(vec![SseChunk::json_body(json!({
-        "id": "msg_1",
-        "type": "message",
-        "role": "assistant",
-        "content": [{ "type": "text", "text": "Hello sync" }],
-        "stop_reason": "end_turn",
-        "usage": { "input_tokens": 1, "output_tokens": 2 }
-    }))]);
-    let provider = make_anthropic_provider(&mock);
-
-    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("hi")], 64);
-    assert_eq!(
-        out.ok().as_deref(),
-        Some("Hello sync"),
-        "无 runtime 线程上的 anthropic sync 调用必须正常返回，而不是 panic"
-    );
 }
 
 // ── Skills ephemeral injection: API acceptance test ──────────────────
@@ -953,7 +928,7 @@ fn dsml_looking_content_stays_plain_text() {
     let mock = MockServer::new(scenario);
     let provider = make_provider(&mock);
     let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("read /tmp/test.txt")],
         None,
@@ -962,7 +937,7 @@ fn dsml_looking_content_stays_plain_text() {
         None,
         None,
         &mut |ev| events.push(ev),
-    );
+    ));
     assert!(result.is_ok(), "chat_stream should succeed");
 
     let done_msg = events.iter().find_map(event_done);
@@ -1035,7 +1010,7 @@ fn endpoint_retry_spec_drives_actual_retry_behavior() {
     assert!(provider.retry.is_some(), "retry spec must be carried");
 
     let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
         None,
@@ -1044,7 +1019,7 @@ fn endpoint_retry_spec_drives_actual_retry_behavior() {
         None,
         None,
         &mut |ev| events.push(ev),
-    );
+    ));
     assert!(result.is_ok(), "retry after 429 should succeed: {result:?}");
     assert_eq!(
         mock.request_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -1086,7 +1061,7 @@ fn huge_retry_after_header_aborts_fast() {
 
     let mut events: Vec<StreamEvent> = Vec::new();
     let start = Instant::now();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
         None,
@@ -1095,7 +1070,7 @@ fn huge_retry_after_header_aborts_fast() {
         None,
         None,
         &mut |ev| events.push(ev),
-    );
+    ));
     let elapsed = start.elapsed();
 
     assert!(
@@ -1240,7 +1215,7 @@ fn responses_chat_stream_basic_text() {
     let provider = make_responses_provider(&mock);
 
     let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
         None,
@@ -1249,7 +1224,7 @@ fn responses_chat_stream_basic_text() {
         None,
         None,
         &mut |ev| events.push(ev),
-    );
+    ));
     assert!(result.is_ok(), "chat_stream failed: {:?}", result);
 
     // Should have ContentDelta for text
@@ -1309,7 +1284,7 @@ fn responses_stream_without_terminal_event_is_a_failure_not_a_salvaged_done() {
     let provider = make_responses_provider(&mock);
     let mut events: Vec<StreamEvent> = Vec::new();
 
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
         None,
@@ -1318,7 +1293,7 @@ fn responses_stream_without_terminal_event_is_a_failure_not_a_salvaged_done() {
         None,
         None,
         &mut |event| events.push(event),
-    );
+    ));
 
     // ADR-0018：上游掐流 = 失败。旧契约伪造 Done{stop_reason:None} 声称
     // "交由上层续写机制"——该机制从未存在，runtime 把半截响应当不可用终态，
@@ -1480,7 +1455,7 @@ fn responses_chat_stream_with_tool_calls() {
     let provider = make_responses_provider(&mock);
 
     let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("read /x.txt")],
         None,
@@ -1489,7 +1464,7 @@ fn responses_chat_stream_with_tool_calls() {
         None,
         None,
         &mut |ev| events.push(ev),
-    );
+    ));
     assert!(result.is_ok());
 
     // Should have tool call progress
@@ -1597,7 +1572,7 @@ fn responses_search_alias_is_wire_only_with_web_search_enabled() {
     }];
 
     let mut events = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("find needle")],
         Some(tools),
@@ -1606,7 +1581,7 @@ fn responses_search_alias_is_wire_only_with_web_search_enabled() {
         None,
         None,
         &mut |event| events.push(event),
-    );
+    ));
     assert!(result.is_ok(), "chat_stream failed: {result:?}");
 
     let request = mock.last_request_json().expect("request body must be JSON");
@@ -1654,7 +1629,7 @@ fn responses_chat_stream_http_error_retries() {
     let provider = make_responses_provider(&mock);
 
     let mut events: Vec<StreamEvent> = Vec::new();
-    let result = qaqh_gate::chat_stream(
+    let result = TEST_RT.block_on(qaqh_gate::chat_stream(
         &provider,
         vec![Message::user("hi")],
         None,
@@ -1663,7 +1638,7 @@ fn responses_chat_stream_http_error_retries() {
         None,
         None,
         &mut |ev| events.push(ev),
-    );
+    ));
     assert!(result.is_ok(), "should succeed after retry: {:?}", result);
     assert_eq!(
         mock.request_count.load(Ordering::SeqCst),
@@ -1811,7 +1786,7 @@ fn anthropic_inclusive_usage_does_not_double_count_the_cached_prefix() {
     let mut provider = make_anthropic_provider(&mock);
     provider.cache_usage_semantics = qaqh_types::CacheUsageSemantics::Inclusive;
 
-    let events = collect_events(&provider, vec![Message::user("Hi")], None);
+    let events = collect_events_with_effort(&provider, vec![Message::user("Hi")], None, None);
     let usage = anthropic_usage_from(&events);
 
     assert_eq!(usage.prompt_tokens, 6_835, "总输入不叠加命中量");
@@ -1828,16 +1803,17 @@ fn anthropic_usage_semantics_auto_latches_on_the_second_agreeing_sample() {
     fn run(mock: &MockServer, session: &str) -> qaqh_types::UsageInfo {
         let provider = make_anthropic_provider(mock);
         let mut events = Vec::new();
-        let result = qaqh_gate::chat_stream(
+        let result = TEST_RT.block_on(qaqh_gate::chat_stream(
             &provider,
             vec![Message::user("Hi")],
             None,
             4096,
-            Some("high".into()),
+            // effort=None：与 thinking 语义无关的用例不撞生产侧预算闸。
+            None,
             Some(session.to_string()),
             None,
             &mut |event| events.push(event),
-        );
+        ));
         assert!(result.is_ok(), "chat_stream failed: {result:?}");
         anthropic_usage_from(&events)
     }
@@ -1909,7 +1885,7 @@ fn anthropic_tool_use_scenario() -> Vec<mock_server::SseChunk> {
 fn anthropic_tool_call_keeps_block_start_identity() {
     let mock = MockServer::new(anthropic_tool_use_scenario());
     let provider = make_anthropic_provider(&mock);
-    let events = collect_events(&provider, vec![Message::user("list /tmp")], None);
+    let events = collect_events_with_effort(&provider, vec![Message::user("list /tmp")], None, None);
 
     let frames: Vec<(String, String, String)> = events
         .iter()
@@ -1982,7 +1958,7 @@ fn anthropic_user_message_with_only_ignored_blocks_is_not_sent_as_empty_text() {
         Message::user("hello"),
     ];
 
-    let _events = collect_events(&provider, messages, None);
+    let _events = collect_events_with_effort(&provider, messages, None, None);
 
     let body = mock
         .last_request_body
@@ -2034,7 +2010,7 @@ fn anthropic_user_message_with_image_placeholder_is_kept() {
         ],
     }];
 
-    let _events = collect_events(&provider, messages, None);
+    let _events = collect_events_with_effort(&provider, messages, None, None);
 
     let body = mock
         .last_request_body
@@ -2062,83 +2038,9 @@ fn anthropic_user_message_with_image_placeholder_is_kept() {
     );
 }
 
-// ── BUG-2026-09-13-20: responses sync 空内容必须 Fatal ────────────────
-
-/// 仅 reasoning 输出：`output` 里只有 reasoning item，没有 output_text。
-fn reasoning_only_responses_body() -> serde_json::Value {
-    json!({
-        "id": "resp_1",
-        "status": "completed",
-        "output": [
-            {
-                "type": "reasoning",
-                "id": "rs_1",
-                "summary": [{ "type": "summary_text", "text": "Let me think..." }]
-            }
-        ],
-        "usage": { "input_tokens": 10, "output_tokens": 5, "total_tokens": 15 }
-    })
-}
-
-/// 回归：空内容曾返回 `Ok("")` —— compact/标题流程静默成功，污染压缩后上下文。
-/// 对齐 chat_completions_api / message_api 的 Fatal("no content") 语义。
-#[test]
-fn responses_sync_empty_content_is_fatal() {
-    let mock = MockServer::new(vec![SseChunk::json_body(reasoning_only_responses_body())]);
-    let provider = make_responses_provider(&mock);
-
-    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("summarize")], 1024);
-
-    let err = out.expect_err("empty content must be an error, not Ok(\"\")");
-    assert!(
-        err.contains("no content"),
-        "error must mirror the sibling adapters' wording, got: {err}"
-    );
-    assert_eq!(mock.request_count.load(Ordering::SeqCst), 1);
-}
-
-/// 反例保护：非空 output_text 仍必须正常返回文本。
-#[test]
-fn responses_sync_non_empty_content_still_succeeds() {
-    let body = json!({
-        "id": "resp_2",
-        "status": "completed",
-        "output": [
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{ "type": "output_text", "text": "Summary: ok" }]
-            }
-        ]
-    });
-    let mock = MockServer::new(vec![SseChunk::json_body(body)]);
-    let provider = make_responses_provider(&mock);
-
-    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("summarize")], 1024);
-
-    assert_eq!(out.expect("non-empty content must succeed"), "Summary: ok");
-}
-
-/// 反例保护：`output_text` 里显式空串同样视为无内容 → Fatal。
-#[test]
-fn responses_sync_whitespace_free_empty_output_text_is_fatal() {
-    let body = json!({
-        "id": "resp_3",
-        "status": "completed",
-        "output": [{
-            "type": "message",
-            "role": "assistant",
-            "content": [{ "type": "output_text", "text": "" }]
-        }]
-    });
-    let mock = MockServer::new(vec![SseChunk::json_body(body)]);
-    let provider = make_responses_provider(&mock);
-
-    let out = qaqh_gate::chat_sync(&provider, vec![Message::user("summarize")], 1024);
-
-    let err = out.expect_err("empty output_text must be an error");
-    assert!(err.contains("no content"), "got: {err}");
-}
+// ── BUG-2026-09-13-20/BUG-2026-09-16-03 的 sync 面随 `chat_sync` 一并退役
+// （v3.0 起压缩/标题旁路已拆,handoff 承担交接;streaming 面的空输入保护
+// 由 responses_empty_input_is_noop_success 继续把守）。
 
 // stateful/deepseek-web（CDP 增量代理）已按 2026-10-06 拍板随 mutil-ai 迁移
 // 整体退役；responses 路径的 stateful 残留随预设删除一并清理。
@@ -2150,13 +2052,23 @@ fn responses_empty_input_is_noop_success() {
     let mock = MockServer::new(vec![SseChunk::text("must not be requested")]);
     let provider = make_responses_provider(&mock);
 
-    let mut events: Vec<StreamEvent> = Vec::new();
-    let result =
-        qaqh_gate::chat_stream(&provider, vec![], None, 4096, None, None, None, &mut |ev| {
-            events.push(ev)
-        });
+    let events = TEST_RT.block_on(async {
+        let mut events: Vec<StreamEvent> = Vec::new();
+        let result = qaqh_gate::chat_stream(
+            &provider,
+            vec![],
+            None,
+            4096,
+            None,
+            None,
+            None,
+            &mut |ev| events.push(ev),
+        )
+        .await;
+        assert!(result.is_ok(), "空输入必须本地短路成功: {result:?}");
+        events
+    });
 
-    assert!(result.is_ok(), "空输入必须本地短路成功: {result:?}");
     assert_eq!(
         mock.request_count.load(Ordering::SeqCst),
         0,
@@ -2167,21 +2079,6 @@ fn responses_empty_input_is_noop_success() {
         .find_map(event_done)
         .expect("空输入短路也必须发 Done 收口");
     assert!(done.content.is_empty(), "短路 Done 不应携带内容");
-}
-
-#[test]
-fn responses_empty_input_sync_reports_diagnostic_error() {
-    let mock = MockServer::new(vec![SseChunk::text("must not be requested")]);
-    let provider = make_responses_provider(&mock);
-
-    let err =
-        qaqh_gate::chat_sync(&provider, vec![], 1024).expect_err("空输入必须报错而非发空请求");
-    assert!(err.contains("empty_request"), "错误必须可诊断，got: {err}");
-    assert_eq!(
-        mock.request_count.load(Ordering::SeqCst),
-        0,
-        "不得向 responses 端点发出 input: [] 请求"
-    );
 }
 
 // ── Gemini generateContent tests ─────────────────────────────────────
@@ -2355,22 +2252,23 @@ fn gemini_body_carries_system_instruction_and_thinking_level() {
 }
 
 /// plan 直连路由的 **HTTP 级**契约（M1 收口）：请求体必须 `stream:true` + `store:false`，
-/// 被禁字段一个都不能出现；而**非流式入口**（压缩走的 `chat_sync`）在 plan 模式下
-/// 也必须改走流式并收集文本——这条测试守的就是那个「改走流式」。
+/// 被禁字段一个都不能出现。（原 `siwc_plan_sync_runs_over_the_streaming_route`
+/// 守的「sync 入口改走流式」行为已随 P0-1 的 `chat_sync` 退役一并消灭；
+/// 本用例改为直接守生产 plan 流式面。）
 ///
 /// 为什么值得单独立一条：`store:false` + `stream:true` 是该路由的硬要求
 /// （文档 preview-limitations），漏了它上游只回一个
 /// `subscription_sharing_route_not_supported`/`unsupported_capability`，
 /// 而那种错误在本地看起来像「上游抽风」——最难查的一类。
 #[test]
-fn siwc_plan_sync_runs_over_the_streaming_route() {
+fn siwc_plan_stream_route_carries_the_http_contract() {
     let mock = MockServer::new(responses_sse_scenario());
     let mut provider = make_responses_provider(&mock);
     provider.responses_compat.siwc_plan = true;
     provider.prompt_cache_key = Some("sess-cache-1".into());
 
-    let text = qaqh_gate::chat_sync(&provider, vec![Message::user("compact this")], 4096)
-        .expect("plan 模式的 sync 应改走流式并成功");
+    let events = collect_events(&provider, vec![Message::user("compact this")], None);
+    let text: String = events.iter().filter_map(event_text).collect();
     assert_eq!(text, "Hello world");
 
     let request = mock.last_request_json().expect("request body");
@@ -2407,14 +2305,21 @@ fn siwc_plan_sync_runs_over_the_streaming_route() {
     }
 }
 
-/// P0-1 反证（宪法 #18）：双会话并发流。主会话连挂起 5 秒的慢流，子代理连
-/// 立即发完的快流。复刻生产三明治（两个阻塞线程各调一次同步 `chat_stream`
-/// ——与 `provider_job::run_round` 的 `spawn_blocking` 同构）：
-/// - 旧实现（`FALLBACK_RT` current_thread `block_on`）：线程 B 的
-///   `block_on` 在调度锁门口被线程 A 卡死串行化，B ≈ 5s → 本断言必红；
-/// - `qaqh-gate` 原生 `async fn chat_stream` 后：B 必须在 50ms 内独立完成。
-#[test]
-fn concurrent_sessions_stream_in_parallel() {
+/// P0-1 架构不变量探针（宪法 #18）：双会话并发流。主会话连挂起 5 秒的慢流，
+/// 子代理连立即发完的快流，两者各占一个 Tokio 任务并发驱动。
+///
+/// 【反证实测记录】MUST.md 预测旧实现（`FALLBACK_RT` current_thread
+/// `block_on` + `spawn_blocking` 三明治）会"流 B 在调度锁门口被卡死 5 秒"，
+/// 反证测试在旧代码上**实为绿**（快流 2.3535ms）：tokio 1.54
+/// `current_thread::block_on`（scheduler/current_thread/mod.rs:201-240）在
+/// `take_core` 失败时由调用线程的 blocking parker 直驱自己的 future 并经
+/// 共享 reactor 收 I/O——并发 block_on 受支持，"单线程大锁死等"不成立。
+/// 手术照常执行（硬性判据 + spawn_blocking 线程/全局单例 runtime/单线程
+/// core CPU 串行仍是真实缺陷），本探针转而为新架构守不变量：
+/// - 快流必须在 50ms 内独立完成（不被慢流拖住）；
+/// - 取消令牌在慢流上照常生效。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_sessions_stream_in_parallel() {
     let hang = MockServer::new(vec![
         SseChunk::delay_ms(5000),
         SseChunk::text("slow"),
@@ -2434,7 +2339,7 @@ fn concurrent_sessions_stream_in_parallel() {
     let a = {
         let provider = hang_provider.clone();
         let cancel = cancel.clone();
-        std::thread::spawn(move || {
+        tokio::spawn(async move {
             let mut events = Vec::new();
             let r = qaqh_gate::chat_stream(
                 &provider,
@@ -2445,23 +2350,24 @@ fn concurrent_sessions_stream_in_parallel() {
                 None,
                 Some(&cancel),
                 &mut |ev| events.push(ev),
-            );
+            )
+            .await;
             (r, events)
         })
     };
-    // 等 A 的 HTTP 请求真正落进 mock 再发 B：既钉死时序叙事，也保证旧实现
-    // 下 B 一定是在调度锁上排队（而非还没轮到它发起请求）。
+    // 等 A 的 HTTP 请求真正落进 mock 再发 B：钉死「主会话先连上慢流」的
+    // 时序叙事，B 的独立完成才构成有效证明。
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while hang.request_count.load(Ordering::SeqCst) == 0 {
         assert!(
             std::time::Instant::now() < deadline,
             "slow stream never reached the mock"
         );
-        std::thread::sleep(std::time::Duration::from_millis(5));
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
 
     // 流 B（子代理）：立即发完的快流，从启动到完成全程计时。
-    let b = std::thread::spawn(move || {
+    let b = tokio::spawn(async move {
         let start = std::time::Instant::now();
         let mut events = Vec::new();
         let r = qaqh_gate::chat_stream(
@@ -2473,11 +2379,12 @@ fn concurrent_sessions_stream_in_parallel() {
             None,
             None,
             &mut |ev| events.push(ev),
-        );
+        )
+        .await;
         (start.elapsed(), r, events)
     });
 
-    let (b_elapsed, b_result, b_events) = b.join().expect("fast stream thread");
+    let (b_elapsed, b_result, b_events) = b.await.expect("fast stream task");
     eprintln!("[counter-proof] fast stream elapsed: {b_elapsed:?}");
     assert!(b_result.is_ok(), "fast stream must succeed: {b_result:?}");
     assert!(
@@ -2489,12 +2396,12 @@ fn concurrent_sessions_stream_in_parallel() {
     assert!(
         b_elapsed < std::time::Duration::from_millis(50),
         "fast stream was blocked behind the hanging stream for {b_elapsed:?} — \
-         the current_thread block_on scheduler lock serialised both sessions"
+         session streams must stay independent on the host runtime"
     );
 
     // 收尾：掐掉慢流，测试不陪它挂满 5 秒。
     cancel.store(true, Ordering::Release);
-    let (a_result, _a_events) = a.join().expect("slow stream thread");
+    let (a_result, _a_events) = a.await.expect("slow stream task");
     assert!(
         a_result.is_err(),
         "cancelled slow stream must surface as an error"
