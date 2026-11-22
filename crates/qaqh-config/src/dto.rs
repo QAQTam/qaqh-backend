@@ -6,7 +6,6 @@
 //! qaqh-config-api `ConfigPatch` 文档）：
 //! - 字符串字段：空串 = 保持
 //!   （防未加载草稿整包写回时清空用户配置——2026-08 根因 1 同类防御）；
-//! - tokenizerPath：空串 = 清除（None，未设置）；
 //! - exec.defaultShell：空串 / "auto" = 回到平台自动探测（None）；
 //! - 数值：validate() 已保证值域；u64→u32 饱和转换防回绕。
 
@@ -74,7 +73,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
                 })
                 .collect(),
         },
-        tokenizer_path: cfg.tokenizer_path.clone(),
         exec: ExecDto {
             default_shell: cfg.exec.default_shell.clone(),
         },
@@ -97,9 +95,6 @@ pub fn apply_patch(cfg: &mut Config, patch: &ConfigPatch) -> Result<(), String> 
     if let Some(v) = patch.permission_level {
         // validate() 已保证 1..=4（BUG-2026-09-13-15；四档制含沙箱档）。
         cfg.permission_level = u8::try_from(v).unwrap_or(1);
-    }
-    if let Some(v) = &patch.tokenizer_path {
-        cfg.tokenizer_path = (!v.is_empty()).then(|| v.clone());
     }
     if let Some(exec) = &patch.exec
         && let Some(v) = &exec.default_shell

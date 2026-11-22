@@ -52,20 +52,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ahash"
-version = "0.8.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
-dependencies = [
- "cfg-if",
- "getrandom 0.3.4",
- "once_cell",
- "serde",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -391,12 +377,6 @@ dependencies = [
 
 [[package]]
 name = "base64"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e1b586273c5702936fe7b7d6896644d8be71e6314cfe09d3167c95f712589e8"
-
-[[package]]
-name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
@@ -546,15 +526,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "castaway"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dec551ab6e7578819132c713a93c022a05d60159dc86e7a7050223577484c55a"
-dependencies = [
- "rustversion",
-]
-
-[[package]]
 name = "cc"
 version = "1.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -680,21 +651,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "compact_str"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dfdd1c2274d9aa354115b09dc9a901d6c5576818cdf70d14cae2bdb47df00ab"
-dependencies = [
- "castaway",
- "cfg-if",
- "itoa",
- "rustversion",
- "ryu",
- "serde",
- "static_assertions",
-]
-
-[[package]]
 name = "compression-codecs"
 version = "0.4.47"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -718,18 +674,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
-]
-
-[[package]]
-name = "console"
-version = "0.16.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e96a4956774c13c126a8b5af4daa79384f4d826534c95a02d76afb39e2ab64e3"
-dependencies = [
- "encode_unicode",
- "libc",
- "unicode-width",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -885,43 +829,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
-name = "daachorse"
-version = "3.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5614204febbc33cc07a2806aa6440b904ac012b68eecc37f4493ea4a76455a3d"
-
-[[package]]
-name = "darling"
-version = "0.20.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc7f46116c46ff9ab3eb1597a45688b6715c6e628b5c133e288e709a29bcb4ee"
-dependencies = [
- "darling_core 0.20.11",
- "darling_macro 0.20.11",
-]
-
-[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed17f5901b6630b993ca003def43f2f8ef4014fc13b047b57aad617ff32bc2ec"
 dependencies = [
- "darling_core 0.24.1",
- "darling_macro 0.24.1",
-]
-
-[[package]]
-name = "darling_core"
-version = "0.20.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d00b9596d185e565c2207a0b01f8bd1a135483d02d9b7b0a54b11da8d53412e"
-dependencies = [
- "fnv",
- "ident_case",
- "proc-macro2",
- "quote",
- "strsim",
- "syn 2.0.119",
+ "darling_core",
+ "darling_macro",
 ]
 
 [[package]]
@@ -939,33 +853,13 @@ dependencies = [
 
 [[package]]
 name = "darling_macro"
-version = "0.20.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc34b93ccb385b40dc71c6fceac4b2ad23662c7eeb248cf10d529b7e055b6ead"
-dependencies = [
- "darling_core 0.20.11",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "darling_macro"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ac7135c3ef02b2f7833bbeb1be5ba7f966dcde8a87c6b87f65a778d71a02785"
 dependencies = [
- "darling_core 0.24.1",
+ "darling_core",
  "quote",
  "syn 3.0.10",
-]
-
-[[package]]
-name = "dary_heap"
-version = "0.3.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b1e3a325bc115f096c8b77bbf027a7c2592230e70be2d985be950d3d5e60ebe"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -995,37 +889,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "derive_builder"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "507dfb09ea8b7fa618fcf76e953f4f5e192547945816d5358edffe39f6f94947"
-dependencies = [
- "derive_builder_macro",
-]
-
-[[package]]
-name = "derive_builder_core"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d5bcf7b024d6835cfb3d473887cd966994907effbe9227e8c8219824d06c4e8"
-dependencies = [
- "darling 0.20.11",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "derive_builder_macro"
-version = "0.20.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab63b0e2bf4d5928aff72e83a7dace85d7bba5fe12dcc3c5a572d78caffd3f3c"
-dependencies = [
- "derive_builder_core",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -1111,18 +974,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 
 [[package]]
-name = "either"
-version = "1.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
-
-[[package]]
 name = "encoding_rs"
 version = "0.8.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1189,15 +1040,6 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "esaxx-rs"
-version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
-dependencies = [
- "cc",
 ]
 
 [[package]]
@@ -1999,32 +1841,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "indicatif"
-version = "0.18.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9433806cd6b4ec1aba79c021c7e4c58fb4c3b9977c085062e611ac929998fb0c"
-dependencies = [
- "console",
- "portable-atomic",
- "unicode-width",
- "unit-prefix",
- "web-time",
-]
-
-[[package]]
 name = "ipnet"
 version = "2.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
-
-[[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
-dependencies = [
- "either",
-]
 
 [[package]]
 name = "itoa"
@@ -2275,22 +2095,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "macro_rules_attribute"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3ae8f6d608c795738406608304d30a2dfbdc8e58e44f7ba43236da5208ded3c"
-dependencies = [
- "macro_rules_attribute-proc_macro",
- "pastey",
-]
-
-[[package]]
-name = "macro_rules_attribute-proc_macro"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fc04a4c58212d57930a24bf47d3fa87485264a3a054e9c10e042eb373573ad3c"
-
-[[package]]
 name = "markup5ever"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2373,28 +2177,6 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "monostate"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3341a273f6c9d5bef1908f17b7267bbab0e95c9bf69a0d4dcf8e9e1b2c76ef67"
-dependencies = [
- "monostate-impl",
- "serde",
- "serde_core",
-]
-
-[[package]]
-name = "monostate-impl"
-version = "0.1.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4db6d5580af57bf992f59068d4ea26fd518574ff48d7639b255a36f9de6e7e9"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
 ]
 
 [[package]]
@@ -2583,28 +2365,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
-name = "onig"
-version = "6.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cc3cbf698f9438986c11a880c90a6d04b9de27575afd28bbf45b154b6c709e2"
-dependencies = [
- "bitflags 2.13.2",
- "libc",
- "once_cell",
- "onig_sys",
-]
-
-[[package]]
-name = "onig_sys"
-version = "69.9.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e68317604e77e53b85896388e1a803c1d21b74c899ec9e5e1112db90735edd7"
-dependencies = [
- "cc",
- "pkg-config",
-]
-
-[[package]]
 name = "openssl-probe"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2648,12 +2408,6 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
-
-[[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pastey"
@@ -2875,7 +2629,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qaqh-acp"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "agent-client-protocol",
  "qaqh-client",
@@ -2888,7 +2642,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-agent-runtime"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2917,7 +2671,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-client"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2941,7 +2695,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-config-api",
@@ -2960,7 +2714,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config-api"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2969,7 +2723,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-contract-export"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "hex",
  "qaqh-config-api",
@@ -2992,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-daemon"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3035,7 +2789,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-dsaccount"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3051,7 +2805,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ffi"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "android_logger",
  "log",
@@ -3066,7 +2820,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-file-tools"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3093,7 +2847,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-gate"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -3111,7 +2865,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-goal"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-ringing-contract",
@@ -3124,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-harmony-napi"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "napi-build-ohos",
  "napi-derive-ohos",
@@ -3137,7 +2891,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-lsp"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "async-lsp",
  "futures",
@@ -3159,7 +2913,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-marketplace"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3171,7 +2925,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-mcp"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "axum",
  "libc",
@@ -3190,7 +2944,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-memwatch"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -3199,7 +2953,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-permission"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-policy",
@@ -3212,14 +2966,14 @@ dependencies = [
 
 [[package]]
 name = "qaqh-policy"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qaqh-process-tools"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -3243,7 +2997,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-profile"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-types",
@@ -3257,7 +3011,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-bun"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3266,7 +3020,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-core"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3274,7 +3028,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-sdk"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3283,7 +3037,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-tools"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "qaqh-policy",
  "qaqh-ptc-core",
@@ -3296,7 +3050,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-pty"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -3306,7 +3060,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "qaqh-profile",
  "qaqh-ringing-contract",
@@ -3318,7 +3072,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-contract"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "qaqh-types",
  "schemars 1.2.3",
@@ -3332,7 +3086,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-runtime"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-memwatch",
@@ -3349,7 +3103,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-runtime"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "libc",
  "log",
@@ -3391,7 +3145,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-sandbox"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "landlock",
  "libc",
@@ -3407,7 +3161,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-session"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "hex",
  "log",
@@ -3429,7 +3183,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-siwc"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3445,7 +3199,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-skills"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "include_dir",
  "serde",
@@ -3455,7 +3209,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-subagent"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3471,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-tool-core"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3486,19 +3240,18 @@ dependencies = [
 
 [[package]]
 name = "qaqh-types"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "tokenizers",
  "toml",
  "ts-rs",
 ]
 
 [[package]]
 name = "qaqh-workspace"
-version = "4.0.2"
+version = "4.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3671,37 +3424,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "caa0f4137e1c0a72f4c651489402276c8e8e1cf081f3b0ba156d2cbeef09e86a"
 dependencies = [
  "rand_core 0.10.1",
-]
-
-[[package]]
-name = "rayon"
-version = "1.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fb39b166781f92d482534ef4b4b1b2568f42613b53e5b6c160e24cfbfa30926d"
-dependencies = [
- "either",
- "rayon-core",
-]
-
-[[package]]
-name = "rayon-cond"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2964d0cf57a3e7a06e8183d14a8b527195c706b7983549cd5462d5aa3747438f"
-dependencies = [
- "either",
- "itertools",
- "rayon",
-]
-
-[[package]]
-name = "rayon-core"
-version = "1.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
-dependencies = [
- "crossbeam-deque",
- "crossbeam-utils",
 ]
 
 [[package]]
@@ -4319,7 +4041,7 @@ version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e17bbc68e28663bbbb90df47e058aa7eda4fb445b89fe70457bb94fbccf6e49"
 dependencies = [
- "darling 0.24.1",
+ "darling",
  "proc-macro2",
  "quote",
  "syn 3.0.10",
@@ -4453,18 +4175,6 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "spm_precompiled"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5851699c4033c63636f7ea4cf7b7c1f1bf06d0cc03cfb42e711de5a5c46cf326"
-dependencies = [
- "base64 0.13.1",
- "nom",
- "serde",
- "unicode-segmentation",
 ]
 
 [[package]]
@@ -4750,40 +4460,6 @@ name = "tinyvec"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
-
-[[package]]
-name = "tokenizers"
-version = "0.23.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7afbf6e88718afcc138bad01d6ccc3051dbbc3b2ce9793d8b8a3aeb610969cfc"
-dependencies = [
- "ahash",
- "compact_str",
- "daachorse",
- "dary_heap",
- "derive_builder",
- "esaxx-rs",
- "getrandom 0.3.4",
- "indicatif",
- "itertools",
- "log",
- "macro_rules_attribute",
- "monostate",
- "onig",
- "paste",
- "rand 0.9.5",
- "rayon",
- "rayon-cond",
- "regex",
- "regex-syntax",
- "serde",
- "serde_json",
- "spm_precompiled",
- "thiserror 2.0.21",
- "unicode-normalization-alignments",
- "unicode-segmentation",
- "unicode_categories",
-]
 
 [[package]]
 name = "tokio"
@@ -5090,15 +4766,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "unicode-normalization-alignments"
-version = "0.1.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43f613e4fa046e69818dd287fdc4bc78175ff20331479dab6e1b0f98d57062de"
-dependencies = [
- "smallvec",
-]
-
-[[package]]
 name = "unicode-segmentation"
 version = "1.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5115,12 +4782,6 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "unicode_categories"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39ec24b3121d976906ece63c9daad25b85969647682eee313cb5779fdd69e14e"
 
 [[package]]
 name = "uniffi"
@@ -5243,12 +4904,6 @@ dependencies = [
  "uniffi_meta",
  "weedle2",
 ]
-
-[[package]]
-name = "unit-prefix"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
 name = "untrusted"

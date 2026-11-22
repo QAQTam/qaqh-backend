@@ -106,8 +106,6 @@ pub struct Config {
     /// 3 = skip-permissions (explicit dangerous bypass; all ordinary tools auto).
     /// 旧四档数值在 load 处经 `PermissionLevel::from_legacy_u8` 迁移。
     pub permission_level: u8,
-    /// Path to a HuggingFace tokenizer.json. `None` = use heuristic fallback.
-    pub tokenizer_path: Option<String>,
     /// Auto-compact threshold: fraction of context_limit (0.0-1.0).
     /// When total tokens exceed `context_limit * threshold`, compact is
     /// triggered before the next user message is processed. 0.0 disables.
@@ -678,7 +676,6 @@ impl Default for Config {
             goals: GoalsConfig::default(),
             exec: ExecConfig::default(),
             permission_level: 2, // workspace-write — safe autonomous default
-            tokenizer_path: None,
             auto_compact_threshold: 0.75,
             session_idle_unload_secs: 0,
             tool_allowlist_enabled: false,
@@ -841,11 +838,6 @@ falling back to 1 (read-only)"
                 }
             }
 
-            // ── Tokenizer ──
-            if let Some(ref tp) = pc.tokenizer_path {
-                cfg.tokenizer_path = Some(tp.clone());
-            }
-
             // ── Auto-compact ──
             if let Some(act) = pc.auto_compact_threshold {
                 cfg.auto_compact_threshold = act;
@@ -888,11 +880,6 @@ falling back to 1 (read-only)"
                 }
                 let _ = store.save(&fresh);
             }
-        }
-
-        // Initialize tokenizer if configured
-        if let Some(ref path) = cfg.tokenizer_path {
-            let _ = qaqh_types::token::init_tokenizer(path);
         }
 
         Ok(cfg)
@@ -946,7 +933,6 @@ falling back to 1 (read-only)"
             permission_tier: Some(self.permission_level),
             // 旧键不再写出:防止数字 3 在新三档下被再次当成旧 WorkspaceFree
             permission_level: None,
-            tokenizer_path: self.tokenizer_path.clone(),
             auto_compact_threshold: Some(self.auto_compact_threshold),
             session_idle_unload_secs: (self.session_idle_unload_secs > 0)
                 .then_some(self.session_idle_unload_secs),

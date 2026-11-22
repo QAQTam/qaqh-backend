@@ -1,0 +1,10 @@
+{
+  "id": "shell_0199a0f000007000800000000001",
+  "pid": 4242,
+  "shell": "fixture-shell",
+  "cwd": "/fixture/workspace",
+  "cols": 132,
+  "rows": 44,
+  "alive": true,
+  "output_offset": 0
+}

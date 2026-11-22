@@ -42,10 +42,6 @@ pub struct ConfigDto {
     pub mcp: McpDto,
     /// LSP 客户端配置（M1 只读；写模型另立）。
     pub lsp: LspDto,
-    /// Path to a HuggingFace tokenizer.json。
-    /// 空 = 启发式估算兜底（agent 状态层的 `<heuristic>`）；变更需**重启 daemon**
-    /// （tokenizer 是 qaqh-types 的进程级 `OnceLock`，仅在 load 时初始化一次）。
-    pub tokenizer_path: Option<String>,
     /// exec 工具默认执行配置（热字段；`exec.default_shell` 被 exec 真正消费）。
     pub exec: ExecDto,
     /// 沙箱执行配置（读模型）。
@@ -173,8 +169,6 @@ pub struct ConfigPatch {
     /// [`Self::validate`] 中做值域校验（非法即拒绝，1..=4 之外不落盘）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokenizer_path: Option<String>,
     /// exec 工具默认 shell。空串 / "auto" = 平台自动探测。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecPatch>,
@@ -305,7 +299,6 @@ mod tests {
             "goals": { "enabled": true, "maxTokenBudget": null },
             "mcp": { "enabled": false, "idleShutdownSecs": 300, "servers": [] },
             "lsp": { "enabled": false, "idleShutdownSecs": 600, "servers": [] },
-            "tokenizerPath": null,
             "exec": { "defaultShell": "bash" },
             "sandbox": { "enabled": true },
             "sessionIdleUnloadSecs": 900,

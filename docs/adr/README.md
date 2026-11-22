@@ -67,6 +67,7 @@
 | [0033](0033-agent-team-2-colleagues-over-sessions.md) | AgentTeam 2.0：同事=会话，一块任务板一条通道 | 已采纳并实施（切片 A/B/C+D 全落 main，见落地清单；`[contract-refreeze]` 三戳 bump + v4.0 金标准重切 EXIT=0）· 冒烟待真实模型环境 · 前端同批（姊妹仓）未动 |
 | [0034](0034-exec-flood-memory-surface.md) | exec 洪峰内存面：源端水位 Arc 共享 + 全文权威源=日志文件（P0，修订 0017 决策 3 写入面） | 已采纳并实施 · reader 64KiB + 同 run 合帧 + `ExecOutputWatermark(Arc<str>)`；settle 不读日志内容，对账降级 `output_complete`，content 复制废除；wire 形状零变更 |
 | [0035](0035-exec-flood-model-spill-gate.md) | exec 洪峰模型消费面泄洪闸：超限转引用 + 不恢复 + 阈值硬编码 | 已采纳 · 未实施（2026-11-22 所有者四项拍板）· 闸门装 session_loop/tool_job 消费面、客户端 SSE 不设闸；承接 0034 权威日志为泄洪区；熔断降为分级响应第三档仍开放 |
+| [0036](0036-remove-tokenizers-facility.md) | 移除 tokenizers 库与全套 tokenizer 配置设施 | 已采纳并实施（`[contract-refreeze]`：4.0.2→4.1.0 minor bump + v4.1 金标准机器重切 + check 留证双 EXIT=0）· `tokenizerPath` wire 字段删除，旧键由 deny_unknown_fields fail-fast；v4.1.0 tag 待线就绪另发 |
 
 ## 阅读顺序
 

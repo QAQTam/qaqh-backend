@@ -1,0 +1,13 @@
+{
+  "command_id": "cmd-fixture-1",
+  "status": "rejected",
+  "code": "interaction_already_resolved",
+  "existing": {
+    "source": "interaction_resolved",
+    "result": {
+      "kind": "ask_resolved",
+      "interaction_id": "interaction-fixture",
+      "outcome": "answered"
+    }
+  }
+}

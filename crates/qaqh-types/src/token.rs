@@ -1,42 +1,15 @@
-//! Token counting: CJK heuristic + optional HuggingFace tokenizer.
-
-#[cfg(feature = "tokenizers")]
-use std::sync::OnceLock;
-
-#[cfg(feature = "tokenizers")]
-static TOKENIZER: OnceLock<tokenizers::Tokenizer> = OnceLock::new();
-
-/// Initialize the tokenizer from a HuggingFace `tokenizer.json` file.
-/// Must be called once at startup. Returns Ok(()) on success.
-#[cfg(feature = "tokenizers")]
-pub fn init_tokenizer(path: &str) -> Result<(), String> {
-    let tok = tokenizers::Tokenizer::from_file(path).map_err(|e| format!("load tokenizer: {e}"))?;
-    let _ = TOKENIZER.set(tok);
-    Ok(())
-}
-
-/// Count tokens using the loaded tokenizer if available,
-/// otherwise fall back to CJK-aware heuristic.
-pub fn count_tokens(text: &str) -> u32 {
-    #[cfg(feature = "tokenizers")]
-    if let Some(tok) = TOKENIZER.get() {
-        return tok
-            .encode(text, false)
-            .map(|e| e.get_ids().len() as u32)
-            .unwrap_or_else(|_| count_tokens_heuristic(text));
-    }
-    count_tokens_heuristic(text)
-}
-
-// ── Heuristic-only counting (no tokenizer dependency) ──
+//! Token counting: CJK-aware character heuristic.
+//!
+//! HuggingFace `tokenizers` 精确计数面已整体退役（ADR-0036）：OnceLock 进程级
+//! tokenizer、`init_tokenizer` 与 `tokenizer_path` 配置设施同批移除，
+//! `count_tokens` 即本启发式。
 
 /// Count tokens using a CJK-aware character heuristic.
 ///
 /// Non-CJK characters are counted as `len / 3.3`; CJK characters as
 /// `count / 1.67`.  These ratios are derived from empirical DeepSeek
-/// tokenizer measurements and serve as a dependency-free fallback when
-/// no `tokenizer.json` is available.
-fn count_tokens_heuristic(text: &str) -> u32 {
+/// tokenizer measurements.
+pub fn count_tokens(text: &str) -> u32 {
     let cjk: usize = text
         .chars()
         .filter(|c| {

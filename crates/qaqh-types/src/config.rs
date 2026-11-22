@@ -56,10 +56,6 @@ pub struct PersistentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_level: Option<u8>,
 
-    /// Path to a HuggingFace tokenizer.json for accurate token counting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tokenizer_path: Option<String>,
-
     /// exec 工具的默认 shell。`None` / 空 / "auto" = 平台优先级自动探测。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<PersistentExecConfig>,
