@@ -1237,6 +1237,7 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("fs.read", READ),
     // gitx（ADR-0041）：worktree 隔离与 git 快照。写面按 WRITE 报错（action_failed）。
     ("gitx.snapshot", READ),
+    ("gitx.status", READ),
     ("gitx.worktree_list", READ),
     ("gitx.worktree_create", WRITE),
     ("gitx.worktree_remove", WRITE),
