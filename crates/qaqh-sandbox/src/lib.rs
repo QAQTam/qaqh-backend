@@ -68,6 +68,12 @@ pub struct SandboxLaunch {
 /// supports the required primitives. This function never returns an error and
 /// never prevents daemon startup.
 pub fn configure_from_current_exe() -> SandboxCapabilities {
+    #[cfg(windows)]
+    {
+        // 启动即在后台自动触发 5 步内核探针自检，避免客户端未主动调用
+        // sandbox.preflight.start 时能力位永远停留在 fail-closed 未校验态。
+        let _ = crate::preflight::start(false);
+    }
     let capabilities = SandboxCapabilities::detect();
     // 审计 H1：能力降级必须让操作者看见，而不是只留在 info 日志里。
     // 非 Linux 平台（主平台是 Windows）当前没有任何强制后端，`workspace_write`

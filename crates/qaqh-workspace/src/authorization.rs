@@ -712,6 +712,10 @@ mod tests {
     /// 非 Windows 恒 false），所以判据是「能力位 ∧ 平台已接线」。只看能力位
     /// 会在 Linux+bubblewrap 上误判成「应当放行」。
     fn exec_write_isolation_wired() -> bool {
+        #[cfg(windows)]
+        if qaqh_sandbox::preflight::cached_write_isolation_verified().is_none() {
+            let _ = qaqh_sandbox::preflight::run_blocking();
+        }
         qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
     }
     use super::*;
@@ -866,9 +870,9 @@ mod tests {
             Some("Need global package cache write access")
         );
 
-        // 命令文本引用会话历史文件（真实平台 sessions 目录）：不自动放行
-        let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");
-        let inv = invocation(&format!("cat {}", session_log.display()), Some("bash"));
+        // 命令文本引用 daemon 自身管理面文件（secrets.toml）：不自动放行
+        let secret_file = qaqh_types::platform::data_dir().join("secrets.toml");
+        let inv = invocation(&format!("cat {}", secret_file.display()), Some("bash"));
         let admission = admit_with_context(
             inv.clone(),
             &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
@@ -923,15 +927,15 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let workspace = std::env::temp_dir().join("qaqh-authorization-exec-cwd");
-        let sessions_dir = qaqh_types::platform::sessions_dir();
+        let data_dir = qaqh_types::platform::data_dir();
         let invocation = ToolInvocation {
             session_id: "seed-a".into(),
             call_id: "call-exec-cwd".into(),
             tool_name: "exec_command".into(),
             args: serde_json::json!({
-                "cmd": "cat messages.jsonl",
+                "cmd": "cat secrets.toml",
                 "shell": "bash",
-                "workdir": sessions_dir.to_string_lossy(),
+                "workdir": data_dir.to_string_lossy(),
             }),
             category: crate::permission::ToolCategory::Exec,
         };
@@ -945,7 +949,7 @@ mod tests {
             let admission = admit_with_context(invocation.clone(), &context, &HashSet::new());
             assert!(
                 asks(admission),
-                "level {level}: cwd 指向会话数据根时必须弹审批"
+                "level {level}: cwd 指向数据根且读取自身管理面文件时必须弹审批"
             );
         }
     }
@@ -1030,7 +1034,20 @@ mod tests {
             assert!(asks(admission));
         }
 
-        // 审计 F1/P0 回归锁：Auto 未晋升 = 实际 plain spawn = 不得自动放行
+        // 审计 F1/P0 回归锁：后端为 None（无写强制）= 不得自动放行
+        let inv = invocation(
+            "exec_command",
+            crate::permission::ToolCategory::Exec,
+            serde_json::json!({ "cmd": "Get-ChildItem src", "shell": "pwsh" }),
+        );
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::None),
+            &HashSet::new(),
+        );
+        assert!(asks(admission));
+
+        // Auto 后端已晋升（WindowsRedirect / WindowsToken）：写强制成立时自动放行
         let inv = invocation(
             "exec_command",
             crate::permission::ToolCategory::Exec,
@@ -1041,7 +1058,11 @@ mod tests {
             &ctx_for(inv, qaqh_sandbox::SandboxBackend::Auto),
             &HashSet::new(),
         );
-        assert!(asks(admission));
+        if write_enforced {
+            assert!(matches!(admission, Admission::Authorized(_)));
+        } else {
+            assert!(asks(admission));
+        }
 
         // deny 形态与网络面任何平台都保持审批
         let inv = invocation(
@@ -1075,12 +1096,12 @@ mod tests {
             &HashSet::new(),
         )));
 
-        // 会话历史文件经命令文本引用：保持审批
-        let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");
+        // daemon 自身管理面文件（secrets.toml）经命令文本引用：保持审批
+        let secret_file = qaqh_types::platform::data_dir().join("secrets.toml");
         let inv = invocation(
             "exec_command",
             crate::permission::ToolCategory::Exec,
-            serde_json::json!({ "cmd": format!("cat {}", session_log.display()), "shell": "bash" }),
+            serde_json::json!({ "cmd": format!("cat {}", secret_file.display()), "shell": "bash" }),
         );
         assert!(asks(admit_with_context(
             inv.clone(),

@@ -15,8 +15,7 @@ a parameter, or a capability that is not present in the current session.
 
 1. Inspect the tool's schema. Use only parameters that exist.
 2. Prefer the typed file tools for file operations:
-   `read`, `glob`, `grep`, `write`, `edit`, `apply_patch`, `copy_range`,
-   and `delete`.
+   `read`, `glob`, `grep`, `write`, `edit`, `apply_patch`, and `delete`.
 3. Use `exec` for commands, processes, and tools that are not represented by a
    typed tool. Do not use `exec` to bypass a typed file tool's safety checks.
 4. If a tool is missing, adapt to the current surface. Never call a preview,

@@ -66,29 +66,45 @@ fn quote_windows_arg(arg: &str, out: &mut String) {
     out.push('"');
 }
 
-/// 子进程环境:qaqh 最小白名单透传 → sbx 重指表(TMP/TEMP/USERPROFILE/HOME
-/// → scratch)→ 模型显式 env 最后覆盖(spec §5.5 顺序)。
-fn child_env(
+/// 合并沙箱子进程环境（Windows 键名大小写不敏感去重，严格优先级）：
+/// 1. qaqh 最小白名单（`minimal_child_env`）
+/// 2. `[exec.env]` 用户覆盖层
+/// 3. 调用方/模型传入的 `extra_env`（如 `TERM`）
+/// 4. sbx scratch 重指表（`TEMP`/`TMP`/`USERPROFILE`/`HOME` → scratch，压过宿主原值防 DACL 写拒）
+/// 5. `forced_child_env`（pager/编辑器/凭据提示解除，harness 最终权威）
+fn compose_sbx_env(
     scratch_tmp: &std::path::Path,
     scratch_home: &std::path::Path,
+    extra_env: Option<&[(String, String)]>,
 ) -> Vec<(String, String)> {
-    let mut env: std::collections::BTreeMap<String, String> =
-        super::direct::minimal_child_env().into_iter().collect();
-    // config [exec.env] 用户授权注入面：排在 sandbox 重指之前——scratch
-    // 重指是 harness 沙箱权威，压过用户配置（overlay 不能破坏 TMP/HOME 隔离）。
-    for (key, value) in crate::exec::env_overlay::snapshot() {
-        env.insert(key, value);
+    let mut env: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    let mut insert_ci = |k: String, v: String| {
+        env.insert(k.to_ascii_uppercase(), (k, v));
+    };
+    for (k, v) in super::direct::minimal_child_env() {
+        insert_ci(k, v);
     }
-    let repoint = [
+    for (k, v) in crate::exec::env_overlay::snapshot() {
+        insert_ci(k, v);
+    }
+    if let Some(extra) = extra_env {
+        for (k, v) in extra {
+            insert_ci(k.clone(), v.clone());
+        }
+    }
+    for (k, v) in [
         ("TEMP", scratch_tmp.display().to_string()),
         ("TMP", scratch_tmp.display().to_string()),
         ("USERPROFILE", scratch_home.display().to_string()),
         ("HOME", scratch_home.display().to_string()),
-    ];
-    for (k, v) in repoint {
-        env.insert(k.to_string(), v);
+    ] {
+        insert_ci(k.to_string(), v);
     }
-    env.into_iter().collect()
+    for (k, v) in super::direct::forced_child_env() {
+        insert_ci(k, v);
+    }
+    env.into_values().collect()
 }
 
 fn sandboxed_failure(display_name: &str, message: String) -> ExecOutput {
@@ -324,13 +340,7 @@ pub(crate) fn sbx_exec(
         }
     };
 
-    let mut env_pairs = child_env(&scratch_tmp, &scratch_home);
-    if let Some(env) = env {
-        env_pairs.extend(env.iter().cloned());
-    }
-    // pager/编辑器/凭据提示解除：harness 最终权威，压过模型显式 env
-    // (sbx 后端与 std Command 路径同一口径)。
-    env_pairs.extend(super::direct::forced_child_env());
+    let env_pairs = compose_sbx_env(&scratch_tmp, &scratch_home, env);
 
     // cwd:redirect 下工作区内路径映射进视图;无 cwd 时非 redirect 用
     // scratch\tmp,redirect 用视图根。
@@ -791,9 +801,7 @@ pub(crate) fn spawn_sbx_interactive(
     let desktop = sbx_win::desktop::create_private_desktop(&identity.sid_text)
         .map_err(|e| format!("private desktop: {e}"))?;
 
-    let mut env_pairs = child_env(&scratch_tmp, &scratch_home);
-    env_pairs.extend(env.iter().cloned());
-    env_pairs.extend(super::direct::forced_child_env());
+    let env_pairs = compose_sbx_env(&scratch_tmp, &scratch_home, Some(env));
 
     let mapped_cwd: Option<std::path::PathBuf> = match (cwd, &turn) {
         (Some(c), Some(turn)) => {
@@ -850,4 +858,51 @@ pub(crate) fn spawn_sbx_interactive(
         stdout_file,
         stderr_file,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn compose_sbx_env_repoints_scratch_and_deduplicates_case_insensitively() {
+        let scratch_tmp = Path::new("C:\\sbx\\scratch\\tmp");
+        let scratch_home = Path::new("C:\\sbx\\scratch\\home");
+        let caller = vec![
+            ("temp".to_string(), "C:\\Users\\Host\\Temp".to_string()),
+            ("USERPROFILE".to_string(), "C:\\Users\\Host".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+            ("PAGER".to_string(), "less".to_string()),
+        ];
+        let env = compose_sbx_env(scratch_tmp, scratch_home, Some(&caller));
+
+        let find_all = |name: &str| -> Vec<&str> {
+            env.iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+                .collect()
+        };
+        assert_eq!(find_all("TEMP"), vec![scratch_tmp.to_string_lossy().as_ref()]);
+        assert_eq!(find_all("TMP"), vec![scratch_tmp.to_string_lossy().as_ref()]);
+        assert_eq!(
+            find_all("USERPROFILE"),
+            vec![scratch_home.to_string_lossy().as_ref()]
+        );
+        assert_eq!(
+            find_all("HOME"),
+            vec![scratch_home.to_string_lossy().as_ref()]
+        );
+        assert_eq!(find_all("TERM"), vec!["xterm-256color"]);
+        assert_eq!(find_all("PAGER"), vec!["cat"]);
+
+        // build_env_block 亦必须对重复键大小写不敏感去重
+        let block = sbx_win::spawn::build_env_block(&[
+            ("temp".into(), "first".into()),
+            ("TEMP".into(), "second".into()),
+        ]);
+        let decoded = String::from_utf16_lossy(&block);
+        assert!(decoded.contains("TEMP=second\0"));
+        assert!(!decoded.contains("first"));
+    }
 }

@@ -155,12 +155,15 @@ fn wide(p: &Path) -> Vec<u16> {
     v
 }
 
-/// 环境块:按键名大小写不敏感排序,UTF-16,双 null 结尾。
+/// 环境块:按键名大小写不敏感去重(后者覆盖前者)并排序,UTF-16,双 null 结尾。
 pub fn build_env_block(env: &[(String, String)]) -> Vec<u16> {
-    let mut sorted: Vec<&(String, String)> = env.iter().collect();
-    sorted.sort_by(|a, b| a.0.to_uppercase().cmp(&b.0.to_uppercase()));
+    let mut deduped: std::collections::BTreeMap<String, (&str, &str)> =
+        std::collections::BTreeMap::new();
+    for (k, v) in env {
+        deduped.insert(k.to_ascii_uppercase(), (k.as_str(), v.as_str()));
+    }
     let mut block: Vec<u16> = Vec::new();
-    for (k, v) in sorted {
+    for (k, v) in deduped.values() {
         block.extend(k.encode_utf16());
         block.push('=' as u16);
         block.extend(v.encode_utf16());

@@ -5,14 +5,16 @@
 //! 解法:每次运行建一个 DACL 只授 capability SID 的私有桌面,
 //! 子进程的窗口/控制台全部落在里面(顺带获得窗口消息隔离)。
 
-use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE};
+use windows::Win32::Foundation::GENERIC_ALL;
 use windows::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows::Win32::Security::{PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES};
-use windows::Win32::System::StationsAndDesktops::{CreateDesktopW, DESKTOP_CONTROL_FLAGS};
+use windows::Win32::System::StationsAndDesktops::{
+    CloseDesktop, CreateDesktopW, DESKTOP_CONTROL_FLAGS, HDESK,
+};
 use windows::core::{PCWSTR, Result};
 
 pub struct Desktop {
-    handle: HANDLE,
+    handle: HDESK,
     name: String,
 }
 
@@ -28,7 +30,7 @@ impl Desktop {
 impl Drop for Desktop {
     fn drop(&mut self) {
         unsafe {
-            let _ = CloseHandle(self.handle);
+            let _ = CloseDesktop(self.handle);
         }
     }
 }
@@ -36,11 +38,24 @@ impl Drop for Desktop {
 /// SDDL_REVISION_1
 const SDDL_REVISION_1: u32 = 1;
 
-/// 创建 DACL 仅授 `cap_sid_text`(如 "S-1-5-21-...")GENERIC_ALL 的私有桌面。
+/// 创建私有桌面：DACL 同时授权当前用户 SID 与 `cap_sid_text`。
+///
+/// 必须同时包含当前用户 SID 与 capability SID：Windows 对 `WRITE_RESTRICTED`
+/// 令牌做双通道 AccessCheck（主 SID 列表 + Restricting SID 列表必须同时命中），
+/// 缺当前用户 SID 会导致任何静态链接 `user32.dll` 的子进程（如 pwsh/python/node）
+/// 在 `DllMain` 连接桌面时直接以 `0xC0000142 (STATUS_DLL_INIT_FAILED)` 崩溃。
 pub fn create_private_desktop(cap_sid_text: &str) -> Result<Desktop> {
     // 名字唯一性:同进程并行创建不能撞名(撞名时 CreateDesktopW 报 ACCESS_DENIED)
     static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let sddl = format!("D:(A;;GA;;;{cap_sid_text})");
+    let user_sid_text = crate::token::process_user_sid()
+        .map(|bytes| crate::sid::sid_to_string(&bytes))
+        .ok();
+    let sddl = match user_sid_text {
+        Some(user_sid) if !user_sid.eq_ignore_ascii_case(cap_sid_text) => {
+            format!("D:P(A;;GA;;;{user_sid})(A;;GA;;;{cap_sid_text})")
+        }
+        _ => format!("D:P(A;;GA;;;{cap_sid_text})"),
+    };
     let sddl_w: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
     let name = format!(
         "sbx-desktop-{}-{}-{}",
@@ -74,7 +89,7 @@ pub fn create_private_desktop(cap_sid_text: &str) -> Result<Desktop> {
         local_free_sd(&psd);
         let hdesk = created?;
         Ok(Desktop {
-            handle: HANDLE(hdesk.0 as _),
+            handle: hdesk,
             name,
         })
     }

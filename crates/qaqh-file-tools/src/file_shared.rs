@@ -115,7 +115,7 @@ pub struct LineEndings {
 /// 所有文件工具共享同一"规范视图"（LF）：
 /// - `read` 的展示/行号/hash、`edit` 的精确匹配、账本 hash 都基于该视图；
 /// - `edit` 写回只把**插入文本**按命中行的行尾还原，文件其余字节原样保留；
-///   copy_range 等整段写回按 `endings.preferred` 选行尾；
+///   apply_patch 等整段写回按 `endings.preferred` 选行尾；
 /// - 新文件/`write` 按模型给定内容原样落盘（不归一化）。
 pub fn normalize_newlines(content: &str) -> (String, LineEndings) {
     let mut lf = String::with_capacity(content.len());

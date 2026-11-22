@@ -38,12 +38,6 @@ pub fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec<String
             // provider ignores the guidance to use one create(items=[...]).
             paths.push("__qaqh_todo__".to_string());
         }
-        "copy_range" => {
-            // M1：写目标是 target_path（source_path 为读端，不参与写冲突）。
-            if let Some(p) = args.get("target_path").and_then(|v| v.as_str()) {
-                paths.push(p.to_string());
-            }
-        }
         "apply_patch" => {
             // M1：目标在 patch 文本里（Codex 格式头），解析后按同文件分组；
             // canonical 键 `input`（Codex 惯例）与旧拼写 `patch` 同权读取——
@@ -196,22 +190,6 @@ mod tests {
         assert_eq!(serial_after, HashSet::from([1]));
     }
 
-    #[test]
-    fn copy_range_write_targets_are_grouped() {
-        let pending = vec![
-            (
-                "copy_range".to_string(),
-                serde_json::json!({"source_path":"a.txt","target_path":"out/b.txt"}),
-            ),
-            (
-                "copy_range".to_string(),
-                serde_json::json!({"source_path":"c.txt","target_path":"out/b.txt"}),
-            ),
-        ];
-        let (groups, serial_after) = resolve_write_conflicts(&pending);
-        assert_eq!(groups, vec![vec![0, 1]]);
-        assert_eq!(serial_after, HashSet::from([1]));
-    }
 
     #[test]
     fn independent_file_mutations_remain_parallel() {

@@ -12,7 +12,6 @@ this table.
 | Create/replace | `write` | Returns a receipt; stale files must be re-read. |
 | Exact replacement | `edit` | `old_string` must occur once unless `replace_all`. |
 | Codex patch | `apply_patch` | First context hit; partial application possible. |
-| Move lines | `copy_range` | Uses exact whole-line anchors. |
 | Delete | `delete` | Moves to `.qaqh/trash/`, not unlink. |
 | Run a command | `exec_command` | Returns an execution session ID when it yields. |
 | Read output or provide input | `write_stdin` | Uses the execution session ID. |

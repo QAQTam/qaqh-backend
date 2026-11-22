@@ -9,7 +9,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{SandboxBackend, SandboxCapabilities};
+use crate::SandboxBackend;
+#[cfg(target_os = "linux")]
+use crate::SandboxCapabilities;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -171,14 +173,13 @@ fn initial_steps() -> Vec<SandboxPreflightStep> {
 }
 
 fn new_idle_report() -> SandboxPreflightReport {
-    let caps = SandboxCapabilities::detect();
     SandboxPreflightReport {
         run_id: "preflight_0".into(),
         state: SandboxPreflightState::Idle,
-        platform: caps.platform_str().to_string(),
-        effective_backend: caps.backend,
-        filesystem_write_enforced: caps.filesystem_write_isolation,
-        network_isolation_enforced: caps.network_isolation,
+        platform: std::env::consts::OS.to_string(),
+        effective_backend: SandboxBackend::Auto,
+        filesystem_write_enforced: false,
+        network_isolation_enforced: false,
         elevated: is_process_elevated(),
         progress_percent: 0,
         current_step_id: None,
@@ -240,14 +241,13 @@ pub fn start(force: bool) -> SandboxPreflightReport {
         let run_id = format!("preflight_{}_{seq}", std::process::id());
         let steps = initial_steps();
         let first_step = steps.first().map(|s| s.id.clone());
-        let caps = SandboxCapabilities::detect();
         *guard = SandboxPreflightReport {
             run_id: run_id.clone(),
             state: SandboxPreflightState::Running,
-            platform: caps.platform_str().to_string(),
-            effective_backend: caps.backend,
-            filesystem_write_enforced: caps.filesystem_write_isolation,
-            network_isolation_enforced: caps.network_isolation,
+            platform: std::env::consts::OS.to_string(),
+            effective_backend: SandboxBackend::Auto,
+            filesystem_write_enforced: false,
+            network_isolation_enforced: false,
             elevated: is_process_elevated(),
             progress_percent: 0,
             current_step_id: first_step,
@@ -296,14 +296,13 @@ pub fn run_blocking() -> SandboxPreflightReport {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let steps = initial_steps();
         let first_step = steps.first().map(|s| s.id.clone());
-        let caps = SandboxCapabilities::detect();
         *guard = SandboxPreflightReport {
             run_id: run_id.clone(),
             state: SandboxPreflightState::Running,
-            platform: caps.platform_str().to_string(),
-            effective_backend: caps.backend,
-            filesystem_write_enforced: caps.filesystem_write_isolation,
-            network_isolation_enforced: caps.network_isolation,
+            platform: std::env::consts::OS.to_string(),
+            effective_backend: SandboxBackend::Auto,
+            filesystem_write_enforced: false,
+            network_isolation_enforced: false,
             elevated: is_process_elevated(),
             progress_percent: 0,
             current_step_id: first_step,
@@ -708,8 +707,6 @@ fn execute_windows_preflight(run_id: &str) {
         .map(|e| e.code == 0 && String::from_utf8_lossy(&e.stdout).contains("gitcfg"))
         .unwrap_or(false);
 
-    let _ = std::fs::remove_dir_all(&base);
-
     if deny_git_write && allow_git_read {
         complete_step(
             run_id,
@@ -720,6 +717,7 @@ fn execute_windows_preflight(run_id: &str) {
             t3.elapsed().as_millis() as u64,
         );
     } else {
+        let _ = std::fs::remove_dir_all(&base);
         complete_step(
             run_id,
             3,
@@ -746,16 +744,82 @@ fn execute_windows_preflight(run_id: &str) {
     let projfs_ok = projfs::available();
     let redirect_on = crate::sbx_map::redirect_promoted();
     let effective_backend = if projfs_ok && redirect_on {
-        complete_step(
-            run_id,
-            4,
-            SandboxPreflightStepStatus::Passed,
-            "Client-ProjFS 已启用，沙箱已就绪于最强 RedirectPlane (虚拟视图写重定向 + 受限令牌)"
-                .into(),
-            None,
-            t4.elapsed().as_millis() as u64,
-        );
-        SandboxBackend::WindowsRedirect
+        // 实测 ProjFS 视图写入 → store 未受污染 → merge 落盘闭环
+        let probe_res = (|| -> std::io::Result<()> {
+            let ws_r = base.join("ws_redirect");
+            let view_r = base.join("view_redirect");
+            std::fs::create_dir_all(&ws_r)?;
+            std::fs::write(ws_r.join("orig.txt"), "v1")?;
+            let policy_r = SbxPolicy {
+                writable_roots: vec![ws_r.clone()],
+                writable_files: vec![],
+                deny_write_paths: vec![],
+                network: NetworkPolicy::Deny,
+                isolation: sbx_win::policy::IsolationKind::Token,
+                readable_roots: vec![],
+                capabilities: vec![],
+                writable_registry_keys: vec![],
+                redirect: true,
+            };
+            let split = sbx_win::redirect::split_plan(&policy_r, &cap, &ws_r, &view_r)?;
+            let turn = sbx_win::redirect::prepare_turn(&ws_r, &view_r, &split.view)?;
+            let child = spawn::spawn(
+                &spawn::Isolation::RestrictedToken {
+                    token: tok.handle(),
+                },
+                &cmd_line("echo redirected > new_in_view.txt"),
+                turn.root(),
+                &env_pairs,
+                Some(priv_desktop.name()),
+            )
+            .map_err(|e| std::io::Error::other(format!("spawn: {e}")))?;
+            let exit = child.wait()?;
+            if exit.code != 0 {
+                return Err(std::io::Error::other(format!(
+                    "projfs view write failed exit={}",
+                    exit.code
+                )));
+            }
+            if ws_r.join("new_in_view.txt").exists() {
+                return Err(std::io::Error::other(
+                    "projfs isolation violated: write leaked directly to store before merge",
+                ));
+            }
+            let report = turn.merge()?;
+            if report.applied == 0 || !ws_r.join("new_in_view.txt").exists() {
+                return Err(std::io::Error::other(
+                    "projfs merge did not apply view write to store",
+                ));
+            }
+            Ok(())
+        })();
+        match probe_res {
+            Ok(()) => {
+                complete_step(
+                    run_id,
+                    4,
+                    SandboxPreflightStepStatus::Passed,
+                    "Client-ProjFS 视图隔离与同步 merge 实测通过，沙箱已就绪于最强 RedirectPlane"
+                        .into(),
+                    None,
+                    t4.elapsed().as_millis() as u64,
+                );
+                SandboxBackend::WindowsRedirect
+            }
+            Err(err) => {
+                complete_step(
+                    run_id,
+                    4,
+                    SandboxPreflightStepStatus::Warning,
+                    format!(
+                        "Client-ProjFS DLL 已存在但视图探针失败 ({err})；已回落 TokenPlane 内核写隔离"
+                    ),
+                    Some("请确认系统临时目录所在卷为本地 NTFS 分区并重启后重试 Client-ProjFS。".into()),
+                    t4.elapsed().as_millis() as u64,
+                );
+                SandboxBackend::WindowsToken
+            }
+        }
     } else if !projfs_ok {
         complete_step(
             run_id,
@@ -778,6 +842,8 @@ fn execute_windows_preflight(run_id: &str) {
         );
         SandboxBackend::WindowsToken
     };
+
+    let _ = std::fs::remove_dir_all(&base);
 
     finish_run(
         run_id,
@@ -881,6 +947,13 @@ mod tests {
 
     #[test]
     fn preflight_runs_all_steps_and_updates_cached_report() {
+        #[cfg(windows)]
+        {
+            // Fail-closed：自检完成前不得乐观宣称写隔离成立
+            if cached_write_isolation_verified().is_none() {
+                assert!(!crate::SandboxCapabilities::detect().filesystem_write_isolation);
+            }
+        }
         let report = run_blocking();
         assert_eq!(report.progress_percent, 100);
         assert!(matches!(
@@ -904,6 +977,10 @@ mod tests {
                     SandboxBackend::WindowsToken | SandboxBackend::WindowsRedirect
                 ));
             }
+            assert_eq!(
+                crate::SandboxCapabilities::detect().filesystem_write_isolation,
+                report.filesystem_write_enforced
+            );
         }
         let cached = status();
         assert_eq!(cached.run_id, report.run_id);

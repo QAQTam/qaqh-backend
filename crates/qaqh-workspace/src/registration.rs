@@ -9,7 +9,6 @@ use super::web;
 
 use super::apply_patch;
 use super::confirm_apply;
-use super::copy_range;
 use super::file_glob;
 use super::file_mutate;
 use super::file_query;
@@ -53,7 +52,6 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     file_query::register(&mut mgr);
     file_glob::register(&mut mgr);
     apply_patch::register(&mut mgr);
-    copy_range::register(&mut mgr);
     grep_tool::register(&mut mgr);
 
     // ── dry-run 确认（内存直提）──
@@ -106,7 +104,6 @@ mod tests {
                 "apply_patch",
                 "ask",
                 "confirm_apply",
-                "copy_range",
                 "delete",
                 "edit",
                 "exec_command",

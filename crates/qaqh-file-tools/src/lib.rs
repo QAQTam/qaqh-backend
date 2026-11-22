@@ -2,7 +2,7 @@
 //!
 //! 承载全部「以文件系统为对象」的内置工具实现：write/delete/file_mutate、
 //! read/file_query、glob、grep、edit、apply_patch 全家（engine/arg_estimate/
-//! code_delta/copy_range/confirm_apply/pending）、journal 审计账本、read_image。
+//! code_delta/confirm_apply/pending）、journal 审计账本、read_image。
 //!
 //! 组内历史环（`journal ↔ file_mutate`、`file_query → edit::core`）随同 crate
 //! 自然合法化。对门面（qaqh-workspace）只经两条单向边回接：
@@ -21,7 +21,6 @@ pub mod apply_patch_engine;
 pub mod arg_estimate;
 pub mod code_delta;
 pub mod confirm_apply;
-pub mod copy_range;
 pub mod edit;
 pub mod file_cache;
 pub mod file_glob;

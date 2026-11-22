@@ -17,7 +17,6 @@ this guide.
 | Create or replace a file | `write` |
 | Replace an exact string | `edit` |
 | Apply a Codex patch | `apply_patch` |
-| Move lines between files | `copy_range` |
 | Move a file to trash | `delete` |
 | Run a command or process | `exec` |
 | Continue a background process | `process` |

@@ -4,7 +4,6 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 pub use qaqh_file_tools::confirm_apply;
-pub use qaqh_file_tools::copy_range;
 pub use qaqh_permission::conflict;
 pub mod display;
 pub use qaqh_file_tools::grep_tool;
@@ -114,7 +113,7 @@ pub use qaqh_types::{
 // ── 全局状态：已随权限引擎拆至 qaqh-permission（P2 拆分，研究文档 §4-c）。
 // 进程级会话/工作区/取消状态 + actor thread-local 经下方
 // re-export 保持 `qaqh_workspace::X` 路径兼容；TEST_RUNTIME_SERIAL 仅服务
-// 门面自身测试（journal/confirm_apply/copy_range），留在此处。
+// 门面自身测试（journal/confirm_apply），留在此处。
 
 /// Unit tests mutate process-wide runtime state. Keep those mutations
 /// deterministic even when the Rust test harness runs modules in parallel.

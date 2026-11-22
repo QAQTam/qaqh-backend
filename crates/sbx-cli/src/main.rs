@@ -6,6 +6,8 @@
 //! workspace 门禁在这些平台编不过。
 
 #[cfg(windows)]
+mod verify;
+#[cfg(windows)]
 mod win;
 
 #[cfg(windows)]

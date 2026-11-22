@@ -318,7 +318,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         ClientsListParams, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
         ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams,
         ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult,
-        GitxSnapshotParams, GitxWorktreeBindParams, GitxWorktreeCreateParams,
+        GitxSnapshotParams, GitxStatusParams, GitxWorktreeBindParams, GitxWorktreeCreateParams,
         GitxWorktreeListParams, GitxWorktreeRemoveParams, GitxWorktreeUnbindParams,
         PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams, SessionDashboard,
         SessionDashboardParams, SessionDashboardTask, SessionGetActivityParams, SessionListParams,
@@ -541,6 +541,45 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             head_sha: Some("3f2a".repeat(10)),
             detached: false,
             dirty: false,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-status-params.json",
+        &GitxStatusParams {
+            scope_session_id: Some("0199a0f0-0000-7000-8000-000000000001".to_owned()),
+        },
+    )?;
+    // 值域与 qaqh-ringing-contract::gitx 的 wire 形状锁测试同源：porcelain v2
+    // XY 双码、upstream/ahead/behind、未推送提交，不另造第二套样本。
+    write_fixture(
+        stage,
+        "service-gitx-status-result.json",
+        &qaqh_ringing_contract::GitStatusSnapshot {
+            schema: qaqh_ringing_contract::GITX_SCHEMA.to_owned(),
+            source_root: "/synthetic/workspace".to_owned(),
+            branch: Some("feature/auth".to_owned()),
+            head_sha: Some("3f2a".repeat(10)),
+            detached: false,
+            upstream: Some("origin/feature/auth".to_owned()),
+            ahead: Some(2),
+            behind: Some(0),
+            files: vec![
+                qaqh_ringing_contract::GitFileStatus {
+                    path: "src/lib.rs".to_owned(),
+                    index: "M".to_owned(),
+                    worktree: " ".to_owned(),
+                },
+                qaqh_ringing_contract::GitFileStatus {
+                    path: "docs/new.md".to_owned(),
+                    index: "?".to_owned(),
+                    worktree: "?".to_owned(),
+                },
+            ],
+            unpushed: vec![qaqh_ringing_contract::GitUnpushedCommit {
+                hash: "abc1234".to_owned(),
+                subject: "feat: x".to_owned(),
+            }],
         },
     )?;
     write_fixture(

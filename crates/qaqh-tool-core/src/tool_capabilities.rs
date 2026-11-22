@@ -90,11 +90,10 @@ const EXEC: ToolCapabilities = ToolCapabilities {
 
 /// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
 /// `default_registry_exposes_the_formal_tool_vocabulary`）。
-const TABLE: [(&str, ToolCapabilities); 20] = [
+const TABLE: [(&str, ToolCapabilities); 19] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
     ("confirm_apply", MUTATING),
-    ("copy_range", MUTATING),
     ("delete", MUTATING),
     ("edit", MUTATING),
     ("exec_command", EXEC),

@@ -85,15 +85,6 @@ pub fn extract_target_paths_in(
     if let Some(d) = args.get("dest").and_then(|v| v.as_str()) {
         paths.push(PathBuf::from(d));
     }
-    // copy_range: source (read) + target (write) — both workspace-bounded
-    if tool_name == "copy_range" {
-        if let Some(s) = args.get("source_path").and_then(|v| v.as_str()) {
-            paths.push(PathBuf::from(s));
-        }
-        if let Some(t) = args.get("target_path").and_then(|v| v.as_str()) {
-            paths.push(PathBuf::from(t));
-        }
-    }
     // web_fetch: `output` 是 web.rs 里唯一且无条件的 `fs::write` 目标；
     // 不提等于审批清单看不到写目标，workspace 边界/trust folder 判定失明。
     if tool_name == "web_fetch"

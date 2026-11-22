@@ -132,7 +132,7 @@ pub fn apply_pending(entries: Vec<StateEntry>) {
 }
 
 /// Windows 上 `canonicalize` 返回 `\\?\C:\…` verbatim 前缀路径；剥掉以与
-/// read/write 既有键形态一致（见 `copy_range.rs` 的 BUG-2026-09-13-16 注）。
+/// read/write 既有键形态一致（BUG-2026-09-13-16：verbatim 前缀曾致两套账本键）。
 fn strip_verbatim(path: &std::path::Path) -> String {
     let s = path.to_string_lossy();
     s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
@@ -150,7 +150,7 @@ fn strip_verbatim(path: &std::path::Path) -> String {
 /// 不存在（新建/已删除，或跨机 serve→daemon 回传）时解析父目录后拼回文件名；
 /// 父目录也解析失败则退回词法归一形态。
 ///
-/// 相对路径**原样保留**：生产调用方（read/write/edit/copy_range/apply_patch）
+/// 相对路径**原样保留**：生产调用方（read/write/edit/apply_patch）
 /// 都已先经 `resolve_workspace_path` 产出绝对路径；账本层再解析会把无锚点的
 /// 相对键悄悄改成 workspace/cwd 绝对键，破坏既有相对键契约（且与并行测试的
 /// 全局 `CURRENT_WORKSPACE` 互相干扰）。

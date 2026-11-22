@@ -26,6 +26,7 @@ sbx — Windows 受限令牌沙箱(TokenPlane)+ ProjFS 重定向(RedirectPlane)
           [--redirect] [--changes merge|discard|report]
           [--scratch DIR] [--cwd DIR] [--journal FILE] -- <cmdline...>
   sbx selftest
+  sbx verify [--json]
   sbx cleanup --workspace DIR
   sbx doctor [--workspace DIR]
   sbx sidgen
@@ -50,6 +51,9 @@ fn real_main() -> i32 {
     match args.first().map(String::as_str) {
         Some("run") => cmd_run(&args[1..]),
         Some("selftest") => cmd_selftest(),
+        Some("verify") => crate::verify::cmd_verify(&args[1..]),
+        Some("probe-worker") => crate::verify::cmd_probe_worker(&args[1..]),
+        Some("probe-grandchild") => crate::verify::cmd_probe_grandchild(&args[1..]),
         Some("cleanup") => cmd_cleanup(&args[1..]),
         Some("doctor") => cmd_doctor(&args[1..]),
         Some("sidgen") => cmd_sidgen(),
