@@ -2802,10 +2802,12 @@ dependencies = [
  "qaqh-types",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "ts-rs",
  "ureq",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -3227,10 +3229,12 @@ dependencies = [
  "qaqh-types",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "ts-rs",
  "ureq",
  "url",
+ "uuid",
 ]
 
 [[package]]

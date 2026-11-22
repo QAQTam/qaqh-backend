@@ -13,6 +13,11 @@ qaqh-types = { path = "../qaqh-types" }
 # 随机量与 sha256 走 aws-lc-rs：与 qaqh-siwc、daemon 服务端 TLS 同一栈（ADR-0039；
 # PKCE 的 S256 就是 sha256）。OHOS 不消费本 crate，无 ring 保留诉求。
 aws-lc-rs = "1"
+# 常数时间比较（PKCE state 校验）：LTO 下手写 XOR 循环随时被优化掉常数时间
+# 特性，subtle 是唯一可信实现。
+subtle = "2"
+# device_id/attempt_id 的 UUIDv4（P0-3：手写「时间戳+PID」兜底退役）。
+uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"

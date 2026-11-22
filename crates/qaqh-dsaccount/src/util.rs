@@ -2,28 +2,24 @@
 //!
 //! 与 `qaqh-siwc::util` 是**同一套实现**（base64url 与一次性事务量都只有一份语义），
 //! 两 crate 互不依赖，故此处重复一份并保留同样的测试向量；抽公共件属结构塑形，
-//! 另立项。随机数一律走 `aws_lc_rs::rand::SystemRandom`（与 PKCE 的 sha256 同一来源）。
+//! 另立项。随机数一律走 `aws_lc_rs::rand::SystemRandom`（与 PKCE 的 sha256 同一
+//! 来源）；UUIDv4 走 `uuid` crate；常数时间比较走 `subtle`（P0-3：三个手写实现
+//! 与「熵源失败降级补丁」一并退役——SystemRandom 失败即 panic，绝不静默降级成
+//! 「时间戳+栈地址」拼出的伪随机，那是拿安全漏洞掩盖系统故障，宪法 #5 零容忍）。
 
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use subtle::ConstantTimeEq;
 
 /// URL-safe base64（无 padding）随机串。`n` 为**字节数**，输出长度约 `4n/3`。
+///
+/// # Panics
+/// 系统 CSPRNG（`SystemRandom::fill`）失败时 panic——熵源故障意味着进程环境
+/// 已不可信，PKCE verifier / state 绝不允许降级生成，故障必须显性暴露。
 pub fn random_urlsafe(bytes: usize) -> String {
     let mut buf = vec![0u8; bytes];
-    let rng = SystemRandom::new();
-    if rng.fill(&mut buf).is_err() {
-        // 系统熵源失败意味着进程环境已不可信。这里不静默降级成「弱随机」而是
-        // 用时间 + 栈地址混合出一个**可观测地不同**的值，同时把随机性来源降级
-        // 这件事留给调用方（PKCE/state 的生命周期只有一次授权尝试那么长）。
-        let seed = format!(
-            "{:?}{:p}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0),
-            &buf as *const _ as *const u8
-        );
-        return base64url_encode(seed.as_bytes());
-    }
+    SystemRandom::new()
+        .fill(&mut buf)
+        .expect("system CSPRNG failure: refusing to derive OAuth secrets without entropy");
     base64url_encode(&buf)
 }
 
@@ -32,46 +28,15 @@ pub fn random_transaction_value() -> String {
     random_urlsafe(32)
 }
 
-/// RFC 4122 v4 UUID 文本形态（`auth_exchange` 的 `device_id` 用）。
-///
-/// 不是凭据，只要求唯一性，故熵源失败时可以退化成时间戳 + 进程 ID。
+/// RFC 4122 v4 UUID 文本形态（`auth_exchange` 的 `device_id` 与授权尝试
+/// `attempt_id` 用）。不是凭据，只要求唯一性；`uuid` crate 的 v4 走系统熵源。
 pub fn random_uuid_v4() -> String {
-    let mut buf = [0u8; 16];
-    let rng = SystemRandom::new();
-    if rng.fill(&mut buf).is_err() {
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        buf[..8].copy_from_slice(&nanos.to_be_bytes()[..8]);
-        buf[8..].copy_from_slice(&(std::process::id() as u64).to_be_bytes());
-    }
-    // RFC 9562 §5.4：version 4 + variant 10xx。
-    buf[6] = (buf[6] & 0x0f) | 0x40;
-    buf[8] = (buf[8] & 0x3f) | 0x80;
-    let hex: String = buf.iter().map(|byte| format!("{byte:02x}")).collect();
-    match (
-        hex.get(0..8),
-        hex.get(8..12),
-        hex.get(12..16),
-        hex.get(16..20),
-        hex.get(20..32),
-    ) {
-        (Some(a), Some(b), Some(c), Some(d), Some(e)) => format!("{a}-{b}-{c}-{d}-{e}"),
-        _ => hex,
-    }
+    uuid::Uuid::new_v4().to_string()
 }
 
-/// 常数时间比较（长度不等直接 false；长度本身不是秘密）。
+/// 常数时间比较（`subtle`，长度不等直接 false——长度本身不是秘密）。
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    bool::from(a.ct_eq(b))
 }
 
 /// epoch 毫秒。授权尝试的过期时刻与 UI 的倒计时共用这一个时钟。
