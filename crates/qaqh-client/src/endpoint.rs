@@ -54,6 +54,14 @@ pub enum QueryRequest {
     DiagnosticsMemorySnapshot {
         after_sequence: Option<u64>,
     },
+    /// gitx 读面（ADR-0041）：源工作区 git 快照（scope 缺省 = daemon cwd）。
+    GitxSnapshot {
+        scope_session_id: Option<String>,
+    },
+    /// gitx 读面（ADR-0041）：managed（注册表）+ unmanaged worktree 清单。
+    GitxWorktreeList {
+        scope_session_id: Option<String>,
+    },
 }
 
 impl QueryRequest {
@@ -86,6 +94,8 @@ impl QueryRequest {
             "workspace.get",
             "todo.list",
             "diagnostics.memory.snapshot",
+            "gitx.snapshot",
+            "gitx.worktree_list",
         ]
     }
 
@@ -150,6 +160,18 @@ impl QueryRequest {
             "diagnostics.memory.snapshot" => Self::DiagnosticsMemorySnapshot {
                 after_sequence: params.get("after_sequence").and_then(Value::as_u64),
             },
+            "gitx.snapshot" => Self::GitxSnapshot {
+                scope_session_id: params
+                    .get("scope_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
+            "gitx.worktree_list" => Self::GitxWorktreeList {
+                scope_session_id: params
+                    .get("scope_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
             _ => return None,
         })
     }
@@ -177,6 +199,20 @@ impl QueryRequest {
                     params["after_sequence"] = json!(after_sequence);
                 }
                 ("diagnostics.memory.snapshot", params)
+            }
+            Self::GitxSnapshot { scope_session_id } => {
+                let mut params = json!({});
+                if let Some(scope) = scope_session_id {
+                    params["scope_session_id"] = json!(scope);
+                }
+                ("gitx.snapshot", params)
+            }
+            Self::GitxWorktreeList { scope_session_id } => {
+                let mut params = json!({});
+                if let Some(scope) = scope_session_id {
+                    params["scope_session_id"] = json!(scope);
+                }
+                ("gitx.worktree_list", params)
             }
             Self::SkillsCatalog { cwd } => {
                 let mut params = json!({});
@@ -253,6 +289,8 @@ mod tests {
                 "diagnostics.memory.snapshot",
                 json!({ "after_sequence": 9 }),
             ),
+            ("gitx.snapshot", json!({})),
+            ("gitx.worktree_list", json!({ "scope_session_id": "s1" })),
         ];
         for (method, params) in cases {
             let request = QueryRequest::try_from_service(method, &params)

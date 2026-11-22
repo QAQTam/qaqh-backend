@@ -1693,6 +1693,42 @@ mod tests {
         }
     }
 
+    /// 客户端的 gitx 放行面与 daemon 方法表**两向**对齐（ADR-0041）。
+    ///
+    /// gitx 读面两条在 `QueryRequest` 封闭枚举里，写面四条在 `GITX_METHODS`
+    /// 账号外白名单里——本闸把 daemon `gitx.*` 这一族与两个客户端出口一起锁：
+    /// daemon 表里的 gitx 方法必须在某个客户端出口放行（漏了桌面壳调不到），
+    /// 客户端出口里的每条都必须在 daemon 表里（死条目），且不是 admin_only。
+    #[test]
+    fn client_gitx_surface_mirrors_the_daemon_gitx_methods() {
+        let declared: Vec<&str> = METHODS
+            .iter()
+            .filter(|(name, _)| name.starts_with("gitx."))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(!declared.is_empty(), "daemon 方法表里必须有 gitx.* 这一族");
+        for method in &declared {
+            assert!(
+                qaqh_client::service::GITX_METHODS.contains(method)
+                    || qaqh_client::QueryRequest::query_service_methods().contains(method),
+                "{method} 在 daemon 方法表里，但客户端 gitx 读/写两个出口都没放行"
+            );
+        }
+        for method in qaqh_client::service::GITX_METHODS
+            .iter()
+            .chain(qaqh_client::QueryRequest::query_service_methods().iter())
+            .filter(|method| method.starts_with("gitx."))
+        {
+            let info = lookup(method).unwrap_or_else(|| {
+                panic!("客户端 gitx 出口里的 {method} 不在 daemon 方法表（死条目）")
+            });
+            assert!(
+                !info.admin_only,
+                "{method} 是桌面壳的 worktree 面，不是账号凭据面：admin_only 会挡在 interact 档之外"
+            );
+        }
+    }
+
     /// 服务面会话键只认 `session_id`：legacy `seed` 已随 Phase E 退场。
     #[test]
     fn session_param_only_accepts_session_id() {

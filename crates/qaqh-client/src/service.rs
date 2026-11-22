@@ -78,6 +78,20 @@ pub const SANDBOX_METHODS: &[&str] = &[
     "sandbox.preflight.status",
 ];
 
+/// gitx worktree 写面四条（ADR-0041：worktree 隔离的变更操作）。
+///
+/// **刻意不并进 [`SERVICE_METHODS`]**：同 [`SHELL_METHODS`] 的理由——那张表的
+/// 真源是账号面 methods 模块，并有 `client_service_whitelist_mirrors_account_methods`
+/// 的 admin_only 语义闸。读面两条（`gitx.snapshot`/`gitx.worktree_list`）走
+/// [`crate::QueryRequest`] 封闭枚举；这四条写面经 `service_call` 透传，
+/// daemon 侧由 `qaqh-runtime` 的 TYPED_METHODS 形状闸与 gitx 镜像测试双向锁住。
+pub const GITX_METHODS: &[&str] = &[
+    "gitx.worktree_create",
+    "gitx.worktree_remove",
+    "gitx.worktree_bind",
+    "gitx.worktree_unbind",
+];
+
 /// 方法名是否在放行范围内（`service_call` 与调用方的预检共用同一条判定）。
 ///
 /// 两张表共用一个判定入口，是为了让「客户端放行了什么」这个问题只有**一处**回答
@@ -87,6 +101,7 @@ pub fn is_allowed(method: &str) -> bool {
     SERVICE_METHODS.contains(&method)
         || SHELL_METHODS.contains(&method)
         || SANDBOX_METHODS.contains(&method)
+        || GITX_METHODS.contains(&method)
 }
 
 /// 把非 2xx 响应体翻成结构化错误。
