@@ -1,0 +1,17 @@
+{
+  "worktrees": [
+    {
+      "schema": "qaqh.ringing.gitx/v1",
+      "id": "0199a0f0-0000-7000-8000-00000000ab12",
+      "branch": "feature/auth",
+      "slug": "feature-auth",
+      "path": "/synthetic/workspace/.qaqh/worktree/feature-auth-ab12",
+      "source_root": "/synthetic/workspace",
+      "head_sha": "3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a",
+      "owner_session_id": null,
+      "created_at_ms": 1760000000000,
+      "missing_dir": false
+    }
+  ],
+  "unmanaged_paths": []
+}

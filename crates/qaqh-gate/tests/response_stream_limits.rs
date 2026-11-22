@@ -5,20 +5,31 @@ use qaqh_types::Message;
 use serde_json::json;
 use std::sync::atomic::Ordering;
 
+/// 共享测试 runtime：gate 原生 async 后测试侧的合法桥接（同 #[tokio::test] 性质）。
+static TEST_RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("gate test runtime")
+});
+
 fn run(mock: &MockServer) -> (anyhow::Result<()>, Vec<StreamEvent>) {
     let provider = ProviderConfig::responses(&mock.base_url(), "test", "test-model", None);
-    let mut events = Vec::new();
-    let result = qaqh_gate::chat_stream(
-        &provider,
-        vec![Message::user("inspect")],
-        None,
-        4096,
-        None,
-        None,
-        None,
-        &mut |event| events.push(event),
-    );
-    (result, events)
+    TEST_RT.block_on(async {
+        let mut events = Vec::new();
+        let result = qaqh_gate::chat_stream(
+            &provider,
+            vec![Message::user("inspect")],
+            None,
+            4096,
+            None,
+            None,
+            None,
+            &mut |event| events.push(event),
+        )
+        .await;
+        (result, events)
+    })
 }
 
 fn event(value: serde_json::Value) -> SseChunk {

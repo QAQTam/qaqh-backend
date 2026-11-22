@@ -63,7 +63,6 @@ pub enum Evidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProviderFailureKind {
     Request,
-    WorkerCrash,
 }
 
 /// 一次请求中截断/损坏的工具调用：call_id/name 齐全，`args_text` 是已到达
@@ -169,22 +168,25 @@ pub async fn run_round(
     let cancel_flag = Arc::new(AtomicBool::new(*cancel.borrow()));
     let flag = cancel_flag.clone();
     let display = progress.clone();
-    let mut job =
-        tokio::task::spawn_blocking(move || {
-            stream_once(spec, messages, user_id, &flag, display, text_seed)
-        });
+    // P0-1：gate 已原生 async,直接在本会话任务的宿主 runtime 上驱动流,
+    // 不再 spawn_blocking 拍扁再 block_on(每在飞 turn 烧一个 OS 线程的三明治
+    // 已随 FALLBACK_RT 一并物理删除)。取消语义不变:置位后由 gate 的取消
+    // 路径收尾,future 照常 await 到终态,证据链(partial_*)一个不丢。
+    let mut job = Box::pin(stream_once(
+        spec,
+        messages,
+        user_id,
+        &flag,
+        display,
+        text_seed,
+    ));
     let mut finished: Option<ProviderOutcome> = None;
     let mut cancelled_by_turn = false;
     loop {
         tokio::select! {
             biased;
             result = &mut job => {
-                finished = Some(match result {
-                    Ok(value) => value,
-                    Err(error) => {
-                        worker_crashed(&format!("provider worker join failed: {error}"))
-                    }
-                });
+                finished = Some(result);
                 break;
             }
             changed = cancel.changed() => {
@@ -199,15 +201,12 @@ pub async fn run_round(
             }
         }
     }
-    let outcome = match finished {
+    let mut outcome = match finished {
         Some(value) => value,
-        // Never drop a running blocking handle and claim the provider stopped.
-        None => match job.await {
-            Ok(value) => value,
-            Err(error) => worker_crashed(&format!("provider worker join failed: {error}")),
-        },
+        // 取消打断 select 后仍要收完整结果:门面证据(partial 文本/工具参数)
+        // 在回调里累积,只有 future 跑完才齐。
+        None => job.await,
     };
-    let mut outcome = outcome;
     outcome.cancelled = cancelled_by_turn;
     // 流末全文兜底已移进 stream_once，且排在工具尾巴之前。这里不再重发：
     // 重发的全文会落到最后一个工具帧之后，把 answer 的 MessageDelta 序列
@@ -215,8 +214,8 @@ pub async fn run_round(
     outcome
 }
 
-/// 阻塞执行一次 gate 流式调用并分类结果(run_round 的同步核心)。
-fn stream_once(
+/// 驱动一次 gate 流式调用并分类结果(run_round 的 async 核心)。
+async fn stream_once(
     spec: ProviderRequestSpec,
     messages: Vec<Message>,
     user_id: String,
@@ -399,7 +398,8 @@ fn stream_once(
                 }
             }
         },
-    );
+    )
+    .await;
     // 流末全文兜底：排在工具尾巴之前，且以已发布长度判重——已经因工具帧
     // 冲刷过的全文不再补发，answer 的 MessageDelta 序列因此保持连续。
     if let Some(display) = &display {
@@ -986,12 +986,6 @@ pub fn retryable_failure(outcome: &ProviderOutcome) -> bool {
             .error
             .as_deref()
             .is_some_and(crate::handoff::is_context_overflow)
-}
-
-fn worker_crashed(message: &str) -> ProviderOutcome {
-    let mut outcome = failed_after_start(message, None);
-    outcome.failure_kind = Some(ProviderFailureKind::WorkerCrash);
-    outcome
 }
 
 #[cfg(test)]

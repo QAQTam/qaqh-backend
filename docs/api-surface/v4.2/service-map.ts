@@ -1,4 +1,4 @@
-import type { AccountsEmptyParams, ClientsListParams, ConfigDto, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams, DsAccountAttemptParams, DsAccountBalanceResult, DsAccountBonus, DsAccountBonusAckParams, DsAccountModel, DsAccountSignInStartParams, DsAccountSignInStartResult, DsAccountSignInStatusResult, DsAccountStatusResult, DsAccountVerifyResult, ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams, ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult, MemorySnapshot, PlanReadItem, PlanReadParams, RingingV2ClientView, SandboxPreflightReport, SandboxPreflightStartParams, SandboxPreflightStatusParams, SessionActivity, SessionActivityParams, SessionDashboard, SessionDashboardParams, SessionGetActivityParams, SessionListEntry, SessionListParams, SessionMetaParams, SessionToolActivity, SessionTurnParams, SessionTurnSnapshot, ShellCloseParams, ShellCloseResult, ShellListParams, ShellListResult, ShellOpenParams, ShellView, SiwcFlowParams, SiwcModel, SiwcProfileParams, SiwcProfileSelectParams, SiwcProfilesResult, SiwcSignInStartParams, SiwcSignInStartResult, SiwcSignInStatusResult, SiwcSignOutResult, SiwcStatusResult, SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoListParams, TodoListSnapshot, TodoStatusParams, TodoStatusSnapshot, WorkspaceEntry, WorkspaceGetParams, WorkspaceListParams } from "./index";
+import type { AccountsEmptyParams, ClientsListParams, ConfigDto, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams, DsAccountAttemptParams, DsAccountBalanceResult, DsAccountBonus, DsAccountBonusAckParams, DsAccountModel, DsAccountSignInStartParams, DsAccountSignInStartResult, DsAccountSignInStatusResult, DsAccountStatusResult, DsAccountVerifyResult, ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams, ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult, GitSnapshot, GitStatusSnapshot, GitxSnapshotParams, GitxStatusParams, GitxWorktreeBindParams, GitxWorktreeCreateParams, GitxWorktreeCreateResult, GitxWorktreeListParams, GitxWorktreeListResult, GitxWorktreeRemoveParams, GitxWorktreeRemoveResult, GitxWorktreeUnbindParams, GitxWorktreeUnbindResult, MemorySnapshot, PlanReadItem, PlanReadParams, RingingV2ClientView, SandboxPreflightReport, SandboxPreflightStartParams, SandboxPreflightStatusParams, SessionActivity, SessionActivityParams, SessionDashboard, SessionDashboardParams, SessionGetActivityParams, SessionListEntry, SessionListParams, SessionMetaParams, SessionToolActivity, SessionTurnParams, SessionTurnSnapshot, ShellCloseParams, ShellCloseResult, ShellListParams, ShellListResult, ShellOpenParams, ShellView, SiwcFlowParams, SiwcModel, SiwcProfileParams, SiwcProfileSelectParams, SiwcProfilesResult, SiwcSignInStartParams, SiwcSignInStartResult, SiwcSignInStatusResult, SiwcSignOutResult, SiwcStatusResult, SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams, TodoListParams, TodoListSnapshot, TodoStatusParams, TodoStatusSnapshot, WorkspaceEntry, WorkspaceGetParams, WorkspaceListParams, WorktreeBindingView } from "./index";
 
 export interface ServiceMap {
   "shell.open": { params: ShellOpenParams; result: ShellView; };
@@ -27,6 +27,13 @@ export interface ServiceMap {
   "diagnostics.memory.snapshot": { params: DiagnosticsMemorySnapshotParams; result: MemorySnapshot; };
   "sandbox.preflight.start": { params: SandboxPreflightStartParams; result: SandboxPreflightReport; };
   "sandbox.preflight.status": { params: SandboxPreflightStatusParams; result: SandboxPreflightReport; };
+  "gitx.snapshot": { params: GitxSnapshotParams; result: GitSnapshot; };
+  "gitx.status": { params: GitxStatusParams; result: GitStatusSnapshot; };
+  "gitx.worktree_list": { params: GitxWorktreeListParams; result: GitxWorktreeListResult; };
+  "gitx.worktree_create": { params: GitxWorktreeCreateParams; result: GitxWorktreeCreateResult; };
+  "gitx.worktree_remove": { params: GitxWorktreeRemoveParams; result: GitxWorktreeRemoveResult; };
+  "gitx.worktree_bind": { params: GitxWorktreeBindParams; result: WorktreeBindingView; };
+  "gitx.worktree_unbind": { params: GitxWorktreeUnbindParams; result: GitxWorktreeUnbindResult; };
   "siwc.status": { params: AccountsEmptyParams; result: SiwcStatusResult; };
   "siwc.profiles": { params: AccountsEmptyParams; result: SiwcProfilesResult; };
   "siwc.models": { params: SiwcProfileParams; result: SiwcModel[]; };
@@ -74,6 +81,13 @@ export const serviceMetadata = {
   "diagnostics.memory.snapshot": { kind: "read", requires_session: false, admin_only: true },
   "sandbox.preflight.start": { kind: "write", requires_session: false, admin_only: false },
   "sandbox.preflight.status": { kind: "read", requires_session: false, admin_only: false },
+  "gitx.snapshot": { kind: "read", requires_session: false, admin_only: false },
+  "gitx.status": { kind: "read", requires_session: false, admin_only: false },
+  "gitx.worktree_list": { kind: "read", requires_session: false, admin_only: false },
+  "gitx.worktree_create": { kind: "write", requires_session: false, admin_only: false },
+  "gitx.worktree_remove": { kind: "write", requires_session: false, admin_only: false },
+  "gitx.worktree_bind": { kind: "write", requires_session: false, admin_only: false },
+  "gitx.worktree_unbind": { kind: "write", requires_session: false, admin_only: false },
   "siwc.status": { kind: "read", requires_session: false, admin_only: true },
   "siwc.profiles": { kind: "read", requires_session: false, admin_only: true },
   "siwc.models": { kind: "read", requires_session: false, admin_only: true },

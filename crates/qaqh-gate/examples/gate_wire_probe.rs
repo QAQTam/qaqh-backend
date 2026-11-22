@@ -148,6 +148,15 @@ fn describe(ev: &StreamEvent) -> String {
 }
 
 fn main() {
+    // gate 原生 async（P0-1）：诊断探针自带最小驱动 runtime（仅此二进制）。
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("probe runtime");
+    rt.block_on(probe());
+}
+
+async fn probe() {
     let url = env_or("QAQH_GATE_PROBE_URL", "http://127.0.0.1:8787/v1");
     let wire = env_or("QAQH_GATE_PROBE_WIRE", "responses");
     let model = env_or("QAQH_GATE_PROBE_MODEL", "qfmodel");
@@ -200,7 +209,8 @@ fn main() {
             frames += 1;
             println!("  · {}", describe(&ev));
         },
-    );
+    )
+    .await;
     println!(
         "result={:?} frames={frames}",
         result.as_ref().map(|_| "Ok").map_err(|e| e.to_string()),

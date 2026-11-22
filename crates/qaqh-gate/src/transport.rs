@@ -1,9 +1,10 @@
 //! gate::transport — SDK 桥接层共享的传输零件。
 //!
 //! HTTP/SSE/重试已整体移交 mutil-ai（`messages_sdk` / `chat_sdk` /
-//! `responses_sdk` + `sdk_common`）；本模块只保留仍被复用的同步门面
-//! （crate 级 current-thread runtime 的 `block_on`）、可取消睡眠、
+//! `responses_sdk` + `sdk_common`）；本模块只保留仍被复用的可取消睡眠、
 //! `RetryPolicy`（gate 侧旋钮，编译成 SDK 策略）、错误描述表和 `SseTrace` 诊断。
+//! gate 不持有任何 tokio runtime：流式入口全部是原生 `async fn`，
+//! 直接跑在宿主（daemon / runtime）的 Tokio Runtime 上。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,38 +23,28 @@ pub(crate) const BASE_DELAY_SECS: u64 = 1;
 /// wrapSSE / codex stream_idle_timeout 的 300s；需大于最长 thinking 静默期）。
 pub(crate) const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// Crate-global tokio runtime for reqwest I/O.
-/// Uses current-thread scheduler — all async I/O serialises on the
-/// calling thread via Runtime::block_on.
-static FALLBACK_RT: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("failed to create qaqh-gate shared tokio runtime")
-});
-
-pub(crate) fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    FALLBACK_RT.block_on(f)
-}
-
 pub(crate) fn is_cancelled(cancel: Option<&Arc<AtomicBool>>) -> bool {
     cancel.map(|c| c.load(Ordering::SeqCst)).unwrap_or(false)
 }
 
-pub(crate) fn sleep_with_cancel(delay: Duration, cancel: Option<&Arc<AtomicBool>>) -> bool {
+/// 可取消重试退避睡眠。守卫/减法语义与旧同步版逐字等价（BUG-2026-09-13-21），
+/// 只是线程睡眠换成了 Tokio 计时器——不占 OS 线程，取消最迟 100ms 粒度生效。
+pub(crate) async fn sleep_with_cancel(delay: Duration, cancel: Option<&Arc<AtomicBool>>) -> bool {
     let start = std::time::Instant::now();
-    while start.elapsed() < delay {
+    loop {
         if is_cancelled(cancel) {
             return true;
         }
-        // `while` 守卫与本次减法之间 elapsed 可能已越过 delay（纳秒级竞争窗口，
-        // 毫秒轮询每迭代都有一次机会）。Duration 的 `Sub` 是无条件 panic（debug
-        // 与 release 皆然，见 BUG-2026-09-13-21）→ 用 checked_sub 饱和到 ZERO：
-        // 剩余时间为 0 时立即进入下一轮守卫并正常退出。
-        let remaining = delay.checked_sub(start.elapsed()).unwrap_or(Duration::ZERO);
-        std::thread::sleep(remaining.min(Duration::from_millis(100)));
+        let elapsed = start.elapsed();
+        if elapsed >= delay {
+            return false;
+        }
+        // 守卫采样与本次减法之间 elapsed 可能已越过 delay（纳秒级竞争窗口）。
+        // Duration 的 `Sub` 是无条件 panic（debug 与 release 皆然，见
+        // BUG-2026-09-13-21）→ 用 checked_sub 饱和到 ZERO。
+        let remaining = delay.checked_sub(elapsed).unwrap_or(Duration::ZERO);
+        tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
     }
-    false
 }
 
 /// 每端点重试策略（对齐 codex `ModelProviderInfo` 的 request_max_retries /
@@ -153,7 +144,7 @@ pub(crate) fn http_error_description(status: u16) -> &'static str {
 
 /// 空请求保护（流式收口）：投影后无任何可发送内容（如 responses 的 `input: []`）时
 /// 发一个空 assistant 的 Done，让 runtime 正常完成本回合（而不是把 400 当 Fatal）。
-/// 与 [`empty_request_sync_error`] 同族语义——本地短路，**零 HTTP 请求**。
+/// 本地短路，**零 HTTP 请求**。
 pub(crate) fn empty_request_noop_done_event() -> StreamEvent {
     StreamEvent::Done {
         raw_message: Message {
@@ -166,13 +157,6 @@ pub(crate) fn empty_request_noop_done_event() -> StreamEvent {
         // 非掐流：`Some` 让 runtime 的"不完整回合续写"判定放行。
         stop_reason: Some("stop".into()),
     }
-}
-
-/// 空请求保护（sync 路径）：sync 没有流式收口可用，返回可诊断错误而不是
-/// 拿空数组去换上游 400。
-pub(crate) fn empty_request_sync_error() -> String {
-    "empty_request: 本次请求无任何可投影内容（input 为空），已本地短路；未向上游发送空请求"
-        .to_string()
 }
 
 /// `QAQH_SSE_TRACE=<path>`：将 gate 派生的每个流式事件按到达序追加写入文件
@@ -297,8 +281,8 @@ mod tests {
     /// 是两次独立采样，守卫通过后 elapsed 越过 delay 时旧的裸减法会 panic
     /// （`overflow when subtracting durations`）。用「两次采样」测试模型直接
     /// 命中该结构：守卫采样恰好通过，减法采样被推过 delay。
-    #[test]
-    fn sleep_with_cancel_tolerates_elapsed_past_delay() {
+    #[tokio::test]
+    async fn sleep_with_cancel_tolerates_elapsed_past_delay() {
         fn guard_passes(guard_sample: Duration, delay: Duration) -> bool {
             guard_sample < delay
         }
@@ -317,23 +301,31 @@ mod tests {
 
         // 端到端：真实函数在 delay 极小、必然越界的场景下不 panic 且正常返回
         let cancel = Arc::new(AtomicBool::new(false));
-        assert!(!sleep_with_cancel(Duration::from_nanos(1), Some(&cancel)));
+        assert!(!sleep_with_cancel(Duration::from_nanos(1), Some(&cancel)).await);
     }
 
     /// 过期 / 零值 delay 防御：不 panic，且不误报取消。
-    #[test]
-    fn sleep_with_cancel_tolerates_expired_delay() {
+    #[tokio::test]
+    async fn sleep_with_cancel_tolerates_expired_delay() {
         let cancel = Arc::new(AtomicBool::new(false));
-        assert!(!sleep_with_cancel(Duration::ZERO, Some(&cancel)));
-        assert!(!sleep_with_cancel(Duration::ZERO, None));
+        assert!(!sleep_with_cancel(Duration::ZERO, Some(&cancel)).await);
+        assert!(!sleep_with_cancel(Duration::ZERO, None).await);
     }
 
     /// 高频防抖：极小 delay 反复调用，暴露任何残留的窗口下溢。
-    #[test]
-    fn sleep_with_cancel_repeatedly_does_not_panic() {
+    #[tokio::test]
+    async fn sleep_with_cancel_repeatedly_does_not_panic() {
         let cancel = Arc::new(AtomicBool::new(false));
         for _ in 0..64 {
-            assert!(!sleep_with_cancel(Duration::from_nanos(1), Some(&cancel)));
+            assert!(!sleep_with_cancel(Duration::from_nanos(1), Some(&cancel)).await);
         }
+    }
+
+    /// 取消语义：cancel 置位后睡眠立即返回 true（不再等满 delay）。
+    #[tokio::test]
+    async fn sleep_with_cancel_returns_early_when_cancelled() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        cancel.store(true, Ordering::SeqCst);
+        assert!(sleep_with_cancel(Duration::from_secs(10), Some(&cancel)).await);
     }
 }

@@ -394,8 +394,8 @@ pub fn is_context_overflow(text: &str) -> bool {
 ///
 /// 只由真实信号驱动：请求被接受且用量更大 → 上抬；被判超限 → 下压。**不写回**
 /// `ModelDef`/目录（那是契约类型，且会被模型编辑器的全量覆盖固化），所以前端是否
-/// 显式回传 `context_window` 都不影响收敛结果。作用域与 gate 的 `chat_sync` 退化
-/// 键一致（`usage_semantics.rs:37`）。
+/// 显式回传 `context_window` 都不影响收敛结果。作用域键与 gate 的
+/// `usage_scope` 无会话身份时的退化键一致（`usage_semantics.rs:37`）。
 static OBSERVED: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<(String, String), u32>>,
 > = std::sync::OnceLock::new();

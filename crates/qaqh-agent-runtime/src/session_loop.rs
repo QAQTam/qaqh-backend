@@ -974,10 +974,7 @@ impl SessionLoop {
                     }
                     outcome.usage = accrued_usage.take();
                     self.seal_partial(&turn, &blocks, &outcome).await;
-                    if outcome.failure_kind == Some(provider_job::ProviderFailureKind::WorkerCrash)
-                    {
-                        self.interrupt(&turn, InterruptReason::Crash).await;
-                    } else if outcome.cancelled {
+                    if outcome.cancelled {
                         self.finish_cancelled(&turn, outcome.usage.clone()).await;
                     } else {
                         self.finish_failed(

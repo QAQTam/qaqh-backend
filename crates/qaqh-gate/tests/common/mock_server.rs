@@ -234,7 +234,7 @@ fn run_server(
         if *stop.lock().expect("stop lock") {
             break;
         }
-        let mut req = match server.recv_timeout(Duration::from_millis(100)) {
+        let req = match server.recv_timeout(Duration::from_millis(100)) {
             Ok(Some(r)) => r,
             Ok(None) => continue,
             Err(e) => {
@@ -243,16 +243,8 @@ fn run_server(
             }
         };
 
-        let url = req.url().to_string();
-        let mut body = String::new();
-        if req.as_reader().read_to_string(&mut body).is_ok() {
-            // body read successfully
-        }
-        *last_body.lock().expect("body lock") = Some(body);
-        *last_url.lock().expect("url lock") = Some(url);
-        request_count.fetch_add(1, Ordering::SeqCst);
-
-        // Get the scenario (+ extra response headers) for this request
+        // Get the scenario (+ extra response headers) for this request. The
+        // index is assigned at accept time so Sequential keeps arrival order.
         let (scenario, headers) = {
             let mut src = source.lock().expect("source lock");
             match &mut *src {
@@ -265,8 +257,26 @@ fn run_server(
                 ScenarioSource::FixedWithHeaders(s, headers) => (s.clone(), headers.clone()),
             }
         };
+        request_count.fetch_add(1, Ordering::SeqCst);
 
-        serve_scenario(req, &scenario, &headers);
+        // Serve on its own thread: concurrent clients must not block each
+        // other — a slow scenario (Delay chunks, e.g. the concurrent-stream
+        // counter-proof) hangs only its own connection, while the accept
+        // loop keeps taking new connections and MockServer::drop stays
+        // prompt. Worker threads are detached by design.
+        let lb = last_body.clone();
+        let lu = last_url.clone();
+        thread::spawn(move || {
+            let mut req = req;
+            let url = req.url().to_string();
+            let mut body = String::new();
+            if req.as_reader().read_to_string(&mut body).is_ok() {
+                // body read successfully
+            }
+            *lb.lock().expect("body lock") = Some(body);
+            *lu.lock().expect("url lock") = Some(url);
+            serve_scenario(req, &scenario, &headers);
+        });
     }
 }
 

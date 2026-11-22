@@ -318,7 +318,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         ClientsListParams, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
         ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams,
         ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult,
-        GitxSnapshotParams, GitxWorktreeBindParams, GitxWorktreeCreateParams,
+        GitxSnapshotParams, GitxStatusParams, GitxWorktreeBindParams, GitxWorktreeCreateParams,
         GitxWorktreeListParams, GitxWorktreeRemoveParams, GitxWorktreeUnbindParams,
         PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams, SessionDashboard,
         SessionDashboardParams, SessionDashboardTask, SessionGetActivityParams, SessionListParams,
@@ -530,6 +530,38 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         stage,
         "service-gitx-snapshot-params.json",
         &GitxSnapshotParams { scope_session_id: None },
+    )?;
+    // gitx.status（ADR-0041 决策 7 分层,additive）：89eab1a2 落了 TYPED_METHODS
+    // 与 coverage 声明却欠了这里的 fixture 写出——exporter 连 stage 自校验都过
+    // 不了（declares missing fixture），check/export 双双被卡。此处补齐机器
+    // 金标准的两个 sample（形状镜像 snapshot：同 synthetic workspace 风格）。
+    write_fixture(
+        stage,
+        "service-gitx-status-params.json",
+        &GitxStatusParams { scope_session_id: None },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-status-result.json",
+        &qaqh_ringing_contract::GitStatusSnapshot {
+            schema: qaqh_ringing_contract::GITX_SCHEMA.to_owned(),
+            source_root: "/synthetic/workspace".to_owned(),
+            branch: Some("main".to_owned()),
+            head_sha: Some("3f2a".repeat(10)),
+            detached: false,
+            upstream: Some("origin/main".to_owned()),
+            ahead: Some(1),
+            behind: Some(0),
+            files: vec![qaqh_ringing_contract::GitFileStatus {
+                path: "src/lib.rs".to_owned(),
+                index: "M".to_owned(),
+                worktree: "M".to_owned(),
+            }],
+            unpushed: vec![qaqh_ringing_contract::GitUnpushedCommit {
+                hash: "3f2a".to_owned(),
+                subject: "feat(gitx): synthetic unpushed commit".to_owned(),
+            }],
+        },
     )?;
     write_fixture(
         stage,
