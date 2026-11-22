@@ -95,6 +95,14 @@ pub struct GitxSnapshotParams {
     pub scope_session_id: Option<String>,
 }
 
+/// `gitx.status`：源工作区完整 git 状态（前端消费;逐文件/同步态不进模型上下文）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitxStatusParams {
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_session_id: Option<String>,
+}
+
 /// `gitx.worktree_list`：managed worktree（注册表）+ 发现式 unmanaged。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -681,6 +689,7 @@ validators! {
         validate_fs_list_params => FsListParams,
         validate_fs_read_params => FsReadParams,
         validate_gitx_snapshot_params => GitxSnapshotParams,
+        validate_gitx_status_params => GitxStatusParams,
         validate_gitx_worktree_list_params => GitxWorktreeListParams,
         validate_gitx_worktree_create_params => GitxWorktreeCreateParams,
         validate_gitx_worktree_remove_params => GitxWorktreeRemoveParams,
@@ -735,6 +744,7 @@ validators! {
         validate_shell_list_result => ShellListResult,
         validate_sandbox_preflight_report_result => SandboxPreflightReport,
         validate_gitx_snapshot_result => qaqh_ringing_contract::GitSnapshot,
+        validate_gitx_status_result => qaqh_ringing_contract::GitStatusSnapshot,
         validate_gitx_worktree_list_result => qaqh_ringing_contract::GitxWorktreeListResult,
         validate_gitx_worktree_create_result => qaqh_ringing_contract::GitxWorktreeCreateResult,
         validate_gitx_worktree_remove_result => qaqh_ringing_contract::GitxWorktreeRemoveResult,
@@ -1056,6 +1066,14 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         info: READ,
         validate_params: validate_gitx_snapshot_params,
         validate_result: validate_gitx_snapshot_result,
+    },
+    TypedMethodInfo {
+        method: "gitx.status",
+        params_type: "GitxStatusParams",
+        result_type: "GitStatusSnapshot",
+        info: READ,
+        validate_params: validate_gitx_status_params,
+        validate_result: validate_gitx_status_result,
     },
     TypedMethodInfo {
         method: "gitx.worktree_list",

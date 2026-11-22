@@ -212,6 +212,8 @@ pub struct PlanReadArgs {
 pub enum GitxCommand {
     #[serde(rename = "gitx.snapshot")]
     GitxSnapshot(GitxSnapshotArgs),
+    #[serde(rename = "gitx.status")]
+    GitxStatus(GitxStatusArgs),
     #[serde(rename = "gitx.worktree_list")]
     GitxWorktreeList(GitxWorktreeListArgs),
     #[serde(rename = "gitx.worktree_create")]
@@ -225,6 +227,7 @@ pub enum GitxCommand {
 }
 
 pub type GitxSnapshotArgs = crate::ringing::service_methods::GitxSnapshotParams;
+pub type GitxStatusArgs = crate::ringing::service_methods::GitxStatusParams;
 pub type GitxWorktreeListArgs = crate::ringing::service_methods::GitxWorktreeListParams;
 pub type GitxWorktreeCreateArgs = crate::ringing::service_methods::GitxWorktreeCreateParams;
 pub type GitxWorktreeRemoveArgs = crate::ringing::service_methods::GitxWorktreeRemoveParams;

@@ -32,6 +32,13 @@ pub(crate) fn handle(service: &QaqhService, command: GitxCommand) -> QaqhResult<
                 .map_err(QaqhError::message)?;
             QaqhError::to_value("git snapshot", snapshot)
         }
+        GitxCommand::GitxStatus(args) => {
+            let root = scoped_workspace(service, args.scope_session_id.as_deref())?;
+            let status = qaqh_gitx::WorktreeManager::new(root)
+                .status()
+                .map_err(QaqhError::message)?;
+            QaqhError::to_value("git status", status)
+        }
         GitxCommand::GitxWorktreeList(args) => {
             let root = scoped_workspace(service, args.scope_session_id.as_deref())?;
             let manager = qaqh_gitx::WorktreeManager::new(root);

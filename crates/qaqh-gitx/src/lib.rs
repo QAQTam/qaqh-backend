@@ -15,6 +15,7 @@ pub mod git;
 pub mod paths;
 pub mod registry;
 pub mod snapshot;
+pub mod status;
 pub mod tools;
 
 pub use error::{GitxError, Result};
@@ -186,6 +187,11 @@ impl WorktreeManager {
     /// source_root 的 git 快照（契约读模型）。
     pub fn snapshot(&self) -> Result<GitSnapshot> {
         snapshot::build(&self.source_root)
+    }
+
+    /// 完整 git 状态（前端消费面,与模型侧 [`WorktreeManager::snapshot`] 分层）。
+    pub fn status(&self) -> Result<crate::status::GitStatusSnapshot> {
+        status::build(&self.source_root)
     }
 
     /// 该会话当前绑定的 worktree 登记（registry owner 反查；无绑定返回 `None`）。

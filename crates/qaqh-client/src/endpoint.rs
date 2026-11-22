@@ -62,6 +62,10 @@ pub enum QueryRequest {
     GitxWorktreeList {
         scope_session_id: Option<String>,
     },
+    /// gitx 读面（ADR-0041）：源工作区完整 git 状态（前端消费面）。
+    GitxStatus {
+        scope_session_id: Option<String>,
+    },
 }
 
 impl QueryRequest {
@@ -96,6 +100,7 @@ impl QueryRequest {
             "diagnostics.memory.snapshot",
             "gitx.snapshot",
             "gitx.worktree_list",
+            "gitx.status",
         ]
     }
 
@@ -172,6 +177,12 @@ impl QueryRequest {
                     .and_then(Value::as_str)
                     .map(str::to_string),
             },
+            "gitx.status" => Self::GitxStatus {
+                scope_session_id: params
+                    .get("scope_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            },
             _ => return None,
         })
     }
@@ -213,6 +224,13 @@ impl QueryRequest {
                     params["scope_session_id"] = json!(scope);
                 }
                 ("gitx.worktree_list", params)
+            }
+            Self::GitxStatus { scope_session_id } => {
+                let mut params = json!({});
+                if let Some(scope) = scope_session_id {
+                    params["scope_session_id"] = json!(scope);
+                }
+                ("gitx.status", params)
             }
             Self::SkillsCatalog { cwd } => {
                 let mut params = json!({});
@@ -291,6 +309,7 @@ mod tests {
             ),
             ("gitx.snapshot", json!({})),
             ("gitx.worktree_list", json!({ "scope_session_id": "s1" })),
+            ("gitx.status", json!({ "scope_session_id": "s1" })),
         ];
         for (method, params) in cases {
             let request = QueryRequest::try_from_service(method, &params)

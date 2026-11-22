@@ -157,3 +157,37 @@ pub fn worktree_list(repo: &Path) -> Result<Vec<RawWorktree>> {
     }
     Ok(worktrees)
 }
+
+/// `status --porcelain=v2 --branch` 一次拿全：分支头段（upstream/ahead-behind）
+/// 与逐文件 XY,不为每个字段各起一个 git 进程。
+pub fn status_porcelain_v2(dir: &Path) -> Result<String> {
+    run_git(
+        dir,
+        &[
+            OsStr::new("status"),
+            OsStr::new("--porcelain=v2"),
+            OsStr::new("--branch"),
+        ],
+    )
+}
+
+/// `@{u}..HEAD` 的未推送提交（`%h%x09%s`,最新在前）。上游缺失时调用方负责不调。
+pub fn unpushed_log(dir: &Path, max_count: u32) -> Result<Vec<(String, String)>> {
+    let stdout = run_git(
+        dir,
+        &[
+            OsStr::new("log"),
+            OsStr::new(&format!("--max-count={max_count}")),
+            OsStr::new("--format=%h%x09%s"),
+            OsStr::new("@{u}..HEAD"),
+        ],
+    )?;
+    Ok(stdout
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.split_once('\t') {
+            Some((hash, subject)) => (hash.to_string(), subject.to_string()),
+            None => (line.to_string(), String::new()),
+        })
+        .collect())
+}

@@ -51,6 +51,49 @@ pub struct GitSnapshot {
     pub dirty: bool,
 }
 
+/// `gitx.status` 读模型：源工作区的完整 git 状态（桌面壳消费面）。
+///
+/// 与模型侧 [`GitSnapshot`] 分层：逐文件/同步态/未推送只进前端,不进模型
+/// 上下文。dirty 语义 = `files` 非空（porcelain 含未跟踪）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitStatusSnapshot {
+    pub schema: String,
+    pub source_root: String,
+    /// `None` = detached HEAD 或无提交。
+    pub branch: Option<String>,
+    pub head_sha: Option<String>,
+    pub detached: bool,
+    /// 上游分支名;`None` = 没有跟踪,无从比较。
+    pub upstream: Option<String>,
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+    /// porcelain v2 逐文件 XY 双码(index=暂存态,worktree=工作区态,"?"=未跟踪)。
+    pub files: Vec<GitFileStatus>,
+    /// 上游存在且 ahead>0 时的未推送提交(最新在前,上限 50)。
+    pub unpushed: Vec<GitUnpushedCommit>,
+}
+
+/// porcelain v2 的 XY 双码：index = 暂存区态,worktree = 工作区态;未跟踪为 "?"。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitFileStatus {
+    pub path: String,
+    pub index: String,
+    pub worktree: String,
+}
+
+/// 一条未推送提交(`%h%x09%s`)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitUnpushedCommit {
+    pub hash: String,
+    pub subject: String,
+}
+
 /// `worktree.create` 参数。`branch_name` 必须是不存在的新分支（服务端经
 /// `git check-ref-format --branch` 校验并以 `-b` 创建）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +207,32 @@ mod tests {
         });
         let binding: WorktreeBindingView = serde_json::from_value(payload.clone()).unwrap();
         let round: serde_json::Value = serde_json::to_value(&binding).unwrap();
+        assert_eq!(round, payload);
+    }
+
+    #[test]
+    fn git_status_snapshot_round_trips_the_daemon_wire_shape() {
+        let payload = serde_json::json!({
+            "schema": GITX_SCHEMA,
+            "source_root": "D:/Projects/demo",
+            "branch": "feature/auth",
+            "head_sha": "3f2a000000000000000000000000000000000000",
+            "detached": false,
+            "upstream": "origin/feature/auth",
+            "ahead": 2,
+            "behind": 0,
+            "files": [
+                { "path": "src/lib.rs", "index": "M", "worktree": " " },
+                { "path": "docs/new.md", "index": "?", "worktree": "?" }
+            ],
+            "unpushed": [
+                { "hash": "abc1234", "subject": "feat: x" }
+            ]
+        });
+        let status: GitStatusSnapshot = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(status.files.len(), 2);
+        assert_eq!(status.unpushed.len(), 1);
+        let round: serde_json::Value = serde_json::to_value(&status).unwrap();
         assert_eq!(round, payload);
     }
 }
