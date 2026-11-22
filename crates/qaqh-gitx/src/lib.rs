@@ -25,7 +25,9 @@ pub use tools::{GitxHost, install_host, host, register};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use qaqh_ringing_contract::{GitSnapshot, WorktreeCreateParams, WorktreeView, GITX_SCHEMA};
+use qaqh_ringing_contract::{
+    GitSnapshot, GitStatusSnapshot, WorktreeCreateParams, WorktreeView, GITX_SCHEMA,
+};
 
 /// 会话绑定结果：双锚点（worktree 代码路径 ↔ source_root 工件锚点）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,7 +192,7 @@ impl WorktreeManager {
     }
 
     /// 完整 git 状态（前端消费面,与模型侧 [`WorktreeManager::snapshot`] 分层）。
-    pub fn status(&self) -> Result<crate::status::GitStatusSnapshot> {
+    pub fn status(&self) -> Result<GitStatusSnapshot> {
         status::build(&self.source_root)
     }
 

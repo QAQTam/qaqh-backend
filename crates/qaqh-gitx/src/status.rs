@@ -5,7 +5,7 @@
 
 use std::path::Path;
 
-use qaqh_ringing_contract::{GitFileStatus, GitStatusSnapshot, GITX_SCHEMA};
+use qaqh_ringing_contract::{GitFileStatus, GitStatusSnapshot, GitUnpushedCommit, GITX_SCHEMA};
 
 use crate::error::Result;
 use crate::git;
@@ -29,7 +29,11 @@ pub fn build(source_root: &Path) -> Result<GitStatusSnapshot> {
     let detached = branch.is_none() && head_sha.is_some();
     let parsed = parse(&git::status_porcelain_v2(source_root)?);
     let unpushed = if parsed.upstream.is_some() && parsed.ahead.unwrap_or(0) > 0 {
-        git::unpushed_log(source_root, MAX_UNPUSHED).unwrap_or_default()
+        git::unpushed_log(source_root, MAX_UNPUSHED)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(hash, subject)| GitUnpushedCommit { hash, subject })
+            .collect()
     } else {
         Vec::new()
     };
@@ -115,7 +119,7 @@ mod tests {
 # branch.upstream origin/feature/auth
 # branch.ab +2 -0
 1 .M N... 100644 100644 100644 abc def src/lib.rs
-2 R. N... 100644 100644 100644 abc def R100 old.rs\tnew dir/new.rs
+2 R. N... 100644 100644 100644 abc def R100 new dir/new.rs\told.rs
 ? docs/new.md
 ";
         let parsed = parse(stdout);

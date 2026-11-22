@@ -32,9 +32,9 @@ pub use workspace::{WorkspaceEntry, WorkspaceMeta};
 // gitx 域（ADR-0033）：worktree 读模型 + 命令参数，与 contract 根导出同权
 // （对齐 ADR-0004 §决策 3 的契约根导出纪律）。
 pub use gitx::{
-    GitSnapshot, GitxWorktreeCreateResult, GitxWorktreeListResult, GitxWorktreeRemoveResult,
-    GitxWorktreeUnbindResult, WorktreeBindingView, WorktreeCreateParams, WorktreeRemoveParams,
-    WorktreeView, GITX_SCHEMA,
+    GitFileStatus, GitSnapshot, GitStatusSnapshot, GitUnpushedCommit, GitxWorktreeCreateResult,
+    GitxWorktreeListResult, GitxWorktreeRemoveResult, GitxWorktreeUnbindResult, WorktreeBindingView,
+    WorktreeCreateParams, WorktreeRemoveParams, WorktreeView, GITX_SCHEMA,
 };
 
 /// `/team` 端点 schema 判别值(契约锁定:客户端按字面量校验)。
