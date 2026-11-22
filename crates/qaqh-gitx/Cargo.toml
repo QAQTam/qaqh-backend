@@ -1,0 +1,28 @@
+[package]
+name = "qaqh-gitx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "QAQ-Harness git 域：worktree 会话隔离与 git 快照消费（ADR-0033）"
+
+[dependencies]
+# wire 类型唯一来源（依赖方向：实现 crate → 契约 crate，ADR-0033 决策 1）。
+# schema feature：worktree_* 模型工具的 Output schema 从契约类型派生（ADR-0008）。
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract", features = ["schema"] }
+# 模型工具面（ADR-0033 切片 2）：TypedTool 契约与注册入口。
+qaqh-tool-core = { path = "../qaqh-tool-core" }
+qaqh-workspace = { path = "../qaqh-workspace" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+thiserror = "2"
+log = "0.4"
+# registry 原子落盘 +（v2）per-worktree owner 文件的 persist_noclobber 形态。
+tempfile = "3"
+uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

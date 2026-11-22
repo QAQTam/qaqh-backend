@@ -6,28 +6,32 @@ use super::*;
 use crate::error::{QaqhError, QaqhResult};
 
 /// ADR-0014 切片 D/E：会话工具面的单一事实源——agent 面（spawn/send/wait/
-/// list/cancel）+ 协作面（task_*/board_*）。`spawn_session_inprocess` 与表面
-/// 测试共用；增删会话工具必须经此，白名单天花板仍在 assemble 的 apply_init 生效。
-/// ADR-0033:基础会话工具面 = agent 五件(所有会话,不分根/子)。
-pub(crate) const AGENT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] =
-    &[qaqh_subagent::register];
-
-/// ADR-0033:team 开启时的协作面(task_* 五件)——按根 team_mode 条件注册。
-pub(crate) const TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
+/// list/cancel）+ worktree 面（worktree_*，ADR-0041）。`spawn_session_inprocess`
+/// 与表面测试共用；增删会话工具必须经此，白名单天花板仍在 assemble 的 apply_init 生效。
+/// ADR-0033:基础会话工具面 = agent 五件(所有会话,不分根/子) + gitx 面。
+pub(crate) const AGENT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register,
+    qaqh_gitx::register,
+];
+
+/// ADR-0033:team 开启时的协作面(task_* 五件,自足含 agent 面)——按根 team_mode 条件注册。
+/// 留言板词表已随 ADR-0033-agent-team 退役，不得复活。
+pub(crate) const TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register_collaboration_tools,
+    qaqh_gitx::register,
 ];
 
 /// ADR-0015：根会话工具面 = 会话工具面 + goal 三件套。子会话是派生瞬时体,
 /// goal 语义只挂根(Codex 对 review 子代理禁用 goals 同律)。
 /// ADR-0015:根会话工具面 = 会话工具面 + goal 三件套(team 关)。
 pub(crate) const ROOT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] =
-    &[qaqh_subagent::register, qaqh_goal::register];
+    &[qaqh_subagent::register, qaqh_gitx::register, qaqh_goal::register];
 
 /// ADR-0033:根会话 + team 开启 = agent 面 + 协作面 + goal。
 pub(crate) const ROOT_TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register,
     qaqh_subagent::register_collaboration_tools,
+    qaqh_gitx::register,
     qaqh_goal::register,
 ];
 
@@ -44,6 +48,18 @@ pub(crate) fn session_cwd(
         .flatten()
         .and_then(|row| row.cwd)
         .filter(|cwd| !cwd.is_empty() && cwd != ".")
+}
+
+/// ADR-0041：会话 workspace 的回合边界重解析闭包。
+///
+/// 单一路径复用 [`ensure_session_workspace`]（含绑定 fallback 与失效响亮
+/// warn）；解析失败（如用户工作区消失）返回 `None`，loop 侧保持现状。
+pub(crate) fn workspace_resolver(
+    owners: std::sync::Arc<qaqh_session::owner::OwnerDirectory>,
+) -> qaqh_agent_runtime::session_loop::WorkspaceResolver {
+    std::sync::Arc::new(move |session_id: &str| {
+        ensure_session_workspace(&owners, session_id).ok()
+    })
 }
 
 /// Resolve the directory a session's tools run in.
@@ -72,6 +88,28 @@ pub(crate) fn ensure_session_workspace(
                 std::fs::create_dir_all(&path).map_err(|error| {
                     format!("create session workspace {}: {error}", path.display())
                 })?;
+            }
+            // ADR-0041 决策 3/4：绑定会话的工具 workspace 动态落到 worktree 根；
+            // `sessions.cwd` 保持源工作区（`.qaqh` 工件锚点）。绑定失效（worktree
+            // 目录被清理）时响亮回退到 cwd，绝不静默沿用 worktree 假设。
+            match qaqh_gitx::WorktreeManager::new(&path).record_for_session(session_id) {
+                Ok(Some(record)) if record.path.is_dir() => return Ok(record.path),
+                Ok(Some(record)) => {
+                    log::warn!(
+                        "session {session_id} is bound to worktree {} but it is missing; \
+                         falling back to workspace root {}",
+                        record.path.display(),
+                        path.display()
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    log::warn!(
+                        "session {session_id} worktree binding lookup failed: {error}; \
+                         falling back to workspace root {}",
+                        path.display()
+                    );
+                }
             }
             Ok(path)
         }
@@ -457,10 +495,15 @@ impl AgentRegistry {
         // 宿主已由 daemon 安装（server.rs install_task_host/install_board_host），
         // 板按根树键控，lead 与子级共用同一注册器；白名单天花板仍在 apply_init 生效。
         let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
-        // ADR-0014：终态回传路由注入（loop 报告终态，registry 判定血缘）。
+        // ADR-0033：终态回传路由注入（loop 报告终态，registry 判定血缘）。
         if let Some(router) = &self.terminal_router {
             loop_.set_terminal_port(router.clone());
         }
+        // ADR-0041：回合边界 workspace 重解析——绑定会话的下一回合自动落到
+        // worktree 根（或解绑/移除后回到源工作区），无需 AgentReloadConfig 广播。
+        loop_.set_workspace_resolver(workspace_resolver(std::sync::Arc::clone(
+            &self.owners,
+        )));
 
         self.instances.insert(
             session_id.to_string(),
@@ -501,8 +544,9 @@ impl AgentRegistry {
 mod tests {
     use super::{AGENT_TOOL_REGISTRARS, ROOT_TEAM_TOOL_REGISTRARS, TEAM_TOOL_REGISTRARS};
 
-    /// ADR-0033 闸门：基础面 = agent 五件；team 开启的会话再加 task_* 五件；
-    /// 留言板词表不得复活。
+    /// ADR-0033 闸门：基础面 = agent 五件 + worktree 面（ADR-0041）；
+    /// team 开启的会话再加 task_* 五件；留言板词表不得复活。
+    /// 注册器列表被削（回到悬置状态）时本测试必须红。
     #[test]
     fn team_mode_switches_the_collaboration_surface() {
         let agent = qaqh_workspace::registration::build_tool_manager(AGENT_TOOL_REGISTRARS);
@@ -521,6 +565,15 @@ mod tests {
                 "{name} must be absent without team mode"
             );
         }
+        for name in [
+            "worktree_list",
+            "worktree_create",
+            "worktree_bind",
+            "worktree_unbind",
+            "worktree_remove",
+        ] {
+            assert!(agent.lookup(name).is_some(), "{name} must be callable");
+        }
 
         let team = qaqh_workspace::registration::build_tool_manager(TEAM_TOOL_REGISTRARS);
         for name in [
@@ -529,6 +582,11 @@ mod tests {
             "task_update",
             "task_close",
             "task_list",
+            "worktree_list",
+            "worktree_create",
+            "worktree_bind",
+            "worktree_unbind",
+            "worktree_remove",
         ] {
             assert!(team.lookup(name).is_some(), "{name} must be callable");
             assert!(

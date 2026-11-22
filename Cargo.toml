@@ -29,6 +29,7 @@ members = [
     "crates/qaqh-ptc-sdk",
     "crates/qaqh-ptc-tools",
     "crates/qaqh-workspace",
+    "crates/qaqh-gitx",
     "crates/qaqh-session",
     "crates/qaqh-subagent",
     "crates/qaqh-goal",

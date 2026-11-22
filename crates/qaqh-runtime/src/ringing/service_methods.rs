@@ -83,6 +83,65 @@ pub struct FsReadResult {
     pub content: String,
 }
 
+// ── gitx 域（ADR-0041）：worktree 会话隔离与 git 快照。`scope_session_id`
+// 缺省取 daemon 进程 cwd；携带时经会话工作区解析（绑定生效的会话动态落到
+// worktree 根，见 registry::spawn 的派生 fallback）。
+
+/// `gitx.snapshot`：源工作区 git 快照。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitxSnapshotParams {
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_session_id: Option<String>,
+}
+
+/// `gitx.worktree_list`：managed worktree（注册表）+ 发现式 unmanaged。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitxWorktreeListParams {
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_session_id: Option<String>,
+}
+
+/// `gitx.worktree_create`：在源工作区建 linked worktree（`git worktree add -b`）。
+/// `attach = true` 时 `scope_session_id` 必填——创建后立即 CAS 绑定该会话。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitxWorktreeCreateParams {
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_session_id: Option<String>,
+    pub branch_name: String,
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub base_ref: Option<String>,
+    pub attach: bool,
+}
+
+/// `gitx.worktree_remove`：dirty 未 force 拒绝；`scope_session_id` 提供时做 owner 校验。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitxWorktreeRemoveParams {
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub scope_session_id: Option<String>,
+    pub worktree_id: String,
+    pub force: bool,
+}
+
+/// `gitx.worktree_bind`：把 worktree 所有权 CAS 给会话。绑定后该会话的工具执行
+/// workspace 由注册表 fallback 动态落到 worktree 根；`sessions.cwd` 保持源工作区。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitxWorktreeBindParams {
+    pub session_id: String,
+    pub worktree_id: String,
+}
+
+/// `gitx.worktree_unbind`：释放会话的 worktree 绑定（幂等）。
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct GitxWorktreeUnbindParams {
+    pub session_id: String,
+}
+
 /// `session.list` optionally includes archived sessions.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
@@ -621,6 +680,12 @@ validators! {
         validate_clients_list_params => ClientsListParams,
         validate_fs_list_params => FsListParams,
         validate_fs_read_params => FsReadParams,
+        validate_gitx_snapshot_params => GitxSnapshotParams,
+        validate_gitx_worktree_list_params => GitxWorktreeListParams,
+        validate_gitx_worktree_create_params => GitxWorktreeCreateParams,
+        validate_gitx_worktree_remove_params => GitxWorktreeRemoveParams,
+        validate_gitx_worktree_bind_params => GitxWorktreeBindParams,
+        validate_gitx_worktree_unbind_params => GitxWorktreeUnbindParams,
         validate_session_list_params => SessionListParams,
         validate_session_meta_params => SessionMetaParams,
         validate_session_activity_params => SessionActivityParams,
@@ -669,6 +734,12 @@ validators! {
         validate_shell_close_result => ShellCloseResult,
         validate_shell_list_result => ShellListResult,
         validate_sandbox_preflight_report_result => SandboxPreflightReport,
+        validate_gitx_snapshot_result => qaqh_ringing_contract::GitSnapshot,
+        validate_gitx_worktree_list_result => qaqh_ringing_contract::GitxWorktreeListResult,
+        validate_gitx_worktree_create_result => qaqh_ringing_contract::GitxWorktreeCreateResult,
+        validate_gitx_worktree_remove_result => qaqh_ringing_contract::GitxWorktreeRemoveResult,
+        validate_gitx_worktree_bind_result => qaqh_ringing_contract::WorktreeBindingView,
+        validate_gitx_worktree_unbind_result => qaqh_ringing_contract::GitxWorktreeUnbindResult,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -976,6 +1047,56 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         validate_params: validate_sandbox_preflight_status_params,
         validate_result: validate_sandbox_preflight_report_result,
     },
+    // gitx 域（ADR-0041）：worktree 隔离与 git 快照。读面 scope 到会话工作区
+    // （绑定生效即视图落 worktree）；写面操作源工作区的注册表。
+    TypedMethodInfo {
+        method: "gitx.snapshot",
+        params_type: "GitxSnapshotParams",
+        result_type: "GitSnapshot",
+        info: READ,
+        validate_params: validate_gitx_snapshot_params,
+        validate_result: validate_gitx_snapshot_result,
+    },
+    TypedMethodInfo {
+        method: "gitx.worktree_list",
+        params_type: "GitxWorktreeListParams",
+        result_type: "GitxWorktreeListResult",
+        info: READ,
+        validate_params: validate_gitx_worktree_list_params,
+        validate_result: validate_gitx_worktree_list_result,
+    },
+    TypedMethodInfo {
+        method: "gitx.worktree_create",
+        params_type: "GitxWorktreeCreateParams",
+        result_type: "GitxWorktreeCreateResult",
+        info: WRITE,
+        validate_params: validate_gitx_worktree_create_params,
+        validate_result: validate_gitx_worktree_create_result,
+    },
+    TypedMethodInfo {
+        method: "gitx.worktree_remove",
+        params_type: "GitxWorktreeRemoveParams",
+        result_type: "GitxWorktreeRemoveResult",
+        info: WRITE,
+        validate_params: validate_gitx_worktree_remove_params,
+        validate_result: validate_gitx_worktree_remove_result,
+    },
+    TypedMethodInfo {
+        method: "gitx.worktree_bind",
+        params_type: "GitxWorktreeBindParams",
+        result_type: "WorktreeBindingView",
+        info: WRITE,
+        validate_params: validate_gitx_worktree_bind_params,
+        validate_result: validate_gitx_worktree_bind_result,
+    },
+    TypedMethodInfo {
+        method: "gitx.worktree_unbind",
+        params_type: "GitxWorktreeUnbindParams",
+        result_type: "GitxWorktreeUnbindResult",
+        info: WRITE,
+        validate_params: validate_gitx_worktree_unbind_params,
+        validate_result: validate_gitx_worktree_unbind_result,
+    },
 ];
 
 fn validate_params<T: DeserializeOwned>(params: &Value) -> Result<(), String> {
@@ -1096,6 +1217,13 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     // fs
     ("fs.list", READ),
     ("fs.read", READ),
+    // gitx（ADR-0041）：worktree 隔离与 git 快照。写面按 WRITE 报错（action_failed）。
+    ("gitx.snapshot", READ),
+    ("gitx.worktree_list", READ),
+    ("gitx.worktree_create", WRITE),
+    ("gitx.worktree_remove", WRITE),
+    ("gitx.worktree_bind", WRITE),
+    ("gitx.worktree_unbind", WRITE),
     // config / profile
     ("config.load", READ),
     // Sign in with ChatGPT（套餐用量）。**全部 admin_only**：配对出来的设备

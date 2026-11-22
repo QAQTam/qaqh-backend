@@ -2759,6 +2759,7 @@ dependencies = [
  "qaqh-acp",
  "qaqh-client",
  "qaqh-config",
+ "qaqh-gitx",
  "qaqh-goal",
  "qaqh-marketplace",
  "qaqh-mcp",
@@ -2864,6 +2865,22 @@ dependencies = [
  "tiny_http",
  "tokio",
  "unicode-normalization",
+]
+
+[[package]]
+name = "qaqh-gitx"
+version = "4.1.0"
+dependencies = [
+ "log",
+ "qaqh-ringing-contract",
+ "qaqh-tool-core",
+ "qaqh-workspace",
+ "schemars 1.2.3",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "uuid",
 ]
 
 [[package]]
@@ -3130,6 +3147,7 @@ dependencies = [
  "qaqh-config-api",
  "qaqh-dsaccount",
  "qaqh-gate",
+ "qaqh-gitx",
  "qaqh-goal",
  "qaqh-lsp",
  "qaqh-mcp",

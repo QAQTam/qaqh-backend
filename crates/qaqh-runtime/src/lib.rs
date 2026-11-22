@@ -15,6 +15,7 @@
 
 mod agent_catalog;
 pub mod error;
+mod gitx_host;
 mod goal_host;
 mod handoff_fork_schedule;
 mod host_impl;

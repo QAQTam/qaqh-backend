@@ -13,7 +13,10 @@ qaqh-config-api = { path = "../qaqh-config-api" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-lsp = { path = "../qaqh-lsp" }
 qaqh-ringing = { path = "../qaqh-ringing" }
-qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
+# schema feature：gitx 工具的 Args/Output schema 从契约类型派生（ADR-0008 形状权威）。
+qaqh-ringing-contract = { path = "../qaqh-ringing-contract", features = ["schema"] }
+# gitx 服务面（ADR-0033）：worktree 命令 handler + workspace 派生的绑定 fallback。
+qaqh-gitx = { path = "../qaqh-gitx" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-goal = { path = "../qaqh-goal" }

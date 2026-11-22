@@ -206,6 +206,8 @@ pub struct SpawnInput<'a> {
     pub exec_sessions: Arc<qaqh_process_tools::exec_session::ExecSessionManager>,
     /// ADR-0014：外部工具注册器（子代理工具面经此进入每个会话）。
     pub tool_registrars: &'a [qaqh_workspace::registration::ToolRegistrar],
+    /// ADR-0033：回合边界 workspace 重解析钩子（registry 注入；`None` = 不解析）。
+    pub workspace_resolver: Option<crate::session_loop::WorkspaceResolver>,
 }
 
 impl<'a> SpawnInput<'a> {
@@ -232,6 +234,7 @@ impl<'a> SpawnInput<'a> {
             workspace_root,
             exec_sessions,
             tool_registrars: &[],
+            workspace_resolver: None,
         })
     }
 }
@@ -274,6 +277,7 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         workspace_root,
         exec_sessions,
         tool_registrars,
+        workspace_resolver,
     } = input;
 
     let mut tool_manager = qaqh_workspace::registration::build_tool_manager(tool_registrars);
@@ -333,6 +337,10 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         permission_level,
     ) {
         loop_.set_hooks(Arc::new(hooks));
+    }
+    // ADR-0033：回合边界 workspace 重解析（绑定会话下一回合自动落 worktree）。
+    if let Some(resolver) = workspace_resolver {
+        loop_.set_workspace_resolver(resolver);
     }
     Ok(loop_)
 }

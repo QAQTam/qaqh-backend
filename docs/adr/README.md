@@ -72,6 +72,7 @@
 | [0038](0038-lifecycle-hooks.md) | 生命周期 hooks:17 事件词表+五门+独立信任存储+wire 事件面 | 已采纳并实施(`[contract-refreeze]`:4.1.0→4.2.0 minor bump + v4.2 金标准机器重切 + check EXIT=0)· SESSION_CONTRACT_REVISION ringing-session-4→5 · HookStarted/HookFinished/PromptBlocked 三帧 ProviderRetrying 同律 |
 | [0039](0039-unify-tls-crypto-provider-aws-lc-rs.md) | TLS/密码学栈统一:全图单 provider aws-lc-rs,host 构建图移除 ring(client target 分治,ohos 保 ring;dsaccount/siwc/rcgen 弃 ring;非契约面) | 已采纳并实施(`-p` 定向测试 60+65+84+7 全绿;host 编译单元 ring=0;lock 保留 ohos-only ring 条目) |
 | [0040](0040-windows-sandbox-preflight-and-escalation-permission.md) | Windows 沙箱分步自检协议(`sandbox.preflight.start/status`)、`exec_command` 接入 `sbx-win` 执行会话、`with_escalated_permissions`+`justification` 提权摘要与 `PermissionGrantScope`(`once\|session\|persistent`)本对话默认授权 | 已采纳并实施(`[contract-refreeze]`:`ringing-commands-11`/`ringing-session-6` + v4.2 金标准机器重切) |
+| [0041](0041-qaqh-gitx-worktree.md) | qaqh-gitx:工作区 git 消费(`gitx.snapshot`)与 linked-worktree 会话隔离(`worktree_list/create/remove/bind/unbind`,注册表+owner CAS,双锚点) | 已采纳并落 main(自 LTS-v4.1 e8d6ae6d 移植,ADR 顺延改号 0033→0041 防与 AgentTeam 撞号;wire `qaqh.ringing.gitx/v1` additive;金标准重切随 v4.2 批次) |
 
 ## 阅读顺序
 

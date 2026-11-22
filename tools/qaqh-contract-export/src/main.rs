@@ -318,6 +318,8 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         ClientsListParams, ConfigLoadParams, DaemonVersionParams, DiagnosticsMemorySnapshotParams,
         ExecSessionListParams, ExecSessionListResult, ExecSessionOutputParams,
         ExecSessionOutputResult, FsEntry, FsListParams, FsReadParams, FsReadResult,
+        GitxSnapshotParams, GitxWorktreeBindParams, GitxWorktreeCreateParams,
+        GitxWorktreeListParams, GitxWorktreeRemoveParams, GitxWorktreeUnbindParams,
         PlanItemStatusView, PlanReadItem, PlanReadParams, SessionActivityParams, SessionDashboard,
         SessionDashboardParams, SessionDashboardTask, SessionGetActivityParams, SessionListParams,
         SessionMetaParams, SessionToolActivity, SessionTurnParams, SkillCatalogDiagnostic,
@@ -521,6 +523,131 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             finished_at_ms: 42,
             args: "{\"path\":\"/synthetic/workspace/README.md\"}".to_owned(),
         }],
+    )?;
+    // ── gitx 域（ADR-0033）：worktree 隔离与 git 快照。读模型/结果形状在
+    // qaqh-ringing-contract::gitx，params DTO 在 service_methods ──
+    write_fixture(
+        stage,
+        "service-gitx-snapshot-params.json",
+        &GitxSnapshotParams { scope_session_id: None },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-snapshot-result.json",
+        &qaqh_ringing_contract::GitSnapshot {
+            schema: qaqh_ringing_contract::GITX_SCHEMA.to_owned(),
+            source_root: "/synthetic/workspace".to_owned(),
+            branch: Some("main".to_owned()),
+            head_sha: Some("3f2a".repeat(10)),
+            detached: false,
+            dirty: false,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_list-params.json",
+        &GitxWorktreeListParams {
+            scope_session_id: Some("0199a0f0-0000-7000-8000-000000000001".to_owned()),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_list-result.json",
+        &qaqh_ringing_contract::GitxWorktreeListResult {
+            worktrees: vec![qaqh_ringing_contract::WorktreeView {
+                schema: qaqh_ringing_contract::GITX_SCHEMA.to_owned(),
+                id: "0199a0f0-0000-7000-8000-00000000ab12".to_owned(),
+                branch: "feature/auth".to_owned(),
+                slug: "feature-auth".to_owned(),
+                path: "/synthetic/workspace/.qaqh/worktree/feature-auth-ab12".to_owned(),
+                source_root: "/synthetic/workspace".to_owned(),
+                head_sha: "3f2a".repeat(10),
+                owner_session_id: None,
+                created_at_ms: 1_760_000_000_000,
+                missing_dir: false,
+            }],
+            unmanaged_paths: vec![],
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_create-params.json",
+        &GitxWorktreeCreateParams {
+            scope_session_id: Some("0199a0f0-0000-7000-8000-000000000001".to_owned()),
+            branch_name: "feature/auth".to_owned(),
+            base_ref: None,
+            attach: true,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_create-result.json",
+        &qaqh_ringing_contract::GitxWorktreeCreateResult {
+            worktree: qaqh_ringing_contract::WorktreeView {
+                schema: qaqh_ringing_contract::GITX_SCHEMA.to_owned(),
+                id: "0199a0f0-0000-7000-8000-00000000ab12".to_owned(),
+                branch: "feature/auth".to_owned(),
+                slug: "feature-auth".to_owned(),
+                path: "/synthetic/workspace/.qaqh/worktree/feature-auth-ab12".to_owned(),
+                source_root: "/synthetic/workspace".to_owned(),
+                head_sha: "3f2a".repeat(10),
+                owner_session_id: Some("0199a0f0-0000-7000-8000-000000000001".to_owned()),
+                created_at_ms: 1_760_000_000_000,
+                missing_dir: false,
+            },
+            binding: Some(qaqh_ringing_contract::WorktreeBindingView {
+                worktree_root: "/synthetic/workspace/.qaqh/worktree/feature-auth-ab12".to_owned(),
+                source_root: "/synthetic/workspace".to_owned(),
+                branch: "feature/auth".to_owned(),
+                head_sha: "3f2a".repeat(10),
+                owner_session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            }),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_remove-params.json",
+        &GitxWorktreeRemoveParams {
+            scope_session_id: Some("0199a0f0-0000-7000-8000-000000000001".to_owned()),
+            worktree_id: "0199a0f0-0000-7000-8000-00000000ab12".to_owned(),
+            force: false,
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_remove-result.json",
+        &qaqh_ringing_contract::GitxWorktreeRemoveResult { removed: true },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_bind-params.json",
+        &GitxWorktreeBindParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+            worktree_id: "0199a0f0-0000-7000-8000-00000000ab12".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_bind-result.json",
+        &qaqh_ringing_contract::WorktreeBindingView {
+            worktree_root: "/synthetic/workspace/.qaqh/worktree/feature-auth-ab12".to_owned(),
+            source_root: "/synthetic/workspace".to_owned(),
+            branch: "feature/auth".to_owned(),
+            head_sha: "3f2a".repeat(10),
+            owner_session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_unbind-params.json",
+        &GitxWorktreeUnbindParams {
+            session_id: "0199a0f0-0000-7000-8000-000000000001".to_owned(),
+        },
+    )?;
+    write_fixture(
+        stage,
+        "service-gitx-worktree_unbind-result.json",
+        &qaqh_ringing_contract::GitxWorktreeUnbindResult { unbound: true },
     )?;
     write_fixture(
         stage,
@@ -1093,6 +1220,17 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_memwatch::PhaseKind,
         qaqh_ringing_contract::SessionActivity,
         qaqh_ringing_contract::SessionActivityState,
+        // ── gitx 域（ADR-0033）：读模型/命令参数/结果形状；6 个服务方法已进
+        // TYPED_METHODS，coverage.json 的 service.gitx.* 行自动生成 ──
+        qaqh_ringing_contract::GitSnapshot,
+        qaqh_ringing_contract::GitxWorktreeCreateResult,
+        qaqh_ringing_contract::GitxWorktreeListResult,
+        qaqh_ringing_contract::GitxWorktreeRemoveResult,
+        qaqh_ringing_contract::GitxWorktreeUnbindResult,
+        qaqh_ringing_contract::WorktreeBindingView,
+        qaqh_ringing_contract::WorktreeCreateParams,
+        qaqh_ringing_contract::WorktreeRemoveParams,
+        qaqh_ringing_contract::WorktreeView,
         qaqh_ringing_contract::WorkspaceEntry,
         qaqh_ringing_contract::WorkspaceMeta,
         qaqh_types::SessionListEntry,

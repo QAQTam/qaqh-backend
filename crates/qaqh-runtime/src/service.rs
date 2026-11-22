@@ -489,6 +489,7 @@ impl QaqhService {
             Command::Workspace(command) => handlers::workspace::handle(self, command),
             Command::Session(command) => handlers::session::handle(self, command),
             Command::Task(command) => handlers::task::handle(self, command),
+            Command::Gitx(command) => handlers::gitx::handle(self, command),
         }
     }
 
@@ -1411,8 +1412,14 @@ mod exec_env_overlay_tests {
         // 清理：覆盖层清空 + env 还原。
         qaqh_process_tools::exec::env_overlay::apply(&std::collections::BTreeMap::new());
         match previous {
-            Some(value) => unsafe { std::env::set_var("QAQH_DATA_DIR", value) },
-            None => unsafe { std::env::remove_var("QAQH_DATA_DIR") },
+            Some(value) => unsafe {
+                // SAFETY: 测试收尾期单线程恢复 QAQH_DATA_DIR；该测试进程内无并发 env 读者。
+                std::env::set_var("QAQH_DATA_DIR", value)
+            },
+            None => unsafe {
+                // SAFETY: 同上——单线程测试内移除，恢复进场前状态。
+                std::env::remove_var("QAQH_DATA_DIR")
+            },
         }
     }
 }
