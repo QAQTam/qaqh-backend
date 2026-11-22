@@ -12,7 +12,7 @@
 //! - **tty=true**：本模块。qaqh-pty PTY 后端 + `qaqh_sandbox::prepare_pty_launch`
 //!   （helper 从文件读 policy、不重定向 stdin）。单合流终端流，进度事件
 //!   **原样携带 ANSI 转义**推给前端（验证点 2：渲染层拿到的是实时终端流）；
-//!   模型侧 tool result 经 `strip_ansi` + `token_truncate`（验证点 4：
+//!   模型侧 tool result 经 `strip_ansi` + `char_truncate`（验证点 4：
 //!   meta 与实际输出一致，不带控制序列噪声）。
 //!
 //! # 本轮刻意采用的 oneshot 生命周期（codex `oneshot.rs` 对齐）
@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{ExecOutputStream, ExecProgressSender};
 
-use super::truncate::{clean_pty_model_text, token_truncate};
+use super::truncate::{clean_pty_model_text, char_truncate};
 
 /// PTY 路径的轮询粒度（与 direct_exec 主循环一致）。
 const POLL_TICK: std::time::Duration = std::time::Duration::from_millis(50);
@@ -47,7 +47,7 @@ pub(crate) fn pty_exec(
     argv: &[String],
     env: Option<&[(String, String)]>,
     cwd: Option<&str>,
-    max_output_tokens: u32,
+    max_output_chars: u32,
     timeout_secs: u64,
     cancel: Option<&std::sync::atomic::AtomicBool>,
     progress_tx: Option<ExecProgressSender>,
@@ -220,12 +220,12 @@ pub(crate) fn pty_exec(
                 .unwrap_or_else(|| "none".to_string()),
         );
     }
-    let total_tokens = qaqh_types::token::count_tokens(&cleaned);
+    let total_chars = cleaned.chars().count();
     // truncated 口径与管道路径对齐：硬截（未 EOF）或捕获省略（洪峰中段
     // 被丢弃）都必须让模型知道"看到的不完整"。
     let (output_str, truncated) =
-        if total_tokens > max_output_tokens || hard_trunc || outcome.omitted > 0 {
-            (token_truncate(&cleaned, max_output_tokens), true)
+        if total_chars > max_output_chars as usize || hard_trunc || outcome.omitted > 0 {
+            (char_truncate(&cleaned, max_output_chars), true)
         } else {
             (cleaned.clone(), false)
         };

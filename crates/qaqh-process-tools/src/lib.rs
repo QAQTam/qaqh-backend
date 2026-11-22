@@ -5,7 +5,7 @@
 //! 落 journal）、qaqh-tool-core（SDK）。
 //!
 //! 对门面的两条单向回接线：
-//! - exec 输出 token 上限经 [`hooks::set_exec_max_output_tokens`] 注入
+//! - exec 输出字符上限经 [`hooks::set_exec_max_output_chars`] 注入
 //!   （单一事实源是执行线程 thread-local 的 fold policy，回调仍在调用线程
 //!   读取，语义不变）；
 //! - `process` 工具的 display 投影经 [`hooks::set_project_process`] 注入

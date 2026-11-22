@@ -29,8 +29,6 @@ pub mod arg;
 // Platform-specific utilities
 pub mod platform;
 
-pub mod token;
-
 // ── Re-exports: flat public API ──
 
 pub use api_types::UsageInfo;
@@ -70,7 +68,6 @@ pub use tool_result::{
 pub use arg::{parse_arg, parse_arg_or, parse_opt};
 
 // ── Shared utilities ──
-pub use token::count_tokens;
 
 pub use tool_mode::{
     CUSTOM, KNOWN_MODES, MINIMAL, MINIMAL_B, MINIMAL_C, MINIMAL_PREFIX, MINIMAL_TOOLS,

@@ -55,7 +55,6 @@ pub struct ToolContinuation {
 pub struct ToolModelPayload {
     pub text: String,
     pub truncated: bool,
-    pub total_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation: Option<ToolContinuation>,
 }
@@ -569,7 +568,6 @@ impl ToolResult {
             model: ToolModelPayload {
                 text: model_text.0,
                 truncated: model_text.1,
-                total_tokens: estimate_tokens(&text),
                 continuation: None,
             },
             diff: None,
@@ -703,7 +701,6 @@ impl ToolResult {
     pub fn set_model_projection(&mut self, text: String, truncated: bool) {
         self.model.text = text;
         self.model.truncated = truncated;
-        self.model.total_tokens = estimate_tokens(&self.model.text);
     }
 
     /// 大输出外置：一次性改写模型文本、截断标记、summary 与外置引用。
@@ -715,7 +712,6 @@ impl ToolResult {
         self.summary = bounded_text(&summary, TOOL_SUMMARY_MAX_CHARS).0;
         self.model.text = retained;
         self.model.truncated = true;
-        self.model.total_tokens = estimate_tokens(&self.model.text);
         self.output_ref = Some(reference);
     }
 
@@ -818,9 +814,6 @@ fn bounded_text(text: &str, max_chars: usize) -> (String, bool) {
     (bounded, truncated)
 }
 
-fn estimate_tokens(text: &str) -> u64 {
-    (text.chars().count() as u64).div_ceil(4)
-}
 
 #[cfg(test)]
 mod tests {

@@ -49,9 +49,9 @@ pub struct ExecArgs {
     /// True allocates a PTY (merged stdout/stderr, live terminal semantics with ANSI); false or omitted uses plain pipes.
     #[serde(default)]
     pub tty: Option<bool>,
-    /// 100-50000; default 10000.
+    /// 100-200000; default 32000.
     #[serde(default)]
-    pub max_output_tokens: Option<u64>,
+    pub max_output_chars: Option<u64>,
 }
 
 pub struct ExecTool;
@@ -225,10 +225,10 @@ pub(crate) fn run_exec(
     let argv = shell.derive_exec_args_with(&shell_command, extra_args);
 
     // ── Execution limits / cwd / env ──
-    let policy_default = crate::hooks::exec_max_output_tokens().unwrap_or(u32::MAX);
-    let max_output_tokens = args
-        .max_output_tokens
-        .filter(|&n| (100..=50000).contains(&n))
+    let policy_default = crate::hooks::exec_max_output_chars().unwrap_or(u32::MAX);
+    let max_output_chars = args
+        .max_output_chars
+        .filter(|&n| (100..=200_000).contains(&n))
         .map(|n| n as u32)
         .unwrap_or(policy_default);
     let timeout_secs = args
@@ -278,7 +278,7 @@ pub(crate) fn run_exec(
             &argv,
             env.as_deref(),
             cwd.as_deref(),
-            max_output_tokens,
+            max_output_chars,
             timeout_secs,
             Some(cancel.as_ref()),
             progress_tx,
@@ -295,7 +295,7 @@ pub(crate) fn run_exec(
         &argv,
         env.as_deref(),
         cwd.as_deref(),
-        max_output_tokens,
+        max_output_chars,
         timeout_secs,
         background_after_secs,
         Some(cancel.as_ref()),

@@ -13,7 +13,7 @@ use super::pipe::pipe_available_bytes;
 #[cfg(unix)]
 use super::pipe::set_pipe_nonblocking;
 use super::pipe::{PipePumpCtx, Readiness, SEAL_JOIN_BUDGET, spawn_pipe_reader, wait_reader_done};
-use super::truncate::{strip_ansi, token_truncate};
+use super::truncate::{strip_ansi, char_truncate};
 
 /// Internal process launch primitive. The argv is always derived from the
 /// selected shell; the public exec tool no longer accepts a direct argv array.
@@ -24,7 +24,7 @@ pub(crate) fn direct_exec(
     argv: &[String],
     env: Option<&[(String, String)]>,
     cwd: Option<&str>,
-    max_output_tokens: u32,
+    max_output_chars: u32,
     timeout_secs: u64,
     background_after_secs: Option<u64>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
@@ -35,7 +35,7 @@ pub(crate) fn direct_exec(
         argv,
         env,
         cwd,
-        max_output_tokens,
+        max_output_chars,
         timeout_secs,
         background_after_secs,
         cancel,
@@ -52,7 +52,7 @@ pub(crate) fn direct_exec_sandboxed(
     argv: &[String],
     env: Option<&[(String, String)]>,
     cwd: Option<&str>,
-    max_output_tokens: u32,
+    max_output_chars: u32,
     timeout_secs: u64,
     background_after_secs: Option<u64>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
@@ -65,7 +65,7 @@ pub(crate) fn direct_exec_sandboxed(
         argv,
         env,
         cwd,
-        max_output_tokens,
+        max_output_chars,
         timeout_secs,
         background_after_secs,
         cancel,
@@ -81,7 +81,7 @@ fn direct_exec_inner(
     argv: &[String],
     env: Option<&[(String, String)]>,
     cwd: Option<&str>,
-    max_output_tokens: u32,
+    max_output_chars: u32,
     timeout_secs: u64,
     background_after_secs: Option<u64>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
@@ -112,7 +112,7 @@ fn direct_exec_inner(
                 argv,
                 env,
                 cwd,
-                max_output_tokens,
+                max_output_chars,
                 timeout_secs,
                 background_after_secs,
                 cancel,
@@ -476,9 +476,9 @@ fn direct_exec_inner(
         &display_name,
         &injected_secrets,
     );
-    let total_tokens = qaqh_types::token::count_tokens(&cleaned);
-    let (output_str, truncated) = if total_tokens > max_output_tokens || hard_trunc {
-        (token_truncate(&cleaned, max_output_tokens), true)
+    let total_chars = cleaned.chars().count();
+    let (output_str, truncated) = if total_chars > max_output_chars as usize || hard_trunc {
+        (char_truncate(&cleaned, max_output_chars), true)
     } else {
         (cleaned, false)
     };

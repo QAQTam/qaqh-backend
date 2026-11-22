@@ -121,7 +121,7 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                     tty: request.tty,
                     timeout_ms: request.timeout_ms,
                     yield_time_ms: request.yield_time_ms,
-                    max_output_bytes: request.max_output_tokens as usize * 4,
+                    max_output_bytes: request.max_output_chars as usize * 4,
                     cancellation: context.cancellation.shared_flag(),
                 },
                 self.publisher.clone(),
@@ -143,7 +143,7 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                 owner_session_id: context.session_id.clone(),
                 chars: request.chars,
                 yield_time_ms: request.yield_time_ms,
-                max_output_bytes: request.max_output_tokens as usize * 4,
+                max_output_bytes: request.max_output_chars as usize * 4,
                 cancellation: context.cancellation.shared_flag(),
             })
             .map_err(exec_manager_error)?;

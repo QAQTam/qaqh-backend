@@ -152,8 +152,8 @@ pub enum ToolSource {
 pub struct OutputBudget {
     /// 模型可见文本字符上限；`None` = 不截断（折叠策略可覆盖）。
     pub model_chars: Option<usize>,
-    /// exec 类工具内部 token 截断上限；`None` = 不截断。
-    pub exec_max_output_tokens: Option<u32>,
+    /// exec 类工具内部字符截断上限；`None` = 不截断。
+    pub exec_max_output_chars: Option<u32>,
 }
 
 /// Optional model-facing text representation of an existing executor.

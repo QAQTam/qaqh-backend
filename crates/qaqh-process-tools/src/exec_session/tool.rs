@@ -34,9 +34,9 @@ pub struct ExecCommandArgs {
     /// Hard process-tree deadline. Null leaves the execution unbounded.
     #[serde(default)]
     pub timeout_ms: Option<u64>,
-    /// Maximum model output budget in tokens.
+    /// Maximum model output budget in Unicode characters.
     #[serde(default)]
-    pub max_output_tokens: Option<u32>,
+    pub max_output_chars: Option<u32>,
 }
 
 /// exec_command `shell` 字段的白名单——这个 enum **就是**模型面 schema：
@@ -93,7 +93,7 @@ pub struct WriteStdinArgs {
     #[serde(default)]
     pub yield_time_ms: Option<u32>,
     #[serde(default)]
-    pub max_output_tokens: Option<u32>,
+    pub max_output_chars: Option<u32>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -220,7 +220,7 @@ impl TypedTool for ExecCommandTool {
             )
             .into());
         }
-        let max_output_tokens = output_budget(args.max_output_tokens)?;
+        let max_output_chars = output_budget(args.max_output_chars)?;
         let shell = crate::exec::handler::resolve_shell(
             context,
             args.shell.as_ref().map(|shell| shell.config_name()),
@@ -285,7 +285,7 @@ impl TypedTool for ExecCommandTool {
                 tty: args.tty,
                 yield_time_ms,
                 timeout_ms: args.timeout_ms,
-                max_output_tokens,
+                max_output_chars,
             },
         );
         if result.is_err() {
@@ -345,7 +345,7 @@ impl TypedTool for WriteStdinTool {
             ))
             .into());
         }
-        let max_output_tokens = output_budget(args.max_output_tokens)?;
+        let max_output_chars = output_budget(args.max_output_chars)?;
         let host = context.exec_host.as_ref().ok_or_else(|| {
             ToolExecutionError::from(ToolError::new(
                 ToolErrorKind::Unavailable,
@@ -358,7 +358,7 @@ impl TypedTool for WriteStdinTool {
                 exec_session_id: ExecSessionId::new(args.exec_session_id),
                 chars: args.chars,
                 yield_time_ms,
-                max_output_tokens,
+                max_output_chars,
             },
         )?;
         Ok(result.into())
@@ -366,11 +366,11 @@ impl TypedTool for WriteStdinTool {
 }
 
 fn output_budget(requested: Option<u32>) -> Result<u32, ToolExecutionError> {
-    let default = crate::hooks::exec_max_output_tokens().unwrap_or(10_000);
+    let default = crate::hooks::exec_max_output_chars().unwrap_or(32_000);
     let budget = requested.unwrap_or(default);
-    if !(1..=50_000).contains(&budget) {
+    if !(1..=200_000).contains(&budget) {
         return Err(
-            ToolError::invalid_arguments("max_output_tokens must be between 1 and 50000").into(),
+            ToolError::invalid_arguments("max_output_chars must be between 1 and 200000").into(),
         );
     }
     Ok(budget)

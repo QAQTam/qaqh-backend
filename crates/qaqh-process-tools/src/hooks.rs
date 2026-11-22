@@ -4,12 +4,12 @@ use std::sync::OnceLock;
 
 use qaqh_tool_core::tool_api::{ToolDisplay, ToolDisplayFn};
 
-static EXEC_MAX_OUTPUT_TOKENS: OnceLock<fn() -> Option<u32>> = OnceLock::new();
+static EXEC_MAX_OUTPUT_CHARS: OnceLock<fn() -> Option<u32>> = OnceLock::new();
 static PROJECT_PROCESS: OnceLock<ToolDisplayFn> = OnceLock::new();
 
 /// 门面注册「执行线程 fold policy 的 exec 输出 token 上限」回调（幂等）。
-pub fn set_exec_max_output_tokens(provider: fn() -> Option<u32>) {
-    let _ = EXEC_MAX_OUTPUT_TOKENS.set(provider);
+pub fn set_exec_max_output_chars(provider: fn() -> Option<u32>) {
+    let _ = EXEC_MAX_OUTPUT_CHARS.set(provider);
 }
 
 /// 门面注册 `process` 工具的显示投影（幂等；单一事实源留守门面 display）。
@@ -17,9 +17,9 @@ pub fn set_project_process(projector: ToolDisplayFn) {
     let _ = PROJECT_PROCESS.set(projector);
 }
 
-/// exec 的缺省输出 token 上限（未注册 = None → 调用侧按 u32::MAX 兜底）。
-pub fn exec_max_output_tokens() -> Option<u32> {
-    EXEC_MAX_OUTPUT_TOKENS
+/// exec 的缺省输出字符上限（未注册 = None → 调用侧按 u32::MAX 兜底）。
+pub fn exec_max_output_chars() -> Option<u32> {
+    EXEC_MAX_OUTPUT_CHARS
         .get()
         .map(|provider| provider())
         .flatten()

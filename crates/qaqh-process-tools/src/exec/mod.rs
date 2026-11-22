@@ -50,7 +50,7 @@ pub(crate) use shell::{
     executable_on_path, ps_encode,
 };
 #[cfg(test)]
-pub(crate) use truncate::token_truncate;
+pub(crate) use truncate::char_truncate;
 
 #[cfg(test)]
 mod tests;

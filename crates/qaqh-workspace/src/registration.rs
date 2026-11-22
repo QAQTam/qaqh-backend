@@ -38,8 +38,8 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
             .unwrap_or(0),
         subagent_sandbox: crate::authorization::is_subagent_sandbox(),
     });
-    qaqh_process_tools::hooks::set_exec_max_output_tokens(|| {
-        crate::tool_side_fold::policy().exec_max_output_tokens()
+    qaqh_process_tools::hooks::set_exec_max_output_chars(|| {
+        crate::tool_side_fold::policy().exec_max_output_chars()
     });
     qaqh_process_tools::hooks::set_project_process(crate::display::project_process);
 

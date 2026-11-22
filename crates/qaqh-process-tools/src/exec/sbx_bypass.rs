@@ -114,7 +114,7 @@ pub(crate) fn sbx_exec(
     argv: &[String],
     env: Option<&[(String, String)]>,
     cwd: Option<&str>,
-    max_output_tokens: u32,
+    max_output_chars: u32,
     timeout_secs: u64,
     _background_after_secs: Option<u64>,
     cancel: Option<&std::sync::atomic::AtomicBool>,
@@ -524,10 +524,10 @@ pub(crate) fn sbx_exec(
     );
 
     let cleaned = super::truncate::strip_ansi(&format!("{stderr_out}{stdout_out}"));
-    let total_tokens = qaqh_types::token::count_tokens(&cleaned);
-    let (output_str, truncated) = if total_tokens > max_output_tokens {
+    let total_chars = cleaned.chars().count();
+    let (output_str, truncated) = if total_chars > max_output_chars as usize {
         (
-            super::truncate::token_truncate(&cleaned, max_output_tokens),
+            super::truncate::char_truncate(&cleaned, max_output_chars),
             true,
         )
     } else {

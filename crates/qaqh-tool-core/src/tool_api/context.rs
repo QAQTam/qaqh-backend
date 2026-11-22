@@ -50,7 +50,7 @@ pub struct ExecCommandRequest {
     pub tty: bool,
     pub yield_time_ms: u32,
     pub timeout_ms: Option<u64>,
-    pub max_output_tokens: u32,
+    pub max_output_chars: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +58,7 @@ pub struct WriteStdinRequest {
     pub exec_session_id: ExecSessionId,
     pub chars: String,
     pub yield_time_ms: u32,
-    pub max_output_tokens: u32,
+    pub max_output_chars: u32,
 }
 
 #[derive(Debug, Clone)]

@@ -52,7 +52,7 @@ impl HeadTailBuffer {
     /// lossy UTF-8 视图。头尾接缝可能在多字节字符中间——两个半字符各自
     /// lossy 成 U+FFFD，比按字节硬切劈进合法文本更可取（与 codex
     /// `to_bytes_with_omission_marker` 的"接缝即省略标记"语义等价，只是
-    /// 省略标记由模型面的 token_truncate 层统一处理）。
+    /// 省略标记由模型面的 char_truncate 层统一处理）。
     pub(crate) fn to_text(&self) -> String {
         let mut bytes = Vec::with_capacity(self.retained_bytes());
         bytes.extend_from_slice(&self.head);

@@ -6,7 +6,7 @@
 //! 折叠策略通过 [`ToolResultFoldPolicy`] 接口注入，按 actor 线程切换（工具
 //! 模式是会话级概念，策略因此不能是进程级状态）：
 //! - [`StandardPolicy`]（默认）：统一折叠/截断（见 [`StandardPolicy::limit_for`]）；
-//! - [`NoFoldPolicy`]（极限模式）：完全透传，连 exec/bash 内部的 token 截断
+//! - [`NoFoldPolicy`]（极限模式）：完全透传，连 exec/bash 内部的字符截断
 //!   也关闭——上下文大小完全由模型自己控制。
 //!
 //! 原则：模型必须“看得到、看得清”。
@@ -37,20 +37,20 @@ const EXEC_CHAR_LIMIT: usize = 8_000;
 /// canonical display 会随 `ToolResult` 落进 `messages.jsonl`，不设限等于把完整
 /// 正文再持久化一份。
 pub(crate) const CONTENT_BEARING_CHAR_LIMIT: usize = 16_000;
-/// 执行会话内部 token 截断的默认上限（StandardPolicy；模型可显式传参覆盖）。
-const EXEC_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 10_000;
+/// 执行会话内部字符截断的默认上限（StandardPolicy；模型可显式传参覆盖）。
+const EXEC_DEFAULT_MAX_OUTPUT_CHARS: u32 = 32_000;
 
 /// 工具结果折叠策略。
 ///
-/// 实现方决定：哪些工具截断（`limit_for`）、命令输出内部 token 上限
-/// （`exec_max_output_tokens`）以及截断标记文案（`truncation_marker`，可覆盖）。
+/// 实现方决定：哪些工具截断（`limit_for`）、命令输出内部字符上限
+/// （`exec_max_output_chars`）以及截断标记文案（`truncation_marker`，可覆盖）。
 pub trait ToolResultFoldPolicy: Send + Sync + std::fmt::Debug {
     /// 该工具结果模型可见文本的字符上限；`None` = 完全透传（不截断）。
     fn limit_for(&self, tool_name: &str) -> Option<usize>;
 
-    /// exec 内部 token 截断上限；`None` = 不截断（极限模式）。
-    /// 模型显式传入 `max_output_tokens` 参数时以模型参数为准。
-    fn exec_max_output_tokens(&self) -> Option<u32>;
+    /// exec 内部字符截断上限；`None` = 不截断（极限模式）。
+    /// 模型显式传入 `max_output_chars` 参数时以模型参数为准。
+    fn exec_max_output_chars(&self) -> Option<u32>;
 
     /// 截断标记文案（默认实现足够通用，策略可按需覆盖）。
     fn truncation_marker(&self, tool_name: &str, total_chars: usize) -> String {
@@ -79,8 +79,8 @@ impl ToolResultFoldPolicy for StandardPolicy {
         }
     }
 
-    fn exec_max_output_tokens(&self) -> Option<u32> {
-        Some(EXEC_DEFAULT_MAX_OUTPUT_TOKENS)
+    fn exec_max_output_chars(&self) -> Option<u32> {
+        Some(EXEC_DEFAULT_MAX_OUTPUT_CHARS)
     }
 }
 
@@ -96,7 +96,7 @@ impl ToolResultFoldPolicy for NoFoldPolicy {
         None
     }
 
-    fn exec_max_output_tokens(&self) -> Option<u32> {
+    fn exec_max_output_chars(&self) -> Option<u32> {
         None
     }
 }
@@ -187,7 +187,7 @@ mod tests {
         assert_eq!(p.limit_for("web_fetch"), Some(CONTENT_BEARING_CHAR_LIMIT));
         assert_eq!(p.limit_for("read_image"), Some(CONTENT_BEARING_CHAR_LIMIT));
         assert_eq!(p.limit_for("unknown_tool"), None);
-        assert_eq!(p.exec_max_output_tokens(), Some(10_000));
+        assert_eq!(p.exec_max_output_chars(), Some(32_000));
     }
 
     #[test]
@@ -203,7 +203,7 @@ mod tests {
         ] {
             assert_eq!(p.limit_for(name), None, "{name} must not be limited");
         }
-        assert_eq!(p.exec_max_output_tokens(), None);
+        assert_eq!(p.exec_max_output_chars(), None);
     }
 
     #[test]

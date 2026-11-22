@@ -832,7 +832,7 @@ fn grandchild_holding_pipe_write_end_collects_bounded() {
 #[test]
 fn truncated_output_instructs_the_model_to_retry_narrowly() {
     let text = "token ".repeat(1_000);
-    let truncated = token_truncate(&text, 10);
+    let truncated = char_truncate(&text, 10);
     assert!(truncated.contains("Call exec again with a narrower command or a filtering pipeline."));
 }
 
