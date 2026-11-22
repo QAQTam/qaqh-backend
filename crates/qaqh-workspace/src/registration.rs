@@ -27,37 +27,31 @@ pub type ToolRegistrar = fn(&mut ToolManager);
 
 /// 构造并注册全部工具 handler，返回初始化后的 ToolManager。
 /// `extra_registrars` 允许外部 crate（如 qaqh-subagent）注入工具。
+///
+/// P0-2：manager 持有一份**会话私有** [`qaqh_file_tools::FileRuntime`]（账本 +
+/// 读缓存），全部文件工具共享同一 `Arc`；进程级 `LEDGER`/`file_cache` 单例与
+/// 门面线程态钩子（`hooks::set_ambient_provider` 等 OnceLock<fn()>）已随旧
+/// 「执行线程 ambient 视图」前提一并退役。
 pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
+    let files = std::sync::Arc::new(qaqh_file_tools::FileRuntime::default());
     let mut mgr = ToolManager::new();
-
-    // P2(d)：向工具组 crate 注入门面线程态钩子（OnceLock 幂等，首个注册者生效）。
-    // 回调在调用线程执行，thread-local（runtime ctx / fold policy）语义与拆分前一致。
-    qaqh_file_tools::hooks::set_ambient_provider(|| qaqh_file_tools::hooks::AmbientRuntime {
-        permission_level: crate::runtime::context()
-            .map(|context| context.permission_level)
-            .unwrap_or(0),
-        subagent_sandbox: crate::authorization::is_subagent_sandbox(),
-    });
-    qaqh_process_tools::hooks::set_exec_max_output_chars(|| {
-        crate::tool_side_fold::policy().exec_max_output_chars()
-    });
-    qaqh_process_tools::hooks::set_project_process(crate::display::project_process);
+    mgr.set_file_runtime(std::sync::Arc::clone(&files));
 
     // ── 系统工具 ──
     qaqh_process_tools::exec_session::register(&mut mgr);
     web::register(&mut mgr);
 
     // ── 文件操作 ──
-    crate::edit::register(&mut mgr);
-    file_mutate::register(&mut mgr);
-    file_query::register(&mut mgr);
+    crate::edit::register(&mut mgr, &files);
+    file_mutate::register(&mut mgr, &files);
+    file_query::register(&mut mgr, &files);
     file_glob::register(&mut mgr);
-    apply_patch::register(&mut mgr);
-    copy_range::register(&mut mgr);
-    grep_tool::register(&mut mgr);
+    apply_patch::register(&mut mgr, &files);
+    copy_range::register(&mut mgr, &files);
+    grep_tool::register(&mut mgr, &files);
 
     // ── dry-run 确认（内存直提）──
-    confirm_apply::register(&mut mgr);
+    confirm_apply::register(&mut mgr, &files);
 
     // ── Todo（直接、会话内状态工具）──
     // Todo v4（全量覆写）：todo_write（items 即完整清单，整体替换）/ todo_update

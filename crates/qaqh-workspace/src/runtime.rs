@@ -231,8 +231,6 @@ pub fn init_tools(
     let _ = session_id;
     manager.apply_init(allowed_tools);
     let _ = TOOL_MANAGER.set(Mutex::new(manager));
-    crate::file_cache::clear();
-    crate::file_state::clear();
     log::info!("qaqh: tool manager inited ({} tools)", all_tools().len());
 }
 
@@ -246,8 +244,6 @@ pub fn install_actor_tool_manager(manager: crate::ToolManager) {
     ACTOR_TOOL_MANAGER.with(|slot| {
         *slot.borrow_mut() = Some(Arc::new(Mutex::new(manager)));
     });
-    crate::file_cache::clear();
-    crate::file_state::clear();
     log::info!("qaqh: in-process actor tool manager installed");
 }
 
@@ -257,8 +253,6 @@ pub fn clear_actor_tool_manager() {
     ACTOR_TOOL_MANAGER.with(|slot| {
         *slot.borrow_mut() = None;
     });
-    crate::file_cache::clear();
-    crate::file_state::clear();
     log::info!("qaqh: in-process actor tool manager cleared");
 }
 

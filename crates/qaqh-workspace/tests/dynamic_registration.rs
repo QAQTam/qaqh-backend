@@ -102,7 +102,7 @@ fn mcp_prefix_and_model_face_merge() {
 #[test]
 fn collision_rejected_against_dynamic_and_builtin() {
     let mut mgr = ToolManager::new();
-    qaqh_workspace::file_query::register(&mut mgr);
+    qaqh_workspace::file_query::register(&mut mgr, &std::sync::Arc::new(qaqh_file_tools::FileRuntime::default()));
 
     // 动态↔内置：与真实注册的内置名撞 → Err。
     let (_, clashing) = echo_entry("read", "x", "");
@@ -249,7 +249,10 @@ fn description_truncates_at_char_boundary_with_marker() {
 #[test]
 fn category_of_covers_builtin_and_dynamic() {
     let mut mgr = ToolManager::new();
-    qaqh_workspace::file_query::register(&mut mgr);
+    qaqh_workspace::file_query::register(
+        &mut mgr,
+        &std::sync::Arc::new(qaqh_file_tools::FileRuntime::default()),
+    );
     let (name, tool) = echo_entry("demo", "echo", "d");
     mgr.register_dynamic(name, tool).expect("register");
 

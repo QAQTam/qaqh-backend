@@ -5,12 +5,12 @@
 //! code_delta/copy_range/confirm_apply/pending）、journal 审计账本、read_image。
 //!
 //! 组内历史环（`journal ↔ file_mutate`、`file_query → edit::core`）随同 crate
-//! 自然合法化。对门面（qaqh-workspace）只经两条单向边回接：
-//! - 根 re-export：`tool_api` / `file_shared` / `file_state` / `permission` 全局
-//!   等，使搬移后的模块内部 `crate::x` 路径零改动可解析；
-//! - [`hooks`]：线程态运行时快照（agent mode / permission level / subagent
-//!   sandbox / 视觉模型能力）由门面注入（OnceLock，先例是 qaqh-permission 的
-//!   cancel-session resolver）。
+//! 自然合法化。对门面（qaqh-workspace）只经单向边回接：
+//! - 根 re-export：`tool_api` / `file_shared` / `permission` 全局等，使搬移后
+//!   的模块内部 `crate::x` 路径零改动可解析；
+//! - [`FileRuntime`]：P0-2 后账本与读缓存是**实例状态**——`ToolManager` 构造
+//!   时创建一份、全部文件工具共享同一 `Arc`，会话私有 manager 各持一份，
+//!   跨会话基线互踩与「一键 clear 全进程基线」的污染机理物理消灭。
 //!
 //! `ToolManager` 留守门面；`register()` 粘合层经 `RegistersTyped` trait 接受，
 //! 组内测试经 dev-dependency 环引用门面具体 manager。
@@ -23,14 +23,12 @@ pub mod code_delta;
 pub mod confirm_apply;
 pub mod copy_range;
 pub mod edit;
-pub mod file_cache;
 pub mod file_glob;
 pub mod file_mutate;
 pub mod file_query;
 pub mod file_shared;
 pub mod file_state;
 pub mod grep_tool;
-pub mod hooks;
 pub mod journal;
 pub mod pending;
 pub mod read_image;
@@ -45,23 +43,17 @@ pub use qaqh_tool_core::tool_api;
 pub use qaqh_types::{ToolResult, ToolStatus};
 
 /// FS 核心层（原独立 crate `qaqh-fs-core`，2026-10-31 并入）：file_shared /
-/// file_cache / file_state 的单一事实源就在本 crate 根。
+/// file_state 的单一事实源就在本 crate 根。
 pub use file_shared::{
     LineIndex, READ_MAX_BYTES, READ_MAX_CHARS, READ_MAX_LINE_CHARS, READ_MAX_LINES, content_hash,
     is_binary_read_error, normalize_newlines,
 };
 
-/// Unit tests mutate process-wide runtime state. Keep those mutations
-/// deterministic even when the Rust test harness runs modules in parallel.
-#[cfg(test)]
-pub static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+/// 会话私有文件运行时状态（账本 + 读缓存；P0-2 后无任何进程级单例）。
+pub use file_state::{FileRuntime, ledger_key};
 
-/// 权限引擎与其进程级全局状态（current_workspace/session、cancel 等）。
+/// 权限引擎（路径解析/风险分类；P0-2 后不再 re-export 任何线程态函数）。
 pub use qaqh_permission::permission;
-pub use qaqh_permission::{
-    current_session, current_workspace, is_cancel, resolve_workspace_path, set_workspace,
-};
 
 /// 时间与错误信封助手（门面同名函数的单一事实源版本）。
 pub use qaqh_types::platform::now_utc8;

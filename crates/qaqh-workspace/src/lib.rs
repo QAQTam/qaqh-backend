@@ -24,7 +24,7 @@ pub use qaqh_file_tools::file_glob;
 pub use qaqh_file_tools::file_mutate;
 pub use qaqh_file_tools::file_query;
 // FS 核心层（原独立 crate `qaqh-fs-core`，2026-10-31 并入 file-tools）。
-pub use qaqh_file_tools::file_cache;
+// P0-2：file_cache 模块随进程级单例一并退役（读缓存并入 FileRuntime 实例）。
 pub use qaqh_file_tools::file_shared;
 pub use qaqh_file_tools::file_state;
 // P2(d) 拆分：文件/进程工具组 crate。`qaqh_workspace::X` 旧路径全部经

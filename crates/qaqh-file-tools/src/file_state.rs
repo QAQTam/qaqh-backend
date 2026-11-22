@@ -1,13 +1,20 @@
-//! File state tracker — records all file operations for context injection.
+//! File runtime state — per-session file baselines + read cache.
 //!
-//! Generates a compact XML summary injected into the [Environment] block
-//! at each turn, so the model always knows current file states without re-reading.
+//! P0-2：进程级 `LEDGER` / `file_cache::CACHE` 单例随「工具执行面没有可注入
+//! 的上下文」这一旧前提一并退役。账本与读缓存现在是 [`FileRuntime`] 的实例
+//! 状态：`ToolManager` 构造时创建一份、全部文件工具共享同一 `Arc`，会话私有
+//! manager（`WorkspaceToolPort`）天然各持一份——跨会话基线互踩（A 的 read
+//! 基线被 B 的 write 防漂移校验拿去判 STALE_FILE）与
+//! `init_tools → file_state::clear()` 一键洗白全进程基线的污染机理物理消灭。
 //!
-//! Format: `<file_state>\n  path  200L  (edited)\n  ...\n</file_state>`
+//! read 缓存策略（原 file_cache 模块，单实例语义不变）：
+//! 1. file_read 时算 hash → 与缓存一致且非连续读 → 返回 "unchanged"；
+//! 2. 连续读同一文件永远旁路缓存（模型需要重新审视）；
+//! 3. write/edit/delete 失效对应路径。容量 64，FIFO 驱逐。
 
 use std::collections::HashMap;
-use std::sync::Mutex;
-use std::sync::OnceLock;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
 struct FileEntry {
@@ -17,21 +24,6 @@ struct FileEntry {
     /// edit/write/delete 未显式携带 expected_hash 时，用它做自动防漂移校验。
     hash: Option<String>,
     order: u64, // monotonically increasing for recency sort
-}
-
-const MAX_SUMMARY_FILES: usize = 20;
-
-/// 账本变更记录（跨进程增量同步单元）：serve 端执行工具后产生，
-/// 随 HTTP 响应回传，daemon 端 `apply_pending` 回写本地账本，
-/// 保证 Environment 的 `<file_state>` 注入不因远程执行而失真。
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct StateEntry {
-    pub path: String,
-    /// read | edited | created | deleted | moved
-    pub op: String,
-    pub line_count: usize,
-    /// LF canonical 视图 hash（`None` = deleted/moved，无内容指纹）
-    pub hash: Option<String>,
 }
 
 /// 单次编辑的行号偏移（账本行号修正用）。
@@ -45,34 +37,49 @@ struct LineShift {
     delta: i64,
 }
 
-/// 账本：进程级唯一实例，**一把锁**。
+struct CacheEntry {
+    path: String,
+    hash: String,
+    line_count: usize,
+}
+
+const MAX_CACHE: usize = 64;
+const MAX_SUMMARY_FILES: usize = 20;
+
+/// 一份会话私有的文件运行时状态（账本 + 读缓存），**一把锁**。
 ///
-/// 此前是 `STATE` / `COUNTER` / `PENDING` / `SHIFTS` 四个 static、三把锁：
-/// `insert` 要在持有账本锁的同时再去拿 pending 锁，锁序全靠约定维持，任何
-/// 新访问点都可能把约定写反。合并成 `Ledger` 后，"一条记录同时进 entries
-/// 与 pending"由同一个 `&mut self` 保证，不再需要跨锁顺序推理。
-///
-/// 仍然是进程级单例（工具执行面没有可注入的上下文），但类型现在是唯一
-/// 所有者：想在别处再开一份平行状态，必须先绕过 `Ledger`。
+/// 原 `STATE`/`COUNTER`/`SHIFTS`/`CACHE`/`LAST_READ_PATH` 五个 static、多把锁
+/// 的锁序约定问题随实例化一并消失：所有字段在同一个 `&mut self` 下变更，
+/// 不再需要跨锁顺序推理。
 #[derive(Default)]
-struct Ledger {
+struct Inner {
     entries: HashMap<String, FileEntry>,
-    pending: Vec<StateEntry>,
     shifts: HashMap<String, Vec<LineShift>>,
+    cache: Vec<CacheEntry>,
+    last_read_path: Option<String>,
     counter: u64,
 }
 
-impl Ledger {
-    fn next_order(&mut self) -> u64 {
-        self.counter = self.counter.wrapping_add(1);
-        self.counter
+/// 会话私有的文件运行时状态句柄（可克隆，共享同一把锁）。
+#[derive(Clone, Default)]
+pub struct FileRuntime {
+    inner: Arc<Mutex<Inner>>,
+}
+
+impl FileRuntime {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 记录一次变更：同时更新账本与跨进程增量队列。
-    fn insert(&mut self, path: &str, op: &'static str, line_count: usize, hash: Option<String>) {
-        let key = state_key(path);
-        let order = self.next_order();
-        self.entries.insert(
+    fn next_order(inner: &mut Inner) -> u64 {
+        inner.counter = inner.counter.wrapping_add(1);
+        inner.counter
+    }
+
+    fn insert(inner: &mut Inner, path: &str, op: &'static str, line_count: usize, hash: Option<String>) {
+        let key = ledger_key(path);
+        let order = Self::next_order(inner);
+        inner.entries.insert(
             key.clone(),
             FileEntry {
                 op,
@@ -81,95 +88,232 @@ impl Ledger {
                 order,
             },
         );
-        self.pending.push(StateEntry {
-            path: key,
-            op: op.to_string(),
-            line_count,
-            hash,
-        });
     }
-}
 
-static LEDGER: OnceLock<Mutex<Ledger>> = OnceLock::new();
+    fn invalidate_cache(inner: &mut Inner, path: &str) {
+        let before = inner.cache.len();
+        inner.cache.retain(|e| e.path != path);
+        if inner.cache.len() < before {
+            log::info!("[CACHE] invalidated: {}", path);
+        }
+    }
 
-fn ledger() -> std::sync::MutexGuard<'static, Ledger> {
-    LEDGER
-        .get_or_init(|| Mutex::new(Ledger::default()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-}
+    /// Record a file read (full file or range — both establish the ledger).
+    /// 同时建立行号基线：清空该文件的编辑偏移链，并把内容存入读缓存。
+    pub fn record_read(&self, path: &str, content: &str, line_count: usize) {
+        let hash = hash_content(content);
+        let hash_short = short_hash(&hash).to_string();
+        let mut inner = self.lock();
+        inner.cache.retain(|e| e.path != path);
+        if inner.cache.len() >= MAX_CACHE {
+            inner.cache.remove(0);
+        }
+        inner.cache.push(CacheEntry {
+            path: path.to_string(),
+            hash,
+            line_count,
+        });
+        log::info!(
+            "[CACHE] file_read stored: {} (hash={}, {}L)",
+            path,
+            hash_short,
+            line_count
+        );
+        Self::insert(&mut inner, path, "read", line_count, Some(ledger_hash(content)));
+        inner.shifts.remove(&ledger_key(path));
+    }
 
-/// 取走自上次以来的全部账本变更（serve 端每次工具执行后调用；清空队列）。
-pub fn take_pending() -> Vec<StateEntry> {
-    std::mem::take(&mut ledger().pending)
-}
-
-/// 应用远程账本变更（daemon 端收到 serve 响应后回写本地账本）。
-pub fn apply_pending(entries: Vec<StateEntry>) {
-    // 先在锁外完成缓存失效（文件 IO），再一次加锁回写，避免 ledger → cache
-    // 的锁嵌套。
-    let mapped: Vec<(&'static str, StateEntry)> = entries
-        .into_iter()
-        .map(|entry| {
-            let op: &'static str = match entry.op.as_str() {
-                "read" => "read",
-                "edited" => "edited",
-                "created" => "created",
-                "deleted" => "deleted",
-                "moved" => "moved",
-                _ => "read",
-            };
-            if op != "read" {
-                crate::file_cache::invalidate(&entry.path);
+    /// Read 缓存命中检查。返回 `Some(json)` 表示内容自上次 read 后未变。
+    /// 连续读同一文件永远旁路缓存（模型需要重新审视）。
+    pub fn read_cache_check(&self, path: &str, content: &str) -> Option<String> {
+        let hash = hash_content(content);
+        let mut inner = self.lock();
+        let is_consecutive = inner.last_read_path.as_ref().is_some_and(|p| p == path);
+        inner.last_read_path = Some(path.to_string());
+        if is_consecutive {
+            log::info!("[CACHE] file_read consecutive: {} — passing through", path);
+            return None;
+        }
+        for e in inner.cache.iter() {
+            if e.path == path {
+                if e.hash == hash {
+                    log::info!(
+                        "[CACHE] file_read hit: {} (hash={})",
+                        path,
+                        short_hash(&hash)
+                    );
+                    return Some(
+                        serde_json::json!({
+                            "timeis": qaqh_types::platform::now_utc8(),
+                            "status": "ok",
+                            "path": path,
+                            "hash": crate::file_shared::content_hash(content),
+                            "cache_hash": short_hash(&hash),
+                            "total_lines": e.line_count,
+                            "unchanged": true,
+                            "content": format!("{} unchanged (hash={})", path, short_hash(&hash)),
+                        })
+                        .to_string(),
+                    );
+                }
+                break;
             }
-            (op, entry)
-        })
-        .collect();
-    let mut ledger = ledger();
-    for (op, entry) in mapped {
-        ledger.insert(&entry.path, op, entry.line_count, entry.hash);
+        }
+        None
+    }
+
+    /// Record a file write (create/overwrite/append). 全覆盖语义：行号全失效，
+    /// 清空偏移链（模型应重新 read 建立基线）。
+    pub fn record_write(&self, path: &str, content: &str) {
+        let mut inner = self.lock();
+        Self::invalidate_cache(&mut inner, path);
+        let op = if inner.entries.contains_key(&ledger_key(path)) {
+            "edited"
+        } else {
+            "created"
+        };
+        Self::insert(
+            &mut inner,
+            path,
+            op,
+            content.lines().count(),
+            Some(ledger_hash(content)),
+        );
+        inner.shifts.remove(&ledger_key(path));
+    }
+
+    /// Record a file edit with per-hunk line shifts (账本行号修正的数据源)。
+    /// `shifts` = 编辑前 1-based 起始行 → 行号增量（按序应用，均相对同一快照）。
+    pub fn record_edit_with_shifts(&self, path: &str, content: &str, shifts: &[(usize, i64)]) {
+        let mut inner = self.lock();
+        Self::invalidate_cache(&mut inner, path);
+        let key = ledger_key(path);
+        Self::insert(
+            &mut inner,
+            path,
+            "edited",
+            content.lines().count(),
+            Some(ledger_hash(content)),
+        );
+        let list = inner.shifts.entry(key).or_default();
+        for (before_line, delta) in shifts {
+            if *delta != 0 {
+                list.push(LineShift {
+                    before_line: *before_line,
+                    delta: *delta,
+                });
+            }
+        }
+    }
+
+    /// 账本行号修正：把"基于最近一次 read 基线"的行号映射到当前行号。
+    ///
+    /// 返回 `(修正后行号, 总偏移)`；无偏移链（该文件从未被 read 过或链已清）
+    /// 返回 `Some((line, 0))` 原样，无基线返回 `None`。
+    pub fn correct_line(&self, path: &str, line: usize) -> Option<(usize, i64)> {
+        let key = ledger_key(path);
+        let inner = self.lock();
+        let list = inner.shifts.get(&key)?;
+        if list.is_empty() {
+            return Some((line, 0));
+        }
+        let mut delta: i64 = 0;
+        for s in list {
+            if line >= s.before_line {
+                delta += s.delta;
+            }
+        }
+        Some(((line as i64 + delta).max(1) as usize, delta))
+    }
+
+    /// grep 输出的是实时行号：清空偏移链，防止后续 read 用 grep 行号时被误修正。
+    pub fn record_grep(&self, path: &str) {
+        self.lock().shifts.remove(&ledger_key(path));
+    }
+
+    /// Record a file deletion (ledger cleared — the file no longer exists).
+    pub fn record_delete(&self, path: &str) {
+        let mut inner = self.lock();
+        Self::invalidate_cache(&mut inner, path);
+        Self::insert(&mut inner, path, "deleted", 0, None);
+    }
+
+    /// 工具侧账本：该路径最近一次被工具看到时的 LF 视图 hash。
+    /// `None` = 本会话中工具从未见过该文件（尚无校验基线）。
+    pub fn last_hash(&self, path: &str) -> Option<String> {
+        let inner = self.lock();
+        inner
+            .entries
+            .get(&ledger_key(path))
+            .and_then(|e| e.hash.clone())
+    }
+
+    /// Generate file state summary. Capped at 20 most recently touched files.
+    pub fn summary(&self) -> String {
+        let inner = self.lock();
+        let s = &inner.entries;
+        if s.is_empty() {
+            return String::new();
+        }
+        let mut entries: Vec<(&String, &FileEntry)> = s.iter().collect();
+        entries.sort_by_key(|(_, e)| -(e.order as i64)); // most recent first
+        let total = entries.len();
+        entries.truncate(MAX_SUMMARY_FILES);
+
+        let mut out = String::from("<file_state>\n");
+        for (path, e) in &entries {
+            let lines = if e.line_count > 0 {
+                format!("{}L", e.line_count)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "  {:<50} {:>6}  ({})\n",
+                path,
+                if lines.is_empty() { "—" } else { &lines },
+                e.op,
+            ));
+        }
+        if total > MAX_SUMMARY_FILES {
+            out.push_str(&format!(
+                "  ... ({} more files)\n",
+                total - MAX_SUMMARY_FILES
+            ));
+        }
+        out.push_str("</file_state>");
+        out
     }
 }
 
 /// Windows 上 `canonicalize` 返回 `\\?\C:\…` verbatim 前缀路径；剥掉以与
 /// read/write 既有键形态一致（见 `copy_range.rs` 的 BUG-2026-09-13-16 注）。
-fn strip_verbatim(path: &std::path::Path) -> String {
+fn strip_verbatim(path: &Path) -> String {
     let s = path.to_string_lossy();
     s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
 }
 
-/// 账本键的唯一派生（T-8-3② / 安全审查 P1-3）：`resolve_workspace_path` 词法
-/// 归一 + 文件存在时 best-effort `canonicalize`（解析符号链接）。
+/// 账本键的唯一派生（T-8-3② / 安全审查 P1-3）。
 ///
-/// 缺陷形态：同一文件的不同书写形态（绝对路径里的 `./` / `..`、符号链接
-/// 别名）此前派生**两套键**，read 建立的基线对 write/edit 不可见
-/// （STALE_FILE 误判 / hash 漂移）。
-///
-/// 保守点：`resolve_workspace_path` 先做跨平台安全的词法归一（不引入
-/// Windows `\\?\` verbatim 前缀——那是 BUG-2026-09-13-16 的根因）；文件
-/// 不存在（新建/已删除，或跨机 serve→daemon 回传）时解析父目录后拼回文件名；
-/// 父目录也解析失败则退回词法归一形态。
+/// 绝对路径：词法归一（去 `./`/`..`/冗余分隔符，不引入 Windows `\\?\`
+/// verbatim 前缀——BUG-2026-09-13-16 的根因）+ 文件存在时 best-effort
+/// `canonicalize`（解析符号链接；不存在时解析父目录后拼回文件名，再不行
+/// 退回词法归一形态）。
 ///
 /// 相对路径**原样保留**：生产调用方（read/write/edit/copy_range/apply_patch）
-/// 都已先经 `resolve_workspace_path` 产出绝对路径；账本层再解析会把无锚点的
-/// 相对键悄悄改成 workspace/cwd 绝对键，破坏既有相对键契约（且与并行测试的
-/// 全局 `CURRENT_WORKSPACE` 互相干扰）。
-/// 账本键的公开口径：把任意写法的路径归一化成账本内部键。
+/// 都已先经显式 ctx 解析出绝对路径；账本层再解析会把无锚点的相对键悄悄改成
+/// workspace/cwd 绝对键，破坏既有相对键契约。
 ///
 /// 宿主在工具之外回填账本时（批边界扫描发现脚本改的文件）必须走同一口径，
-/// 否则与 record_read / record_write 的键错开——注意 state_key 对**相对路径不做
+/// 否则与 record_read / record_write 的键错开——注意对**相对路径不做
 /// canonicalize**，因此调用方应先把路径解析成绝对路径再传入。
 pub fn ledger_key(raw: &str) -> String {
-    state_key(raw)
-}
-
-fn state_key(raw: &str) -> String {
-    let raw_path = std::path::Path::new(raw);
+    let raw_path = Path::new(raw);
     if !raw_path.is_absolute() {
         return raw.to_string();
     }
-    let resolved = qaqh_permission::resolve_workspace_path(raw);
-    let path = std::path::Path::new(&resolved);
+    let normalized =
+        qaqh_permission::normalize_lexically(raw_path).to_string_lossy().to_string();
+    let path = Path::new(&normalized);
     if let Ok(canon) = std::fs::canonicalize(path) {
         return strip_verbatim(&canon);
     }
@@ -178,7 +322,7 @@ fn state_key(raw: &str) -> String {
     {
         return strip_verbatim(&canon_parent.join(name));
     }
-    resolved
+    normalized
 }
 
 /// 任意内容 → LF canonical 视图 hash（与 read 返回的 hash 同视图）。
@@ -189,232 +333,62 @@ fn ledger_hash(content: &str) -> String {
     crate::file_shared::content_hash(&lf)
 }
 
-/// Record a file read (full file or range — both establish the ledger).
-/// 同时建立行号基线：清空该文件的编辑偏移链。
-pub fn record_read(path: &str, content: &str, line_count: usize) {
-    crate::file_cache::store(path, content, line_count);
-    let key = state_key(path);
-    let mut ledger = ledger();
-    ledger.insert(path, "read", line_count, Some(ledger_hash(content)));
-    ledger.shifts.remove(&key);
+/// 16 位小写 hex 的前 8 位（hex 为 ASCII，切片恒为 char boundary）。
+fn short_hash(h: &str) -> &str {
+    h.get(..8).unwrap_or(h)
 }
 
-/// Record a file write (create/overwrite/append). 全覆盖语义：行号全失效，
-/// 清空偏移链（模型应重新 read 建立基线）。
-pub fn record_write(path: &str, content: &str) {
-    crate::file_cache::invalidate(path);
-    let key = state_key(path);
-    let mut ledger = ledger();
-    let op = if ledger.entries.contains_key(&key) {
-        "edited"
-    } else {
-        "created"
-    };
-    ledger.insert(
-        path,
-        op,
-        content.lines().count(),
-        Some(ledger_hash(content)),
-    );
-    ledger.shifts.remove(&key);
-}
-
-/// Record a file edit with per-hunk line shifts (账本行号修正的数据源)。
-/// `shifts` = 编辑前 1-based 起始行 → 行号增量（按序应用，均相对同一快照）。
-pub fn record_edit_with_shifts(path: &str, content: &str, shifts: &[(usize, i64)]) {
-    crate::file_cache::invalidate(path);
-    let key = state_key(path);
-    let mut ledger = ledger();
-    ledger.insert(
-        path,
-        "edited",
-        content.lines().count(),
-        Some(ledger_hash(content)),
-    );
-    let list = ledger.shifts.entry(key).or_default();
-    for (before_line, delta) in shifts {
-        if *delta != 0 {
-            list.push(LineShift {
-                before_line: *before_line,
-                delta: *delta,
-            });
-        }
-    }
-}
-
-/// 账本行号修正：把"基于最近一次 read 基线"的行号映射到当前行号。
-///
-/// 返回 `(修正后行号, 总偏移)`；无偏移链（该文件从未被 read 过或链已清）
-/// 返回 `Some((line, 0))` 原样，无基线返回 `None`。
-pub fn correct_line(path: &str, line: usize) -> Option<(usize, i64)> {
-    let key = state_key(path);
-    let ledger = ledger();
-    let list = ledger.shifts.get(&key)?;
-    if list.is_empty() {
-        return Some((line, 0));
-    }
-    let mut delta: i64 = 0;
-    for s in list {
-        if line >= s.before_line {
-            delta += s.delta;
-        }
-    }
-    Some(((line as i64 + delta).max(1) as usize, delta))
-}
-
-/// grep 输出的是实时行号：清空偏移链，防止后续 read 用 grep 行号时被误修正。
-pub fn record_grep(path: &str) {
-    ledger().shifts.remove(&state_key(path));
-}
-
-/// Record a file edit.
-pub fn record_edit(path: &str, content: &str) {
-    crate::file_cache::invalidate(path);
-    ledger().insert(
-        path,
-        "edited",
-        content.lines().count(),
-        Some(ledger_hash(content)),
-    );
-}
-
-/// Record a file deletion (ledger cleared — the file no longer exists).
-pub fn record_delete(path: &str) {
-    crate::file_cache::invalidate(path);
-    ledger().insert(path, "deleted", 0, None);
-}
-
-/// 工具侧账本：该路径最近一次被工具看到时的 LF 视图 hash。
-/// `None` = 本会话中工具从未见过该文件（尚无校验基线）。
-pub fn last_hash(path: &str) -> Option<String> {
-    ledger()
-        .entries
-        .get(&state_key(path))
-        .and_then(|e| e.hash.clone())
-}
-
-/// Generate file state summary. Capped at 20 most recently touched files.
-pub fn summary() -> String {
-    let ledger = ledger();
-    let s = &ledger.entries;
-    if s.is_empty() {
-        return String::new();
-    }
-    let mut entries: Vec<(&String, &FileEntry)> = s.iter().collect();
-    entries.sort_by_key(|(_, e)| -(e.order as i64)); // most recent first
-    let total = entries.len();
-    entries.truncate(MAX_SUMMARY_FILES);
-
-    let mut out = String::from("<file_state>\n");
-    for (path, e) in &entries {
-        let lines = if e.line_count > 0 {
-            format!("{}L", e.line_count)
-        } else {
-            String::new()
-        };
-        out.push_str(&format!(
-            "  {:<50} {:>6}  ({})\n",
-            path,
-            if lines.is_empty() { "—" } else { &lines },
-            e.op,
-        ));
-    }
-    if total > MAX_SUMMARY_FILES {
-        out.push_str(&format!(
-            "  ... ({} more files)\n",
-            total - MAX_SUMMARY_FILES
-        ));
-    }
-    out.push_str("</file_state>");
-    out
-}
-
-/// Clear all tracked state (session reset).
-pub fn clear() {
-    ledger().entries.clear();
+fn hash_content(s: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// 实例化后的账本天然会话私有：两份 FileRuntime 互不可见——这正是
+    /// P0-2 消灭跨会话污染的不变量（8 线程并发探针的单元级前身）。
     #[test]
-    fn pending_roundtrip_applies_remote_ledger() {
-        // 模拟 serve 端：record 产生 pending 增量。
-        // 注意 pending/state 是进程级全局（lib 测试并行共享），
-        // 断言过滤自己的条目；apply_pending 也会产生 pending（daemon 端不回传，
-        // 但测试环境里会混入队列），因此取过滤后的最后一条（最新记录）。
-        let key = "pending-roundtrip-a.txt";
-        // pending 是进程级全局队列且 take_pending 为清空语义：并行测试可能
-        // 抢走增量。先吞掉别人的，再写自己的并立刻取走；仍被抢则重试。
-        let own = (0..3)
-            .find_map(|_| {
-                let _ = take_pending();
-                record_write(key, "hello\nworld\n");
-                let got: Vec<StateEntry> = take_pending()
-                    .into_iter()
-                    .filter(|e| e.path == key)
-                    .collect();
-                (!got.is_empty()).then_some(got)
-            })
-            .expect("own pending entry after retries");
-        assert_eq!(own.len(), 1, "one entry for our path");
-        assert_eq!(own[0].op, "created");
-        assert_eq!(own[0].line_count, 2);
-        assert!(own[0].hash.is_some());
-
-        // 模拟 daemon 端：apply 回传增量（不清全局账本，避免踩并行测试）
-        apply_pending(own);
-        let h = last_hash(key).expect("ledger restored from delta");
-        // 与本地 LF canonical 视图 hash 一致
-        assert_eq!(h, ledger_hash("hello\nworld\n"));
-
-        // 编辑后 op=edited，hash 更新
-        record_edit(key, "hello\nWORLD\n");
-        let delta2: Vec<StateEntry> = take_pending()
-            .into_iter()
-            .filter(|e| e.path == key)
-            .collect();
-        assert_eq!(delta2.last().map(|e| e.op.as_str()), Some("edited"));
-        apply_pending(delta2);
-        assert_eq!(last_hash(key).unwrap(), ledger_hash("hello\nWORLD\n"));
-
-        // 删除：hash=None
-        record_delete(key);
-        let delta3: Vec<StateEntry> = take_pending()
-            .into_iter()
-            .filter(|e| e.path == key)
-            .collect();
-        assert_eq!(delta3.last().map(|e| e.op.as_str()), Some("deleted"));
-        assert!(delta3.last().unwrap().hash.is_none());
-        apply_pending(delta3);
-        assert_eq!(last_hash(key), None);
+    fn runtimes_are_isolated_by_construction() {
+        let a = FileRuntime::default();
+        let b = FileRuntime::default();
+        a.record_read("shared.txt", "alpha\n", 1);
+        assert_eq!(a.last_hash("shared.txt"), Some(ledger_hash("alpha\n")));
+        assert_eq!(
+            b.last_hash("shared.txt"), None,
+            "另一份 FileRuntime 不得看到本实例的基线"
+        );
+        // B 建立自己的基线后互不覆盖
+        b.record_write("shared.txt", "beta\n");
+        assert_eq!(a.last_hash("shared.txt"), Some(ledger_hash("alpha\n")));
+        assert_eq!(b.last_hash("shared.txt"), Some(ledger_hash("beta\n")));
     }
 
     #[test]
-    fn take_pending_clears_the_queue() {
-        // PENDING 是进程全局队列：并行测试的 take_pending 会偷走本测试
-        // 刚 record 的条目，必须按家规持全仓串行锁。
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        // 全局队列：记录唯一条目后断言其出现且取走即清（不依赖队列为空起步）
-        let key = "pending-roundtrip-b.txt";
-        record_read(key, "x\n", 1);
-        let mut saw_own = false;
-        let mut queue = take_pending();
-        while queue.iter().any(|e| e.path == key) {
-            saw_own = true;
-            queue = take_pending();
-        }
-        assert!(saw_own, "own entry observed in the queue");
+    fn read_cache_hits_and_invalidates_per_instance() {
+        let rt = FileRuntime::default();
+        rt.record_read("c.txt", "v1\n", 1);
+        // 同内容再次读（非连续——中间插一个别的路径）→ 命中
+        rt.record_read("other.txt", "o\n", 1);
+        let hit = rt.read_cache_check("c.txt", "v1\n").expect("cache hit");
+        assert!(hit.contains("unchanged"));
+        // 内容变了 → 未命中
+        assert!(rt.read_cache_check("c.txt", "v2\n").is_none());
+        // write 失效 → 未命中
+        rt.record_write("c.txt", "v3\n");
+        assert!(rt.read_cache_check("c.txt", "v3\n").is_none());
+        // 连续读旁路
+        assert!(rt.read_cache_check("c.txt", "v3\n").is_none());
     }
 
     #[test]
     fn file_state_key_matches_resolved_key() {
         // T-8-3②：同一文件的不同书写形态必须派生**同一个**账本键——否则
         // read 建立的基线对 write/edit 不可见（STALE_FILE 误判 / hash 漂移）。
-        // 不调用 clear()：账本是进程级全局，清空会踩并行测试。
         let dir = tempfile::tempdir().expect("tempdir");
         let file = dir.path().join("ledger.txt");
         std::fs::write(&file, "hello\n").expect("write file");
@@ -422,31 +396,34 @@ mod tests {
         // 绝对路径 + 冗余分量（`./` 与 `sub/..` 回折）。旧实现把绝对路径
         // 原样返回，该字符串与归一化后的解析键分叉。
         let dotted = format!("{}/./sub/../ledger.txt", dir.path().display());
-        record_read(&dotted, "hello\n", 1);
+        let rt = FileRuntime::default();
+        rt.record_read(&dotted, "hello\n", 1);
 
-        let resolved = qaqh_permission::resolve_workspace_path(&file.to_string_lossy());
+        let resolved = qaqh_permission::normalize_lexically(Path::new(&file))
+            .to_string_lossy()
+            .to_string();
         assert!(
-            std::path::Path::new(&resolved).is_absolute(),
+            Path::new(&resolved).is_absolute(),
             "fixture must resolve to an absolute key, got {resolved}"
         );
         assert_eq!(
-            state_key(&dotted),
-            state_key(&resolved),
+            ledger_key(&dotted),
+            ledger_key(&resolved),
             "state key must not depend on the path spelling"
         );
         assert_eq!(
-            last_hash(&dotted),
-            last_hash(&resolved),
+            rt.last_hash(&dotted),
+            rt.last_hash(&resolved),
             "file_state key must match the resolved key for the same file"
         );
         assert!(
-            last_hash(&resolved).is_some(),
+            rt.last_hash(&resolved).is_some(),
             "the read baseline must be visible through the resolved key"
         );
         assert!(
-            !state_key(&dotted).contains("/./"),
+            !ledger_key(&dotted).contains("/./"),
             "key must be normalized: {}",
-            state_key(&dotted)
+            ledger_key(&dotted)
         );
     }
 }

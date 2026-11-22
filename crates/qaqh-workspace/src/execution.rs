@@ -255,10 +255,13 @@ pub fn execute_authorized_with_context(
     let _ = (authorized_workspace, authorized_resources);
     // 审计对象 before 指纹：派发前按与 finalize 同源的 args 口径快照
     // file_state 账本（键一致，命中即 before，未命中为 None）。
+    // P0-2：账本是 manager 的会话私有 FileRuntime（与工具 handler 同源）。
+    let file_runtime = crate::runtime::with_manager(|manager| manager.file_runtime().clone())
+        .unwrap_or_default();
     let audit_paths = crate::manager::extract_files_affected(&name, &args);
     let before_hashes: Vec<(String, Option<String>)> = audit_paths
         .iter()
-        .map(|path| (path.clone(), crate::file_state::last_hash(path)))
+        .map(|path| (path.clone(), file_runtime.last_hash(path)))
         .collect();
     // P4 A1: write/exec/net 必须先写 durable audit intent；失败不得进入 handler。
     let high_risk = matches!(
@@ -411,7 +414,7 @@ pub fn execute_authorized_with_context(
                         .iter()
                         .find(|(candidate, _)| candidate == path)
                         .and_then(|(_, hash)| hash.clone()),
-                    after_sha: crate::file_state::last_hash(path),
+                    after_sha: file_runtime.last_hash(path),
                 })
                 .collect();
             let audit_entry = crate::audit::AuditEntry {

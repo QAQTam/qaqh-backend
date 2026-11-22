@@ -130,7 +130,10 @@ impl ToolProjection for ApplyPatchOutput {
     }
 }
 
-pub struct ApplyPatchTool;
+pub struct ApplyPatchTool {
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for ApplyPatchTool {
     type Args = ApplyPatchArgs;
@@ -248,7 +251,7 @@ impl TypedTool for ApplyPatchTool {
             if !dry_run {
                 if let Some(new) = &delta.new {
                     // 账本键用解析后的绝对路径（与 read/edit/write 同键）。
-                    crate::file_state::record_write(&delta.resolved_path, new);
+                    self.files.record_write(&delta.resolved_path, new);
                 }
                 crate::journal::record_change(
                     &ctx.session_id,
@@ -402,8 +405,10 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
 pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch (*** Begin Patch). Matching takes the FIRST hit; \
      disambiguate repeated context with extra lines or '@@ <context line>'. dry_run previews.";
 
-pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_typed_tool(ApplyPatchTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
+    mgr.register_typed_tool(ApplyPatchTool {
+        files: files.clone(),
+    });
 }
 
 /// Compatibility entry retained for existing in-process tests.
@@ -412,7 +417,13 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
 /// the existing in-process call shape for older tests.
 #[cfg(test)]
 pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
-    use crate::file_mutate::ambient_tool_context;
+    exec_apply_patch_in(&crate::FileRuntime::default(), args)
+}
+
+/// 共享账本的变体（read→apply_patch→last_hash 链路用同一份 FileRuntime）。
+#[cfg(test)]
+pub(super) fn exec_apply_patch_in(files: &crate::FileRuntime, args: &Value) -> crate::ToolResult {
+    use crate::file_mutate::test_tool_context_in;
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
     if args
@@ -433,11 +444,19 @@ pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
             .to_string(),
         );
     }
-    let ctx = ambient_tool_context("apply-patch-compat", Duration::from_secs(60));
-    TypedToolAdapter::new(ApplyPatchTool)
-        .execute(ctx, args.clone())
-        .unwrap_or_else(|fatal| panic!("apply_patch tool fatal: {}", fatal.message))
-        .to_tool_result()
+    // Commit1 过渡：workspace 取自 set_workspace 的 TLS（与旧 ambient 形态一致）；
+    // Commit3 收尾后由测试显式传根，TLS 语义整体退役。
+    let ctx = test_tool_context_in(
+        &qaqh_permission::current_workspace(),
+        "apply-patch-compat",
+        Duration::from_secs(60),
+    );
+    TypedToolAdapter::new(ApplyPatchTool {
+        files: files.clone(),
+    })
+    .execute(ctx, args.clone())
+    .unwrap_or_else(|fatal| panic!("apply_patch tool fatal: {}", fatal.message))
+    .to_tool_result()
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -475,7 +494,7 @@ mod tests {
         (dir, ws)
     }
 
-    fn run_in(ws: &str, patch: &str, extra: serde_json::Value) -> serde_json::Value {
+    fn run_in(files: &crate::FileRuntime, ws: &str, patch: &str, extra: serde_json::Value) -> serde_json::Value {
         let mut args = serde_json::json!({ "patch": patch });
         if let Some(obj) = extra.as_object() {
             for (k, v) in obj {
@@ -484,7 +503,7 @@ mod tests {
         }
         // 测试直接注入 workspace（避免依赖全局 CURRENT_WORKSPACE）
         qaqh_permission::set_workspace(&ws.to_string());
-        let result = exec_apply_patch(&args);
+        let result = exec_apply_patch_in(files, &args);
         if let Some(err) = &result.error {
             return serde_json::json!({
                 "status": "error",
@@ -539,7 +558,7 @@ mod tests {
 +LINE2
 *** End Patch
 ";
-        let out = run_in(&ws, patch, serde_json::json!({}));
+        let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(out["format"], "codex");
         assert_eq!(out["files"], 1);
@@ -564,7 +583,7 @@ mod tests {
 ++LINE2
 *** End Patch
 ";
-        let out = run_in(&ws, patch, serde_json::json!({ "dry_run": true }));
+        let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({ "dry_run": true }));
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(out["dry_run"], true);
         assert_eq!(out["files"], 1);
@@ -587,7 +606,7 @@ mod tests {
 ++NOPE
 *** End Patch
 ";
-        let out = run_in(&ws, patch, serde_json::json!({}));
+        let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "error", "got: {out}");
         assert_eq!(out["code"], "no_match");
         assert_eq!(
@@ -609,7 +628,7 @@ mod tests {
 +clobbered
 *** End Patch
 ";
-        let out = run_in(&ws, patch, serde_json::json!({ "dry_run": true }));
+        let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({ "dry_run": true }));
         assert_eq!(out["status"], "error", "got: {out}");
         assert_eq!(out["code"], "would_overwrite", "got: {out}");
         let hint = out["hint"].as_str().unwrap_or_default();
@@ -637,7 +656,7 @@ mod tests {
 +clobbered
 *** End Patch
 ";
-        let out = run_in(&ws, patch, serde_json::json!({}));
+        let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(out["overwritten"][0], "a.txt", "got: {out}");
         assert_eq!(
@@ -662,7 +681,7 @@ mod tests {
 +new b
 *** End Patch
 ";
-        let out = run_in(&ws, patch, serde_json::json!({}));
+        let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
         assert_eq!(
             out["overwritten"],
@@ -686,18 +705,20 @@ mod tests {
         let (dir, ws) = repo_with_commit(&[("a.txt", "one\ntwo\n")]);
         let abs = dir.path().canonicalize().unwrap().join("a.txt");
         let patch = "*** Begin Patch\n*** Add File: a.txt\n+clobbered\n*** End Patch\n";
-        let out = run_in(&ws, patch, serde_json::json!({}));
+        // P0-2：apply_patch 与后续 edit/断言共享同一份 FileRuntime（账本实例化）。
+        let files = crate::FileRuntime::default();
+        let out = run_in(&files, &ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
 
         let abs = abs.to_string_lossy().to_string();
         assert_eq!(
-            crate::file_state::last_hash(&abs),
+            files.last_hash(&abs),
             Some(crate::file_shared::content_hash("clobbered\n")),
             "apply_patch must refresh the ledger key for the overwritten file"
         );
 
         // 紧随其后的 edit：精确匹配必须看得见 apply_patch 写进去的新内容。
-        let ok = crate::edit::exec_edit(&serde_json::json!({
+        let ok = crate::edit::exec_edit_with(&files, &serde_json::json!({
             "path": abs,
             "old_str": "clobbered",
             "new_str": "CLOBBERED",
@@ -817,7 +838,7 @@ mod tests {
     #[test]
     fn tool_description_warns_about_ambiguous_context() {
         let mut mgr = qaqh_workspace::ToolManager::new();
-        register(&mut mgr);
+        register(&mut mgr, &crate::FileRuntime::default());
         let desc = mgr
             .lookup("apply_patch")
             .expect("apply_patch registered")
@@ -852,7 +873,7 @@ mod tests {
     #[test]
     fn typed_apply_patch_registration_and_display_are_same_source() {
         let mut manager = qaqh_workspace::ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, &crate::FileRuntime::default());
         assert!(
             manager.builtin("apply_patch").is_some(),
             "apply_patch must be on the typed execution surface"
@@ -989,7 +1010,7 @@ mod tests {
             "*** Begin Patch\n*** Update File: {}\n@@\n-hello\n+HELLO\n*** End Patch\n",
             link.display()
         );
-        let out = run_in(&ws, &patch, serde_json::json!({}));
+        let out = run_in(&crate::FileRuntime::default(), &ws, &patch, serde_json::json!({}));
         assert_eq!(out["code"], "symlink_target", "got: {out}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "hello\n");
         assert!(

@@ -251,7 +251,10 @@ impl ToolProjection for GrepOutput {
     }
 }
 
-pub struct GrepTool;
+pub struct GrepTool {
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for GrepTool {
     type Args = GrepArgs;
@@ -391,7 +394,7 @@ impl TypedTool for GrepTool {
         let matcher = Arc::new(matcher);
         let ws_abs = Arc::new(ws_abs);
         let limit = WalkLimit::from_ctx(ctx);
-        let state = Arc::new(SearchState::new(max_results));
+        let state = Arc::new(SearchState::new(max_results, self.files.clone()));
 
         'roots: for root in &roots {
             // rg 默认并行遍历；单线程在 16k 条目的 target/ 上要 10s+。
@@ -456,6 +459,7 @@ impl TypedTool for GrepTool {
                             .max
                             .saturating_sub(state.counted.load(Ordering::Relaxed)),
                         truncated: false,
+                        files: state.files.clone(),
                     };
                     // 忽略单个文件的 IO 错误（rg 行为：不可读文件跳过）。
                     let _ = searcher.search_path(matcher.as_ref(), path, &mut sink);
@@ -548,10 +552,12 @@ struct SearchState {
     deadline_hit: AtomicBool,
     cancelled_hit: AtomicBool,
     max: usize,
+    /// 会话私有文件运行时状态（matched 时清偏移链；P0-2 实例化）。
+    files: crate::FileRuntime,
 }
 
 impl SearchState {
-    fn new(max: usize) -> Self {
+    fn new(max: usize, files: crate::FileRuntime) -> Self {
         Self {
             lines: Mutex::new(Vec::new()),
             counted: AtomicUsize::new(0),
@@ -561,6 +567,7 @@ impl SearchState {
             deadline_hit: AtomicBool::new(false),
             cancelled_hit: AtomicBool::new(false),
             max,
+            files,
         }
     }
 }
@@ -574,6 +581,8 @@ struct CollectSink {
     matches: Vec<MatchLine>,
     max_matches: usize,
     truncated: bool,
+    /// 会话私有文件运行时状态（matched 时清偏移链）。
+    files: crate::FileRuntime,
 }
 
 impl Sink for CollectSink {
@@ -586,7 +595,7 @@ impl Sink for CollectSink {
         }
         // grep 输出的是实时行号：清空该文件的偏移链，防止后续 read 用
         // grep 行号时被账本修正误伤（read→edit→grep→read 链）。
-        crate::file_state::record_grep(&self.abs_path);
+        self.files.record_grep(&self.abs_path);
         let content = mat
             .lines()
             .next()
@@ -624,8 +633,10 @@ impl Sink for CollectSink {
     }
 }
 
-pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_typed_tool(GrepTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
+    mgr.register_typed_tool(GrepTool {
+        files: files.clone(),
+    });
 }
 
 // ── Tests ──
@@ -673,7 +684,7 @@ mod tests {
 
     #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
     fn run(root: &Path, args: serde_json::Value) -> Result<GrepOutput, ToolExecutionError> {
-        GrepTool.run(&ctx(root), parse_args(args))
+        GrepTool { files: crate::FileRuntime::default() }.run(&ctx(root), parse_args(args))
     }
 
     fn error_code(error: ToolExecutionError) -> String {
@@ -850,7 +861,7 @@ mod tests {
     #[test]
     fn grep_registration_is_typed_and_schema_is_type_generated() {
         let mut manager = qaqh_workspace::ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, &crate::FileRuntime::default());
         let registered = manager.builtin("grep").expect("grep registered");
         assert_eq!(
             registered.descriptor.name.as_str(),
@@ -971,23 +982,27 @@ mod tests {
 
         let mut tool_ctx = ctx(root.as_path());
         tool_ctx.timeout = Duration::from_nanos(1);
-        let output = GrepTool
-            .run(
-                &tool_ctx,
-                parse_args(serde_json::json!({ "pattern": "target" })),
-            )
-            .expect("deadline stop returns partial results, not an error");
+        let output = (GrepTool {
+            files: crate::FileRuntime::default(),
+        })
+        .run(
+            &tool_ctx,
+            parse_args(serde_json::json!({ "pattern": "target" })),
+        )
+        .expect("deadline stop returns partial results, not an error");
         assert!(output.deadline_hit, "1ns deadline must trip");
         assert!(output.model_text().contains("deadline"));
 
         let tool_ctx = ctx(root.as_path());
         tool_ctx.cancellation.cancel();
-        let output = GrepTool
-            .run(
-                &tool_ctx,
-                parse_args(serde_json::json!({ "pattern": "target" })),
-            )
-            .expect("cancelled stop returns partial results, not an error");
+        let output = (GrepTool {
+            files: crate::FileRuntime::default(),
+        })
+        .run(
+            &tool_ctx,
+            parse_args(serde_json::json!({ "pattern": "target" })),
+        )
+        .expect("cancelled stop returns partial results, not an error");
         assert!(output.cancelled_hit);
         assert!(output.model_text().contains("cancelled"));
     }

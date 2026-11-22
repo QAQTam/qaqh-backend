@@ -651,10 +651,14 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
 fn exec_journal(args: &Value) -> crate::ToolResult {
-    use crate::file_mutate::ambient_tool_context;
+    use crate::file_mutate::test_tool_context_in;
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
-    let ctx = ambient_tool_context("journal-compat", Duration::from_secs(30));
+    let ctx = test_tool_context_in(
+        &qaqh_permission::current_workspace(),
+        "journal-compat",
+        Duration::from_secs(30),
+    );
     TypedToolAdapter::new(JournalTool)
         .execute(ctx, args.clone())
         .unwrap_or_else(|fatal| panic!("journal tool fatal: {}", fatal.message))
@@ -765,7 +769,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         with_temp_journal(|| {
             let ws = tempfile::tempdir().expect("ws tempdir");
-            crate::set_workspace(&ws.path().to_string_lossy());
+            qaqh_permission::set_workspace(&ws.path().to_string_lossy());
             record_change(
                 "s1",
                 "c1",
@@ -795,7 +799,7 @@ mod tests {
                 .expect("out must be workspace-anchored");
             assert_eq!(written, "restored bytes\n");
 
-            crate::set_workspace("");
+            qaqh_permission::set_workspace("");
         });
     }
 

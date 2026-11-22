@@ -376,10 +376,14 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
 pub(super) fn handle_read_image(args: serde_json::Value) -> crate::ToolResult {
-    use crate::file_mutate::ambient_tool_context;
+    use crate::file_mutate::test_tool_context_in;
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
-    let call_ctx = ambient_tool_context("read-image-compat", Duration::from_secs(30));
+    let call_ctx = test_tool_context_in(
+        &qaqh_permission::current_workspace(),
+        "read-image-compat",
+        Duration::from_secs(30),
+    );
     TypedToolAdapter::new(ReadImageTool)
         .execute(call_ctx, args)
         .unwrap_or_else(|fatal| panic!("read_image tool fatal: {}", fatal.message))

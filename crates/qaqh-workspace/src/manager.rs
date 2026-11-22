@@ -92,6 +92,10 @@ pub struct ToolManager {
     display_projectors: BTreeMap<String, crate::tool_api::ToolDisplayFn>,
     /// P3-2：动态注册名 → dispatcher fn 指针（聚合入口复用 E-5 单一 dispatcher）。
     dynamic_dispatches: BTreeMap<String, DynamicDispatch>,
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。`new()` 自带
+    /// 独立实例，`build_tool_manager` 用统一实例覆盖后注册文件工具——
+    /// 审计指纹（execution.rs before/after）与工具 handler 共享同一账本。
+    file_runtime: std::sync::Arc<qaqh_file_tools::FileRuntime>,
 }
 
 /// 动态工具名前缀（S2：`mcp__{server}__{tool}`；与内置 20 工具零碰撞）。
@@ -256,7 +260,18 @@ impl ToolManager {
             files_written: Vec::new(),
             display_projectors: BTreeMap::new(),
             dynamic_dispatches: BTreeMap::new(),
+            file_runtime: std::sync::Arc::new(qaqh_file_tools::FileRuntime::default()),
         }
+    }
+
+    /// 统一注册期覆盖：让全部文件工具与审计指纹共享同一份账本。
+    pub fn set_file_runtime(&mut self, files: std::sync::Arc<qaqh_file_tools::FileRuntime>) {
+        self.file_runtime = files;
+    }
+
+    /// 会话私有文件运行时状态（审计 before/after 指纹与 handler 同源）。
+    pub fn file_runtime(&self) -> &std::sync::Arc<qaqh_file_tools::FileRuntime> {
+        &self.file_runtime
     }
 
     /// 注册测试探针（`test-harness` 门控；见 [`crate::probe`]）。生产工具一律

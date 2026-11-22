@@ -19,6 +19,7 @@ pub mod core;
 pub mod handler;
 
 pub use handler::exec_edit;
+pub use handler::exec_edit_with;
 pub use handler::register;
 
 #[cfg(test)]

@@ -16,6 +16,32 @@ fn call_all(path: &str, old: &str, new: &str, replace_all: bool) -> ToolResult {
     }))
 }
 
+/// 共享账本的变体：edit→correct_line 链路用同一份 FileRuntime（P0-2）。
+fn call_with(files: &crate::FileRuntime, path: &str, old: &str, new: &str) -> ToolResult {
+    super::exec_edit_with(
+        files,
+        &json!({"file_path": path, "old_string": old, "new_string": new}),
+    )
+}
+
+fn call_all_with(
+    files: &crate::FileRuntime,
+    path: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> ToolResult {
+    super::exec_edit_with(
+        files,
+        &json!({
+            "file_path": path,
+            "old_string": old,
+            "new_string": new,
+            "replace_all": replace_all
+        }),
+    )
+}
+
 fn write_file(dir: &tempfile::TempDir, name: &str, content: &str) -> String {
     let path = dir.path().join(name);
     std::fs::write(&path, content).unwrap();
@@ -158,14 +184,15 @@ fn replace_all_uses_non_overlapping_matches() {
 fn exec_replace_all_reports_count_and_shifts() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_file(&dir, "all.txt", "x\nmid\nx\nmid\nx\n");
-    let result = call_all(&path, "x", "x\nY", true);
+    let files = crate::FileRuntime::default();
+    let result = call_all_with(&files, &path, "x", "x\nY", true);
     assert!(result.is_success(), "{}", result.model_text());
     assert_eq!(read(&path), "x\nY\nmid\nx\nY\nmid\nx\nY\n");
     assert!(result.model_text().contains("replaced 3 occurrences"));
     // 三处起始行 1/3/5，各 +1 行。
-    assert_eq!(crate::file_state::correct_line(&path, 2), Some((3, 1)));
-    assert_eq!(crate::file_state::correct_line(&path, 4), Some((6, 2)));
-    assert_eq!(crate::file_state::correct_line(&path, 6), Some((9, 3)));
+    assert_eq!(files.correct_line(&path, 2), Some((3, 1)));
+    assert_eq!(files.correct_line(&path, 4), Some((6, 2)));
+    assert_eq!(files.correct_line(&path, 6), Some((9, 3)));
 }
 
 #[test]
@@ -266,19 +293,21 @@ fn exec_crlf_file_roundtrip() {
 fn exec_shift_ledger_records_line_growth() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_file(&dir, "shift.txt", "a\nb\nc\n");
-    let result = call(&path, "b", "b1\nb2");
+    let files = crate::FileRuntime::default();
+    let result = call_with(&files, &path, "b", "b1\nb2");
     assert!(result.is_success(), "{}", result.model_text());
     // 旧 L3（c）在编辑后 = L4。
-    assert_eq!(crate::file_state::correct_line(&path, 3), Some((4, 1)));
+    assert_eq!(files.correct_line(&path, 3), Some((4, 1)));
 }
 
 #[test]
 fn exec_inline_replace_records_zero_shift() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_file(&dir, "inline.txt", "a\nb\nc\n");
-    let result = call(&path, "b", "B");
+    let files = crate::FileRuntime::default();
+    let result = call_with(&files, &path, "b", "B");
     assert!(result.is_success(), "{}", result.model_text());
-    assert_eq!(crate::file_state::correct_line(&path, 3), Some((3, 0)));
+    assert_eq!(files.correct_line(&path, 3), Some((3, 0)));
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -289,7 +318,8 @@ fn exec_inline_replace_records_zero_shift() {
 fn exec_not_found_returns_diff_in_model_text() {
     let dir = tempfile::tempdir().unwrap();
     let path = write_file(&dir, "nf.txt", "alpha\nlet x = 1;\nbeta\n");
-    let result = call(&path, "let x = 2;", "let x = 3;");
+    let files = crate::FileRuntime::default();
+    let result = call_with(&files, &path, "let x = 2;", "let x = 3;");
     assert!(!result.is_success());
     assert_eq!(code(&result), "not_found");
     let text = result.model_text();
@@ -299,7 +329,7 @@ fn exec_not_found_returns_diff_in_model_text() {
     assert!(text.contains("+let x = 1;"), "{text}");
     // 文件与账本都不动。
     assert_eq!(read(&path), "alpha\nlet x = 1;\nbeta\n");
-    assert_eq!(crate::file_state::correct_line(&path, 3), None);
+    assert_eq!(files.correct_line(&path, 3), None);
 }
 
 #[test]
@@ -433,7 +463,7 @@ fn exec_binary_file_is_rejected() {
 #[test]
 fn tool_contract_exposes_str_replace_fields() {
     let mut mgr = qaqh_workspace::ToolManager::new();
-    super::register(&mut mgr);
+    super::register(&mut mgr, &crate::FileRuntime::default());
     let handler = mgr.lookup("edit").expect("edit tool registered");
     let schema = &handler.input_schema;
     let required: Vec<&str> = schema["required"]
@@ -517,7 +547,7 @@ fn exec_symlink_target_is_rejected() {
 #[test]
 fn typed_edit_registration_and_display_are_same_source() {
     let mut manager = qaqh_workspace::ToolManager::new();
-    super::register(&mut manager);
+    super::register(&mut manager, &crate::FileRuntime::default());
     assert!(
         manager.builtin("edit").is_some(),
         "edit must be on the typed execution surface"
