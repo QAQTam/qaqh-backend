@@ -129,7 +129,7 @@ fn apply_endpoint_compat(
 /// - `apply_patch` 以 **native custom tool**（freeform 裸文本）声明：官方唯一
 ///   认的 custom 名称就是 `apply_patch`（其他名称 400），且官方 Codex 接入对
 ///   两个模型均声明 `apply_patch_tool_type: "freeform"`。回程裸补丁由 gate 的
-///   `freeform_custom_blocks` 收口为 `{"patch": raw}`，执行器零改动。
+    ///   `freeform_custom_blocks` 收口为 `{"input": raw}`，执行器零改动。
 ///
 /// 这些是端点事实而非用户偏好，且 OAuth 凭据被 origin 校验钉死在该端点上
 /// （`provider_job::resolve_provider_credential`），所以在 config.compat 之后
@@ -316,13 +316,25 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
             widgets_dir.display()
         );
     }
-    Ok(SessionLoop::new(
+    let loop_ = SessionLoop::new(
         session_id,
-        owner,
+        Arc::clone(&owner),
         port,
         provider,
-        workspace_root,
-    ))
+        workspace_root.clone(),
+    );
+    // ADR-0038:hooks 装配(config + 全局/项目目录 + trust store);
+    // 无 hook 声明 = None,运行循环零开销。失败只 warn 不阻会话。
+    if let Some(hooks) = crate::session_hooks::SessionHooks::spawn(
+        session_id,
+        owner,
+        config,
+        &workspace_root,
+        permission_level,
+    ) {
+        loop_.set_hooks(Arc::new(hooks));
+    }
+    Ok(loop_)
 }
 
 #[cfg(test)]

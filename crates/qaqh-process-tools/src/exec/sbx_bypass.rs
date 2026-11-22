@@ -553,3 +553,301 @@ pub(crate) fn sbx_exec(
         protocol_dropped_bytes: 0,
     }
 }
+
+/// Interactive Windows `sbx-win` session handle used by `ExecSessionManager` (`exec_command`).
+pub(crate) struct SbxInteractiveSession {
+    child: sbx_win::spawn::Child,
+    _token: sbx_win::token::Token,
+    _desktop: sbx_win::desktop::Desktop,
+    turn: Option<sbx_win::redirect::Turn>,
+    _turn_guard: Option<crate::exec::redirect_guard::RedirectTurnGuard>,
+    scratch: std::path::PathBuf,
+    command_text: String,
+    tool_call_id: String,
+    settled: bool,
+}
+
+impl SbxInteractiveSession {
+    pub(crate) fn try_wait(&mut self) -> std::io::Result<Option<qaqh_pty::SessionExit>> {
+        match self.child.try_wait().map_err(std::io::Error::other)? {
+            Some(code) => {
+                self.child.mark_waited();
+                Ok(Some(qaqh_pty::SessionExit {
+                    code: Some(code as i32),
+                }))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub(crate) fn kill_tree(&mut self) -> std::io::Result<()> {
+        self.child.kill_tree();
+        Ok(())
+    }
+
+    /// Run turn merge, denial-steering feedback generation, and scratch cleanup once the child exits.
+    pub(crate) fn settle_after_exit(
+        &mut self,
+        exit_code: Option<i32>,
+        stderr_preview: &str,
+    ) -> Option<String> {
+        if self.settled {
+            return None;
+        }
+        self.settled = true;
+
+        let mut extra_stderr = String::new();
+        if let Some(code) = exit_code
+            && sbx_win::feedback::is_likely_sandbox_denied(code as u32, stderr_preview)
+        {
+            extra_stderr.push_str(&sbx_win::feedback::denial_feedback_with_targets(
+                &self.command_text,
+            ));
+        }
+
+        if let Some(turn) = self.turn.take() {
+            let _ = turn.take_notifications();
+            let _ = turn.diff();
+            match turn.merge() {
+                Ok(r) => {
+                    if r.skipped_deletions > 0 {
+                        let note = format!(
+                            "[sbx] {} deletion(s) NOT applied (ADR-0004: deletions require explicit \
+                             confirmation; files re-projected)",
+                            r.skipped_deletions
+                        );
+                        log::warn!("[exec] {note} (tool_call_id={})", self.tool_call_id);
+                        extra_stderr.push_str(&note);
+                        extra_stderr.push('\n');
+                    }
+                }
+                Err(e) => {
+                    let note = format!(
+                        "[sbx] merge FAILED (partial state possible, manual reconciliation needed): {e}"
+                    );
+                    log::error!("[exec] {note} (tool_call_id={})", self.tool_call_id);
+                    extra_stderr.push_str(&note);
+                    extra_stderr.push('\n');
+                }
+            }
+        }
+        let _ = self._turn_guard.take();
+        let _ = std::fs::remove_dir_all(&self.scratch);
+        (!extra_stderr.is_empty()).then_some(extra_stderr)
+    }
+}
+
+impl Drop for SbxInteractiveSession {
+    fn drop(&mut self) {
+        if !self.settled {
+            let _ = self.settle_after_exit(None, "");
+        }
+    }
+}
+
+/// Spawn an interactive `sbx-win` session returning `(session, stdin_writer, stdout_reader, stderr_reader)`.
+pub(crate) fn spawn_sbx_interactive(
+    argv: &[String],
+    env: &[(String, String)],
+    cwd: Option<&str>,
+    spec: &SandboxSpec,
+    command_text: &str,
+    tool_call_id: &str,
+) -> Result<
+    (
+        SbxInteractiveSession,
+        std::fs::File,
+        std::fs::File,
+        std::fs::File,
+    ),
+    String,
+> {
+    use sbx_win::events::EventSink;
+    use std::io::Write;
+
+    let policy_json = qaqh_sandbox::sbx_map::policy_json_for_exec(spec)
+        .ok_or_else(|| "sbx policy mapping unavailable".to_string())?;
+    let policy: sbx_win::policy::SbxPolicy =
+        serde_json::from_str(&policy_json).map_err(|e| format!("sbx policy mapping: {e}"))?;
+    let redirect = policy.redirect;
+
+    let workspace = spec.workspace_root.clone();
+    let identity = match &workspace {
+        Some(ws) => {
+            sbx_win::sidstore::load_or_create_identity(ws, sbx_win::policy::IsolationKind::Token)
+                .map(|(id, _)| id)
+                .map_err(|e| format!("sbx sidstore: {e}"))?
+        }
+        None => {
+            let sid = sbx_win::sid::capability_sid().map_err(|e| format!("sbx sidgen: {e}"))?;
+            sbx_win::sidstore::Identity {
+                sid_text: sbx_win::sid::sid_to_string(&sid),
+                sid,
+                ac_name: None,
+                created: true,
+            }
+        }
+    };
+    let cap = identity.sid.clone();
+
+    let journal: Option<std::fs::File> = workspace.as_ref().and_then(|ws| {
+        let p = sbx_win::sidstore::journal_path(ws);
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+    });
+    let sink: Box<dyn EventSink> = match journal {
+        Some(f) => Box::new(sbx_win::events::JsonlSink::new(f)),
+        None => Box::new(sbx_win::events::NullSink),
+    };
+
+    let scratch = std::env::temp_dir().join(format!(
+        "qaqh-sbx-execs-{}-{}",
+        std::process::id(),
+        sbx_win::events::now_millis()
+    ));
+    let scratch_tmp = scratch.join("tmp");
+    let scratch_home = scratch.join("home");
+    let view_root = scratch.join("view");
+    std::fs::create_dir_all(&scratch_tmp)
+        .and_then(|_| std::fs::create_dir_all(&scratch_home))
+        .map_err(|e| format!("scratch: {e}"))?;
+
+    let child_token =
+        sbx_win::token::create_restricted_token(&[cap.clone(), sbx_win::sid::everyone_sid()])
+            .map_err(|e| format!("restricted token: {e}"))?;
+
+    let (mut plan, view_ops) = if redirect {
+        let ws = workspace
+            .as_deref()
+            .ok_or_else(|| "redirect requires workspace".to_string())?;
+        let split = sbx_win::redirect::split_plan(&policy, &cap, ws, &view_root)
+            .map_err(|e| format!("split redirect plan: {e}"))?;
+        (split.inplace, Some(split.view))
+    } else {
+        (sbx_win::policy::build_ace_plan(&policy, &cap), None)
+    };
+    plan.push(sbx_win::policy::AceOp {
+        path: scratch.clone(),
+        mode: sbx_win::policy::AceMode::Allow,
+        sid: cap.clone(),
+        inherit_tree: true,
+        precreate: sbx_win::policy::Precreate::None,
+        full_mask: false,
+        kind: sbx_win::policy::AceTarget::File,
+    });
+    let snapshots = sbx_win::acl::apply_ops(&plan, sink.as_ref())
+        .map_err(|e| format!("apply acl plan: {e}"))?;
+
+    if let Some(ws) = &workspace {
+        let ledger_path = sbx_win::sidstore::ledger_path(ws);
+        if let Some(dir) = ledger_path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(mut ledger) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&ledger_path)
+        {
+            for (op, sddl) in plan.iter().zip(snapshots.iter()) {
+                let _ = writeln!(
+                    ledger,
+                    "{}",
+                    serde_json::json!({
+                        "path": op.path.display().to_string(),
+                        "sid": identity.sid_text,
+                        "ts": sbx_win::events::now_millis(),
+                        "sddl": sddl,
+                        "kind": match op.kind {
+                            sbx_win::policy::AceTarget::File => "file",
+                            sbx_win::policy::AceTarget::Registry => "reg",
+                        },
+                    })
+                );
+            }
+        }
+    }
+
+    let turn = if let Some(view_ops) = &view_ops {
+        let ws = workspace
+            .as_deref()
+            .ok_or_else(|| "redirect requires workspace".to_string())?;
+        Some(
+            sbx_win::redirect::prepare_turn(ws, &view_root, view_ops)
+                .map_err(|e| format!("prepare view turn: {e}"))?,
+        )
+    } else {
+        None
+    };
+    let turn_guard = turn
+        .is_some()
+        .then(crate::exec::redirect_guard::RedirectTurnGuard::acquire);
+
+    let desktop = sbx_win::desktop::create_private_desktop(&identity.sid_text)
+        .map_err(|e| format!("private desktop: {e}"))?;
+
+    let mut env_pairs = child_env(&scratch_tmp, &scratch_home);
+    env_pairs.extend(env.iter().cloned());
+    env_pairs.extend(super::direct::forced_child_env());
+
+    let mapped_cwd: Option<std::path::PathBuf> = match (cwd, &turn) {
+        (Some(c), Some(turn)) => {
+            let ws = workspace.as_deref().expect("redirect requires workspace");
+            match sbx_win::redirect::workspace_rel(ws, std::path::Path::new(c)) {
+                Some(rel) if !rel.is_empty() => Some(turn.root().join(rel.replace('/', "\\"))),
+                Some(_) => Some(turn.root().to_path_buf()),
+                None => Some(std::path::PathBuf::from(c)),
+            }
+        }
+        (Some(c), None) => Some(std::path::PathBuf::from(c)),
+        (None, Some(turn)) => Some(turn.root().to_path_buf()),
+        (None, None) => Some(scratch_tmp.clone()),
+    };
+    let cwd_path = mapped_cwd.unwrap_or_else(|| scratch_tmp.clone());
+
+    let cmdline = cmdline_of(argv);
+    let isolation = sbx_win::spawn::Isolation::RestrictedToken {
+        token: child_token.handle(),
+    };
+    sink.emit(
+        &sbx_win::events::Event::new("spawn").with_detail(serde_json::json!({
+            "cmdline": cmdline,
+            "redirect": redirect,
+            "cap_sid": identity.sid_text,
+            "tool_call_id": tool_call_id,
+        })),
+    );
+    let mut child = sbx_win::spawn::spawn_interactive(
+        &isolation,
+        &cmdline,
+        &cwd_path,
+        &env_pairs,
+        Some(desktop.name()),
+    )
+    .map_err(|e| format!("spawn_interactive (sbx): {e}"))?;
+    let (stdin_file, stdout_file, stderr_file) = child
+        .take_stdio()
+        .ok_or_else(|| "sbx interactive child missing stdio handles".to_string())?;
+
+    Ok((
+        SbxInteractiveSession {
+            child,
+            _token: child_token,
+            _desktop: desktop,
+            turn,
+            _turn_guard: turn_guard,
+            scratch,
+            command_text: command_text.to_string(),
+            tool_call_id: tool_call_id.to_string(),
+            settled: false,
+        },
+        stdin_file,
+        stdout_file,
+        stderr_file,
+    ))
+}

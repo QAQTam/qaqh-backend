@@ -72,13 +72,21 @@ pub const SHELL_METHODS: &[&str] = &[
     "shell.list",  // 本身份已开的 shell（几何真值也从这里读）
 ];
 
+/// 沙箱启动自检服务面两条（ADR-0040：前端启动动画轮询沙箱自检进度与修复建议）。
+pub const SANDBOX_METHODS: &[&str] = &[
+    "sandbox.preflight.start",
+    "sandbox.preflight.status",
+];
+
 /// 方法名是否在放行范围内（`service_call` 与调用方的预检共用同一条判定）。
 ///
 /// 两张表共用一个判定入口，是为了让「客户端放行了什么」这个问题只有**一处**回答
 /// ——napi 的 `service_methods()`、主进程 IPC 闸门、`Client::service_call` 的本地
 /// 拒绝，都从这里取，不再各写一份并集。
 pub fn is_allowed(method: &str) -> bool {
-    SERVICE_METHODS.contains(&method) || SHELL_METHODS.contains(&method)
+    SERVICE_METHODS.contains(&method)
+        || SHELL_METHODS.contains(&method)
+        || SANDBOX_METHODS.contains(&method)
 }
 
 /// 把非 2xx 响应体翻成结构化错误。

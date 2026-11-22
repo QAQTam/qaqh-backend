@@ -435,6 +435,152 @@ pub struct TodoStatusSnapshot {
     pub items: Vec<TodoItemSnapshot>,
 }
 
+// ── 沙箱启动自检（ADR-0040：sandbox.preflight.start / sandbox.preflight.status）──
+
+/// `sandbox.preflight.start` 参数：`force=true` 时丢弃已完成缓存并重新跑自检。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SandboxPreflightStartParams {
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub force: Option<bool>,
+}
+
+/// `sandbox.preflight.status` 参数：可选 `run_id` 过滤，缺省读取当前/最近一次自检快照。
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SandboxPreflightStatusParams {
+    #[serde(default)]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub run_id: Option<String>,
+}
+
+/// 沙箱自检整体运行状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxPreflightState {
+    Idle,
+    Running,
+    Completed,
+    Failed,
+}
+
+/// 沙箱自检单步状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxPreflightStepStatus {
+    Pending,
+    Running,
+    Passed,
+    Warning,
+    Failed,
+    Skipped,
+}
+
+/// 沙箱自检单步条目（供前端启动动画逐项高亮展示与给出修复命令）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SandboxPreflightStep {
+    pub id: String,
+    pub label: String,
+    pub status: SandboxPreflightStepStatus,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub remediation: Option<String>,
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub duration_ms: Option<u64>,
+}
+
+/// `sandbox.preflight.start` 与 `sandbox.preflight.status` 的返回载荷。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
+pub struct SandboxPreflightReport {
+    pub run_id: String,
+    pub state: SandboxPreflightState,
+    pub platform: String,
+    pub effective_backend: String,
+    pub filesystem_write_enforced: bool,
+    pub network_isolation_enforced: bool,
+    pub elevated: bool,
+    pub progress_percent: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub current_step_id: Option<String>,
+    pub steps: Vec<SandboxPreflightStep>,
+    pub remediations: Vec<String>,
+    pub started_at_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub finished_at_ms: Option<i64>,
+}
+
+impl From<qaqh_sandbox::preflight::SandboxPreflightState> for SandboxPreflightState {
+    fn from(value: qaqh_sandbox::preflight::SandboxPreflightState) -> Self {
+        match value {
+            qaqh_sandbox::preflight::SandboxPreflightState::Idle => Self::Idle,
+            qaqh_sandbox::preflight::SandboxPreflightState::Running => Self::Running,
+            qaqh_sandbox::preflight::SandboxPreflightState::Completed => Self::Completed,
+            qaqh_sandbox::preflight::SandboxPreflightState::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<qaqh_sandbox::preflight::SandboxPreflightStepStatus> for SandboxPreflightStepStatus {
+    fn from(value: qaqh_sandbox::preflight::SandboxPreflightStepStatus) -> Self {
+        match value {
+            qaqh_sandbox::preflight::SandboxPreflightStepStatus::Pending => Self::Pending,
+            qaqh_sandbox::preflight::SandboxPreflightStepStatus::Running => Self::Running,
+            qaqh_sandbox::preflight::SandboxPreflightStepStatus::Passed => Self::Passed,
+            qaqh_sandbox::preflight::SandboxPreflightStepStatus::Warning => Self::Warning,
+            qaqh_sandbox::preflight::SandboxPreflightStepStatus::Failed => Self::Failed,
+            qaqh_sandbox::preflight::SandboxPreflightStepStatus::Skipped => Self::Skipped,
+        }
+    }
+}
+
+impl From<qaqh_sandbox::preflight::SandboxPreflightStep> for SandboxPreflightStep {
+    fn from(step: qaqh_sandbox::preflight::SandboxPreflightStep) -> Self {
+        Self {
+            id: step.id,
+            label: step.label,
+            status: step.status.into(),
+            detail: step.detail,
+            remediation: step.remediation,
+            required: step.required,
+            duration_ms: step.duration_ms,
+        }
+    }
+}
+
+impl From<qaqh_sandbox::preflight::SandboxPreflightReport> for SandboxPreflightReport {
+    fn from(report: qaqh_sandbox::preflight::SandboxPreflightReport) -> Self {
+        let effective_backend = serde_json::to_value(report.effective_backend)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "none".to_string());
+        Self {
+            run_id: report.run_id,
+            state: report.state.into(),
+            platform: report.platform,
+            effective_backend,
+            filesystem_write_enforced: report.filesystem_write_enforced,
+            network_isolation_enforced: report.network_isolation_enforced,
+            elevated: report.elevated,
+            progress_percent: report.progress_percent,
+            current_step_id: report.current_step_id,
+            steps: report.steps.into_iter().map(Into::into).collect(),
+            remediations: report.remediations,
+            started_at_ms: report.started_at_ms,
+            finished_at_ms: report.finished_at_ms,
+        }
+    }
+}
+
 /// A typed descriptor links the method key, the exact wire DTOs and the
 /// authorization metadata. Only methods present here are yet exposed as typed
 /// ServiceMap calls; the remaining legacy RPCs stay explicitly untyped/pending.
@@ -495,6 +641,8 @@ validators! {
         validate_shell_open_params => ShellOpenParams,
         validate_shell_close_params => ShellCloseParams,
         validate_shell_list_params => ShellListParams,
+        validate_sandbox_preflight_start_params => SandboxPreflightStartParams,
+        validate_sandbox_preflight_status_params => SandboxPreflightStatusParams,
         ;
     result:
         validate_string_result => String,
@@ -520,6 +668,7 @@ validators! {
         validate_shell_view_result => ShellView,
         validate_shell_close_result => ShellCloseResult,
         validate_shell_list_result => ShellListResult,
+        validate_sandbox_preflight_report_result => SandboxPreflightReport,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -811,6 +960,22 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         validate_params: validate_diagnostics_memory_snapshot_params,
         validate_result: validate_memory_snapshot_result,
     },
+    TypedMethodInfo {
+        method: "sandbox.preflight.start",
+        params_type: "SandboxPreflightStartParams",
+        result_type: "SandboxPreflightReport",
+        info: WRITE,
+        validate_params: validate_sandbox_preflight_start_params,
+        validate_result: validate_sandbox_preflight_report_result,
+    },
+    TypedMethodInfo {
+        method: "sandbox.preflight.status",
+        params_type: "SandboxPreflightStatusParams",
+        result_type: "SandboxPreflightReport",
+        info: READ,
+        validate_params: validate_sandbox_preflight_status_params,
+        validate_result: validate_sandbox_preflight_report_result,
+    },
 ];
 
 fn validate_params<T: DeserializeOwned>(params: &Value) -> Result<(), String> {
@@ -967,6 +1132,9 @@ pub const METHODS: &[(&str, MethodInfo)] = &[
     ("plan.read", READ_SEEDED),
     // Process-wide memory view is intentionally admin-scope only.
     ("diagnostics.memory.snapshot", READ_ADMIN),
+    // 沙箱启动自检（ADR-0040：前端启动动画轮询沙箱自检进度与修复建议）。
+    ("sandbox.preflight.start", WRITE),
+    ("sandbox.preflight.status", READ),
     // subagent
 ];
 
@@ -1364,6 +1532,35 @@ mod tests {
             assert!(
                 !info.admin_only,
                 "{method} 是用户 shell 面，不是账号凭据面：admin_only 会把它挡在 interact 档之外"
+            );
+        }
+    }
+
+    #[test]
+    fn client_sandbox_method_table_mirrors_the_daemon_sandbox_surface() {
+        let declared: Vec<&str> = METHODS
+            .iter()
+            .filter(|(name, _)| name.starts_with("sandbox."))
+            .map(|(name, _)| *name)
+            .collect();
+        assert!(!declared.is_empty(), "daemon 方法表里必须有 sandbox.* 这一族");
+        for method in &declared {
+            assert!(
+                qaqh_client::service::SANDBOX_METHODS.contains(method),
+                "{method} 在 daemon 方法表里，但客户端的 sandbox 表没放行"
+            );
+        }
+        for method in qaqh_client::service::SANDBOX_METHODS {
+            let info = lookup(method).unwrap_or_else(|| {
+                panic!("客户端 sandbox 表里的 {method} 不在 daemon 方法表（死条目）")
+            });
+            assert!(
+                !info.admin_only,
+                "{method} 是用户启动期沙箱自检面，不应被 admin_only 挡在 interact 档之外"
+            );
+            assert!(
+                !info.requires_session,
+                "{method} 在启动零会话时也要能调，不能要求 session_id"
             );
         }
     }

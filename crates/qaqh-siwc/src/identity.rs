@@ -145,13 +145,13 @@ pub fn verify_signature(parts: &IdTokenParts, keys: &[Jwk]) -> Result<(), SiwcEr
         return Err(invalid("JWKS 中没有匹配 kid 的公钥"));
     }
     for key in candidates {
-        let components = ring::signature::RsaPublicKeyComponents {
+        let components = aws_lc_rs::signature::RsaPublicKeyComponents {
             n: &key.n,
             e: &key.e,
         };
         if components
             .verify(
-                &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                &aws_lc_rs::signature::RSA_PKCS1_2048_8192_SHA256,
                 &parts.signing_input,
                 &parts.signature,
             )

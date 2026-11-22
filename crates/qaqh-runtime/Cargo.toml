@@ -23,6 +23,7 @@ qaqh-profile = { path = "../qaqh-profile" }
 qaqh-process-tools = { path = "../qaqh-process-tools" }
 qaqh-pty = { path = "../qaqh-pty" }
 qaqh-memwatch = { path = "../qaqh-memwatch" }
+qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-skills = { path = "../qaqh-skills" }
 sha2 = "0.11"
 thiserror = "2"

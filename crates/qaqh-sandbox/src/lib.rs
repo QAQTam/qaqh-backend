@@ -32,6 +32,7 @@ mod linux;
 pub mod sbx_map;
 
 pub mod capability;
+pub mod preflight;
 pub mod protocol;
 
 pub use capability::{Platform, SandboxBackend, SandboxCapabilities};
@@ -113,27 +114,28 @@ pub fn filesystem_and_network_isolation_enforced() -> bool {
 
 /// Whether **this launch's plan** resolves to a backend that enforces
 /// filesystem writes. Approval surfaces must consult this rather than
-/// [`SandboxCapabilities::detect`] (audit F1/P0): detection answers "does this
-/// machine have a sandbox", while auto-approval needs "is this specific command
-/// actually inside one". Auto that never got promoted means a plain spawn, so
-/// it reports `false` and the caller falls back to asking the user.
-///
-/// Non-Windows platforms have no wired write-enforcing backend, so the answer
-/// is a hard `false` there — a missing sandbox must never widen auto-approval.
-/// Keeping that branch inside this crate is also what makes the gate compile on
-/// those targets: `sbx_map` is `#[cfg(windows)]`-only.
+/// [`SandboxCapabilities::detect`] (audit F1/P0 + ADR-0040): detection answers
+/// "does this machine have a sandbox", while auto-approval needs "is this
+/// specific command actually inside one".
 pub fn exec_backend_enforces_write_isolation(spec: &SandboxSpec) -> bool {
+    if !spec.enabled {
+        return false;
+    }
     #[cfg(windows)]
     {
         return matches!(
             sbx_map::resolve_windows_backend(spec).ok().flatten(),
             Some(SandboxBackend::WindowsToken | SandboxBackend::WindowsRedirect)
-        );
+        ) && SandboxCapabilities::detect().filesystem_write_isolation;
     }
     #[cfg(not(windows))]
     {
-        let _ = spec;
-        false
+        let capabilities = SandboxCapabilities::detect();
+        return capabilities.filesystem_write_isolation
+            && matches!(
+                resolve_backend(spec.backend, &capabilities),
+                Ok(SandboxBackend::LinuxBubblewrap | SandboxBackend::LinuxLandlockSeccomp)
+            );
     }
 }
 
@@ -336,6 +338,16 @@ pub fn prepare_pty_launch(
             argv: argv.to_vec(),
             payload_path: None,
         });
+    }
+    #[cfg(windows)]
+    {
+        if let Some(backend) = sbx_map::resolve_windows_backend(spec)? {
+            return Ok(PtySandboxLaunch {
+                backend,
+                argv: argv.to_vec(),
+                payload_path: None,
+            });
+        }
     }
     if !cfg!(target_os = "linux") {
         warn_spec_unenforced(spec);
@@ -579,7 +591,10 @@ pub fn classify_denial(
 ) -> Option<SandboxDenial> {
     if !matches!(
         backend,
-        SandboxBackend::LinuxBubblewrap | SandboxBackend::LinuxLandlockSeccomp
+        SandboxBackend::LinuxBubblewrap
+            | SandboxBackend::LinuxLandlockSeccomp
+            | SandboxBackend::WindowsToken
+            | SandboxBackend::WindowsRedirect
     ) {
         return None;
     }
@@ -592,7 +607,11 @@ pub fn classify_denial(
         SandboxDenialReason::ReadOnlyFileSystem
     } else if lower.contains("operation not permitted") {
         SandboxDenialReason::OperationNotPermitted
-    } else if lower.contains("permission denied") {
+    } else if lower.contains("permission denied")
+        || lower.contains("access is denied")
+        || output.contains("拒绝访问")
+        || output.contains("权限不足")
+    {
         SandboxDenialReason::PermissionDenied
     } else if lower.contains("seccomp") || lower.contains("landlock") || lower.contains("sandbox") {
         SandboxDenialReason::PolicyDenied

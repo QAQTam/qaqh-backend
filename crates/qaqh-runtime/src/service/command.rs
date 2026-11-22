@@ -33,7 +33,7 @@ impl Command {
     pub fn decode(method: &str, params: &Value) -> Result<Self, QaqhError> {
         let domain = method.split('.').next().unwrap_or_default();
         match domain {
-            "daemon" | "diagnostics" | "config" | "profile" => {
+            "daemon" | "diagnostics" | "config" | "profile" | "sandbox" => {
                 Ok(Self::System(decode(method, params)?))
             }
             "workspace" | "fs" => Ok(Self::Workspace(decode(method, params)?)),
@@ -89,10 +89,16 @@ pub enum SystemCommand {
     DiagnosticsMemorySnapshot(DiagnosticsMemorySnapshotArgs),
     #[serde(rename = "config.load")]
     ConfigLoad(ConfigLoadArgs),
+    #[serde(rename = "sandbox.preflight.start")]
+    SandboxPreflightStart(SandboxPreflightStartArgs),
+    #[serde(rename = "sandbox.preflight.status")]
+    SandboxPreflightStatus(SandboxPreflightStatusArgs),
 }
 
 /// `daemon.version`：无参数。
 pub type DaemonVersionArgs = crate::ringing::service_methods::DaemonVersionParams;
+pub type SandboxPreflightStartArgs = crate::ringing::service_methods::SandboxPreflightStartParams;
+pub type SandboxPreflightStatusArgs = crate::ringing::service_methods::SandboxPreflightStatusParams;
 
 #[derive(Debug, Default, Deserialize)]
 pub struct DiagnosticsMemorySnapshotArgs {

@@ -325,7 +325,7 @@ pub struct ResponsesCompat {
     /// `{"type":"custom","name":"apply_patch"}`（Codex 兼容形状，其他名称 400；
     /// 官方 Codex 接入配置对两个模型均声明 `apply_patch_tool_type: "freeform"`）。
     /// 回程的 `custom_tool_call`（裸补丁文本）由 [`crate::responses_sdk`] 收口为
-    /// 与 function_json 等价的 `{"patch": raw}` ToolUse，执行器零改动。
+    /// 与 function_json 等价的 `{"input": raw}` ToolUse，执行器零改动。
     pub apply_patch_freeform: bool,
 }
 

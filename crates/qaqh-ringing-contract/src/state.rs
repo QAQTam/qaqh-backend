@@ -469,6 +469,9 @@ pub struct PermissionRequestDetails {
     pub tool_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action_summary: Option<String>,
+    /// 模型主动请求提权时附带的提权摘要（ADR-0040 决策 3）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justification: Option<String>,
     pub reason: String,
     pub paths: Vec<String>,
     pub category: String,

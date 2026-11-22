@@ -28,7 +28,7 @@ pub mod v2_stream;
 
 pub use client::{
     Client, ClientHandlers, ClientOptions, PairScope, RemoteEndpoint, StopStatus, pair_remote,
-    runtime_handle,
+    install_default_crypto_provider, runtime_handle,
 };
 pub use discovery::{DaemonDiscovery, DiscoveryExt, ensure_daemon_running, read_discovery};
 pub use endpoint::QueryRequest;

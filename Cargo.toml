@@ -6,6 +6,7 @@ members = [
     "crates/qaqh-config",
     "crates/qaqh-profile",
     "crates/qaqh-skills",
+    "crates/qaqh-hooks",
     "crates/qaqh-types",
     "crates/qaqh-siwc",
     "crates/qaqh-dsaccount",
@@ -58,7 +59,7 @@ async-lsp = { version = "0.2", default-features = false, features = ["tokio", "o
 lsp-types = "0.95"
 
 [workspace.package]
-version = "4.1.0"
+version = "4.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

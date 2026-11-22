@@ -170,6 +170,7 @@ impl ChallengeStore {
                 "level": tool.level.clone().unwrap_or(Value::Null),
                 "risk": tool.risk.clone().unwrap_or(Value::Null),
                 "consequence": tool.consequence.clone().unwrap_or(Value::Null),
+                "justification": tool.justification.clone().unwrap_or(Value::Null),
                 "details_unavailable": tool.details_unavailable,
             });
             let challenge = self
@@ -211,22 +212,24 @@ pub fn command_for(
 ) -> Result<RingingCommand, &'static str> {
     match challenge.kind {
         ApprovalKind::ToolPermission => {
-            let (approved, trust_folder) = match decision {
-                "approve" if challenge.details["details_unavailable"] == true => {
+            use qaqh_ringing::PermissionGrantScope;
+            let (approved, trust_folder, scope) = match decision {
+                "approve" | "approve_session" | "trust"
+                    if challenge.details["details_unavailable"] == true =>
+                {
                     return Err("permission_details_unavailable");
                 }
-                "approve" => (true, false),
-                "reject" => (false, false),
-                "trust" if challenge.details["details_unavailable"] == true => {
-                    return Err("permission_details_unavailable");
-                }
-                "trust" => (true, true),
+                "approve" => (true, false, Some(PermissionGrantScope::Once)),
+                "approve_session" => (true, false, Some(PermissionGrantScope::Session)),
+                "reject" => (false, false, None),
+                "trust" => (true, true, Some(PermissionGrantScope::Persistent)),
                 _ => return Err("invalid_decision"),
             };
             Ok(RingingCommand::ToolPermissionRespond {
                 tool_call_id: challenge.source_id.clone(),
                 approved,
                 trust_folder,
+                scope,
             })
         }
         ApprovalKind::Ask => match decision {
@@ -303,6 +306,7 @@ mod tests {
                 tool_call_id,
                 approved: true,
                 trust_folder: true,
+                scope: Some(qaqh_ringing::PermissionGrantScope::Persistent),
             } if tool_call_id == "canonical-id"
         ));
     }
@@ -375,6 +379,7 @@ mod tests {
                 level: None,
                 risk: None,
                 consequence: None,
+                justification: None,
                 details_unavailable: false,
             }),
             pending_interaction: None,
@@ -402,6 +407,7 @@ mod tests {
                 level: None,
                 risk: None,
                 consequence: None,
+                justification: None,
                 details_unavailable: true,
             }),
             pending_interaction: None,

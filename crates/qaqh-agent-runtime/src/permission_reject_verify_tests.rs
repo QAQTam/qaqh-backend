@@ -53,7 +53,11 @@ mod tests {
                         "type": "function",
                         "function": {
                             "name": "exec_command",
-                            "arguments": serde_json::json!({ "cmd": cmd }).to_string()
+                            "arguments": serde_json::json!({
+                                "cmd": cmd,
+                                "with_escalated_permissions": true,
+                                "justification": "test permission rejection"
+                            }).to_string()
                         }
                     }]
                 },
@@ -187,6 +191,7 @@ mod tests {
             PermissionAnswer {
                 approved: false,
                 trust_folder: false,
+                scope: qaqh_ringing_contract::PermissionGrantScope::Once,
             },
         );
         assert!(delivered, "pending 权限必须接住拒绝应答");
@@ -268,6 +273,7 @@ mod tests {
             PermissionAnswer {
                 approved: false,
                 trust_folder: false,
+                scope: qaqh_ringing_contract::PermissionGrantScope::Once,
             },
         );
         assert!(!delivered, "清扫后的拒绝应答应无处投递");

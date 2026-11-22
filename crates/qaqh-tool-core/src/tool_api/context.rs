@@ -51,6 +51,7 @@ pub struct ExecCommandRequest {
     pub yield_time_ms: u32,
     pub timeout_ms: Option<u64>,
     pub max_output_chars: u32,
+    pub sandbox_spec: Option<SandboxSpec>,
 }
 
 #[derive(Debug, Clone)]

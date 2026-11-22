@@ -55,14 +55,29 @@ pub struct Child {
     process: HANDLE,
     thread: HANDLE,
     job: HANDLE,
+    stdin: Option<OwnedHandle>,
     stdout: Option<OwnedHandle>,
     stderr: Option<OwnedHandle>,
     waited: bool,
 }
 
 unsafe impl Send for Child {}
+unsafe impl Sync for Child {}
 
 impl Child {
+    /// 提取交互式 stdio 管道 (`(stdin_writer, stdout_reader, stderr_reader)`) 供流式会话管理。
+    pub fn take_stdio(&mut self) -> Option<(File, File, File)> {
+        let stdin = File::from(self.stdin.take()?);
+        let stdout = File::from(self.stdout.take()?);
+        let stderr = File::from(self.stderr.take()?);
+        Some((stdin, stdout, stderr))
+    }
+
+    /// 标记进程已由外部会话循环收割，Drop 时不再重复强杀。
+    pub fn mark_waited(&mut self) {
+        self.waited = true;
+    }
+
     /// 非阻塞探测退出;None = 仍在运行(超时轮询用)。
     pub fn try_wait(&self) -> io::Result<Option<u32>> {
         unsafe {
@@ -80,6 +95,7 @@ impl Child {
     /// 等待退出并收割管道输出。
     pub fn wait(mut self) -> io::Result<Exit> {
         self.waited = true;
+        drop(self.stdin.take());
         let t_out = self.stdout.take().map(spawn_pipe_reader);
         let t_err = self.stderr.take().map(spawn_pipe_reader);
         unsafe {
@@ -154,7 +170,7 @@ pub fn build_env_block(env: &[(String, String)]) -> Vec<u16> {
     block
 }
 
-/// 以给定隔离后端 spawn `cmdline`(完整命令行字符串)。
+/// 以给定隔离后端 spawn `cmdline`(完整命令行字符串;stdin 写端立即关闭)。
 /// `desktop`:私有桌面名(受限令牌/AppContainer 下必填,见 desktop.rs 模块注释)。
 pub fn spawn(
     isolation: &Isolation,
@@ -162,6 +178,28 @@ pub fn spawn(
     cwd: &Path,
     env: &[(String, String)],
     desktop: Option<&str>,
+) -> Result<Child> {
+    spawn_inner(isolation, cmdline, cwd, env, desktop, false)
+}
+
+/// 以给定隔离后端 spawn 交互式子进程(保留 stdin 写端供 `write_stdin` 流式写入)。
+pub fn spawn_interactive(
+    isolation: &Isolation,
+    cmdline: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    desktop: Option<&str>,
+) -> Result<Child> {
+    spawn_inner(isolation, cmdline, cwd, env, desktop, true)
+}
+
+fn spawn_inner(
+    isolation: &Isolation,
+    cmdline: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    desktop: Option<&str>,
+    keep_stdin: bool,
 ) -> Result<Child> {
     unsafe {
         let job = CreateJobObjectW(None, PCWSTR::null())?;
@@ -269,7 +307,12 @@ pub fn spawn(
         let _ = CloseHandle(out_w);
         let _ = CloseHandle(err_w);
         let _ = CloseHandle(in_r);
-        let _ = CloseHandle(in_w);
+        let stdin = if keep_stdin && created.is_ok() {
+            Some(OwnedHandle::from_raw_handle(in_w.0 as _))
+        } else {
+            let _ = CloseHandle(in_w);
+            None
+        };
         DeleteProcThreadAttributeList(attr);
         created?;
 
@@ -282,6 +325,7 @@ pub fn spawn(
             process: pi.hProcess,
             thread: pi.hThread,
             job,
+            stdin,
             stdout: Some(out_r),
             stderr: Some(err_r),
             waited: false,

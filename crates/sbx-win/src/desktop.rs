@@ -16,6 +16,9 @@ pub struct Desktop {
     name: String,
 }
 
+unsafe impl Send for Desktop {}
+unsafe impl Sync for Desktop {}
+
 impl Desktop {
     pub fn name(&self) -> &str {
         &self.name

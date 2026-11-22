@@ -16,6 +16,16 @@ pub(crate) fn handle(service: &QaqhService, command: SystemCommand) -> QaqhResul
             .diagnostics_memory_snapshot(args.after_sequence)
             .map_err(QaqhError::message),
         SystemCommand::ConfigLoad(_) => load_config().map_err(QaqhError::message),
+        SystemCommand::SandboxPreflightStart(args) => {
+            let report: crate::ringing::service_methods::SandboxPreflightReport =
+                qaqh_sandbox::preflight::start(args.force.unwrap_or(false)).into();
+            QaqhError::to_value("sandbox preflight report", report)
+        }
+        SystemCommand::SandboxPreflightStatus(_args) => {
+            let report: crate::ringing::service_methods::SandboxPreflightReport =
+                qaqh_sandbox::preflight::status().into();
+            QaqhError::to_value("sandbox preflight report", report)
+        }
     }
 }
 

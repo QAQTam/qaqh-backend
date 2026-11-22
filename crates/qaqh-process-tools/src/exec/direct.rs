@@ -96,32 +96,44 @@ fn direct_exec_inner(
     } else {
         argv[0].clone()
     };
-    // Windows sbx 后端旁路:显式 WindowsToken/WindowsRedirect 请求不进
-    // std Command 路径(受限令牌必须经 CreateProcessAsUserW);其余 spec
-    // (含 Auto/None)行为不变(dark-launch,调研报告 §7)。
+    // Windows sbx 后端旁路:Auto / WindowsToken / WindowsRedirect 统一经
+    // resolve_windows_backend 解析进入受限令牌 CreateProcessAsUserW 沙箱。
     #[cfg(windows)]
     if let Some(spec) = sandbox {
-        if spec.enabled
-            && matches!(
-                spec.backend,
-                qaqh_sandbox::SandboxBackend::WindowsToken
-                    | qaqh_sandbox::SandboxBackend::WindowsRedirect
-            )
-        {
-            return super::sbx_bypass::sbx_exec(
-                argv,
-                env,
-                cwd,
-                max_output_chars,
-                timeout_secs,
-                background_after_secs,
-                cancel,
-                progress_tx,
-                tool_call_id,
-                &display_name,
-                spec,
-                command_text,
-            );
+        match qaqh_sandbox::sbx_map::resolve_windows_backend(spec) {
+            Ok(Some(_)) => {
+                return super::sbx_bypass::sbx_exec(
+                    argv,
+                    env,
+                    cwd,
+                    max_output_chars,
+                    timeout_secs,
+                    background_after_secs,
+                    cancel,
+                    progress_tx,
+                    tool_call_id,
+                    &display_name,
+                    spec,
+                    command_text,
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                return ExecOutput {
+                    status: "completed".to_string(),
+                    command: display_name,
+                    exit_code: Some(-1),
+                    output: format!("SANDBOX PREPARE FAILED: {error}"),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    truncated: false,
+                    timed_out: false,
+                    cancelled: false,
+                    process_id: None,
+                    output_omitted_bytes: 0,
+                    protocol_dropped_bytes: 0,
+                };
+            }
         }
     }
     let mut cmd = std::process::Command::new(&argv[0]);

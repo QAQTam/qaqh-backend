@@ -50,7 +50,7 @@ fn native_plan_declaration_admission_and_replay() {
             },
             internal_tool_key: "apply_patch".into(),
             adapter: InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch")
+                TextInputAdapter::custom_raw("input")
                     .with_defaults(serde_json::json!({"dry_run": false})),
             ),
         }],
@@ -73,7 +73,7 @@ fn native_plan_declaration_admission_and_replay() {
     assert!(adapt_native(&other, Some(&plan)).is_err());
     let blocks = adapt_native(&call, Some(&plan)).expect("admit");
     assert!(
-        matches!(&blocks[0], ContentBlock::ToolUse { id, input, .. } if id == "call_1" && input["patch"] == "你好\n*** End Patch" && input["dry_run"] == false)
+        matches!(&blocks[0], ContentBlock::ToolUse { id, input, .. } if id == "call_1" && input["input"] == "你好\n*** End Patch" && input["dry_run"] == false)
     );
     let messages = vec![
         qa_msg("assistant", blocks),
@@ -678,7 +678,7 @@ fn apply_patch_freeform_moves_the_tool_into_a_native_custom_declaration() {
 
 #[test]
 fn freeform_custom_call_wraps_raw_patch_into_the_canonical_field() {
-    // 回程收口：custom_tool_call 裸补丁文本 → {"patch": raw} ToolUse +
+    // 回程收口：custom_tool_call 裸补丁文本 → {"input": raw} ToolUse +
     // 原样 custom_tool_call provider item（下一轮回放配对用）。
     let call = mutil_ai::NativeToolCall {
         kind: mutil_ai::NativeToolKind::Custom,
@@ -699,7 +699,7 @@ fn freeform_custom_call_wraps_raw_patch_into_the_canonical_field() {
     assert_eq!(name, "apply_patch");
     assert_eq!(
         input,
-        &serde_json::json!({ "patch": "*** Begin Patch\n*** End Patch" })
+        &serde_json::json!({ "input": "*** Begin Patch\n*** End Patch" })
     );
     let ContentBlock::ResponseOutputItem { item } = &blocks[1] else {
         panic!("expected a ResponseOutputItem block: {:?}", blocks[1]);

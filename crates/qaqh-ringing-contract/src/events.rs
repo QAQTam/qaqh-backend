@@ -26,6 +26,18 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// 单条 hook 运行终态(ADR-0038 hooks 事件面;仅展示,不落库)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[serde(rename_all = "snake_case")]
+pub enum HookRunStatus {
+    Completed,
+    Failed,
+    TimedOut,
+    SkippedUntrusted,
+    SkippedDisabled,
+}
+
 /// 普通工具(无执行会话)实时输出流标识;无输出的工具不产生 output.delta 事件。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
@@ -240,6 +252,34 @@ pub enum SessionEvent {
         /// fork 完成时刻（unix ms）。
         at_ms: u64,
     },
+    /// 生命周期 hook 开始执行(ADR-0038;仅展示,不落库、不进 bootstrap——
+    /// ProviderRetrying 同律)。`event` 是 hook 事件名(PascalCase 词表键,
+    /// 权威词表在 qaqh-hooks::HookEventName;String 承载以保 wire 边界
+    /// 稳定,新增 hook 事件不再动本契约)。HookFinished 必随其后,
+    /// 客户端以 run_id 关联渲染运行条。
+    HookStarted {
+        run_id: String,
+        event: String,
+        hook_name: String,
+        turn_id: Option<TurnId>,
+        call_id: Option<ToolCallId>,
+    },
+    /// 生命周期 hook 终态(ADR-0038)。`summary` 是 deny/block 理由或失败
+    /// 摘要,可整串展示;不进模型上下文(模型侧内容走工具结果/续跑注入,
+    /// 不经本帧)。
+    HookFinished {
+        run_id: String,
+        status: HookRunStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<String>,
+        duration_ms: u64,
+    },
+    /// UserPromptSubmit hook 拒绝了本次输入(ADR-0038):prompt 不入库、
+    /// 不建回合、不进模型上下文;`reason` 只给人看。纯展示帧——历史与
+    /// bootstrap 里没有这次输入。
+    PromptBlocked {
+        reason: String,
+    },
 }
 
 impl SessionEvent {
@@ -258,6 +298,7 @@ impl SessionEvent {
             | SessionEvent::ToolStateChanged { turn_id, .. } => Some(turn_id),
             SessionEvent::ToolArgumentsDelta { turn_id, .. } => Some(turn_id),
             SessionEvent::HandoffSealed { turn_id, .. } => Some(turn_id),
+            SessionEvent::HookStarted { turn_id, .. } => turn_id.as_ref(),
             _ => None,
         }
     }

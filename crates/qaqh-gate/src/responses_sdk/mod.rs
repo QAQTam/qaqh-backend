@@ -1039,7 +1039,7 @@ fn adapt_native(
 /// 生产路径（无 plan）的 freeform `apply_patch` 收口：DeepSeek Responses 的
 /// custom 工具只认 `{"type":"custom","name":"apply_patch"}`，模型返回
 /// `custom_tool_call`、`input` 为裸补丁文本。转成与 function_json 形态相同的
-/// `{"patch": raw}` ToolUse——执行器、审批、事件流零改动；并回存原样 provider
+/// `{"input": raw}` ToolUse——执行器、审批、事件流零改动；并回存原样 provider
 /// item，下一轮按 `custom_tool_call` / `custom_tool_call_output` 配对回放
 /// （形状对齐 plan 路径的 `adapt_native` 双块输出）。
 ///
@@ -1075,7 +1075,7 @@ fn freeform_custom_blocks(call: &mutil_ai::NativeToolCall) -> Option<Vec<Content
         ContentBlock::ToolUse {
             id: call.call_id.clone(),
             name: call.name.clone(),
-            input: serde_json::json!({ "patch": raw }),
+            input: serde_json::json!({ "input": raw }),
         },
         ContentBlock::ResponseOutputItem { item },
     ])

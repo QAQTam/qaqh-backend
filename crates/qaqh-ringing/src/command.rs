@@ -131,6 +131,8 @@ pub enum RingingCommand {
         approved: bool,
         #[serde(default)]
         trust_folder: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<qaqh_ringing_contract::fact::PermissionGrantScope>,
     },
     /// 执行会话统一控制(spec §6.2):interrupt 是中断请求;target 必须是
     /// `CommandTarget::ExecSession`。accepted 仅代表受理;最终事实由

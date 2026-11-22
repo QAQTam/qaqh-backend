@@ -11,7 +11,9 @@ qaqh-config = { path = "../qaqh-config" }
 # `platform::data_dir()` 与 `sha256_hex`。
 qaqh-types = { path = "../qaqh-types" }
 log = "0.4"
-ring = "0.17"
+# PKCE sha256 / JWKS RSA 验签 / 随机量走 aws-lc-rs：与 daemon 服务端 TLS 同一栈
+# （ADR-0039）。OHOS 不消费本 crate，无 ring 保留诉求。
+aws-lc-rs = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 # URL 构造/查询解析：授权 URL 的参数编码与回环回调的查询串都交给它，

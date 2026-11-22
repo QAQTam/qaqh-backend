@@ -123,6 +123,9 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                     yield_time_ms: request.yield_time_ms,
                     max_output_bytes: request.max_output_chars as usize * 4,
                     cancellation: context.cancellation.shared_flag(),
+                    sandbox_spec: request
+                        .sandbox_spec
+                        .or_else(|| Some(context.sandbox_spec().clone())),
                 },
                 self.publisher.clone(),
             )
@@ -298,6 +301,20 @@ pub struct ToolApprovalGrant {
     pub workspace_root: PathBuf,
 }
 
+/// Session-scoped default approvals ("本对话默认允许", ADR-0040).
+///
+/// Remembers user-granted category/escalation approvals for the lifetime of the
+/// current conversation in memory without mutating persistent global config.
+/// Daemon self-administration files and `.qaqh/skills` instruction roots are
+/// never covered by session default approvals.
+#[derive(Clone, Debug, Default)]
+pub struct SessionApprovalStore {
+    pub allow_exec: bool,
+    pub allow_escalated_exec: bool,
+    pub allow_net: bool,
+    pub allow_write: bool,
+}
+
 /// Real [`WorkspaceToolPort`] backed by a session-scoped [`qaqh_workspace::ToolManager`],
 /// pre-dispatch permission/approval re-verification.
 ///
@@ -308,6 +325,7 @@ pub struct WorkspaceToolPort {
     manager: Arc<Mutex<qaqh_workspace::ToolManager>>,
     policy: RwLock<ToolPolicySnapshot>,
     approvals: Mutex<HashMap<String, ToolApprovalGrant>>,
+    session_approvals: Mutex<SessionApprovalStore>,
     lifecycle: ToolLifecycle,
     exec_sessions: Arc<ExecSessionManager>,
 }
@@ -325,6 +343,7 @@ impl WorkspaceToolPort {
             manager,
             policy: RwLock::new(policy),
             approvals: Mutex::new(HashMap::new()),
+            session_approvals: Mutex::new(SessionApprovalStore::default()),
             lifecycle,
             exec_sessions,
         }
@@ -429,6 +448,69 @@ impl WorkspaceToolPort {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .insert(grant.execution_id.clone(), grant);
     }
+
+    /// Record a session-scoped default approval ("本对话默认允许") for the
+    /// category / escalation tier of `details` and `args`.
+    pub fn grant_session_approval(
+        &self,
+        details: &PermissionRequestDetails,
+        args: &serde_json::Value,
+    ) {
+        let mut store = self
+            .session_approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match details.category.as_str() {
+            "exec" => {
+                store.allow_exec = true;
+                if args
+                    .get("with_escalated_permissions")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    store.allow_escalated_exec = true;
+                }
+            }
+            "net" => {
+                store.allow_net = true;
+            }
+            "write" => {
+                store.allow_write = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn is_session_approved(&self, challenge: &qaqh_workspace::PermissionChallenge) -> bool {
+        let reason = challenge.reason();
+        if reason.starts_with("Daemon self-configuration")
+            || reason.starts_with("Writing a skill file")
+        {
+            return false;
+        }
+        let store = self
+            .session_approvals
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match challenge.category() {
+            qaqh_workspace::ToolCategory::Exec => {
+                let requests_escalation = challenge.tool_name() == "exec_command"
+                    && challenge
+                        .normalized_args()
+                        .get("with_escalated_permissions")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true);
+                if requests_escalation {
+                    store.allow_escalated_exec
+                } else {
+                    store.allow_exec || store.allow_escalated_exec
+                }
+            }
+            qaqh_workspace::ToolCategory::Net => store.allow_net,
+            qaqh_workspace::ToolCategory::Write => store.allow_write,
+            qaqh_workspace::ToolCategory::Read => false,
+        }
+    }
 }
 
 /// Pre-dispatch admission verdict. `execute` re-evaluates it; this only lets
@@ -449,6 +531,39 @@ struct PreparedCall {
 }
 
 impl WorkspaceToolPort {
+    /// hook ask(ADR-0038):策略放行但 hook 要求人工批准时的权限详情。
+    /// category/risk 取工具描述符真值;None = 工具不在册(控制面工具不进
+    /// hook ask)。
+    pub fn hook_ask_details(
+        &self,
+        tool_name: &str,
+        reason: &str,
+    ) -> Option<qaqh_ringing_contract::state::PermissionRequestDetails> {
+        let manager = self
+            .manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let descriptor = manager.lookup(tool_name)?;
+        let risk = match descriptor.risk {
+            qaqh_workspace::ToolRisk::ReadOnly => "low",
+            qaqh_workspace::ToolRisk::Write => "medium",
+            qaqh_workspace::ToolRisk::Destructive | qaqh_workspace::ToolRisk::Administrative => {
+                "high"
+            }
+        };
+        Some(qaqh_ringing_contract::state::PermissionRequestDetails {
+            tool_name: tool_name.to_string(),
+            action_summary: Some("lifecycle hook requires manual approval".into()),
+            reason: reason.to_string(),
+            paths: vec![self.workspace_root().to_string_lossy().into_owned()],
+            category: descriptor.category.as_str().to_string(),
+            level: 3,
+            risk: risk.to_string(),
+            consequence: "hook ask:批准则继续执行;拒绝把理由回给模型".to_string(),
+            justification: None,
+        })
+    }
+
     fn prepare(&self, request: &ToolRequest) -> Result<PreparedCall, ToolFailure> {
         if request.args.len() > 256 * 1024 {
             return Err(ToolFailure::NotStarted(
@@ -530,6 +645,9 @@ impl WorkspaceToolPort {
         ) {
             qaqh_workspace::Admission::Authorized(_) => ToolAdmission::Authorized,
             qaqh_workspace::Admission::ApprovalRequired(challenge) => {
+                if self.is_session_approved(&challenge) {
+                    return ToolAdmission::Authorized;
+                }
                 ToolAdmission::ApprovalRequired {
                     details: PermissionRequestDetails {
                         tool_name: challenge.tool_name().to_string(),
@@ -549,6 +667,7 @@ impl WorkspaceToolPort {
                         }
                         .to_string(),
                         consequence: challenge.consequence().to_string(),
+                        justification: challenge.justification(),
                     },
                 }
             }
@@ -591,6 +710,7 @@ impl WorkspaceToolPort {
             }
         };
 
+        let mut user_approved_challenge = false;
         let authorized =
             match qaqh_workspace::admit_with_context(invocation, &context, &policy.trusted_dirs) {
                 qaqh_workspace::Admission::Authorized(call) => call,
@@ -604,18 +724,23 @@ impl WorkspaceToolPort {
                     return Err(ToolFailure::Denied(reason));
                 }
                 qaqh_workspace::Admission::ApprovalRequired(challenge) => {
-                    let grant = match self
+                    let single_grant = self
                         .approvals
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .remove(&request.execution_id)
-                    {
-                        Some(grant) => grant,
-                        None => {
-                            let reason = format!(
-                                "permission approval required or revoked for {}",
-                                request.tool_name
-                            );
+                        .remove(&request.execution_id);
+                    if let Some(grant) = single_grant {
+                        let normalized_ws =
+                            qaqh_workspace::resolve_target_path(policy.workspace_root.clone());
+                        let grant_ws = qaqh_workspace::resolve_target_path(grant.workspace_root);
+                        if grant.call_id != request.call_id
+                            || grant.execution_id != request.execution_id
+                            || grant.args_hash != args_hash
+                            || grant_ws != normalized_ws
+                        {
+                            let reason =
+                            "approval grant does not match execution identity, arguments, or workspace"
+                                .to_string();
                             self.lifecycle.settled(
                                 &request.call_id,
                                 &request.tool_name,
@@ -624,18 +749,11 @@ impl WorkspaceToolPort {
                             );
                             return Err(ToolFailure::Denied(reason));
                         }
-                    };
-                    let normalized_ws =
-                        qaqh_workspace::resolve_target_path(policy.workspace_root.clone());
-                    let grant_ws = qaqh_workspace::resolve_target_path(grant.workspace_root);
-                    if grant.call_id != request.call_id
-                        || grant.execution_id != request.execution_id
-                        || grant.args_hash != args_hash
-                        || grant_ws != normalized_ws
-                    {
-                        let reason =
-                        "approval grant does not match execution identity, arguments, or workspace"
-                            .to_string();
+                    } else if !self.is_session_approved(&challenge) {
+                        let reason = format!(
+                            "permission approval required or revoked for {}",
+                            request.tool_name
+                        );
                         self.lifecycle.settled(
                             &request.call_id,
                             &request.tool_name,
@@ -644,6 +762,7 @@ impl WorkspaceToolPort {
                         );
                         return Err(ToolFailure::Denied(reason));
                     }
+                    user_approved_challenge = true;
                     match challenge.approve(true) {
                         Ok(call) => call,
                         Err(err) => {
@@ -673,6 +792,19 @@ impl WorkspaceToolPort {
         }
 
         let mut context = context;
+        if user_approved_challenge && authorized.tool_name() == "exec_command" {
+            let escalated = authorized
+                .args()
+                .get("with_escalated_permissions")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true);
+            if escalated {
+                context.sandbox_spec = qaqh_workspace::tool_api::SandboxSpec::disabled();
+            } else {
+                context.sandbox_spec.network =
+                    qaqh_workspace::tool_api::SandboxSpec::disabled().network;
+            }
+        }
         context.cancellation =
             qaqh_workspace::tool_api::CancellationToken::from_shared_flag(Arc::clone(&cancel));
         let scope = qaqh_workspace::runtime::ToolExecutionScope::with_manager(

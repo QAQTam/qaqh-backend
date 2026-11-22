@@ -2,9 +2,9 @@
 //!
 //! 与 `qaqh-siwc::util` 是**同一套实现**（base64url 与一次性事务量都只有一份语义），
 //! 两 crate 互不依赖，故此处重复一份并保留同样的测试向量；抽公共件属结构塑形，
-//! 另立项。随机数一律走 `ring::rand::SystemRandom`（与 PKCE 的 sha256 同一来源）。
+//! 另立项。随机数一律走 `aws_lc_rs::rand::SystemRandom`（与 PKCE 的 sha256 同一来源）。
 
-use ring::rand::{SecureRandom, SystemRandom};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 
 /// URL-safe base64（无 padding）随机串。`n` 为**字节数**，输出长度约 `4n/3`。
 pub fn random_urlsafe(bytes: usize) -> String {

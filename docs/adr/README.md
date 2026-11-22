@@ -69,6 +69,9 @@
 | [0035](0035-exec-flood-model-spill-gate.md) | exec 洪峰模型消费面泄洪闸：超限转引用 + 不恢复 + 阈值硬编码 | 已采纳 · 未实施（2026-11-22 所有者四项拍板）· 闸门装 session_loop/tool_job 消费面、客户端 SSE 不设闸；承接 0034 权威日志为泄洪区；熔断降为分级响应第三档仍开放 |
 | [0036](0036-remove-tokenizers-facility.md) | 移除 tokenizers 库与全套 tokenizer 配置设施 | 已采纳并实施 · `[contract-refreeze]` 4.0.2→4.1.0 + v4.1 金标准机器重切 EXIT=0；tokenizerPath wire 字段删除；count_tokens 启发式当时保留（0037 推翻） |
 | [0037](0037-exec-output-metering-chars.md) | exec 输出计量 tokens→chars：本地 token 估算层退役 | 已采纳并实施 · wire 零变更（内核空间）；max_output_chars 参数/policy/预算链改名；token.rs/estimate_tokens/total_tokens 删除；记账全靠上游 usage 字段 |
+| [0038](0038-lifecycle-hooks.md) | 生命周期 hooks:17 事件词表+五门+独立信任存储+wire 事件面 | 已采纳并实施(`[contract-refreeze]`:4.1.0→4.2.0 minor bump + v4.2 金标准机器重切 + check EXIT=0)· SESSION_CONTRACT_REVISION ringing-session-4→5 · HookStarted/HookFinished/PromptBlocked 三帧 ProviderRetrying 同律 |
+| [0039](0039-unify-tls-crypto-provider-aws-lc-rs.md) | TLS/密码学栈统一:全图单 provider aws-lc-rs,host 构建图移除 ring(client target 分治,ohos 保 ring;dsaccount/siwc/rcgen 弃 ring;非契约面) | 已采纳并实施(`-p` 定向测试 60+65+84+7 全绿;host 编译单元 ring=0;lock 保留 ohos-only ring 条目) |
+| [0040](0040-windows-sandbox-preflight-and-escalation-permission.md) | Windows 沙箱分步自检协议(`sandbox.preflight.start/status`)、`exec_command` 接入 `sbx-win` 执行会话、`with_escalated_permissions`+`justification` 提权摘要与 `PermissionGrantScope`(`once\|session\|persistent`)本对话默认授权 | 已采纳并实施(`[contract-refreeze]`:`ringing-commands-11`/`ringing-session-6` + v4.2 金标准机器重切) |
 
 ## 阅读顺序
 

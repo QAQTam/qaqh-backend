@@ -25,6 +25,7 @@ fn settings_command_uses_the_single_ringing_envelope() {
             patch: SessionSettingsPatch {
                 tools: Some(ToolsSettingPatch::All),
                 model_selection: None,
+                team_mode: None,
             },
         },
     )

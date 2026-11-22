@@ -123,6 +123,8 @@ pub struct Config {
     pub lsp: LspConfig,
     /// 沙箱执行配置。
     pub sandbox: SandboxConfig,
+    /// 生命周期 hooks(ADR-0036):config.toml `[[hooks.<Event>]]`。
+    pub hooks: qaqh_hooks::HookEventsConfig,
 }
 
 // ── MCP 客户端配置──
@@ -683,6 +685,7 @@ impl Default for Config {
             mcp: McpConfig::default(),
             lsp: LspConfig::default(),
             sandbox: SandboxConfig::default(),
+            hooks: qaqh_hooks::HookEventsConfig::default(),
         }
     }
 }
@@ -859,6 +862,15 @@ falling back to 1 (read-only)"
                 }
             }
 
+            // ── Hooks(ADR-0036)── 未知事件键逐条警告(拼写错误抓现行),
+            // 其余形状校验在 discovery。
+            if let Some(ref hooks) = pc.hooks {
+                for key in hooks.unknown_events.keys() {
+                    log::warn!("[config] unknown hook event name `{key}` in config.toml [hooks]");
+                }
+                cfg.hooks = hooks.clone();
+            }
+
             // ── MCP 客户端（fail-fast：非法名/互斥冲突/缺 command 直接 load 失败）──
             cfg.mcp = map_mcp_config(pc.mcp.clone())?;
             // E-4 fail-fast：`${secret:name}` 引用的名字必须在 secrets.toml
@@ -1002,6 +1014,7 @@ falling back to 1 (read-only)"
             sandbox: Some(PersistentSandboxConfig {
                 enabled: Some(self.sandbox.enabled),
             }),
+            hooks: (!self.hooks.is_empty()).then(|| self.hooks.clone()),
         };
         log::info!(
             "[Config::save] writing to {}",

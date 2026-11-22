@@ -125,7 +125,7 @@ pub(crate) fn pinned_client_config(fp: &str) -> Result<rustls::ClientConfig, Cli
             "invalid tls fingerprint (want 64 hex chars, sha256 optional prefix): {fp}"
         ))
     })?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(crate::client::rustls_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider.clone())
         .with_protocol_versions(rustls::ALL_VERSIONS)
         .map_err(|error| ClientError::Protocol(format!("tls versions: {error}")))?
@@ -167,7 +167,7 @@ mod tests {
 
     fn verifier_for(cert: &CertificateDer<'static>) -> PinnedServerCertVerifier {
         let expected = der_fingerprint(cert);
-        PinnedServerCertVerifier::new(expected, Arc::new(rustls::crypto::ring::default_provider()))
+        PinnedServerCertVerifier::new(expected, Arc::new(crate::client::rustls_provider()))
     }
 
     fn localhost_cert() -> CertificateDer<'static> {
@@ -200,7 +200,7 @@ mod tests {
         };
         let verifier = PinnedServerCertVerifier::new(
             wrong,
-            Arc::new(rustls::crypto::ring::default_provider()),
+            Arc::new(crate::client::rustls_provider()),
         );
         let name = ServerName::try_from("localhost".to_string()).expect("server name");
         let error = verifier

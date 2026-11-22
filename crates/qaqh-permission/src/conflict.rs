@@ -46,8 +46,13 @@ pub fn file_write_paths(tool_name: &str, args: &serde_json::Value) -> Vec<String
         }
         "apply_patch" => {
             // M1：目标在 patch 文本里（Codex 格式头），解析后按同文件分组；
-            // 原名单只匹配 "patch" 等旧名，apply_patch 双调用曾并行竞态。
-            if let Some(patch) = args.get("patch").and_then(|v| v.as_str()) {
+            // canonical 键 `input`（Codex 惯例）与旧拼写 `patch` 同权读取——
+            // 漏读任何一个，同文件双 apply_patch 就会退回并行竞态（M1 历史坑）。
+            if let Some(patch) = args
+                .get("input")
+                .or_else(|| args.get("patch"))
+                .and_then(|v| v.as_str())
+            {
                 for target in crate::permission::patch_target_paths(patch) {
                     paths.push(target);
                 }

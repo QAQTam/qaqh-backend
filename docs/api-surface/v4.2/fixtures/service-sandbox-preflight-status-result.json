@@ -1,0 +1,23 @@
+{
+  "run_id": "preflight-1",
+  "state": "completed",
+  "platform": "windows",
+  "effective_backend": "windows_redirect",
+  "filesystem_write_enforced": true,
+  "network_isolation_enforced": false,
+  "elevated": false,
+  "progress_percent": 100,
+  "steps": [
+    {
+      "id": "dacl_write_isolation",
+      "label": "内核 DACL 写隔离自检",
+      "status": "passed",
+      "detail": "授权目录写入成功，未授权目录被内核拒绝",
+      "required": true,
+      "duration_ms": 12
+    }
+  ],
+  "remediations": [],
+  "started_at_ms": 1759000000000,
+  "finished_at_ms": 1759000000042
+}

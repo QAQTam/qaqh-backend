@@ -76,6 +76,11 @@ pub struct PersistentConfig {
     /// 沙箱执行配置（默认启用）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sandbox: Option<PersistentSandboxConfig>,
+
+    /// 生命周期 hooks(ADR-0036):`[[hooks.<Event>]]` matcher 组数组。
+    /// 事件词表/matcher/runner 的单一事实源在 qaqh-hooks。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<qaqh_hooks::HookEventsConfig>,
 }
 
 /// Persistence-friendly sandbox defaults.

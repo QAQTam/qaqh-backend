@@ -157,12 +157,19 @@ impl AgentRegistry {
                     tool_call_id,
                     approved,
                     trust_folder,
+                    scope,
                 } => {
+                    let effective_scope = scope.unwrap_or(if *trust_folder {
+                        qaqh_ringing::PermissionGrantScope::Persistent
+                    } else {
+                        qaqh_ringing::PermissionGrantScope::Once
+                    });
                     loop_.respond_permission(
                         tool_call_id,
                         PermissionAnswer {
                             approved: *approved,
                             trust_folder: *trust_folder,
+                            scope: effective_scope,
                         },
                     );
                     Ok(())

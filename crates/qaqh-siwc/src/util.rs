@@ -1,8 +1,8 @@
 //! 基础件：随机量、UUIDv4、常数时间比较、base64url。
 //!
-//! 随机数一律走 `ring::rand::SystemRandom`（不新增依赖，且与验签同一来源）。
+//! 随机数一律走 `aws_lc_rs::rand::SystemRandom`（与验签同一来源）。
 
-use ring::rand::{SecureRandom, SystemRandom};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 
 /// URL-safe base64（无 padding）随机串。`n` 为**字节数**，输出长度约 `4n/3`。
 pub fn random_urlsafe(bytes: usize) -> String {

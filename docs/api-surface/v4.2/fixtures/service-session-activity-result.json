@@ -1,0 +1,9 @@
+[
+  {
+    "session_id": "session-fixture",
+    "state": "running",
+    "turn_id": "turn-fixture-1",
+    "seq": 3,
+    "updated_at": 1759000060000
+  }
+]

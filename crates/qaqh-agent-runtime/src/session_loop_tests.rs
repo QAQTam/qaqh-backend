@@ -518,7 +518,11 @@ mod tests {
     #[tokio::test]
     async fn turn_cancel_during_permission_cancels_interaction_and_tool_call() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let tool_args = serde_json::json!({ "cmd": "echo permission-cancel-smoke" });
+        let tool_args = serde_json::json!({
+            "cmd": "echo permission-cancel-smoke",
+            "with_escalated_permissions": true,
+            "justification": "test turn cancel during permission wait"
+        });
         let tool_call = serde_json::json!({
             "choices": [{
                 "index": 0,

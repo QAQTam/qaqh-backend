@@ -427,6 +427,7 @@ impl QaqhClient {
                 tool_call_id,
                 approved,
                 trust_folder: false,
+                scope: None,
             })?,
         )
         .await

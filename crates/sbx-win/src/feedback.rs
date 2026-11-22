@@ -1,7 +1,7 @@
 //! deny-steer 反馈(spec §5.7):把内核拒绝翻译成模型可执行的导流指引。
 //! 文案冻结;关键词启发式对齐 codex is_likely_sandbox_denied。
 
-pub const DENIAL_FEEDBACK: &str = "[win-sbx] 写入受沙箱保护的路径被拒绝(内核 DACL 策略)。\n受保护的文件请改用受管控的文件工具(走权限审批),或先在 policy 的 writable_files / writable_roots 中声明目标。\n";
+pub const DENIAL_FEEDBACK: &str = "[win-sbx] 写入受沙箱保护的路径被拒绝(内核 DACL 策略)。\n受保护的文件请改用受管控的文件工具(走权限审批),或在 exec_command 中设置 with_escalated_permissions: true 并附带 justification(提权摘要)向用户申请提权。\n";
 
 const KEYWORDS: &[&str] = &[
     "access is denied",

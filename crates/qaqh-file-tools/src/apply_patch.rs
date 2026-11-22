@@ -31,7 +31,11 @@ use crate::tool_api::{
 #[serde(deny_unknown_fields)]
 pub struct ApplyPatchArgs {
     /// Codex patch text. If a hunk's context is not unique in the file, extend it with surrounding lines or anchor the chunk with '@@ <context line>'; the engine edits the FIRST match.
-    pub patch: String,
+    /// Canonical field name follows the Codex JSON-function convention
+    /// (`input`); the legacy in-repo spelling `patch` stays accepted via
+    /// serde alias and never appears in the model-facing schema.
+    #[serde(alias = "patch")]
+    pub input: String,
     /// Preview only (also reports WOULD_OVERWRITE when '*** Add File:' targets an existing path)
     #[serde(default)]
     pub dry_run: bool,
@@ -43,7 +47,9 @@ pub struct ApplyPatchArgs {
 #[serde(deny_unknown_fields)]
 pub struct ApplyPatchPreviewArgs {
     /// Codex patch text to preflight without writing files.
-    pub patch: String,
+    /// Same canonical/alias split as [`ApplyPatchArgs::input`].
+    #[serde(alias = "patch")]
+    pub input: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -140,7 +146,7 @@ impl TypedTool for ApplyPatchTool {
         )
         .with_native_text(
             crate::tool_api::NativeTextRepresentation::text_tool(
-                "patch",
+                "input",
                 json!({"dry_run": false}),
                 "The `apply_patch` tool can be used to edit files. This is a FREEFORM tool, so do not wrap the patch in JSON. Matching takes the FIRST hit; disambiguate repeated context with extra lines or '@@ <context line>'. Partial multi-file application is possible; do not blindly resend the whole patch.",
                 true,
@@ -161,7 +167,7 @@ impl TypedTool for ApplyPatchTool {
     ) -> Result<Self::Output, ToolExecutionError> {
         use crate::apply_patch_engine::{apply_patch_engine, dry_run_patch_engine};
 
-        if args.patch.is_empty() {
+        if args.input.is_empty() {
             return Err(mutation_error(
                 "parse_error",
                 "apply_patch: missing 'patch'",
@@ -172,7 +178,7 @@ impl TypedTool for ApplyPatchTool {
             ));
         }
 
-        let patch = args.patch;
+        let patch = args.input;
         let dry_run = args.dry_run;
         let outcome = if dry_run {
             dry_run_patch_engine(&patch, &ctx.workspace_root)
@@ -311,7 +317,7 @@ impl TypedTool for ApplyPatchTool {
             text
         };
         let pending_id = if dry_run {
-            let pending_id = crate::pending::store("apply_patch", &json!({"patch": patch}));
+            let pending_id = crate::pending::store("apply_patch", &json!({"input": patch}));
             model_text.push_str(&format!(
                 "\npending_id={pending_id} — confirm with confirm_apply {{\"pending_id\":\"{pending_id}\",\"action\":\"apply\"}}"
             ));
@@ -410,7 +416,8 @@ pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
     if args
-        .get("patch")
+        .get("input")
+        .or_else(|| args.get("patch"))
         .and_then(Value::as_str)
         .filter(|patch| !patch.is_empty())
         .is_none()
@@ -496,6 +503,28 @@ mod tests {
                 _ => serde_json::json!({ "status": "error", "raw": raw }),
             }
         }
+    }
+
+    /// 模型面 schema 声明 canonical `input`（对齐 Codex JSON 变体的训练分布）；
+    /// 旧拼写 `patch` 经 serde alias 永久兼容。两条拼写都必须能走完引擎。
+    #[test]
+    fn canonical_input_field_and_legacy_patch_alias_both_parse() {
+        let (dir, ws) = repo_with_commit(&[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        qaqh_permission::set_workspace(&ws);
+        let patch_a = "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+ONE\n*** End Patch\n";
+        let patch_b = "*** Begin Patch\n*** Update File: b.txt\n@@\n-two\n+TWO\n*** End Patch\n";
+        let legacy = exec_apply_patch(&serde_json::json!({ "patch": patch_a }));
+        assert!(
+            legacy.error.is_none(),
+            "alias `patch` must parse: {:?}",
+            legacy.error
+        );
+        let canonical = exec_apply_patch(&serde_json::json!({ "input": patch_b }));
+        assert!(
+            canonical.error.is_none(),
+            "canonical `input` must parse: {:?}",
+            canonical.error
+        );
     }
 
     #[test]

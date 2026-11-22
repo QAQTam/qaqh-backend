@@ -1,0 +1,11 @@
+{
+  "command_id": "cmd-fixture-1",
+  "state": "succeeded",
+  "payload_fingerprint": "synthetic-fingerprint",
+  "terminal_event_id": "event-fixture",
+  "result": {
+    "kind": "permission_resolved",
+    "interaction_id": "interaction-fixture",
+    "approved": false
+  }
+}

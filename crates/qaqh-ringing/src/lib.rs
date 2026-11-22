@@ -21,6 +21,7 @@ pub mod v2;
 pub mod worker;
 
 pub use command::{ConversationSendMessage, RingingCommand};
+pub use qaqh_ringing_contract::PermissionGrantScope;
 pub use envelope::{
     RingingCommandAck, RingingCommandAckStatus, RingingCommandState, RingingCommandStatus,
 };

@@ -1,0 +1,7 @@
+{
+  "challenge_id": "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff",
+  "decision": "approve",
+  "payload": {
+    "message": "synthetic approval message"
+  }
+}

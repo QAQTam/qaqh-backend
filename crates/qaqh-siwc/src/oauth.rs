@@ -15,7 +15,7 @@ use crate::util::base64url_encode;
 
 /// `code_challenge = base64url(SHA-256(verifier))`（RFC 7636 §4.2，S256）。
 pub fn pkce_challenge(verifier: &str) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, verifier.as_bytes());
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, verifier.as_bytes());
     base64url_encode(digest.as_ref())
 }
 

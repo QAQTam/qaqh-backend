@@ -304,6 +304,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "048006790404103c488e6c5616b3e7e702a71292aadda08e8f7698a9e0d2eb53"
 dependencies = [
  "aws-lc-sys",
+ "untrusted 0.7.1",
  "zeroize",
 ]
 
@@ -2629,7 +2630,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qaqh-acp"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "agent-client-protocol",
  "qaqh-client",
@@ -2642,12 +2643,13 @@ dependencies = [
 
 [[package]]
 name = "qaqh-agent-runtime"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-config",
  "qaqh-dsaccount",
  "qaqh-gate",
+ "qaqh-hooks",
  "qaqh-lsp",
  "qaqh-mcp",
  "qaqh-memwatch",
@@ -2671,7 +2673,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-client"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -2695,10 +2697,11 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-config-api",
+ "qaqh-hooks",
  "qaqh-policy",
  "qaqh-profile",
  "qaqh-types",
@@ -2714,7 +2717,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config-api"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2723,7 +2726,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-contract-export"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "hex",
  "qaqh-config-api",
@@ -2746,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-daemon"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -2789,12 +2792,12 @@ dependencies = [
 
 [[package]]
 name = "qaqh-dsaccount"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
+ "aws-lc-rs",
  "log",
  "qaqh-config",
  "qaqh-types",
- "ring",
  "serde",
  "serde_json",
  "tempfile",
@@ -2805,7 +2808,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ffi"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "android_logger",
  "log",
@@ -2820,7 +2823,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-file-tools"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2847,7 +2850,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-gate"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -2865,7 +2868,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-goal"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-ringing-contract",
@@ -2878,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-harmony-napi"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "napi-build-ohos",
  "napi-derive-ohos",
@@ -2890,8 +2893,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-hooks"
+version = "4.2.0"
+dependencies = [
+ "log",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+]
+
+[[package]]
 name = "qaqh-lsp"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "async-lsp",
  "futures",
@@ -2913,7 +2929,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-marketplace"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-config",
@@ -2925,7 +2941,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-mcp"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "axum",
  "libc",
@@ -2944,7 +2960,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-memwatch"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -2953,7 +2969,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-permission"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-policy",
@@ -2966,14 +2982,14 @@ dependencies = [
 
 [[package]]
 name = "qaqh-policy"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "qaqh-process-tools"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2997,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-profile"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-types",
@@ -3011,7 +3027,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-bun"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3020,7 +3036,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-core"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3028,7 +3044,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-sdk"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "qaqh-ptc-core",
  "serde",
@@ -3037,7 +3053,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ptc-tools"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "qaqh-policy",
  "qaqh-ptc-core",
@@ -3050,7 +3066,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-pty"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -3060,7 +3076,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "qaqh-profile",
  "qaqh-ringing-contract",
@@ -3072,7 +3088,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-contract"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "qaqh-types",
  "schemars 1.2.3",
@@ -3086,7 +3102,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-runtime"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-memwatch",
@@ -3103,7 +3119,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-runtime"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "libc",
  "log",
@@ -3124,6 +3140,7 @@ dependencies = [
  "qaqh-ringing",
  "qaqh-ringing-contract",
  "qaqh-ringing-runtime",
+ "qaqh-sandbox",
  "qaqh-session",
  "qaqh-siwc",
  "qaqh-skills",
@@ -3145,7 +3162,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-sandbox"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "landlock",
  "libc",
@@ -3161,7 +3178,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-session"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "hex",
  "log",
@@ -3183,12 +3200,12 @@ dependencies = [
 
 [[package]]
 name = "qaqh-siwc"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
+ "aws-lc-rs",
  "log",
  "qaqh-config",
  "qaqh-types",
- "ring",
  "serde",
  "serde_json",
  "tempfile",
@@ -3199,7 +3216,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-skills"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "include_dir",
  "serde",
@@ -3209,7 +3226,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-subagent"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3225,7 +3242,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-tool-core"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "anyhow",
  "log",
@@ -3240,8 +3257,9 @@ dependencies = [
 
 [[package]]
 name = "qaqh-types"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
+ "qaqh-hooks",
  "serde",
  "serde_json",
  "sha2",
@@ -3251,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-workspace"
-version = "4.1.0"
+version = "4.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -3432,8 +3450,8 @@ version = "0.14.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8774e05a7d0de114588e6a28fe7e71694b82614ed569d86d8b389dfbc98b8ad8"
 dependencies = [
+ "aws-lc-rs",
  "pem",
- "ring",
  "rustls-pki-types",
  "time",
  "x509-parser",
@@ -3550,7 +3568,7 @@ dependencies = [
  "cfg-if",
  "getrandom 0.2.17",
  "libc",
- "untrusted",
+ "untrusted 0.9.0",
  "windows-sys 0.52.0",
 ]
 
@@ -3735,7 +3753,7 @@ dependencies = [
  "aws-lc-rs",
  "ring",
  "rustls-pki-types",
- "untrusted",
+ "untrusted 0.9.0",
 ]
 
 [[package]]
@@ -4907,6 +4925,12 @@ dependencies = [
 
 [[package]]
 name = "untrusted"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a156c684c91ea7d62626509bce3cb4e1d9ed5c4d978f7b4352658f96a4c26b4a"
+
+[[package]]
+name = "untrusted"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
@@ -5446,12 +5470,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d43b0f71ce057da06bc0851b23ee24f3f86190b07203dd8f567d0b706a185202"
 dependencies = [
  "asn1-rs",
+ "aws-lc-rs",
  "data-encoding",
  "der-parser",
  "lazy_static",
  "nom",
  "oid-registry",
- "ring",
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",

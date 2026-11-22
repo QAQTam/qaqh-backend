@@ -117,9 +117,14 @@ pub fn extract_target_paths_in(
     {
         paths.push(PathBuf::from(cwd));
     }
-    // W3：apply_patch 目标在 patch 文本里，解析 Codex 格式头。
+    // W3：apply_patch 目标在补丁文本里，解析 Codex 格式头。canonical 键是
+    // `input`（Codex 惯例），旧拼写 `patch` 走 alias——两个消费方必须同口径
+    // 双键读取，见 conflict::paths_from_args 的历史坑注释。
     if tool_name == "apply_patch"
-        && let Some(patch) = args.get("patch").and_then(|v| v.as_str())
+        && let Some(patch) = args
+            .get("input")
+            .or_else(|| args.get("patch"))
+            .and_then(|v| v.as_str())
     {
         for target in patch_target_paths(patch) {
             paths.push(PathBuf::from(target));
@@ -181,13 +186,29 @@ pub fn summarize_permission_action(tool_name: &str, args: &serde_json::Value) ->
         }
     }
 
+    let with_escalated = args
+        .get("with_escalated_permissions")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    if with_escalated {
+        parts.push("escalated: true (runs outside the OS sandbox)".to_string());
+    }
+    if let Some(justification) = args
+        .get("justification")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        parts.push(format!("justification: {}", json_display(justification)));
+    }
+
     if parts.is_empty() {
         return None;
     }
-    // 审计 H1：`SandboxSpec.workspace_write` + 网络 Deny 在无强制后端的平台
-    // （Windows/macOS，以及缺 landlock/bwrap 的 Linux）纯属装饰。审批对话框
+    // 审计 H1：`SandboxSpec.workspace_write` 在无强制写隔离后端的平台（如 macOS、
+    // Windows 提权进程或缺少 landlock/bwrap 的 Linux）无法执行沙箱隔离。审批对话框
     // 必须明说，不得让用户带着「命令在沙箱内」的错觉放行 exec。
-    if !qaqh_sandbox::filesystem_and_network_isolation_enforced() {
+    if !with_escalated && !qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation {
         parts.push(
             "WARNING: sandbox not enforced on this platform — the command will run with full user privileges (filesystem & network)"
                 .to_string(),
@@ -580,23 +601,56 @@ pub fn needs_permission(
         }
     }
 
+    let requests_escalation = tool_name == "exec_command"
+        && args
+            .get("with_escalated_permissions")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    let escalation_justification = args
+        .get("justification")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
     // Otherwise: ask user
     // （Read 类已在上文无条件放行，不会再落到这里；此处的 Read 判定仅剩
     //   死防御。）
-    let reason = if level == PermissionLevel::ReadOnly {
-        format!(
-            "read-only mode: '{}' (write/exec/net) requires confirmation.",
-            tool_name
+    let (reason, consequence) = if requests_escalation {
+        let reason = match escalation_justification {
+            Some(j) => format!(
+                "'exec_command' requests escalated permissions outside the OS sandbox: {j}"
+            ),
+            None => "'exec_command' requests escalated permissions outside the OS sandbox."
+                .to_string(),
+        };
+        (
+            reason,
+            "Runs the command outside the OS sandbox with full user privileges (filesystem & network)."
+                .to_string(),
+        )
+    } else if level == PermissionLevel::ReadOnly {
+        (
+            format!(
+                "read-only mode: '{}' (write/exec/net) requires confirmation.",
+                tool_name
+            ),
+            consequence,
         )
     } else if matches!(category, ToolCategory::Exec | ToolCategory::Net) {
-        format!(
-            "'{}' requires execution or network confirmation.",
-            tool_name
+        (
+            format!(
+                "'{}' requires execution or network confirmation.",
+                tool_name
+            ),
+            consequence,
         )
     } else {
-        format!(
-            "'{}' writes outside the workspace (one-time folder trust).",
-            tool_name
+        (
+            format!(
+                "'{}' writes outside the workspace (one-time folder trust).",
+                tool_name
+            ),
+            consequence,
         )
     };
 
@@ -1095,7 +1149,7 @@ mod w3_w7_tests {
             &serde_json::json!({ "cmd": "ls", "workdir": "/repo" }),
         )
         .expect("exec_command summary");
-        if qaqh_sandbox::filesystem_and_network_isolation_enforced() {
+        if qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation {
             assert!(!summary.contains("WARNING"), "{summary}");
         } else {
             assert!(

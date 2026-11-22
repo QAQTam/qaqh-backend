@@ -259,6 +259,17 @@ impl PermissionChallenge {
         &self.consequence
     }
 
+    /// Model-authored escalation justification (`exec_command.justification`)
+    /// surfaced on the frontend approval card (ADR-0040).
+    pub fn justification(&self) -> Option<String> {
+        self.normalized_args
+            .get("justification")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
     pub fn is_expired(&self, ttl: Duration) -> bool {
         self.created_at.elapsed() > ttl
     }
@@ -424,10 +435,17 @@ pub fn admit_with_context(
     // （显式 Token/Redirect，或 Auto 已晋升 Redirect）；Auto 未晋升 = 不强制
     // = 不自动放行（fail-safe，与 direct.rs 的实际分派条件一致）。非 Windows
     // 平台没有已接线的写强制后端，该判定恒 false ⇒ exec 一律落回常规审批。
+    let requests_escalation = invocation.tool_name == "exec_command"
+        && invocation
+            .args
+            .get("with_escalated_permissions")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
     let exec_backend_resolved =
         qaqh_sandbox::exec_backend_enforces_write_isolation(&context.sandbox_spec);
     let exec_class = if !sandboxed
         && invocation.tool_name == "exec_command"
+        && !requests_escalation
         && context.sandbox_spec.enabled
         && exec_backend_resolved
         && qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
@@ -439,14 +457,12 @@ pub fn admit_with_context(
     let exec_classified_auto = matches!(
         (&level, &exec_class),
         (
-            crate::permission::PermissionLevel::WorkspaceWrite,
-            Some(crate::permission::ExecCommandClass::ReadOnly)
-        ) | (
-            crate::permission::PermissionLevel::SandboxRun,
-            Some(crate::permission::ExecCommandClass::ReadOnly),
-        ) | (
-            crate::permission::PermissionLevel::SandboxRun,
-            Some(crate::permission::ExecCommandClass::Unclassified),
+            crate::permission::PermissionLevel::WorkspaceWrite
+                | crate::permission::PermissionLevel::SandboxRun,
+            Some(
+                crate::permission::ExecCommandClass::ReadOnly
+                    | crate::permission::ExecCommandClass::Unclassified
+            ),
         )
     );
     let exec_auto =
@@ -696,7 +712,7 @@ mod tests {
     /// 非 Windows 恒 false），所以判据是「能力位 ∧ 平台已接线」。只看能力位
     /// 会在 Linux+bubblewrap 上误判成「应当放行」。
     fn exec_write_isolation_wired() -> bool {
-        cfg!(windows) && qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
+        qaqh_sandbox::SandboxCapabilities::detect().filesystem_write_isolation
     }
     use super::*;
     use crate::permission::PermissionRisk;
@@ -779,14 +795,28 @@ mod tests {
             assert!(asks(admission));
         }
 
-        // 审计 F1/P0 回归锁：Auto 未晋升 = 实际 plain spawn = 不得自动放行
+        // 审计 F1/P0 回归锁：后端为 None（无写强制后端）= 不得自动放行
+        let inv = invocation("rg foo src", Some("bash"));
+        let admission = admit_with_context(
+            inv.clone(),
+            &ctx_for(inv, qaqh_sandbox::SandboxBackend::None),
+            &HashSet::new(),
+        );
+        assert!(asks(admission));
+
+        // Auto 后端已晋升（WindowsRedirect / WindowsToken / LinuxBubblewrap）：
+        // 写强制成立时同样自动放行
         let inv = invocation("rg foo src", Some("bash"));
         let admission = admit_with_context(
             inv.clone(),
             &ctx_for(inv, qaqh_sandbox::SandboxBackend::Auto),
             &HashSet::new(),
         );
-        assert!(asks(admission));
+        if write_enforced {
+            assert!(matches!(admission, Admission::Authorized(_)));
+        } else {
+            assert!(asks(admission));
+        }
 
         // deny 形态（递归删除）任何平台都不得自动放行
         let inv = invocation("rm -rf build", Some("bash"));
@@ -797,14 +827,44 @@ mod tests {
         );
         assert!(asks(admission));
 
-        // pwsh 侧不做文法判定：Unclassified 保持常规审批
+        // pwsh 侧非 deny 命令在写强制沙箱内自动放行（越界写由内核 DACL 拦截并回流导流文案）
         let inv = invocation("Get-ChildItem src", Some("pwsh"));
         let admission = admit_with_context(
             inv.clone(),
             &ctx_for(inv, qaqh_sandbox::SandboxBackend::WindowsToken),
             &HashSet::new(),
         );
-        assert!(asks(admission));
+        if write_enforced {
+            assert!(matches!(admission, Admission::Authorized(_)));
+        } else {
+            assert!(asks(admission));
+        }
+
+        // 显式请求提权（with_escalated_permissions: true）必须弹审批并携带 justification
+        let escalated_inv = ToolInvocation {
+            session_id: "seed-a".into(),
+            call_id: "call-exec-esc".into(),
+            tool_name: "exec_command".into(),
+            args: serde_json::json!({
+                "cmd": "Get-ChildItem src",
+                "shell": "pwsh",
+                "with_escalated_permissions": true,
+                "justification": "Need global package cache write access",
+            }),
+            category: crate::permission::ToolCategory::Exec,
+        };
+        let admission = admit_with_context(
+            escalated_inv.clone(),
+            &ctx_for(escalated_inv, qaqh_sandbox::SandboxBackend::WindowsToken),
+            &HashSet::new(),
+        );
+        let Admission::ApprovalRequired(challenge) = admission else {
+            panic!("with_escalated_permissions=true must always require user approval");
+        };
+        assert_eq!(
+            challenge.justification().as_deref(),
+            Some("Need global package cache write access")
+        );
 
         // 命令文本引用会话历史文件（真实平台 sessions 目录）：不自动放行
         let session_log = qaqh_types::platform::sessions_dir().join("messages.jsonl");

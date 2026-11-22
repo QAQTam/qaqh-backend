@@ -33,7 +33,7 @@ fn v2_surface_is_nameable_from_the_client_root() {
 
     assert_eq!(RINGING_V2_VERSION, 2);
     assert_eq!(RINGING_V2_BASE_PATH, "/ringing/v2");
-    assert_eq!(qaqh_client::SESSION_CONTRACT_REVISION, "ringing-session-2");
+    assert_eq!(qaqh_client::SESSION_CONTRACT_REVISION, "ringing-session-5");
 }
 
 /// 壳层必须能只靠 `qaqh-client` **命名并 match** 会话事件流的 interaction /

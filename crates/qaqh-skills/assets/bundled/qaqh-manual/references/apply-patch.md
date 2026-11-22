@@ -8,7 +8,7 @@ still authoritative.
 | Declaration | What to send |
 |---|---|
 | custom / freeform | Raw patch text. Do not wrap it in JSON. |
-| function / JSON | The object declared by the schema, normally `{ "patch": "..." }`. |
+| function / JSON | The object declared by the schema, normally `{ "input": "..." }`. The legacy `patch` spelling is still accepted as an alias, but prefer the canonical `input` key. |
 
 If the schema has `dry_run`, use it only for a real preview. If
 `apply_patch_preview` or `confirm_apply` is not in the current tool list, do not

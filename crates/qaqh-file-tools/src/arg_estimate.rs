@@ -163,7 +163,10 @@ fn targets_for(tool_name: &str) -> Option<&'static [(&'static str, Target)]> {
             ("old_str", Target::Removed),
             ("old_string", Target::Removed),
         ]),
-        "apply_patch" => Some(&[("patch", Target::Patch)]),
+        // canonical `input`（Codex JSON 变体拼写）与迁移前旧拼写 `patch` 同权
+        // 列出；一次调用只会出现一种（执行器侧双键 = duplicate field 报错），
+        // 与 edit 的四键并列同一防双计逻辑。
+        "apply_patch" => Some(&[("input", Target::Patch), ("patch", Target::Patch)]),
         // 其余工具（read / grep / exec / …）没有行数概念：不估算，
         // 免得给只读调用画出 +/-。
         _ => None,

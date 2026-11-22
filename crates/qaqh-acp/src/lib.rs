@@ -587,6 +587,7 @@ impl PermissionPrompt {
             .filter_map(|choice| {
                 let kind = match choice.decision {
                     InteractionDecision::Approved => PermissionOptionKind::AllowOnce,
+                    InteractionDecision::ApprovedForSession => PermissionOptionKind::AllowAlways,
                     InteractionDecision::Rejected => PermissionOptionKind::RejectOnce,
                     // Answered/Dismissed 不属于权限交互,出现即不该展示。
                     _ => return None,
@@ -612,7 +613,13 @@ impl PermissionPrompt {
             .map_err(backend_error)?;
         // 回合取消时 Zed 必答 cancelled;取消已由 ConversationCancel 传达,无需回写。
         if let RequestPermissionOutcome::Selected(selected) = response.outcome {
-            let approved = selected.option_id.0.as_ref() == "approved";
+            let option_id = selected.option_id.0.as_ref();
+            let approved = matches!(option_id, "approved" | "approved_for_session");
+            let scope = match option_id {
+                "approved" => Some(qaqh_ringing::PermissionGrantScope::Once),
+                "approved_for_session" => Some(qaqh_ringing::PermissionGrantScope::Session),
+                _ => None,
+            };
             send_command(
                 &self.client,
                 self.target.clone(),
@@ -620,6 +627,7 @@ impl PermissionPrompt {
                     tool_call_id: call_id.to_string(),
                     approved,
                     trust_folder: false,
+                    scope,
                 },
             )
             .await?;
@@ -737,6 +745,7 @@ fn tool_title(tool_name: &str, args: Option<&serde_json::Value>) -> String {
 fn decision_id(decision: InteractionDecision) -> &'static str {
     match decision {
         InteractionDecision::Approved => "approved",
+        InteractionDecision::ApprovedForSession => "approved_for_session",
         InteractionDecision::Rejected => "rejected",
         InteractionDecision::Answered => "answered",
         InteractionDecision::Dismissed => "dismissed",
@@ -748,6 +757,11 @@ fn permission_text(details: &PermissionRequestDetails) -> String {
         "Reason: {}\nConsequence: {}\nRisk: {} (level {})",
         details.reason, details.consequence, details.risk, details.level
     );
+    if let Some(justification) = details.justification.as_deref()
+        && !justification.is_empty()
+    {
+        text.push_str(&format!("\nJustification: {justification}"));
+    }
     if !details.paths.is_empty() {
         text.push_str("\nPaths:");
         for path in &details.paths {

@@ -281,11 +281,14 @@ impl ModelToolPlan {
                 if object.len() != 1 {
                     return Err(ToolPlanError::InvalidPayload);
                 }
+                // canonical `input`（Codex 惯例）；旧拼写 `patch` 兼容读取，
+                // 与 permission/conflict 的双键口径一致。
                 let patch = object
-                    .get("patch")
+                    .get("input")
+                    .or_else(|| object.get("patch"))
                     .and_then(Value::as_str)
                     .ok_or(ToolPlanError::InvalidPayload)?;
-                json!({"patch": patch, "dry_run": true})
+                json!({"input": patch, "dry_run": true})
             }
             _ => return Err(ToolPlanError::InvalidPayload),
         };
@@ -468,7 +471,7 @@ mod tests {
             "apply_patch",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+                TextInputAdapter::custom_raw("input").with_defaults(json!({"dry_run": false})),
             ),
         );
         let preview = entry(
@@ -485,7 +488,7 @@ mod tests {
         assert_eq!(result.native, call);
         assert_eq!(
             result.canonical.args,
-            json!({"patch": PATCH, "dry_run": false})
+            json!({"input": PATCH, "dry_run": false})
         );
         assert_eq!(result.canonical.call_id, "call_1");
         assert_eq!(result.canonical.internal_tool_key, "apply_patch");
@@ -497,7 +500,7 @@ mod tests {
             .expect("preview");
         assert_eq!(
             result.canonical.args,
-            json!({"patch": PATCH, "dry_run": true})
+            json!({"input": PATCH, "dry_run": true})
         );
         assert_eq!(plan.version(), "v1");
         assert_eq!(plan.profile(), "siwc-opt-in");
@@ -511,7 +514,7 @@ mod tests {
             "apply_patch",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+                TextInputAdapter::custom_raw("input").with_defaults(json!({"dry_run": false})),
             ),
         );
         let function = entry(
@@ -550,7 +553,7 @@ mod tests {
             "apply_patch",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+                TextInputAdapter::custom_raw("input").with_defaults(json!({"dry_run": false})),
             ),
         );
         let preview = entry(
@@ -593,7 +596,7 @@ mod tests {
         );
         for args in [
             json!({"patch": PATCH, "dry_run": true}),
-            json!({"input": PATCH}),
+            json!({"dry_run": true}),
             json!({"patch": 42}),
             json!(null),
         ] {
@@ -613,6 +616,8 @@ mod tests {
             "apply_patch",
             "delete",
             InputAdapter::TextInput(
+                // 故意用遗留保留名 "patch"：canonical_field "patch" 只许
+                // apply_patch 使用（守卫条款），其余工具必须被拒。
                 TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
             ),
         );
@@ -674,7 +679,7 @@ mod tests {
             "patch_text",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+                TextInputAdapter::custom_raw("input").with_defaults(json!({"dry_run": false})),
             ),
         );
         let function = entry(
@@ -683,7 +688,7 @@ mod tests {
             "patch_text",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::function_field("input", "patch")
+                TextInputAdapter::function_field("input", "input")
                     .with_defaults(json!({"dry_run": false})),
             ),
         );
@@ -704,7 +709,7 @@ mod tests {
         assert_eq!(custom_call.canonical.args, function_call.canonical.args);
         assert_eq!(
             custom_call.canonical.args,
-            json!({"patch": PATCH, "dry_run": false})
+            json!({"input": PATCH, "dry_run": false})
         );
     }
 
@@ -772,7 +777,7 @@ mod tests {
             "apply_patch",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+                TextInputAdapter::custom_raw("input").with_defaults(json!({"dry_run": false})),
             ),
         );
         let preview = entry(
@@ -801,7 +806,7 @@ mod tests {
                 .canonical,
             plan.adapt(native(
                 &preview,
-                NativeToolPayload::JsonArguments(json!({"patch":patch})),
+                NativeToolPayload::JsonArguments(json!({"input":patch})),
             ))
             .expect("preview")
             .canonical,
@@ -866,7 +871,7 @@ mod tests {
             "apply_patch",
             "apply_patch",
             InputAdapter::TextInput(
-                TextInputAdapter::custom_raw("patch").with_defaults(json!({"dry_run": false})),
+                TextInputAdapter::custom_raw("input").with_defaults(json!({"dry_run": false})),
             ),
         );
         let plan = ModelToolPlan::new("v1", "p", vec![custom.clone()]).expect("plan");

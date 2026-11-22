@@ -173,6 +173,7 @@ mod tests {
             tool_call_id: "call-1".into(),
             approved: true,
             trust_folder: false,
+            scope: None,
         }
     }
 

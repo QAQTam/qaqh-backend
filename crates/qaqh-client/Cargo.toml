@@ -13,7 +13,6 @@ qaqh-types = { path = "../qaqh-types" }
 futures-util = "0.3"
 log = "0.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls-no-provider", "query"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
@@ -42,8 +41,17 @@ required-features = ["shell-stream"]
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
+# TLS provider 按 target 分治（ADR-0039）：host/桌面/服务端全图单一栈 aws-lc-rs；
+# 仅 OHOS target 保留 ring——aws-lc-sys 无法在 OHOS 交叉工具链下构建（历史实测，
+# 见 src/client.rs `ensure_crypto_provider` 文档）。
+[target.'cfg(not(target_env = "ohos"))'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "logging", "std", "tls12"] }
+
+[target.'cfg(target_env = "ohos")'.dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
 [dev-dependencies]
-rcgen = "0.14.10"
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 tokio = { version = "1", features = ["full"] }
 
 [lints]

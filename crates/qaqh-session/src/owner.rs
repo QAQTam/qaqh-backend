@@ -19,7 +19,8 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use qaqh_ringing_contract::events::{
-    ExecOutputSource, InteractionEndStatus, OutputStream, SessionEvent, SessionEventFrame,
+    ExecOutputSource, HookRunStatus, InteractionEndStatus, OutputStream, SessionEvent,
+    SessionEventFrame,
 };
 use qaqh_ringing_contract::fact::{
     BlockId, ContentHash, ContentRef, ContentValue, InputId, InteractionDecision, InteractionId,
@@ -686,6 +687,64 @@ impl SessionOwner {
                 delay_secs,
                 error,
             });
+            Ok(())
+        });
+    }
+
+    // ---- 生命周期 hooks 事件面(ADR-0038;全部仅展示,不落库) ----
+
+    /// hook 开始执行;HookFinished 必随其后,客户端按 run_id 关联。
+    pub fn hook_started(
+        &self,
+        run_id: &str,
+        event: &str,
+        hook_name: &str,
+        turn_id: Option<&TurnId>,
+        call_id: Option<&ToolCallId>,
+    ) {
+        let run_id = run_id.to_string();
+        let event = event.to_string();
+        let hook_name = hook_name.to_string();
+        let turn_id = turn_id.cloned();
+        let call_id = call_id.cloned();
+        self.send_request(move |pump| {
+            pump.emit(SessionEvent::HookStarted {
+                run_id,
+                event,
+                hook_name,
+                turn_id,
+                call_id,
+            });
+            Ok(())
+        });
+    }
+
+    /// hook 终态;summary = deny/block 理由或失败摘要(只给人看)。
+    pub fn hook_finished(
+        &self,
+        run_id: &str,
+        status: HookRunStatus,
+        summary: Option<&str>,
+        duration_ms: u64,
+    ) {
+        let run_id = run_id.to_string();
+        let summary = summary.map(str::to_string);
+        self.send_request(move |pump| {
+            pump.emit(SessionEvent::HookFinished {
+                run_id,
+                status,
+                summary,
+                duration_ms,
+            });
+            Ok(())
+        });
+    }
+
+    /// UserPromptSubmit hook 拒绝输入:prompt 不入库,reason 只给人看。
+    pub fn prompt_blocked(&self, reason: &str) {
+        let reason = reason.to_string();
+        self.send_request(move |pump| {
+            pump.emit(SessionEvent::PromptBlocked { reason });
             Ok(())
         });
     }

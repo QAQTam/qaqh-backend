@@ -23,10 +23,25 @@ pub fn redirect_promoted() -> bool {
 /// 纯映射:SandboxSpec → SbxPolicy。隔离后端恒 Token(AC 后端留实验档,
 /// 不接生产;调研报告 §3)。
 pub fn map_policy(spec: &SandboxSpec) -> SbxPolicy {
+    let resolved_redirect = matches!(
+        resolve_windows_backend(spec),
+        Ok(Some(SandboxBackend::WindowsRedirect))
+    ) || spec.redirect;
+    let mut deny_write_paths = spec.deny_write_paths.clone();
+    if let Some(ws) = &spec.workspace_root {
+        for protected in [
+            ws.join(".git").join("hooks"),
+            ws.join(".qaqh").join("skills"),
+        ] {
+            if protected.exists() && !deny_write_paths.contains(&protected) {
+                deny_write_paths.push(protected);
+            }
+        }
+    }
     SbxPolicy {
         writable_roots: spec.writable_roots.clone(),
         writable_files: spec.writable_files.clone(),
-        deny_write_paths: spec.deny_write_paths.clone(),
+        deny_write_paths,
         network: match spec.network {
             NetworkPolicy::Deny => SbxNetworkPolicy::Deny,
             NetworkPolicy::Allow => SbxNetworkPolicy::Allow,
@@ -35,30 +50,33 @@ pub fn map_policy(spec: &SandboxSpec) -> SbxPolicy {
         readable_roots: Vec::new(),
         capabilities: Vec::new(),
         writable_registry_keys: Vec::new(),
-        redirect: matches!(spec.backend, SandboxBackend::WindowsRedirect) || spec.redirect,
+        redirect: resolved_redirect,
     }
 }
 
-/// 显式 Windows 后端的可行性校验。`Ok(None)` = 非Windows 后端请求(交还
-/// 原有解析路径);`Err` = 显式请求但环境不满足(fail closed)。
+/// 显式与自动 Windows 后端的可行性解析。`Ok(None)` = 沙箱禁用或非 Windows 后端请求;
+/// `Err` = 显式请求但环境不满足(fail closed)。
 ///
-/// 转正（CLEAN-3/T10）：`Auto` 在 Windows 上不再 fail-open——工作区 +
-/// ProjFS 可用时优先选 RedirectPlane（最强写隔离，turn 结束同步 merge），
-/// 否则 `Ok(None)` 交回调用方兜底（`wrap_command` 落 TokenPlane）。
-/// `QAQH_SBX_REDIRECT=0` 可整体退出晋升（灰度/排障开关）。
+/// 转正（CLEAN-3/T10 + ADR-0040）：`Auto` 在 Windows 上不再 fail-open——工作区 +
+/// ProjFS 可用时优先选 `WindowsRedirect`（最强写隔离，turn 结束同步 merge），
+/// 否则自动回落 `WindowsToken`（受限令牌 + DACL 写隔离）。
+/// `QAQH_SBX_REDIRECT=0` 可整体退出 Redirect 晋升、固定使用 `WindowsToken`。
 pub fn resolve_windows_backend(spec: &SandboxSpec) -> Result<Option<SandboxBackend>, String> {
+    if !spec.enabled {
+        return Ok(None);
+    }
     match spec.backend {
         SandboxBackend::WindowsToken => Ok(Some(SandboxBackend::WindowsToken)),
-        SandboxBackend::Auto if redirect_promoted() => {
-            let Some(ws) = &spec.workspace_root else {
-                return Ok(None);
-            };
-            if !ws.is_dir() || !sbx_win::projfs::available() {
-                return Ok(None);
+        SandboxBackend::Auto => {
+            if redirect_promoted()
+                && let Some(ws) = &spec.workspace_root
+                && ws.is_dir()
+                && sbx_win::projfs::available()
+            {
+                return Ok(Some(SandboxBackend::WindowsRedirect));
             }
-            Ok(Some(SandboxBackend::WindowsRedirect))
+            Ok(Some(SandboxBackend::WindowsToken))
         }
-        SandboxBackend::Auto => Ok(None),
         SandboxBackend::WindowsRedirect => {
             let Some(ws) = &spec.workspace_root else {
                 return Err(
@@ -133,11 +151,14 @@ mod tests {
         spec.backend = SandboxBackend::WindowsToken;
         assert!(resolve_windows_backend(&spec).is_ok());
         spec.backend = SandboxBackend::Auto;
-        assert_eq!(resolve_windows_backend(&spec).expect("auto"), None);
+        assert_eq!(
+            resolve_windows_backend(&spec).expect("auto falls back to WindowsToken"),
+            Some(SandboxBackend::WindowsToken)
+        );
     }
 
-    /// 转正（CLEAN-3/T10）：Auto + workspace + ProjFS 可用 → 晋升
-    /// WindowsRedirect；ProjFS 不可用回落 None（wrap_command 落 TokenPlane）。
+    /// 转正（CLEAN-3/T10 + ADR-0040）：Auto + workspace + ProjFS 可用 → 晋升
+    /// WindowsRedirect；ProjFS 不可用回落 WindowsToken。
     /// 断言按宿主 ProjFS 实况分支，两台机器上都诚实。
     #[test]
     fn auto_promotes_to_redirect_when_projfs_available() {
@@ -148,11 +169,11 @@ mod tests {
         if sbx_win::projfs::available() {
             assert_eq!(resolved, Some(SandboxBackend::WindowsRedirect));
         } else {
-            assert_eq!(resolved, None);
+            assert_eq!(resolved, Some(SandboxBackend::WindowsToken));
         }
     }
 
-    /// 退出开关：`QAQH_SBX_REDIRECT=0` 时 Auto 不晋升（灰度/排障用）。
+    /// 退出开关：`QAQH_SBX_REDIRECT=0` 时 Auto 不晋升 Redirect，回落 WindowsToken。
     #[test]
     fn auto_promotion_can_be_opted_out() {
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -160,7 +181,10 @@ mod tests {
         // SAFETY: 全测试经 SERIAL 互斥串行，无并发线程读取环境变量。
         unsafe { std::env::set_var("QAQH_SBX_REDIRECT", "0") };
         let spec = SandboxSpec::workspace_write(PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-        assert_eq!(resolve_windows_backend(&spec).expect("auto"), None);
+        assert_eq!(
+            resolve_windows_backend(&spec).expect("auto"),
+            Some(SandboxBackend::WindowsToken)
+        );
         // SAFETY: 同上，持有 SERIAL 锁后才改动环境。
         unsafe { std::env::remove_var("QAQH_SBX_REDIRECT") };
     }

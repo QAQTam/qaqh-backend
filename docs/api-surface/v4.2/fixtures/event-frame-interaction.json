@@ -1,0 +1,16 @@
+{
+  "seq": 3,
+  "type": "interaction_requested",
+  "interaction": {
+    "interaction_id": "int_fixture",
+    "call_id": "call_fixture",
+    "turn_id": "turn_fixture",
+    "kind": "ask",
+    "request": {
+      "kind": "inline",
+      "data": {
+        "text": "a synthetic question"
+      }
+    }
+  }
+}

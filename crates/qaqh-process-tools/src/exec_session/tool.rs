@@ -37,6 +37,16 @@ pub struct ExecCommandArgs {
     /// Maximum model output budget in Unicode characters.
     #[serde(default)]
     pub max_output_chars: Option<u32>,
+    /// Request escalated (unsandboxed) execution with explicit user approval.
+    /// Do NOT set this on your first attempt unless you already know sandbox
+    /// isolation blocks the required operation; run normally in the sandbox first.
+    #[serde(default)]
+    pub with_escalated_permissions: Option<bool>,
+    /// Concise human-readable summary explaining why escalated permissions outside
+    /// the sandbox are required (displayed on the user's approval card). Required
+    /// when `with_escalated_permissions` is true.
+    #[serde(default)]
+    pub justification: Option<String>,
 }
 
 /// exec_command `shell` 字段的白名单——这个 enum **就是**模型面 schema：
@@ -197,7 +207,7 @@ impl TypedTool for ExecCommandTool {
     fn meta(&self) -> ToolMeta {
         ToolMeta::new(
             "exec_command",
-            "Run a shell command. `cmd` is wrapped by the selected shell dialect (`shell`); long-running commands return an execution session id — use write_stdin to read output or provide terminal input. To wait for a long-running command, issue a single empty write_stdin with a large yield_time_ms (up to 300000): it returns as soon as the process exits. stdout/stderr are captured as separate streams; avoid `2>&1`/`1>&2` unless merging is intentional. Pagers and git prompts/editors are disarmed via env (PAGER/GIT_PAGER/GH_PAGER=cat, GIT_TERMINAL_PROMPT=0, GIT_EDITOR=true); output ending in `:` means stuck in a pager — send `q` via write_stdin. Payload interpreters (node/bun/python/deno) are programs to run inside `cmd`, never a value for `shell`.",
+            "Run a shell command inside the OS sandbox by default. `cmd` is wrapped by the selected shell dialect (`shell`); long-running commands return an execution session id — use write_stdin to read output or provide terminal input. To wait for a long-running command, issue a single empty write_stdin with a large yield_time_ms (up to 300000): it returns as soon as the process exits. If an operation is blocked by the sandbox and genuinely requires unsandboxed access, retry with `with_escalated_permissions: true` and a concise `justification` for the user's approval card. stdout/stderr are captured as separate streams; avoid `2>&1`/`1>&2` unless merging is intentional. Pagers and git prompts/editors are disarmed via env (PAGER/GIT_PAGER/GH_PAGER=cat, GIT_TERMINAL_PROMPT=0, GIT_EDITOR=true); output ending in `:` means stuck in a pager — send `q` via write_stdin. Payload interpreters (node/bun/python/deno) are programs to run inside `cmd`, never a value for `shell`.",
             crate::permission::ToolCategory::Exec,
             crate::ToolRisk::Destructive,
             Duration::from_secs(30),
@@ -254,8 +264,14 @@ impl TypedTool for ExecCommandTool {
                 let workspace = context.workspace_root.to_string_lossy();
                 (!workspace.is_empty() && workspace != ".").then(|| workspace.into_owned())
             });
+        let _ = &args.justification;
+        let effective_sandbox = if args.with_escalated_permissions.unwrap_or(false) {
+            qaqh_policy::SandboxSpec::disabled()
+        } else {
+            context.sandbox_spec().clone()
+        };
         let launch =
-            qaqh_sandbox::prepare_pty_launch(&argv, cwd.as_deref(), context.sandbox_spec())
+            qaqh_sandbox::prepare_pty_launch(&argv, cwd.as_deref(), &effective_sandbox)
                 .map_err(|message| {
                     ToolExecutionError::from(ToolError::new(ToolErrorKind::Execution, message))
                 })?;
@@ -286,6 +302,7 @@ impl TypedTool for ExecCommandTool {
                 yield_time_ms,
                 timeout_ms: args.timeout_ms,
                 max_output_chars,
+                sandbox_spec: Some(effective_sandbox),
             },
         );
         if result.is_err() {

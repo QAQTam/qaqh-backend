@@ -1,0 +1,11 @@
+{
+  "command_id": "cmd-fixture-create",
+  "state": "succeeded",
+  "payload_fingerprint": "synthetic-fingerprint",
+  "sync_result": {
+    "operation": "session.create",
+    "result": {
+      "session_id": "0199a0f0-0000-7000-8000-000000000001"
+    }
+  }
+}

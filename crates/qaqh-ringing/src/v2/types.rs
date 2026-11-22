@@ -91,7 +91,9 @@ pub const COMMAND_CONTRACT_REVISION: &str = "ringing-commands-11";
 /// 当前无该字段的读模型视为隐式第 1 代。
 /// ADR-0033:TeamResponse.board 删除/TeamAgentSnapshot 诚实化/TaskView 与
 /// SessionSettingsPatch additive = 读模型词表实变,代际 bump。
-pub const SESSION_CONTRACT_REVISION: &str = "ringing-session-4";
+/// ADR-0038:SessionEvent 增 HookStarted/HookFinished/PromptBlocked = 事件
+/// 读模型词表实变,代际 bump(ringing-session-4 → 5)。
+pub const SESSION_CONTRACT_REVISION: &str = "ringing-session-5";
 
 /// RingingV2 唯一公共命令信封。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -593,6 +595,8 @@ pub struct RingingV2PendingPermissionView {
     pub tool_call_id: String,
     pub tool_name: Option<serde_json::Value>,
     pub action_summary: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justification: Option<serde_json::Value>,
     pub reason: Option<serde_json::Value>,
     pub paths: serde_json::Value,
     pub category: Option<serde_json::Value>,

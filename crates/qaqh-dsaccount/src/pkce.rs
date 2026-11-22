@@ -4,7 +4,7 @@
 //! `code_verifier` **不出进程**：它只出现在换码与取消两个请求体里，从不进 UI
 //! 投影、不进日志。
 
-use ring::digest::{SHA256, digest};
+use aws_lc_rs::digest::{SHA256, digest};
 
 use crate::util::{base64url_encode, constant_time_eq, random_transaction_value};
 

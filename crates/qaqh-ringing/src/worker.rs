@@ -59,6 +59,7 @@ mod tests {
             tool_call_id: "c".into(),
             approved: true,
             trust_folder: false,
+            scope: None,
         };
         let frame = RingingWorkerCommandEnvelope::new("s1", "cmd-1", cmd);
         let json = serde_json::to_string(&frame).expect("serialize");

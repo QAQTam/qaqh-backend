@@ -640,6 +640,10 @@ fn pending_permission_view(
         consequence: details
             .as_ref()
             .map(|value| serde_json::json!(value.consequence)),
+        justification: details
+            .as_ref()
+            .and_then(|value| value.justification.as_ref())
+            .map(|value| serde_json::json!(value)),
         details_unavailable: details.is_none(),
     }))
 }
@@ -1230,7 +1234,10 @@ fn command_result_for(
 ) -> Option<RingingV2CommandResult> {
     let interaction_id = interaction_id.to_string();
     match (kind, verdict) {
-        (InteractionKind::Permission, InteractionDecision::Approved) => {
+        (
+            InteractionKind::Permission,
+            InteractionDecision::Approved | InteractionDecision::ApprovedForSession,
+        ) => {
             Some(RingingV2CommandResult::PermissionResolved {
                 interaction_id,
                 approved: true,

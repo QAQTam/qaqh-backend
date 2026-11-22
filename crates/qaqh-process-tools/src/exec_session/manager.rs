@@ -46,6 +46,7 @@ pub struct ExecSessionStart {
     pub yield_time_ms: u32,
     pub max_output_bytes: usize,
     pub cancellation: Arc<AtomicBool>,
+    pub sandbox_spec: Option<qaqh_policy::SandboxSpec>,
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +194,8 @@ enum ProcessControl {
     #[cfg(any(unix, windows))]
     Pty(qaqh_pty::SpawnedSession),
     Pipe(qaqh_pty::SpawnedPipeSession),
+    #[cfg(windows)]
+    Sbx(crate::exec::sbx_bypass::SbxInteractiveSession),
 }
 
 #[cfg(any(unix, windows))]
@@ -202,6 +205,8 @@ impl ProcessControl {
             #[cfg(any(unix, windows))]
             Self::Pty(process) => process.try_wait(),
             Self::Pipe(process) => process.try_wait(),
+            #[cfg(windows)]
+            Self::Sbx(process) => process.try_wait(),
         }
     }
 
@@ -210,6 +215,8 @@ impl ProcessControl {
             #[cfg(any(unix, windows))]
             Self::Pty(process) => process.interrupt(),
             Self::Pipe(process) => process.interrupt(),
+            #[cfg(windows)]
+            Self::Sbx(process) => process.kill_tree(),
         }
     }
 
@@ -218,6 +225,8 @@ impl ProcessControl {
             #[cfg(any(unix, windows))]
             Self::Pty(process) => process.kill_group(),
             Self::Pipe(process) => process.kill_group(),
+            #[cfg(windows)]
+            Self::Sbx(process) => process.kill_tree(),
         }
     }
 
@@ -228,6 +237,20 @@ impl ProcessControl {
             #[cfg(any(unix, windows))]
             Self::Pty(process) => process.close_terminal(),
             Self::Pipe(_) => {}
+            #[cfg(windows)]
+            Self::Sbx(_) => {}
+        }
+    }
+
+    #[cfg(windows)]
+    fn settle_sandbox_after_exit(
+        &mut self,
+        exit_code: Option<i32>,
+        stderr_preview: &str,
+    ) -> Option<String> {
+        match self {
+            Self::Sbx(process) => process.settle_after_exit(exit_code, stderr_preview),
+            _ => None,
         }
     }
 }
@@ -295,7 +318,90 @@ impl ExecSessionManager {
             cols: 80,
             rows: 24,
         };
-        let (process, writer, readers, expected_sources) = if request.tty {
+        #[cfg(windows)]
+        let use_windows_sbx = match request.sandbox_spec.as_ref() {
+            Some(sbx_spec) => match qaqh_sandbox::sbx_map::resolve_windows_backend(sbx_spec) {
+                Ok(Some(_)) => Some(sbx_spec),
+                Ok(None) => None,
+                Err(error) => {
+                    self.release_reservation(&request.owner_session_id);
+                    return Err(manager_error(
+                        ExecManagerErrorKind::Spawn,
+                        format!("sandbox prepare failed: {error}"),
+                        0,
+                    ));
+                }
+            },
+            None => None,
+        };
+
+        #[cfg(windows)]
+        let (process, writer, readers, expected_sources, uses_conpty_reflower) =
+            if let Some(sbx_spec) = use_windows_sbx {
+                let (sbx_session, stdin_file, stdout_file, stderr_file) =
+                    crate::exec::sbx_bypass::spawn_sbx_interactive(
+                        &request.argv,
+                        &request.env,
+                        request.cwd.as_deref(),
+                        sbx_spec,
+                        &request.command,
+                        &request.origin_call_id,
+                    )
+                    .map_err(|error| {
+                        self.release_reservation(&request.owner_session_id);
+                        manager_error(
+                            ExecManagerErrorKind::Spawn,
+                            format!("spawn sandboxed command (sbx-win): {error}"),
+                            0,
+                        )
+                    })?;
+                let writer: Box<dyn Write + Send> = Box::new(stdin_file);
+                let readers: Vec<(Box<dyn Read + Send>, OutputSource)> = vec![
+                    (Box::new(stdout_file), OutputSource::Stdout),
+                    (Box::new(stderr_file), OutputSource::Stderr),
+                ];
+                (ProcessControl::Sbx(sbx_session), writer, readers, 2, false)
+            } else if request.tty {
+                let process = qaqh_pty::spawn_pty(&spec).map_err(|error| {
+                    self.release_reservation(&request.owner_session_id);
+                    manager_error(
+                        ExecManagerErrorKind::Spawn,
+                        format!("spawn PTY command: {error}"),
+                        0,
+                    )
+                })?;
+                let (io, process) = process.into_parts();
+                (
+                    ProcessControl::Pty(process),
+                    io.writer,
+                    vec![(io.reader, OutputSource::Terminal)],
+                    1,
+                    true,
+                )
+            } else {
+                let process = qaqh_pty::spawn_pipe_split(&spec).map_err(|error| {
+                    self.release_reservation(&request.owner_session_id);
+                    manager_error(
+                        ExecManagerErrorKind::Spawn,
+                        format!("spawn pipe command: {error}"),
+                        0,
+                    )
+                })?;
+                let (io, process) = process.into_parts();
+                (
+                    ProcessControl::Pipe(process),
+                    io.writer,
+                    vec![
+                        (io.stdout, OutputSource::Stdout),
+                        (io.stderr, OutputSource::Stderr),
+                    ],
+                    2,
+                    false,
+                )
+            };
+
+        #[cfg(not(windows))]
+        let (process, writer, readers, expected_sources, uses_conpty_reflower) = if request.tty {
             let process = qaqh_pty::spawn_pty(&spec).map_err(|error| {
                 self.release_reservation(&request.owner_session_id);
                 manager_error(
@@ -324,6 +430,7 @@ impl ExecSessionManager {
                 io.writer,
                 vec![(io.reader, OutputSource::Terminal)],
                 1,
+                true,
             )
         } else {
             let process = qaqh_pty::spawn_pipe_split(&spec).map_err(|error| {
@@ -343,6 +450,7 @@ impl ExecSessionManager {
                     (io.stderr, OutputSource::Stderr),
                 ],
                 2,
+                false,
             )
         };
 
@@ -369,8 +477,7 @@ impl ExecSessionManager {
                 active_slot_released: false,
                 finished_at_ms: None,
                 stream_dropped_bytes: 0,
-                model_reflower: request
-                    .tty
+                model_reflower: uses_conpty_reflower
                     .then(|| crate::exec::truncate::ConptyReflower::new(spec.cols)),
             }),
             changed: Condvar::new(),
@@ -1086,7 +1193,24 @@ fn watch_process(inner: Arc<ManagerInner>, session: Arc<ManagedSession>, timeout
             break;
         }
     }
+    #[cfg(windows)]
+    settle_sandbox_session(&session, exit.code);
     finalize_session(inner, &session, Some(exit), watch_failed);
+}
+
+#[cfg(windows)]
+fn settle_sandbox_session(session: &ManagedSession, exit_code: Option<i32>) {
+    let stderr_preview = {
+        let core = session.core.lock().unwrap_or_else(|e| e.into_inner());
+        core.capture.snapshot().output_preview
+    };
+    let extra_stderr = {
+        let mut process = session.process.lock().unwrap_or_else(|e| e.into_inner());
+        process.settle_sandbox_after_exit(exit_code, &stderr_preview)
+    };
+    if let Some(extra) = extra_stderr {
+        append_output(session, OutputSource::Stderr, extra.as_bytes());
+    }
 }
 
 #[cfg(any(unix, windows))]
@@ -1159,6 +1283,11 @@ fn force_shutdown_finalize(inner: Arc<ManagerInner>, session: &Arc<ManagedSessio
         core = next;
     }
     drop(core);
+    #[cfg(windows)]
+    settle_sandbox_session(
+        session,
+        observed_exit.as_ref().and_then(|status| status.code),
+    );
     let watch_failed = observed_exit.is_none();
     finalize_session(inner, session, observed_exit, watch_failed);
 }
@@ -1181,12 +1310,8 @@ fn finalize_session(
             OutputSource::Stdout,
             OutputSource::Stderr,
         ] {
-            if (source == OutputSource::Terminal && session.tty)
-                || (source != OutputSource::Terminal && !session.tty)
-            {
-                let chunks = core.capture.finish_source(source);
-                publish_chunks(session, &chunks, &core);
-            }
+            let chunks = core.capture.finish_source(source);
+            publish_chunks(session, &chunks, &core);
         }
         let exit_observed = exit.is_some() || core.exit.is_some();
         let output = match (
@@ -1562,6 +1687,7 @@ mod tests {
             yield_time_ms,
             max_output_bytes: 4096,
             cancellation: Arc::new(AtomicBool::new(false)),
+            sandbox_spec: None,
         }
     }
 

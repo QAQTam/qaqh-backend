@@ -51,6 +51,7 @@ const WIDGET_STATE_NAME: &str = "qaqh_widget_state";
 pub struct PermissionAnswer {
     pub approved: bool,
     pub trust_folder: bool,
+    pub scope: qaqh_ringing_contract::PermissionGrantScope,
 }
 
 enum AskReply {
@@ -92,6 +93,8 @@ pub struct SessionLoop {
     lsp_projection_seeded: AtomicBool,
     /// ADR-0014：终态通知端口（registry 注入；未注入 = 不回传）。
     terminal_port: RwLock<Option<TurnTerminalPort>>,
+    /// ADR-0038：生命周期 hooks(None = 无 hook 声明,零开销直通)。
+    hooks: RwLock<Option<Arc<crate::session_hooks::SessionHooks>>>,
 }
 
 struct LoopInner {
@@ -211,7 +214,49 @@ impl SessionLoop {
             mcp_projection_gen: AtomicU64::new(0),
             lsp_projection_seeded: AtomicBool::new(false),
             terminal_port: RwLock::new(None),
+            hooks: RwLock::new(None),
         })
+    }
+
+    /// ADR-0038：注入会话 hooks(装配期调用)。SessionStart 观察事件在此触发。
+    pub fn set_hooks(&self, hooks: Arc<crate::session_hooks::SessionHooks>) {
+        let started = Arc::clone(&hooks);
+        *self
+            .hooks
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hooks);
+        let cwd = self.current_cwd().to_string_lossy().to_string();
+        spawn_task(async move {
+            started
+                .observe(
+                    qaqh_hooks::HookEventName::SessionStart,
+                    qaqh_hooks::HookPayload::Sparse {
+                        source: Some("startup".to_string()),
+                        reason: None,
+                        trigger: None,
+                        agent_type: None,
+                    },
+                    &cwd,
+                    None,
+                    None,
+                )
+                .await;
+        });
+    }
+
+    fn hooks_ref(&self) -> Option<Arc<crate::session_hooks::SessionHooks>> {
+        self.hooks
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// 当前工作目录(hook 信封 cwd / trust 判据)。
+    fn current_cwd(&self) -> PathBuf {
+        self.cwd
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     pub fn session_id(&self) -> &str {
@@ -417,6 +462,24 @@ impl SessionLoop {
 
     /// 关停:取消活动回合并等待任务退出。
     pub async fn shutdown(self: Arc<Self>) {
+        // ADR-0038:SessionEnd 观察(先于槽位拆除,hook 能看到完整会话态)。
+        if let Some(hooks) = self.hooks_ref() {
+            let cwd = self.current_cwd().to_string_lossy().to_string();
+            hooks
+                .observe(
+                    qaqh_hooks::HookEventName::SessionEnd,
+                    qaqh_hooks::HookPayload::Sparse {
+                        source: None,
+                        reason: Some("shutdown".to_string()),
+                        trigger: None,
+                        agent_type: None,
+                    },
+                    &cwd,
+                    None,
+                    None,
+                )
+                .await;
+        }
         self.abandon();
         let task = {
             let mut inner = self.lock();
@@ -512,6 +575,21 @@ impl SessionLoop {
             .message_id
             .clone()
             .unwrap_or_else(|| format!("input_{}", generate_ulid()));
+        // ADR-0038 UserPromptSubmit 门:block 的 prompt 不入库、不建回合
+        // (start_turn 未调用,历史零痕迹);reason 只给人看(PromptBlocked 帧)。
+        // 自动唤醒回合(subagent 终态/系统输入)只观察,grok 同律。
+        let mut hook_context: Vec<String> = Vec::new();
+        if let Some(hooks) = self.hooks_ref() {
+            let typed = input.subagent_terminal.is_none() && !input.as_system;
+            let cwd_str = self.current_cwd().to_string_lossy().to_string();
+            let gate = hooks.prompt_gate(&input.text, typed, &cwd_str).await;
+            if let Some(block) = gate.block {
+                self.owner.prompt_blocked(&format!("{}: {}", block.source, block.reason));
+                self.finish_active(&turn_id).await;
+                return;
+            }
+            hook_context = gate.additional_context;
+        }
         if let Err(error) = self.owner.start_turn(&turn_id, Some(input_id)).await {
             log::error!("[loop] {} start turn failed: {error}", self.session_id);
             self.finish_active(&turn_id).await;
@@ -567,6 +645,21 @@ impl SessionLoop {
 
         let mut turn_retry_budget = MAX_TURN_RETRIES;
         let mut attempt_no: u32 = 0;
+        // ADR-0038:UserPromptSubmit 放行路径的上下文注入(codex 口径);
+        // user 角色承载,与 steer 合并帧同形状。
+        for context in hook_context {
+            messages.push(Message {
+                msg_id: None,
+                role: "user".into(),
+                name: None,
+                content: vec![ContentBlock::Text {
+                    text: format!("[hooks] {context}"),
+                }],
+            });
+        }
+        // ADR-0038:Stop 门续跑防环位——一次 block 续跑后,本回合的 Stop
+        // 不再门控(stop_hook_active 信封位同步给 hook)。
+        let mut stop_hook_active = false;
         // 此前失败 attempt 已消耗的用量:结算时并入最终口径,账本不丢中间
         // attempt(此前失败轮的 usage 直接丢弃,turn 级重发会放大这个缺口)。
         let mut accrued_usage: Option<UsageInfo> = None;
@@ -884,6 +977,31 @@ impl SessionLoop {
                     self.seal_response(&turn, &blocks, &outcome).await;
                     match outcome.finish {
                         Some(ProviderFinish::Stop) => {
+                            // ADR-0038 Stop 门:block = 拒绝停回合,理由回灌模型
+                            // 续跑;一次续跑后不再门控(防环,grok/Claude 同律)。
+                            if let Some(hooks) = self.hooks_ref() {
+                                let cwd_str =
+                                    self.current_cwd().to_string_lossy().to_string();
+                                let last_assistant = outcome.message.as_ref().map(assistant_text);
+                                let gate = hooks
+                                    .stop_gate(last_assistant.as_deref(), stop_hook_active, &cwd_str)
+                                    .await;
+                                if let Some(block) = gate.and_then(|gate| gate.block) {
+                                    messages.push(Message {
+                                        msg_id: None,
+                                        role: "user".into(),
+                                        name: None,
+                                        content: vec![ContentBlock::Text {
+                                            text: format!(
+                                                "[hooks:stop] {}: {}",
+                                                block.source, block.reason
+                                            ),
+                                        }],
+                                    });
+                                    stop_hook_active = true;
+                                    continue 'rounds;
+                                }
+                            }
                             self.finish_completed(&turn, outcome.usage.clone()).await;
                             break;
                         }
@@ -909,14 +1027,63 @@ impl SessionLoop {
                                 .await;
                                 break;
                             }
+                            // ADR-0038 PreToolUse 门:deny → 调用按失败结算;
+                            // ask → 强制权限交互;updatedInput → 改写后的入参
+                            // 既是声明事实也是执行入参(declared==executed)。
+                            // 控制面工具(ask/handoff/session_title)豁免。
+                            let mut hook_rewrites: HashMap<String, serde_json::Value> =
+                                HashMap::new();
+                            let mut hook_denials: HashMap<String, String> = HashMap::new();
+                            // call_id → hook ask 理由(强制权限交互)。
+                            let mut hook_asks: HashMap<String, String> = HashMap::new();
+                            let hook_cwd = self.current_cwd().to_string_lossy().to_string();
+                            if let Some(hooks) = self.hooks_ref() {
+                                for (call_id, name, input) in &tool_uses {
+                                    if is_control_plane_tool(name) {
+                                        continue;
+                                    }
+                                    if let Some(gate) =
+                                        hooks.pre_tool_use_gate(name, input.clone(), &hook_cwd).await
+                                    {
+                                        if let Some(denial) = gate.denial {
+                                            hook_denials.insert(
+                                                call_id.clone(),
+                                                format!("{}: {}", denial.source, denial.reason),
+                                            );
+                                        }
+                                        if let Some(reason) = gate.ask_reason {
+                                            hook_asks.insert(call_id.clone(), reason);
+                                        }
+                                        if let Some(updated) = gate.updated_input {
+                                            hook_rewrites.insert(call_id.clone(), updated);
+                                        }
+                                    }
+                                }
+                            }
                             for (call_id, name, input) in &tool_uses {
-                                self.declare(&turn, call_id, name, input).await;
+                                let effective_input = hook_rewrites
+                                    .get(call_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| input.clone());
+                                self.declare(&turn, call_id, name, &effective_input).await;
                             }
                             let mut tool_messages = Vec::with_capacity(tool_uses.len());
                             let mut handed_off = false;
                             for (call_id, name, input) in &tool_uses {
+                                let effective_input = hook_rewrites
+                                    .get(call_id)
+                                    .cloned()
+                                    .unwrap_or_else(|| input.clone());
                                 let (ok, text, image_refs) = match self
-                                    .dispatch_tool(&turn, call_id, name, input, &cancel_rx)
+                                    .dispatch_tool(
+                                        &turn,
+                                        call_id,
+                                        name,
+                                        &effective_input,
+                                        &cancel_rx,
+                                        hook_denials.get(call_id).map(String::as_str),
+                                        hook_asks.get(call_id).map(String::as_str),
+                                    )
                                     .await
                                 {
                                     Ok(result) => result,
@@ -925,6 +1092,22 @@ impl SessionLoop {
                                             "[loop] {} tool {name} dispatch failed: {error}",
                                             self.session_id
                                         );
+                                        // ADR-0038:派发失败 → PostToolUseFailure 观察。
+                                        if let Some(hooks) = self.hooks_ref() {
+                                            hooks
+                                                .observe(
+                                                    qaqh_hooks::HookEventName::PostToolUseFailure,
+                                                    qaqh_hooks::HookPayload::ToolUse {
+                                                        tool_name: name.clone(),
+                                                        tool_input: effective_input.clone(),
+                                                        tool_output: None,
+                                                    },
+                                                    &hook_cwd,
+                                                    Some(turn.as_str()),
+                                                    Some(call_id),
+                                                )
+                                                .await;
+                                        }
                                         (false, "tool dispatch failed".to_string(), Vec::new())
                                     }
                                 };
@@ -946,6 +1129,37 @@ impl SessionLoop {
                                         }
                                     }
                                     None => text,
+                                };
+                                // ADR-0038 PostToolUse 门:替换模型可见输出、
+                                // 追加上下文与 block 反馈;替换/追加与落库同
+                                // 字节(历史即消息,零反转)。
+                                let text = if is_control_plane_tool(name) {
+                                    text
+                                } else if let Some(hooks) = self.hooks_ref() {
+                                    let gate = hooks
+                                        .post_tool_use_gate(
+                                            name,
+                                            effective_input.clone(),
+                                            &text,
+                                            &hook_cwd,
+                                        )
+                                        .await;
+                                    match gate {
+                                        None => text,
+                                        Some(gate) => {
+                                            let mut text =
+                                                gate.output_replacement.unwrap_or(text);
+                                            for context in gate.additional_context {
+                                                text.push_str(&format!("\n[hooks] {context}"));
+                                            }
+                                            for reason in gate.block_reasons {
+                                                text.push_str(&format!("\n[hooks] {reason}"));
+                                            }
+                                            text
+                                        }
+                                    }
+                                } else {
+                                    text
                                 };
                                 // ToolResult is the durable RingingV2 history fact. Keeping a
                                 // result only in this turn's in-memory request makes the next
@@ -1116,6 +1330,8 @@ impl SessionLoop {
 
     /// 单个工具的完整执行:precheck → 权限/ask 交互 → port 派发。
     /// 返回 (是否成功, 回传模型的文本)。port 自身结算生命周期事件。
+    /// ADR-0038:`hook_denial` = PreToolUse deny 理由(直接失败结算);
+    /// `hook_ask` = hook ask 理由(策略放行也强制权限交互)。
     async fn dispatch_tool(
         &self,
         turn: &TurnId,
@@ -1123,6 +1339,8 @@ impl SessionLoop {
         tool_name: &str,
         input: &serde_json::Value,
         cancel_rx: &watch::Receiver<bool>,
+        hook_denial: Option<&str>,
+        hook_ask: Option<&str>,
     ) -> Result<(bool, String, Vec<ToolImageRef>), LoopError> {
         // ask:答案来自交互应答,不走 port。
         if tool_name == "ask" {
@@ -1149,6 +1367,13 @@ impl SessionLoop {
             LoopError::Db(qaqh_session::db::DbError::Corrupt(error.to_string()))
         })?;
         let args_json = Some(String::from_utf8_lossy(&args).into_owned());
+        // ADR-0038 PreToolUse deny:直接失败结算,理由回模型,不进权限与执行。
+        if let Some(reason) = hook_denial {
+            self.settle_failed(call_id, tool_name, args_json, "hook_denied", reason);
+            self.observe_permission_denied(tool_name, input, turn, call_id, reason)
+                .await;
+            return Ok((false, reason.to_string(), Vec::new()));
+        }
         let request = ToolRequest {
             execution_id: generate_ulid(),
             call_id: call_id.to_string(),
@@ -1158,59 +1383,156 @@ impl SessionLoop {
             args: args.clone(),
         };
 
-        match self.port.precheck(&request) {
+        let mut admission = self.port.precheck(&request);
+        // ADR-0038 hook ask:策略放行也升级为权限交互(详情取描述符真值;
+        // 控制面/未在册工具拿不到详情,按原 admission 直通)。
+        if let Some(ask_reason) = hook_ask
+            && matches!(admission, ToolAdmission::Authorized)
+            && let Some(details) = self.port.hook_ask_details(tool_name, ask_reason)
+        {
+            admission = ToolAdmission::ApprovalRequired { details };
+        }
+        match admission {
             ToolAdmission::Denied(reason) => {
                 self.settle_failed(call_id, tool_name, args_json, "permission_denied", &reason);
+                self.observe_permission_denied(tool_name, input, turn, call_id, &reason).await;
                 return Ok((false, reason, Vec::new()));
             }
             ToolAdmission::ApprovalRequired { details } => {
-                let Some((interaction_id, answer)) = self
-                    .request_permission(turn, call_id, &details, cancel_rx)
-                    .await
-                else {
-                    if *cancel_rx.borrow() {
-                        self.settle_cancelled(
+                // ADR-0038 PermissionRequest 门:hook 预答 allow/deny;None =
+                // 不干预,照常升起交互。
+                let mut pre_approved = false;
+                if let Some(hooks) = self.hooks_ref() {
+                    let cwd_str = self.current_cwd().to_string_lossy().to_string();
+                    let gate = hooks
+                        .permission_gate(tool_name, input.clone(), &cwd_str)
+                        .await;
+                    if let Some(gate) = gate {
+                        match gate.decision {
+                            Some(false) => {
+                                let reason = gate.denial_reason.clone().unwrap_or_else(|| {
+                                    "denied by hook".to_string()
+                                });
+                                self.settle_failed(
+                                    call_id,
+                                    tool_name,
+                                    args_json,
+                                    "hook_denied",
+                                    &reason,
+                                );
+                                return Ok((false, reason, Vec::new()));
+                            }
+                            Some(true) => pre_approved = true,
+                            None => {}
+                        }
+                    }
+                }
+                let grant_interaction_id = if pre_approved {
+                    String::new()
+                } else {
+                    let Some((interaction_id, answer)) = self
+                        .request_permission(turn, call_id, &details, cancel_rx)
+                        .await
+                    else {
+                        if *cancel_rx.borrow() {
+                            self.settle_cancelled(
+                                call_id,
+                                tool_name,
+                                args_json,
+                                qaqh_types::ToolCancellationReason::TurnCancel,
+                            );
+                            return Ok((false, "cancelled".into(), Vec::new()));
+                        }
+                        self.settle_failed(
                             call_id,
                             tool_name,
                             args_json,
-                            qaqh_types::ToolCancellationReason::TurnCancel,
+                            "permission_denied",
+                            "permission interaction failed",
                         );
-                        return Ok((false, "cancelled".into(), Vec::new()));
+                        return Ok((false, "permission interaction failed".into(), Vec::new()));
+                    };
+                    if answer.approved {
+                        let effective_scope = if answer.trust_folder
+                            && answer.scope == qaqh_ringing_contract::PermissionGrantScope::Once
+                        {
+                            qaqh_ringing_contract::PermissionGrantScope::Persistent
+                        } else {
+                            answer.scope
+                        };
+                        if matches!(
+                            effective_scope,
+                            qaqh_ringing_contract::PermissionGrantScope::Session
+                                | qaqh_ringing_contract::PermissionGrantScope::Persistent
+                        ) {
+                            self.port.grant_session_approval(&details, input);
+                            let workspace_root =
+                                qaqh_workspace::resolve_target_path(self.current_cwd());
+                            for path_str in &details.paths {
+                                let resolved =
+                                    qaqh_workspace::resolve_target_path(PathBuf::from(path_str));
+                                if !resolved.starts_with(&workspace_root) {
+                                    let dir_to_trust = if resolved.is_dir() {
+                                        resolved
+                                    } else {
+                                        resolved
+                                            .parent()
+                                            .map(std::path::Path::to_path_buf)
+                                            .unwrap_or(resolved)
+                                    };
+                                    self.port.trust_dir(dir_to_trust.clone());
+                                    if effective_scope
+                                        == qaqh_ringing_contract::PermissionGrantScope::Persistent
+                                    {
+                                        qaqh_workspace::trust_folder(&dir_to_trust);
+                                    }
+                                }
+                            }
+                        }
+                        if answer.trust_folder
+                            || effective_scope
+                                == qaqh_ringing_contract::PermissionGrantScope::Persistent
+                        {
+                            let cwd = self.current_cwd();
+                            self.port.trust_dir(cwd);
+                            // ADR-0038:统一 folder trust 同款语义——信任决定同时
+                            // 放行本 workspace 的项目作用域 hooks(独立 store)。
+                            if let Some(hooks) = self.hooks_ref() {
+                                hooks.trust_project();
+                            }
+                        }
                     }
-                    self.settle_failed(
-                        call_id,
-                        tool_name,
-                        args_json,
-                        "permission_denied",
-                        "permission interaction failed",
-                    );
-                    return Ok((false, "permission interaction failed".into(), Vec::new()));
+                    if !answer.approved {
+                        self.settle_failed(
+                            call_id,
+                            tool_name,
+                            args_json,
+                            "permission_denied",
+                            "denied by user",
+                        );
+                        self.observe_permission_denied(
+                            tool_name,
+                            input,
+                            turn,
+                            call_id,
+                            "denied by user",
+                        )
+                        .await;
+                        return Ok((false, "denied by user".into(), Vec::new()));
+                    }
+                    interaction_id.as_ref().to_string()
                 };
-                if answer.trust_folder {
-                    let cwd = self
-                        .cwd
-                        .read()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone();
-                    self.port.trust_dir(cwd);
-                }
-                if !answer.approved {
-                    self.settle_failed(
-                        call_id,
-                        tool_name,
-                        args_json,
-                        "permission_denied",
-                        "denied by user",
-                    );
-                    return Ok((false, "denied by user".into(), Vec::new()));
-                }
                 // 迁移表:权限允许后回到 declared,等真正进入执行再 running。
                 self.owner
                     .tool_back_to_declared(&ToolCallId::new(call_id.to_string()))
                     .await
                     .ok();
                 self.port.grant_approval(ToolApprovalGrant {
-                    interaction_id: interaction_id.as_ref().to_string(),
+                    interaction_id: if grant_interaction_id.is_empty() {
+                        format!("hook_{call_id}")
+                    } else {
+                        grant_interaction_id
+                    },
                     call_id: call_id.to_string(),
                     execution_id: request.execution_id.clone(),
                     args_hash: WorkspaceToolPort::args_hash(&args),
@@ -1271,6 +1593,35 @@ impl SessionLoop {
         })
     }
 
+    /// ADR-0038 PermissionDenied 观察事件(拒绝面统一收口:hook deny /
+    /// 策略 deny / 用户拒绝)。
+    async fn observe_permission_denied(
+        &self,
+        tool_name: &str,
+        input: &serde_json::Value,
+        turn: &TurnId,
+        call_id: &str,
+        reason: &str,
+    ) {
+        let Some(hooks) = self.hooks_ref() else {
+            return;
+        };
+        let cwd = self.current_cwd().to_string_lossy().to_string();
+        hooks
+            .observe(
+                qaqh_hooks::HookEventName::PermissionDenied,
+                qaqh_hooks::HookPayload::ToolUse {
+                    tool_name: tool_name.to_string(),
+                    tool_input: input.clone(),
+                    tool_output: Some(reason.to_string()),
+                },
+                &cwd,
+                Some(turn.as_str()),
+                Some(call_id),
+            )
+            .await;
+    }
+
     /// 权限交互:登记 oneshot、升起交互、等待应答。None = 升起失败。
     async fn request_permission(
         &self,
@@ -1306,15 +1657,21 @@ impl SessionLoop {
             choices: vec![
                 InteractionChoice {
                     decision: InteractionDecision::Approved,
-                    label: "允许".into(),
+                    label: "允许本次".into(),
                     description: None,
-                    tone: Default::default(),
+                    tone: qaqh_ringing_contract::fact::InteractionChoiceTone::Primary,
+                },
+                InteractionChoice {
+                    decision: InteractionDecision::ApprovedForSession,
+                    label: "本对话默认允许".into(),
+                    description: None,
+                    tone: qaqh_ringing_contract::fact::InteractionChoiceTone::Secondary,
                 },
                 InteractionChoice {
                     decision: InteractionDecision::Rejected,
                     label: "拒绝".into(),
                     description: None,
-                    tone: Default::default(),
+                    tone: qaqh_ringing_contract::fact::InteractionChoiceTone::Destructive,
                 },
             ],
             expires_at_ms: None,
@@ -1353,10 +1710,17 @@ impl SessionLoop {
         self.owner
             .interaction_resolved(
                 &interaction_id,
-                Some(if answer.approved {
-                    InteractionDecision::Approved
-                } else {
+                Some(if !answer.approved {
                     InteractionDecision::Rejected
+                } else if matches!(
+                    answer.scope,
+                    qaqh_ringing_contract::PermissionGrantScope::Session
+                        | qaqh_ringing_contract::PermissionGrantScope::Persistent
+                ) || answer.trust_folder
+                {
+                    InteractionDecision::ApprovedForSession
+                } else {
+                    InteractionDecision::Approved
                 }),
                 InteractionEndStatus::Resolved,
             )
@@ -2009,6 +2373,24 @@ impl SessionLoop {
             )
             .await
             .ok();
+        // ADR-0038:取消终态 → StopCancelled 观察。
+        if let Some(hooks) = self.hooks_ref() {
+            let cwd = self.current_cwd().to_string_lossy().to_string();
+            hooks
+                .observe(
+                    qaqh_hooks::HookEventName::StopCancelled,
+                    qaqh_hooks::HookPayload::Sparse {
+                        source: None,
+                        reason: Some("cancelled".to_string()),
+                        trigger: None,
+                        agent_type: None,
+                    },
+                    &cwd,
+                    Some(turn.as_str()),
+                    None,
+                )
+                .await;
+        }
         self.notify_terminal(turn, TurnTerminal::Cancelled, None);
     }
 
@@ -2036,6 +2418,24 @@ impl SessionLoop {
             )
             .await
             .ok();
+        // ADR-0038:失败终态 → StopFailure 观察。
+        if let Some(hooks) = self.hooks_ref() {
+            let cwd = self.current_cwd().to_string_lossy().to_string();
+            hooks
+                .observe(
+                    qaqh_hooks::HookEventName::StopFailure,
+                    qaqh_hooks::HookPayload::Sparse {
+                        source: None,
+                        reason: Some(format!("{code}: {message}")),
+                        trigger: None,
+                        agent_type: None,
+                    },
+                    &cwd,
+                    Some(turn.as_str()),
+                    None,
+                )
+                .await;
+        }
         self.notify_terminal(
             turn,
             TurnTerminal::Failed,
@@ -2069,6 +2469,23 @@ impl SessionLoop {
             )
             .await
             .ok();
+        // ADR-0038:中断 = StopCancelled(不是 Stop)+ Interrupt 观察。
+        let detail = format!("{reason:?}");
+        if let Some(hooks) = self.hooks_ref() {
+            let cwd = self.current_cwd().to_string_lossy().to_string();
+            let payload = qaqh_hooks::HookPayload::Sparse {
+                source: None,
+                reason: Some(detail.clone()),
+                trigger: None,
+                agent_type: None,
+            };
+            hooks
+                .observe(qaqh_hooks::HookEventName::Interrupt, payload.clone(), &cwd, Some(turn.as_str()), None)
+                .await;
+            hooks
+                .observe(qaqh_hooks::HookEventName::StopCancelled, payload, &cwd, Some(turn.as_str()), None)
+                .await;
+        }
         self.notify_terminal(
             turn,
             TurnTerminal::Failed,
@@ -2331,6 +2748,27 @@ impl SessionLoop {
             }
         }
     }
+}
+
+/// Stop 门信封的 last_assistant_message:assistant Text 块按序拼接。
+fn assistant_text(message: &Message) -> String {
+    message
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 控制面工具豁免 hooks(ADR-0038):ask/handoff/session_title 不走 port
+/// 派发,同样不进 PreToolUse/PostToolUse 门。
+fn is_control_plane_tool(tool_name: &str) -> bool {
+    tool_name == "ask"
+        || tool_name == crate::handoff::TOOL_NAME
+        || tool_name == crate::session_title::TOOL_NAME
 }
 
 fn empty_assistant() -> Message {

@@ -154,6 +154,7 @@ fn write_approvals(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         level: 2,
         risk: "medium".into(),
         consequence: "overwrites the file".into(),
+        justification: None,
     };
     // 导出器拒绝发布 daemon 自己会判为不合法的样例 —— 夹具由此变成机器闸而不是抄写。
     if !details.is_valid() {
@@ -176,6 +177,7 @@ fn write_approvals(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             level: Some(serde_json::json!(details.level)),
             risk: Some(serde_json::json!(&details.risk)),
             consequence: Some(serde_json::json!(&details.consequence)),
+            justification: None,
             details_unavailable: false,
         }),
         pending_interaction: Some(RingingV2PendingInteractionView {

@@ -431,9 +431,24 @@ pub struct InteractionChoice {
 #[serde(rename_all = "snake_case")]
 pub enum InteractionDecision {
     Approved,
+    ApprovedForSession,
     Rejected,
     Answered,
     Dismissed,
+}
+
+/// 工具权限批准的作用域（ADR-0040 决策 4）。
+#[cfg_attr(feature = "ts", derive(TS), ts(export, export_to = "qaqh/"))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionGrantScope {
+    /// 仅本次调用生效（单次凭证）。
+    #[default]
+    Once,
+    /// 本对话默认授权（当前会话生命周期内同类调用自动放行）。
+    Session,
+    /// 持久信任（如将工作区外目标父目录写入持久信任目录表）。
+    Persistent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

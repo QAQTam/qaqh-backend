@@ -324,6 +324,8 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
         SkillCatalogEntry, SkillsCatalogParams, SkillsCatalogResult, SkillsListToolsParams,
         ShellCloseParams, ShellCloseResult, ShellListParams, ShellListResult, ShellOpenParams,
         ShellView,
+        SandboxPreflightReport, SandboxPreflightStartParams, SandboxPreflightState,
+        SandboxPreflightStatusParams, SandboxPreflightStep, SandboxPreflightStepStatus,
         TodoCountsSnapshot, TodoItemSnapshot, TodoListParams, TodoListSnapshot, TodoStatusParams,
         TodoStatusSnapshot, WorkspaceGetParams, WorkspaceListParams,
     };
@@ -862,6 +864,49 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
             phases: Vec::new(),
         },
     )?;
+    let sandbox_preflight_report = SandboxPreflightReport {
+        run_id: "preflight-1".to_owned(),
+        state: SandboxPreflightState::Completed,
+        platform: "windows".to_owned(),
+        effective_backend: "windows_redirect".to_owned(),
+        filesystem_write_enforced: true,
+        network_isolation_enforced: false,
+        elevated: false,
+        progress_percent: 100,
+        current_step_id: None,
+        steps: vec![SandboxPreflightStep {
+            id: "dacl_write_isolation".to_owned(),
+            label: "内核 DACL 写隔离自检".to_owned(),
+            status: SandboxPreflightStepStatus::Passed,
+            detail: "授权目录写入成功，未授权目录被内核拒绝".to_owned(),
+            remediation: None,
+            required: true,
+            duration_ms: Some(12),
+        }],
+        remediations: Vec::new(),
+        started_at_ms: 1_759_000_000_000,
+        finished_at_ms: Some(1_759_000_000_042),
+    };
+    write_fixture(
+        stage,
+        "service-sandbox-preflight-start-params.json",
+        &SandboxPreflightStartParams { force: Some(false) },
+    )?;
+    write_fixture(
+        stage,
+        "service-sandbox-preflight-start-result.json",
+        &sandbox_preflight_report,
+    )?;
+    write_fixture(
+        stage,
+        "service-sandbox-preflight-status-params.json",
+        &SandboxPreflightStatusParams { run_id: None },
+    )?;
+    write_fixture(
+        stage,
+        "service-sandbox-preflight-status-result.json",
+        &sandbox_preflight_report,
+    )?;
     account_fixtures::write(stage)?;
     client_fixtures::write(stage)?;
     Ok(())
@@ -961,6 +1006,7 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         // JSON-in-JSON 边界（ADR-0004 §决策 3）：审批卡的正文穿过 HTTP 面,它的形状
         // 必须是导出物,不接受"它是 `serde_json::Value` 所以不用管"。
         qaqh_ringing_contract::PermissionRequestDetails,
+        qaqh_ringing_contract::PermissionGrantScope,
         qaqh_ringing_contract::SessionBootstrap,
         qaqh_ringing_contract::SessionState,
         // ADR-0015：goal 读模型（SessionState.goal / GoalUpdated 事件供数）。
@@ -1033,6 +1079,12 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_runtime::ringing::service_methods::TodoCountsSnapshot,
         qaqh_runtime::ringing::service_methods::TodoStatusParams,
         qaqh_runtime::ringing::service_methods::TodoStatusSnapshot,
+        qaqh_runtime::ringing::service_methods::SandboxPreflightStartParams,
+        qaqh_runtime::ringing::service_methods::SandboxPreflightStatusParams,
+        qaqh_runtime::ringing::service_methods::SandboxPreflightReport,
+        qaqh_runtime::ringing::service_methods::SandboxPreflightStep,
+        qaqh_runtime::ringing::service_methods::SandboxPreflightState,
+        qaqh_runtime::ringing::service_methods::SandboxPreflightStepStatus,
         qaqh_memwatch::MemorySnapshot,
         qaqh_memwatch::ProcessMemory,
         qaqh_memwatch::SessionMemory,

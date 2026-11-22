@@ -92,21 +92,27 @@ impl SandboxCapabilities {
         {
             // sbx TokenPlane(WRITE_RESTRICTED 受限令牌 + cap-SID DACL)已接
             // 线:文件写由内核强制(授权写经 ACE 放行,其余写在发生时刻被拒)。
-            // 网络仍是零强制(token 后端透传;强制断网走实验档 AppContainer
-            // 后端,未接生产)。审批面按分项消费:写已隔离、网络未隔离。
+            // 若启动自检已跑完,以自检实测结论为准;未跑完前默认 true。
             let projfs = sbx_win::projfs::available();
+            let write_enforced =
+                crate::preflight::cached_write_isolation_verified().unwrap_or(true);
+            let backend = if projfs && crate::sbx_map::redirect_promoted() {
+                SandboxBackend::WindowsRedirect
+            } else {
+                SandboxBackend::WindowsToken
+            };
             return Self {
                 platform: Platform::Windows,
-                backend: SandboxBackend::WindowsToken,
+                backend,
                 landlock: false,
                 seccomp: false,
                 bubblewrap: false,
-                filesystem_write_isolation: true,
+                filesystem_write_isolation: write_enforced,
                 network_isolation: false,
                 process_hardening: true,
                 detail: format!(
                     "sbx TokenPlane (restricted token + cap-SID DACL) enforces filesystem \
-                     writes; network NOT enforced on token plane; ProjFS redirect \
+                     writes={write_enforced}; network NOT enforced on token plane; ProjFS redirect \
                      available={projfs}"
                 ),
             };

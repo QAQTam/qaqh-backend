@@ -1,6 +1,6 @@
 //! 测试夹具：**测试专用** RSA 私钥 + 可编程的本地 OIDC 提供方。
 //!
-//! 为什么需要固定私钥：`ring` 不生成 RSA 密钥（只有签名/验签），而 ID token 的
+//! 为什么需要固定私钥：`aws-lc-rs` 不生成 RSA 密钥（只有签名/验签），而 ID token 的
 //! 校验路径必须真跑一遍 RS256。这把密钥随仓库公开、只用于测试，
 //! 不具备也不代表任何生产权限。
 //!
@@ -53,9 +53,9 @@ pub const TEST_JWK_N: &str = "r5PETJTVMLeXDfDVkdL3YDL6LRas91j_HkGX5AaLzHFqAbhu3d
 
 pub const TEST_KID: &str = "test-kid";
 
-fn key_pair() -> ring::signature::RsaKeyPair {
+fn key_pair() -> aws_lc_rs::signature::RsaKeyPair {
     let der = base64url_decode(TEST_PKCS8_B64).expect("fixture key base64");
-    ring::signature::RsaKeyPair::from_pkcs8(&der).expect("fixture key pkcs8")
+    aws_lc_rs::signature::RsaKeyPair::from_pkcs8(&der).expect("fixture key pkcs8")
 }
 
 /// 用测试私钥签一段 JWT（RS256）。
@@ -69,10 +69,10 @@ pub fn sign_id_token(claims: &Value) -> String {
     );
     let signing_input = format!("{header}.{payload}");
     let key = key_pair();
-    let mut signature = vec![0u8; key.public().modulus_len()];
+    let mut signature = vec![0u8; key.public_modulus_len()];
     key.sign(
-        &ring::signature::RSA_PKCS1_SHA256,
-        &ring::rand::SystemRandom::new(),
+        &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+        &aws_lc_rs::rand::SystemRandom::new(),
         signing_input.as_bytes(),
         &mut signature,
     )

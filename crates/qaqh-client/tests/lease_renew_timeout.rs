@@ -96,6 +96,8 @@ impl HangingDaemon {
 }
 
 fn new_session(base_url: &str) -> Arc<RingingSession> {
+    // 裸 reqwest Client 也受 `rustls-no-provider` 硬契约约束：先装 provider。
+    qaqh_client::install_default_crypto_provider();
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .build()
