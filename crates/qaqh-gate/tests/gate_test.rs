@@ -2406,3 +2406,97 @@ fn siwc_plan_sync_runs_over_the_streaming_route() {
         );
     }
 }
+
+/// P0-1 反证（宪法 #18）：双会话并发流。主会话连挂起 5 秒的慢流，子代理连
+/// 立即发完的快流。复刻生产三明治（两个阻塞线程各调一次同步 `chat_stream`
+/// ——与 `provider_job::run_round` 的 `spawn_blocking` 同构）：
+/// - 旧实现（`FALLBACK_RT` current_thread `block_on`）：线程 B 的
+///   `block_on` 在调度锁门口被线程 A 卡死串行化，B ≈ 5s → 本断言必红；
+/// - `qaqh-gate` 原生 `async fn chat_stream` 后：B 必须在 50ms 内独立完成。
+#[test]
+fn concurrent_sessions_stream_in_parallel() {
+    let hang = MockServer::new(vec![
+        SseChunk::delay_ms(5000),
+        SseChunk::text("slow"),
+        SseChunk::finish("stop", None),
+        SseChunk::done(),
+    ]);
+    let fast = MockServer::new(vec![
+        SseChunk::text("quick"),
+        SseChunk::finish("stop", None),
+        SseChunk::done(),
+    ]);
+    let hang_provider = Arc::new(make_provider(&hang));
+    let fast_provider = Arc::new(make_provider(&fast));
+    let cancel = Arc::new(AtomicBool::new(false));
+
+    // 流 A（主会话）：连挂 5 秒的慢流。
+    let a = {
+        let provider = hang_provider.clone();
+        let cancel = cancel.clone();
+        std::thread::spawn(move || {
+            let mut events = Vec::new();
+            let r = qaqh_gate::chat_stream(
+                &provider,
+                vec![Message::user("slow")],
+                None,
+                64,
+                None,
+                None,
+                Some(&cancel),
+                &mut |ev| events.push(ev),
+            );
+            (r, events)
+        })
+    };
+    // 等 A 的 HTTP 请求真正落进 mock 再发 B：既钉死时序叙事，也保证旧实现
+    // 下 B 一定是在调度锁上排队（而非还没轮到它发起请求）。
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while hang.request_count.load(Ordering::SeqCst) == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "slow stream never reached the mock"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+
+    // 流 B（子代理）：立即发完的快流，从启动到完成全程计时。
+    let b = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let mut events = Vec::new();
+        let r = qaqh_gate::chat_stream(
+            &fast_provider,
+            vec![Message::user("fast")],
+            None,
+            64,
+            None,
+            None,
+            None,
+            &mut |ev| events.push(ev),
+        );
+        (start.elapsed(), r, events)
+    });
+
+    let (b_elapsed, b_result, b_events) = b.join().expect("fast stream thread");
+    eprintln!("[counter-proof] fast stream elapsed: {b_elapsed:?}");
+    assert!(b_result.is_ok(), "fast stream must succeed: {b_result:?}");
+    assert!(
+        b_events
+            .iter()
+            .any(|ev| matches!(ev, StreamEvent::Done { .. })),
+        "fast stream must reach Done"
+    );
+    assert!(
+        b_elapsed < std::time::Duration::from_millis(50),
+        "fast stream was blocked behind the hanging stream for {b_elapsed:?} — \
+         the current_thread block_on scheduler lock serialised both sessions"
+    );
+
+    // 收尾：掐掉慢流，测试不陪它挂满 5 秒。
+    cancel.store(true, Ordering::Release);
+    let (a_result, _a_events) = a.join().expect("slow stream thread");
+    assert!(
+        a_result.is_err(),
+        "cancelled slow stream must surface as an error"
+    );
+}
