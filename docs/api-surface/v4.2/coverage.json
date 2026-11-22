@@ -525,6 +525,111 @@
     {
       "admin_only": false,
       "fixtures": [
+        "service-gitx-snapshot-params.json",
+        "service-gitx-snapshot-result.json"
+      ],
+      "id": "service.gitx.snapshot",
+      "kind": "read",
+      "method": "POST",
+      "params_type": "GitxSnapshotParams",
+      "path": "/ringing/v2/service/gitx.snapshot",
+      "requires_session": false,
+      "result_type": "GitSnapshot",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-gitx-status-params.json",
+        "service-gitx-status-result.json"
+      ],
+      "id": "service.gitx.status",
+      "kind": "read",
+      "method": "POST",
+      "params_type": "GitxStatusParams",
+      "path": "/ringing/v2/service/gitx.status",
+      "requires_session": false,
+      "result_type": "GitStatusSnapshot",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-gitx-worktree_bind-params.json",
+        "service-gitx-worktree_bind-result.json"
+      ],
+      "id": "service.gitx.worktree_bind",
+      "kind": "write",
+      "method": "POST",
+      "params_type": "GitxWorktreeBindParams",
+      "path": "/ringing/v2/service/gitx.worktree_bind",
+      "requires_session": false,
+      "result_type": "WorktreeBindingView",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-gitx-worktree_create-params.json",
+        "service-gitx-worktree_create-result.json"
+      ],
+      "id": "service.gitx.worktree_create",
+      "kind": "write",
+      "method": "POST",
+      "params_type": "GitxWorktreeCreateParams",
+      "path": "/ringing/v2/service/gitx.worktree_create",
+      "requires_session": false,
+      "result_type": "GitxWorktreeCreateResult",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-gitx-worktree_list-params.json",
+        "service-gitx-worktree_list-result.json"
+      ],
+      "id": "service.gitx.worktree_list",
+      "kind": "read",
+      "method": "POST",
+      "params_type": "GitxWorktreeListParams",
+      "path": "/ringing/v2/service/gitx.worktree_list",
+      "requires_session": false,
+      "result_type": "GitxWorktreeListResult",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-gitx-worktree_remove-params.json",
+        "service-gitx-worktree_remove-result.json"
+      ],
+      "id": "service.gitx.worktree_remove",
+      "kind": "write",
+      "method": "POST",
+      "params_type": "GitxWorktreeRemoveParams",
+      "path": "/ringing/v2/service/gitx.worktree_remove",
+      "requires_session": false,
+      "result_type": "GitxWorktreeRemoveResult",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
+        "service-gitx-worktree_unbind-params.json",
+        "service-gitx-worktree_unbind-result.json"
+      ],
+      "id": "service.gitx.worktree_unbind",
+      "kind": "write",
+      "method": "POST",
+      "params_type": "GitxWorktreeUnbindParams",
+      "path": "/ringing/v2/service/gitx.worktree_unbind",
+      "requires_session": false,
+      "result_type": "GitxWorktreeUnbindResult",
+      "status": "implemented"
+    },
+    {
+      "admin_only": false,
+      "fixtures": [
         "service-plan-read-params.json",
         "service-plan-read-result.json"
       ],

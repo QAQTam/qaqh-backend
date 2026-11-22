@@ -1,0 +1,23 @@
+{
+  "schema": "qaqh.ringing.gitx/v1",
+  "source_root": "/synthetic/workspace",
+  "branch": "main",
+  "head_sha": "3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a3f2a",
+  "detached": false,
+  "upstream": "origin/main",
+  "ahead": 1,
+  "behind": 0,
+  "files": [
+    {
+      "path": "src/lib.rs",
+      "index": "M",
+      "worktree": "M"
+    }
+  ],
+  "unpushed": [
+    {
+      "hash": "3f2a",
+      "subject": "feat(gitx): synthetic unpushed commit"
+    }
+  ]
+}

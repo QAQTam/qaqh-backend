@@ -5,7 +5,7 @@
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "26fa465a518d52900a93feea54bddc3fc0c41f49318b177ac476c2f8624441f6",
+  "contract_hash": "8f0d94ccde0f7b409ca5ff4db66a7701f7472dc8cc67ebbbcdbb7693ef89f0e5",
   "files": [
     {
       "path": "constants.ts",
@@ -13,7 +13,7 @@
     },
     {
       "path": "coverage.json",
-      "sha256": "b859a2ff140567b90004a050254e1722398c20f03ed5d9a38dfed4b6c597dc37"
+      "sha256": "88c8cb28d3ab161b3973e797417baeaf56bf1d8c53169955ea08c7d138e96a40"
     },
     {
       "path": "cs/AccountsEmptyParams.cs",
@@ -266,6 +266,26 @@
     {
       "path": "cs/FsReadResult.cs",
       "sha256": "646493090c3701f175bf42355d3dfa7a2914ca4a15b9f4a6e2a02ed84d5ec8f8"
+    },
+    {
+      "path": "cs/GitSnapshot.cs",
+      "sha256": "b536631788fe5db7d9fe6bad33afdf0293720cff6a7c1185623bb72d21d653c5"
+    },
+    {
+      "path": "cs/GitxWorktreeCreateResult.cs",
+      "sha256": "17c2f2373911d13b0228b724418a8bbaf4b04069b1ab28288c36a8ccfe68d4ce"
+    },
+    {
+      "path": "cs/GitxWorktreeListResult.cs",
+      "sha256": "4660c0677423eb7e6b7dce4ffe661e20c0e04789a485065258a152926b090506"
+    },
+    {
+      "path": "cs/GitxWorktreeRemoveResult.cs",
+      "sha256": "7851923b2dd33743ea9a804c2136724335d9e66666615220b43222987b5794eb"
+    },
+    {
+      "path": "cs/GitxWorktreeUnbindResult.cs",
+      "sha256": "868ccac057944a6cb7bc5898256d87d7db4961615417b80c61bc5ff9d3dc84d4"
     },
     {
       "path": "cs/GoalStatus.cs",
@@ -1016,6 +1036,22 @@
       "sha256": "a11f6ed7a3bb05a3309591d7d0ca7eecd39600675192534fcfc97649c0b8778d"
     },
     {
+      "path": "cs/WorktreeBindingView.cs",
+      "sha256": "d992427489e6716abfbea59868ad2160900d3994bad936b27cc74538bd6c8a14"
+    },
+    {
+      "path": "cs/WorktreeCreateParams.cs",
+      "sha256": "df53ba3efef4184e4cc61d06034e7c46dc3e8b592f59f6851fd16cbeb811d813"
+    },
+    {
+      "path": "cs/WorktreeRemoveParams.cs",
+      "sha256": "f79e4075f2f648ce8ed592c58671411c992c2c30db436dd1f3128a05ba0e4922"
+    },
+    {
+      "path": "cs/WorktreeView.cs",
+      "sha256": "e2f00cd86b895b0a86f492731c34a238aaa750ab75b0825e283d3298f4061055"
+    },
+    {
       "path": "fixtures/README.md",
       "sha256": "ccf998d52354903c5bb1b750f7cc8be87caf7876ac3e9ac02032734a73e5e366"
     },
@@ -1268,6 +1304,62 @@
       "sha256": "f2656b94f205e159a3e38f8bdc822df05e04799596f7025727b19455375bb6fa"
     },
     {
+      "path": "fixtures/service-gitx-snapshot-params.json",
+      "sha256": "38e7c4dce47b463ec5cba9a27b378930c4980cee724fa386fade5c769673d316"
+    },
+    {
+      "path": "fixtures/service-gitx-snapshot-result.json",
+      "sha256": "728cd1d9bf4484696b2e3a6436c505a5a01619d6bc0cc50dcb7eaa5e8544fce4"
+    },
+    {
+      "path": "fixtures/service-gitx-status-params.json",
+      "sha256": "38e7c4dce47b463ec5cba9a27b378930c4980cee724fa386fade5c769673d316"
+    },
+    {
+      "path": "fixtures/service-gitx-status-result.json",
+      "sha256": "7bda02dbe58de21a9e6af0a31104e4ba694a42dd266f2a30b4d82762a7089d27"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_bind-params.json",
+      "sha256": "5a34d14c844899206385a817ba6c863ab9a07763d8d62a1777f2096f671396a4"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_bind-result.json",
+      "sha256": "bdecd60716e9d80d2b9f67ed343a7e96e094edcf91af4dc94d08261d4493f8a4"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_create-params.json",
+      "sha256": "9cbf0b4ef2c0ec67b43cce17e5a5a6f374e0ee3640291e3900737bd610984399"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_create-result.json",
+      "sha256": "17bd2aab90d3ff0357c00eece9dfbd23dc151a9a7ab287913806c6f43c677497"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_list-params.json",
+      "sha256": "9059fb3c98c6462c9d40bcfeb4f4ad082d248634ede8ce5ff60cea5b3d626843"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_list-result.json",
+      "sha256": "15f1b0cf72914d200e0980f4af2a69797a59f603f161c259cf9eb87f6e178665"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_remove-params.json",
+      "sha256": "2ea28103bb7e67374f7d1af95ec0db97d684a56f7614ba56179d38e2c8d66de0"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_remove-result.json",
+      "sha256": "4f676b368ce8c0ba38035bfdedd8066835f543cbc6d3b14f8490cde968323b09"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_unbind-params.json",
+      "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
+    },
+    {
+      "path": "fixtures/service-gitx-worktree_unbind-result.json",
+      "sha256": "ab96ccac3ca1669f8d658976075c95c3880feac6bf5aa1c95e3b17deb1fe2923"
+    },
+    {
       "path": "fixtures/service-plan-read-params.json",
       "sha256": "03b60a583c7d9f9698432f7a92adce19d856f31575433286bba4b105bdd5ff4f"
     },
@@ -1493,7 +1585,7 @@
     },
     {
       "path": "index.ts",
-      "sha256": "389237400d99e9927025fddff8f130f1a538a0c8147f82ae83acb787b47ffa8f"
+      "sha256": "3966dcd24afb1f142514e5c098797c8e5a5c0e30275e026b3a621dea694d9b62"
     },
     {
       "path": "node.ts",
@@ -1501,7 +1593,7 @@
     },
     {
       "path": "service-map.ts",
-      "sha256": "236163e2970580f93dd0a1e152eb22543f733965186670be22ebcbf9d19c0264"
+      "sha256": "458dbe6f0eddf6fef4ce6e080c466a1aa9bd5f9a84da8bd9ea2ff49908f1da6d"
     },
     {
       "path": "types/ReceiptIdScope.ts",
@@ -1782,6 +1874,26 @@
     {
       "path": "types/qaqh/FsReadResult.ts",
       "sha256": "5105632e922307b9a8ca5074aa770fff06ea5e32934561ab1b6e6d2596d27fe4"
+    },
+    {
+      "path": "types/qaqh/GitSnapshot.ts",
+      "sha256": "243254385e99f5e57322a6c2a9251559912c1a61503dc4ff21715cb2ac782114"
+    },
+    {
+      "path": "types/qaqh/GitxWorktreeCreateResult.ts",
+      "sha256": "dd447ac435e2c7f8c5b942590e07ce95761975207631e252c282d82b313a81cb"
+    },
+    {
+      "path": "types/qaqh/GitxWorktreeListResult.ts",
+      "sha256": "190770887723bd21e4c73350edb60398da2131d1ec1038908b1b8087b33edbbf"
+    },
+    {
+      "path": "types/qaqh/GitxWorktreeRemoveResult.ts",
+      "sha256": "f064ef6590645444fad4cd04cb460dc02d3429f432754e7e05f803e9ee9daae5"
+    },
+    {
+      "path": "types/qaqh/GitxWorktreeUnbindResult.ts",
+      "sha256": "022b77988e33ca5df06081b6cf8874b3fce71b03e6c9220890b88608e4ff5898"
     },
     {
       "path": "types/qaqh/GoalStatus.ts",
@@ -2550,6 +2662,22 @@
     {
       "path": "types/qaqh/WorkspaceMeta.ts",
       "sha256": "a5c5f57bb32c1c9fbcb23e017351328bf0bf7a6552e6cfe6fa8cfc008a51a20f"
+    },
+    {
+      "path": "types/qaqh/WorktreeBindingView.ts",
+      "sha256": "29dc613551de46b7a6ea07e5cc5eb9a392fd9d4f70389a5f42b63f927a5e4a02"
+    },
+    {
+      "path": "types/qaqh/WorktreeCreateParams.ts",
+      "sha256": "7b7dec6140481a98fe80d477ff7362c37c69581c5fe6e508b49c7c090ff9f967"
+    },
+    {
+      "path": "types/qaqh/WorktreeRemoveParams.ts",
+      "sha256": "5ae2885877d693cac770c23daaa2b1e9ac64eb220b796ddbe77963ac015200fd"
+    },
+    {
+      "path": "types/qaqh/WorktreeView.ts",
+      "sha256": "86ac34b654684c9682efff46db98dfda0098398fb719e6214d8cff92ee2e9def"
     },
     {
       "path": "types/serde_json/JsonValue.ts",
