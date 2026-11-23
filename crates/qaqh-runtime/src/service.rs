@@ -1053,11 +1053,14 @@ fn spawn_exec_env_reloader() {
     let rx = qaqh_config::watch::subscribe();
     tokio::spawn(async move {
         reload_loop(rx, |published| async move {
-            if apply_exec_env_overlay(&published) {
-                log::info!(
-                    "[exec] env overlay hot-reload applied ({} keys)",
-                    published.exec.env.len()
-                );
+            // P1-0a：`${secret:name}` 解析是现读现解密 + 同步磁盘 IO（secrets.toml），
+            // 覆盖层重解析整体迁阻塞池，不在 Tokio worker 上同步读盘。
+            let env_keys = published.exec.env.len();
+            let applied = tokio::task::spawn_blocking(move || apply_exec_env_overlay(&published))
+                .await
+                .expect("exec env overlay task must not panic");
+            if applied {
+                log::info!("[exec] env overlay hot-reload applied ({env_keys} keys)");
             }
         })
         .await;
@@ -1079,20 +1082,28 @@ fn spawn_config_file_poller() {
         let mut last_mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         loop {
             tokio::time::sleep(POLL_INTERVAL).await;
-            let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
-            if mtime.is_some() && mtime != last_mtime {
-                last_mtime = mtime;
-                if qaqh_config::watch::reload_from_disk() {
-                    log::info!(
-                        "[config] file change detected ({}); reloaded",
-                        path.display()
-                    );
-                }
+            // P1-0a：stat 与 `reload_from_disk()`（同步解析 config.toml 并解密
+            // 引用段）迁阻塞池；mtime 状态机与发布语义不变。
+            let check_path = path.clone();
+            let previous_mtime = last_mtime;
+            let (mtime, reloaded) = tokio::task::spawn_blocking(move || {
+                let mtime = std::fs::metadata(&check_path).and_then(|m| m.modified()).ok();
+                let reloaded =
+                    mtime.is_some() && mtime != previous_mtime && qaqh_config::watch::reload_from_disk();
+                (mtime, reloaded)
+            })
+            .await
+            .expect("config poll task must not panic");
+            if reloaded {
+                log::info!(
+                    "[config] file change detected ({}); reloaded",
+                    path.display()
+                );
             } else if mtime.is_none() && last_mtime.is_some() {
                 // 文件被删除：记录状态，不发布（等待恢复或编辑器原子替换）。
                 log::warn!("[config] config file missing ({}); waiting", path.display());
-                last_mtime = None;
             }
+            last_mtime = mtime;
         }
     });
 }
