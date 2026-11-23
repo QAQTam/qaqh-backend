@@ -2087,6 +2087,41 @@ impl OwnerDirectory {
         &self.db
     }
 
+    /// 会话身份生成（v4.4 P1-3 自 `SessionManager` 并入——身份与存在权威在
+    /// SQLite，目录句柄只提供路径策略，业务行由调用方创建）。
+    pub fn allocate_session(&self) -> String {
+        format!("ses_{}", qaqh_ringing_contract::ulid::generate_ulid())
+    }
+
+    /// 业务会话行删除之后清理其资源文件（原 `SessionManager::delete`）。
+    /// `data_dir` 恒取 `qaqh.db` 的父目录——与启动吸入同一空间口径。
+    pub fn delete_session_resources(&self, session_id: &str) -> Result<(), String> {
+        let mut components = std::path::Path::new(session_id).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+            || session_id.contains('\\')
+        {
+            return Err("session resource id must be one normal path component".into());
+        }
+        let data_dir = self.db.path().parent().unwrap_or(Path::new(".")).to_path_buf();
+        for path in [
+            data_dir.join("sessions").join(session_id),
+            data_dir.join("workspace").join(session_id),
+        ] {
+            match std::fs::remove_dir_all(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(format!(
+                        "remove session resources {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub fn delete_session_tree(&self, session_id: &str) -> Result<Vec<String>, DbError> {
         let root = session_id.to_string();
         let ids = self

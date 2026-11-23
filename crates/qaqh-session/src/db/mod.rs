@@ -11,9 +11,14 @@ use rusqlite::{Connection, OpenFlags};
 use tokio::sync::oneshot;
 
 pub mod goals;
+pub mod devices;
+pub mod quota;
+pub mod receipts;
+pub mod sidecar;
 pub mod schema;
 pub mod store;
 pub mod team;
+pub mod todos;
 pub mod view;
 #[cfg(test)]
 mod view_tests;
@@ -109,7 +114,10 @@ impl Db {
         })?;
         read_conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
-        schema::initialize(&mut write_conn)?;
+        // MUST 铁闸 2:schema 初始化(含 sidecar 吸入)以 db 文件父目录为
+        // data_dir——生产路径恒为 `data_dir/qaqh.db`,parent 恒存在。
+        let data_dir = path.parent().unwrap_or(std::path::Path::new("."));
+        schema::initialize(&mut write_conn, data_dir)?;
 
         let write_tx = spawn_executor(write_conn)?;
 

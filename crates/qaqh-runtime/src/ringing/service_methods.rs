@@ -1810,9 +1810,7 @@ mod tests {
                 tmp
             });
             let _ = tmp;
-            QaqhService::init(std::sync::Arc::new(qaqh_session::SessionManager::new(
-                qaqh_types::platform::data_dir(),
-            )))
+            QaqhService::init(qaqh_types::platform::data_dir())
         })
     }
 

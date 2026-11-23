@@ -62,9 +62,9 @@ fn open_body() -> serde_json::Value {
 async fn open_device(router: &Router, state: &AppState, scope: Scope) -> (String, String, String) {
     let (device_id, token) = state
         .devices
-        .lock()
-        .unwrap()
-        .issue("e2e-device", "node", scope);
+        .issue("e2e-device", "node", scope)
+        .await
+        .expect("issue device");
     let response = router
         .clone()
         .oneshot(request(

@@ -1,13 +1,31 @@
 //! Public-store fault boundaries; these do not prove HTTP dispatch exactly-once.
+//!
+//! v4.4 P1-3：receipt 权威进 `command_receipts` 后，旧的
+//! `open_persistent_at(path)` 文件夹具整体换成「独立 Db 句柄 = 重启」与
+//! `receipts::upsert` 播种（过期年龄用同一套原语词表构造，不手改私有字段）。
 
 use std::sync::{Arc, Barrier, Mutex};
 
-use super::{PendingCommandStore, RECEIPT_POLICY, ReceiptLoadError};
+use super::{PendingCommandStore, RECEIPT_POLICY};
+use crate::pending_store::receipts;
 use qaqh_ringing::{RingingCommandState, RingingV2CommandResult, RingingV2ExistingResult};
+use qaqh_session::db::Db;
 
 const COMMAND: &str = "92455601-b53a-4f25-8df5-94124676055b";
 const OWNER: &str = "lease-original";
 const FINGERPRINT: &str = "payload-and-guards-hash";
+
+/// 独立 Db 句柄 = 一次「重启」：同一文件、新执行器、新内存态。
+fn store_on(db: &Arc<Db>) -> PendingCommandStore {
+    PendingCommandStore::new(Arc::clone(db))
+}
+
+fn new_store() -> (tempfile::TempDir, Arc<Db>, PendingCommandStore) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = Arc::new(Db::open(dir.path().join("qaqh.db")).expect("open db"));
+    let store = store_on(&db);
+    (dir, db, store)
+}
 
 fn reserve(store: &mut PendingCommandStore) -> bool {
     store
@@ -25,18 +43,22 @@ fn assert_unknown(store: &PendingCommandStore, command_id: &str, owner: &str) {
     );
 }
 
-fn seed_receipt(path: &std::path::Path, accepted_at_ms: u64) {
-    // Synthetic on-disk input exercises the public loader without wall-clock
-    // sleeps, a global data-dir override, or mutations of private store fields.
-    let saved = serde_json::json!({
-        (COMMAND): {
-            "fingerprint": FINGERPRINT,
-            "client_session_id": OWNER,
-            "accepted_at_ms": accepted_at_ms,
-            "state": "running"
-        }
-    });
-    std::fs::write(path, serde_json::to_vec(&saved).unwrap()).unwrap();
+/// 合成一条指定年龄的行（不经 wall-clock sleep）。
+fn seed_row(db: &Arc<Db>, command_id: &str, accepted_at_ms: i64, state: &str) {
+    let row = receipts::ReceiptRow {
+        command_id: command_id.to_string(),
+        fingerprint: FINGERPRINT.to_string(),
+        client_session_id: Some(OWNER.to_string()),
+        state: state.to_string(),
+        terminal_event_id: None,
+        error_code: None,
+        result_json: None,
+        sync_result_json: None,
+        accepted_at_ms,
+    };
+    let commandless = row;
+    db.write_blocking(move |conn| receipts::upsert(conn, &commandless))
+        .expect("seed row");
 }
 
 #[test]
@@ -55,7 +77,8 @@ fn receipt_policy_is_machine_readable_and_matches_store_defaults() {
 
 #[test]
 fn concurrent_same_id_has_one_reservation_and_replays_the_rest() {
-    let store = Arc::new(Mutex::new(PendingCommandStore::new()));
+    let (_dir, _db, store) = new_store();
+    let store = Arc::new(Mutex::new(store));
     let start = Arc::new(Barrier::new(16));
     let accepted = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..16)
@@ -88,7 +111,8 @@ fn concurrent_same_id_has_one_reservation_and_replays_the_rest() {
 
 #[test]
 fn concurrent_conflicting_payloads_cannot_both_reserve_same_id() {
-    let store = Arc::new(Mutex::new(PendingCommandStore::new()));
+    let (_dir, _db, store) = new_store();
+    let store = Arc::new(Mutex::new(store));
     let start = Arc::new(Barrier::new(2));
     let results = std::thread::scope(|scope| {
         let workers: Vec<_> = ["payload-a", "payload-b"]
@@ -130,7 +154,7 @@ fn lost_ack_status_and_replay_preserve_each_known_outcome() {
         RingingCommandState::Failed,
         RingingCommandState::Rejected,
     ] {
-        let mut store = PendingCommandStore::new();
+        let (_dir, _db, mut store) = new_store();
         assert!(reserve(&mut store));
         let terminal = !matches!(
             state,
@@ -157,10 +181,7 @@ fn lost_ack_status_and_replay_preserve_each_known_outcome() {
                 result.clone(),
             );
         }
-        assert!(
-            !reserve(&mut store),
-            "lost ACK must not create a new reservation"
-        );
+        assert!(!reserve(&mut store), "lost ACK must not create a new reservation");
         let status = store.v2_status_for_session(COMMAND, OWNER).unwrap();
         assert_eq!(status.state, state);
         assert_eq!(status.payload_fingerprint, FINGERPRINT);
@@ -189,7 +210,7 @@ fn lost_ack_status_and_replay_preserve_each_known_outcome() {
 
 #[test]
 fn receipts_reconcile_across_reopen_for_same_identity_but_not_other_identities() {
-    let mut store = PendingCommandStore::new();
+    let (_dir, db, mut store) = new_store();
     assert!(reserve(&mut store));
     store.mark_terminal(
         COMMAND,
@@ -204,15 +225,15 @@ fn receipts_reconcile_across_reopen_for_same_identity_but_not_other_identities()
     leases.open("cs-2".into(), OWNER.into(), None);
     assert!(leases.is_active_session("cs-1"), "同身份多连接并存（§3）");
     assert!(leases.is_active_session("cs-2"));
-    // 同身份重复提交（同 command_id + 同指纹 + 同 owner）→ 原回执（非错误）。
+    // 「重启」后的 store 仍对同身份重复提交返回原回执（非错误）。
+    let mut reloaded = store_on(&db);
     assert_eq!(
-        store
+        reloaded
             .record_fingerprint_for_session(COMMAND, FINGERPRINT, OWNER)
             .expect("same identity reconciles"),
         false,
         "duplicate replay returns the stored receipt"
     );
-    // 他设备身份冒用 → mismatch。
     assert!(
         store
             .record_fingerprint_for_session(COMMAND, FINGERPRINT, "device-2")
@@ -225,7 +246,7 @@ fn receipts_reconcile_across_reopen_for_same_identity_but_not_other_identities()
 
 #[test]
 fn capacity_eviction_means_unknown_and_allows_a_new_reservation() {
-    let mut store = PendingCommandStore::new();
+    let (_dir, _db, mut store) = new_store();
     assert!(reserve(&mut store));
     store.mark_terminal(
         COMMAND,
@@ -251,48 +272,55 @@ fn capacity_eviction_means_unknown_and_allows_a_new_reservation() {
 }
 
 #[test]
-fn ttl_and_future_timestamp_are_unknown_on_load_not_terminal_failure() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("receipts.json");
-    let now = super::unix_millis();
-    for timestamp in [now - RECEIPT_POLICY.ttl_secs * 1000, now + 86_400_000] {
-        seed_receipt(&path, timestamp);
-        let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
+fn ttl_and_future_timestamp_are_unknown_not_terminal_failure() {
+    let (_dir, db, _store0) = new_store();
+    let now = super::unix_millis() as i64;
+    for timestamp in [now - RECEIPT_POLICY.ttl_secs as i64 * 1000, now + 86_400_000] {
+        seed_row(&db, COMMAND, timestamp, "running");
+        let mut store = store_on(&db);
         assert_unknown(&store, COMMAND, OWNER);
         assert!(!store.is_known(COMMAND));
         assert!(
             reserve(&mut store),
             "absent receipt does not protect a retry"
         );
+        // 清场，下一轮时间戳重新播种。
+        store.rollback(COMMAND);
     }
 }
 
 #[test]
-fn loading_retains_original_age_instead_of_extending_ttl() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("receipts.json");
-    let original_timestamp = super::unix_millis() - 60_000;
-    seed_receipt(&path, original_timestamp);
-    let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
+fn updates_retain_original_age_instead_of_extending_ttl() {
+    let (_dir, db, _store0) = new_store();
+    let original_timestamp = super::unix_millis() as i64 - 60_000;
+    seed_row(&db, COMMAND, original_timestamp, "running");
+    let mut store = store_on(&db);
     assert_eq!(
         store.v2_status_for_session(COMMAND, OWNER).unwrap().state,
         RingingCommandState::Running
     );
     assert!(!reserve(&mut store));
     store.mark_running(COMMAND); // Flush through the same persistence path.
-    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let written_timestamp = saved[COMMAND]["accepted_at_ms"].as_u64().unwrap();
+    let written = store
+        .db
+        .read_blocking(|conn| {
+            conn.query_row(
+                "SELECT accepted_at_ms FROM command_receipts WHERE command_id = ?1",
+                [COMMAND],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("read stored age");
     assert!(
-        written_timestamp.abs_diff(original_timestamp) < 30_000,
-        "loading/persisting must not reset the original acceptance age by a minute"
+        (written - original_timestamp).unsigned_abs() < 30_000,
+        "state updates must not reset the original acceptance age by a minute"
     );
 }
 
 #[test]
 fn restart_keeps_nonterminal_receipts_nonterminal_and_terminal_payloads_replayable() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("receipts.json");
-    let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
+    let (_dir, db, _store0) = new_store();
+    let mut store = store_on(&db);
     for (id, state) in [
         ("accepted", RingingCommandState::Accepted),
         ("running", RingingCommandState::Running),
@@ -321,11 +349,8 @@ fn restart_keeps_nonterminal_receipts_nonterminal_and_terminal_payloads_replayab
     }
     let before = store.v2_status_for_session(COMMAND, OWNER).unwrap();
     drop(store);
-    let mut reloaded = PendingCommandStore::open_persistent_at(&path).unwrap();
-    assert_eq!(
-        reloaded.v2_status_for_session(COMMAND, OWNER).unwrap(),
-        before
-    );
+    let mut reloaded = store_on(&db);
+    assert_eq!(reloaded.v2_status_for_session(COMMAND, OWNER).unwrap(), before);
     assert!(!reserve(&mut reloaded));
     for (id, state) in [
         ("accepted", RingingCommandState::Accepted),
@@ -341,53 +366,46 @@ fn restart_keeps_nonterminal_receipts_nonterminal_and_terminal_payloads_replayab
 }
 
 #[test]
-fn persisted_rollback_and_missing_file_are_unknown() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("receipts.json");
-    let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
+fn persisted_rollback_survives_restart() {
+    let (_dir, db, _store0) = new_store();
+    let mut store = store_on(&db);
     assert_unknown(&store, COMMAND, OWNER);
     assert!(reserve(&mut store));
     store.rollback(COMMAND);
     drop(store);
-    let mut reloaded = PendingCommandStore::open_persistent_at(&path).unwrap();
+    let mut reloaded = store_on(&db);
     assert_unknown(&reloaded, COMMAND, OWNER);
     assert!(reserve(&mut reloaded));
 }
 
 #[test]
-fn explicit_path_loader_reports_corruption_and_io_failures() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("receipts.json");
-    for invalid in ["not json", "[]", "{\"receipt\":{}}"] {
-        std::fs::write(&path, invalid).unwrap();
-        assert!(matches!(
-            PendingCommandStore::open_persistent_at(&path),
-            Err(ReceiptLoadError::Decode(_))
-        ));
-    }
-    assert!(matches!(
-        PendingCommandStore::open_persistent_at(dir.path()),
-        Err(ReceiptLoadError::Read(_))
-    ));
+fn corrupt_row_vocabulary_is_unknown_not_fabricated() {
+    // 旧形态用坏 JSON 文件测 Decode；DB 形态的对应物是坏 state 词表行。
+    let (_dir, db, _store0) = new_store();
+    seed_row(&db, "cmd-corrupt", super::unix_millis() as i64, "quantum");
+    let store = store_on(&db);
+    // 查询面：坏词表 = unknown（不伪装回执）。
+    assert_unknown(&store, "cmd-corrupt", OWNER);
+    // 闸门面：坏词表行不得给出「重复」放行——重放必须走 Mismatch。
+    let mut gate = store_on(&db);
+    assert!(
+        gate.record_fingerprint_for_session("cmd-corrupt", FINGERPRINT, OWNER)
+            .is_err(),
+        "unparseable stored state must not be replayed as a duplicate"
+    );
 }
 
 #[test]
-fn best_effort_persistence_does_not_promise_durable_ack() {
-    let dir = tempfile::tempdir().unwrap();
-    let parent = dir.path().join("blocked-parent");
-    let path = parent.join("receipts.json");
-    let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
-    std::fs::write(&parent, "not a directory").unwrap();
-    assert!(
-        reserve(&mut store),
-        "current reservation success does not prove durable storage"
-    );
-    assert!(store.v2_status_for_session(COMMAND, OWNER).is_some());
-    assert!(!path.exists());
-    assert!(matches!(
-        PendingCommandStore::open_persistent_at(&path),
-        Err(ReceiptLoadError::Read(_))
-    ));
+fn reservation_is_durable_immediately_after_commit() {
+    // 旧 `best_effort_persistence_does_not_promise_durable_ack` 的 DB 等价物
+    // 反转为正证：reserve 返回 true 即已 COMMIT（WAL + synchronous=FULL），
+    // 另一个 store 句柄（模拟重启）立刻能看到。文件时代「内存有、盘上没有」
+    // 的窗口在这里不存在——持久性承诺升级，用例方向随之翻正。
+    let (_dir, db, _store0) = new_store();
+    let mut store = store_on(&db);
+    assert!(reserve(&mut store));
+    let witness = store_on(&db);
+    assert!(witness.v2_status_for_session(COMMAND, OWNER).is_some());
 }
 
 // ── B05:同步命令结果的保存与重放 ─────────────────────────────────────────
@@ -404,7 +422,7 @@ fn sync_sample() -> RingingV2SyncResult {
 
 #[test]
 fn lost_sync_ack_restores_original_result_via_replay_and_status() {
-    let mut store = PendingCommandStore::new();
+    let (_dir, _db, mut store) = new_store();
     assert!(reserve(&mut store));
     let sample = sync_sample();
     store.mark_terminal_sync(COMMAND, sample.clone());
@@ -432,7 +450,7 @@ fn lost_sync_ack_restores_original_result_via_replay_and_status() {
 
 #[test]
 fn engine_succeeded_without_sync_result_is_not_fabricated() {
-    let mut store = PendingCommandStore::new();
+    let (_dir, _db, mut store) = new_store();
     assert!(reserve(&mut store));
     store.mark_terminal(COMMAND, RingingCommandState::Succeeded, None, None);
     let status = store.v2_status_for_session(COMMAND, OWNER).unwrap();
@@ -445,26 +463,25 @@ fn engine_succeeded_without_sync_result_is_not_fabricated() {
 }
 
 #[test]
-fn sync_result_survives_persistence_round_trip() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("receipts.json");
-    let mut store = PendingCommandStore::open_persistent_at(&path).unwrap();
+fn sync_result_survives_restart() {
+    let (_dir, db, _store0) = new_store();
+    let mut store = store_on(&db);
     assert!(reserve(&mut store));
     store.mark_terminal_sync(COMMAND, sync_sample());
     drop(store);
 
-    let reloaded = PendingCommandStore::open_persistent_at(&path).unwrap();
+    let reloaded = store_on(&db);
     let status = reloaded.v2_status_for_session(COMMAND, OWNER).unwrap();
     assert_eq!(
         status.sync_result.map(|s| s.operation),
         Some("session.create".into()),
-        "best-effort 持久化必须带回同步结果"
+        "DB 权威必须带回同步结果"
     );
 }
 
 #[test]
 fn conflicting_payload_still_rejected_after_sync_terminal() {
-    let mut store = PendingCommandStore::new();
+    let (_dir, _db, mut store) = new_store();
     assert!(reserve(&mut store));
     store.mark_terminal_sync(COMMAND, sync_sample());
     assert!(

@@ -52,12 +52,14 @@ fn synth(path: &str) -> String {
     out
 }
 
-fn view_token(state: &AppState) -> String {
-    let (_device_id, token) = state.devices.lock().expect("device registry lock").issue(
+async fn view_token(state: &AppState) -> String {
+    let (_device_id, token) = state.devices.issue(
         "route-table-probe",
         "node",
         Scope::View,
-    );
+    )
+    .await
+    .expect("issue view device");
     token
 }
 
@@ -88,7 +90,7 @@ async fn v2_route_table_equals_the_real_router() {
     let state = test_state();
     // 走到这里没 panic，已经证明「每张表的每行都有 match arm」。
     let app = build_router(state.clone());
-    let token = view_token(&state);
+    let token = view_token(&state).await;
 
     let declared = CONTROL_PLANE_ROUTES
         .iter()

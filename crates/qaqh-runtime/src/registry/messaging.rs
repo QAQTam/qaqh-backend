@@ -224,7 +224,8 @@ impl AgentRegistry {
     }
 
     /// Set root-tree quota limits. Existing in-memory ledgers are dropped;
-    /// durable files remain and are replayed on next access.
+    /// the durable state stays in `qaqh.db` (v4.4 P1-3: no replay — rows are
+    /// re-read from the database on next access).
     pub fn set_quota_limits(&mut self, limits: QuotaLimits) {
         self.quota_limits = limits;
         self.quota_ledgers.clear();
@@ -287,7 +288,7 @@ impl AgentRegistry {
 
     pub(super) fn quota_ledger_mut(&mut self, root: &str) -> QaqhResult<&mut QuotaLedger> {
         if !self.quota_ledgers.contains_key(root) {
-            let ledger = QuotaLedger::open(root, self.quota_limits)?;
+            let ledger = QuotaLedger::open(root, self.quota_limits, self.owners.db().clone())?;
             self.quota_ledgers.insert(root.to_string(), ledger);
         }
         self.quota_ledgers

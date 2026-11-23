@@ -1,11 +1,20 @@
 //! Pending command store — Ringing V1 command idempotency + 4096 cap.
 //!
-//! Extracted from the legacy daemon HTTP layer (now
-//! `qaqh-daemon/src/axum_server`) for sharing between the old TCP and axum paths.
+//! v4.4 P1-3（MUST 铁闸 2）：权威是 `qaqh.db` 的 `command_receipts` 表。
+//! 旧的 `ringing-command-receipts.json` 全量覆写（L-06）与
+//! `Instant + persistence_path` 的内存索引整体删除；TTL/容量裁剪都是 SQL。
+//! 调用点已在阻塞池（P1-0a），方法保持 sync——`write_blocking` 与串行写
+//! 执行器同步返回，预留成功即已 COMMIT，durable-before-ack 由 WAL +
+//! synchronous=FULL 保证（不再是 best-effort 文件写）。
+//! DB 故障在幂等闸门上按 **fail-closed** 处理：record 返回 `Err(())`
+//! （调用方视作 Mismatch，不派发执行）、status 返回 `None`（unknown，
+//! SDK 不得自动重试副作用）——两者都绝不伪装成「可安全执行」。
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use qaqh_session::db::{Db, receipts};
 
 use qaqh_ringing::{
     RingingCommandState, RingingCommandStatus, RingingV2CommandResult, RingingV2CommandStatus,
@@ -60,37 +69,21 @@ pub const RECEIPT_POLICY: ReceiptPolicy = ReceiptPolicy {
     persistence: ReceiptPersistence::BestEffort,
 };
 
-/// Explicit-path receipt loading never silently treats unreadable data as empty.
-#[derive(Debug)]
-pub enum ReceiptLoadError {
-    Read(std::io::Error),
-    Decode(serde_json::Error),
-}
-
-impl std::fmt::Display for ReceiptLoadError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Read(error) => write!(f, "cannot read command receipt store: {error}"),
-            Self::Decode(error) => write!(f, "cannot decode command receipt store: {error}"),
-        }
-    }
-}
-
-impl std::error::Error for ReceiptLoadError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Read(error) => Some(error),
-            Self::Decode(error) => Some(error),
-        }
-    }
-}
-
-/// 已 accepted 命令的幂等表（有界 TTL；accepted 后断线重试不得重复执行）。
-#[derive(Debug, Default)]
 pub struct PendingCommandStore {
-    accepted: HashMap<String, CommandReceipt>,
+    db: Arc<Db>,
     max_entries: usize,
-    persistence_path: Option<PathBuf>,
+    /// 冻结告警限频状态（command_id → 上次告警 ms）。刻意不落库：
+    /// 与旧实现「纯内存限频、重启后重新计」同律，重启后重复告警可接受。
+    warn_state: Mutex<HashMap<String, u64>>,
+}
+
+// `Db` 不暴露 Debug(执行器句柄无诊断价值)。
+impl std::fmt::Debug for PendingCommandStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PendingCommandStore")
+            .field("max_entries", &self.max_entries)
+            .finish_non_exhaustive()
+    }
 }
 
 /// 冻结告警条目：Accepted/Running 超时无终态的 receipt 快照。
@@ -100,25 +93,6 @@ pub struct StaleRunningReceipt {
     pub state: RingingCommandState,
     pub age_secs: u64,
     pub client_session_id: Option<String>,
-}
-
-#[derive(Debug, Clone)]
-struct CommandReceipt {
-    fingerprint: String,
-    client_session_id: Option<String>,
-    accepted_at: Instant,
-    state: RingingCommandState,
-    terminal_event_id: Option<String>,
-    error_code: Option<String>,
-    /// 终态的 typed payload（ask/plan 等）。ACK 丢失后重放 command_id 或
-    /// 轮询 command_status 时返回，客户端不必再靠 code/message 猜结果。
-    result: Option<RingingV2CommandResult>,
-    /// 同步命令的完整结果回放（B05）：result/operation/revision 原样保存，
-    /// 重放与 status 查询恢复首次执行承诺的原结果；引擎类命令为 None。
-    sync_result: Option<RingingV2SyncResult>,
-    /// 上次冻结告警时刻（epoch ms，仅内存不持久化）：同一 receipt 的重复
-    /// 告警按间隔限频，避免周期巡检刷屏。
-    last_stale_warn_ms: Option<u64>,
 }
 
 /// v2 command 的已有 receipt 视图（含指纹，供重放时做 payload 校验）。
@@ -144,132 +118,77 @@ impl ExistingCommandReceipt {
     }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct PersistedCommandReceipt {
-    fingerprint: String,
-    #[serde(default)]
-    client_session_id: Option<String>,
-    accepted_at_ms: u64,
-    state: RingingCommandState,
-    #[serde(default)]
-    terminal_event_id: Option<String>,
-    #[serde(default)]
-    error_code: Option<String>,
-    #[serde(default)]
-    result: Option<RingingV2CommandResult>,
-    #[serde(default)]
-    sync_result: Option<RingingV2SyncResult>,
-}
-
 impl PendingCommandStore {
-    pub fn new() -> Self {
+    /// Receipt 权威在 `command_receipts`；只保存哈希，不把命令正文、
+    /// 用户文本或附件元数据写入库表。
+    pub fn new(db: Arc<Db>) -> Self {
         Self {
-            accepted: HashMap::new(),
+            db,
             max_entries: RECEIPT_POLICY.max_entries,
-            persistence_path: None,
+            warn_state: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Receipt 存在 daemon 数据目录的独立 Ringing V1 namespace；只保存哈希，
-    /// 不把命令正文、用户文本或附件元数据写入磁盘。
-    pub fn new_persistent() -> Self {
-        let data_dir = qaqh_types::platform::data_dir();
-        let path = data_dir.join("ringing-command-receipts.json");
-        let mut store = Self {
-            persistence_path: Some(path.clone()),
-            ..Self::new()
-        };
-        if let Err(error) = store.load(&path) {
-            log::warn!("[ringing] {error}; starting empty");
-        }
-        store
+    fn ttl_cutoff_ms(now_ms: u64) -> i64 {
+        now_ms.saturating_sub(RECEIPT_TTL.as_millis() as u64) as i64
     }
 
-    /// Load the existing receipt cache without consulting process environment.
-    ///
-    /// A missing file starts empty; other read/format errors are reported. Writes
-    /// retain the existing best-effort semantics: successfully recording a
-    /// receipt does not promise durable execution or crash-safe exactly-once.
-    pub fn open_persistent_at(path: impl Into<PathBuf>) -> Result<Self, ReceiptLoadError> {
-        let path = path.into();
-        let mut store = Self {
-            persistence_path: Some(path.clone()),
-            ..Self::new()
-        };
-        store.load(&path)?;
-        Ok(store)
+    fn state_to_db(state: RingingCommandState) -> &'static str {
+        match state {
+            RingingCommandState::Accepted => "accepted",
+            RingingCommandState::Running => "running",
+            RingingCommandState::Succeeded => "succeeded",
+            RingingCommandState::Failed => "failed",
+            RingingCommandState::Rejected => "rejected",
+        }
     }
 
-    fn load(&mut self, path: &Path) -> Result<(), ReceiptLoadError> {
-        let bytes = match std::fs::read(path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(ReceiptLoadError::Read(error)),
-        };
-        let saved = serde_json::from_slice::<HashMap<String, PersistedCommandReceipt>>(&bytes)
-            .map_err(ReceiptLoadError::Decode)?;
-        let now_ms = unix_millis();
-        for (command_id, receipt) in saved {
-            let Some(age) = now_ms.checked_sub(receipt.accepted_at_ms) else {
-                continue;
-            };
-            if age >= RECEIPT_TTL.as_millis() as u64 {
-                continue;
-            }
-            self.accepted.insert(
-                command_id,
-                CommandReceipt {
-                    fingerprint: receipt.fingerprint,
-                    client_session_id: receipt.client_session_id,
-                    accepted_at: Instant::now() - Duration::from_millis(age),
-                    state: receipt.state,
-                    terminal_event_id: receipt.terminal_event_id,
-                    error_code: receipt.error_code,
-                    result: receipt.result,
-                    sync_result: receipt.sync_result,
-                    last_stale_warn_ms: None,
-                },
-            );
+    fn state_from_db(raw: &str) -> Option<RingingCommandState> {
+        match raw {
+            "accepted" => Some(RingingCommandState::Accepted),
+            "running" => Some(RingingCommandState::Running),
+            "succeeded" => Some(RingingCommandState::Succeeded),
+            "failed" => Some(RingingCommandState::Failed),
+            "rejected" => Some(RingingCommandState::Rejected),
+            _ => None,
         }
-        Ok(())
     }
 
-    fn persist(&self) {
-        let Some(path) = &self.persistence_path else {
-            return;
+    /// 行 → 视图。state/payload 词表解不动即 `None`（数据损坏 fail-closed
+    /// 当 unknown，并留 error 痕——不伪装回执，也不回退文件）。
+    fn row_to_existing(row: &receipts::ReceiptRow) -> Option<ExistingCommandReceipt> {
+        let state = Self::state_from_db(&row.state)?;
+        let result = match row.result_json.as_deref() {
+            None => None,
+            Some(raw) => match serde_json::from_str::<RingingV2CommandResult>(raw) {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    log::error!("[receipt] corrupt result_json for {}: {error}", row.command_id);
+                    return None;
+                }
+            },
         };
-        let saved: HashMap<_, _> = self
-            .accepted
-            .iter()
-            .filter_map(|(command_id, receipt)| {
-                let age = receipt.accepted_at.elapsed();
-                (age < RECEIPT_TTL).then(|| {
-                    (
-                        command_id.clone(),
-                        PersistedCommandReceipt {
-                            fingerprint: receipt.fingerprint.clone(),
-                            client_session_id: receipt.client_session_id.clone(),
-                            accepted_at_ms: unix_millis().saturating_sub(age.as_millis() as u64),
-                            state: receipt.state,
-                            terminal_event_id: receipt.terminal_event_id.clone(),
-                            error_code: receipt.error_code.clone(),
-                            result: receipt.result.clone(),
-                            sync_result: receipt.sync_result.clone(),
-                        },
-                    )
-                })
-            })
-            .collect();
-        let Ok(bytes) = serde_json::to_vec(&saved) else {
-            return;
+        let sync_result = match row.sync_result_json.as_deref() {
+            None => None,
+            Some(raw) => match serde_json::from_str::<RingingV2SyncResult>(raw) {
+                Ok(result) => Some(result),
+                Err(error) => {
+                    log::error!(
+                        "[receipt] corrupt sync_result_json for {}: {error}",
+                        row.command_id
+                    );
+                    return None;
+                }
+            },
         };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+        Some(ExistingCommandReceipt {
+            state,
+            payload_fingerprint: row.fingerprint.clone(),
+            terminal_event_id: row.terminal_event_id.clone(),
+            error_code: row.error_code.clone(),
+            result,
+            sync_result,
+        })
     }
 
     /// 记录 accepted。返回 false 表示重复（已 accepted 且未过期）。
@@ -302,62 +221,111 @@ impl PendingCommandStore {
         fingerprint: &str,
         client_session_id: Option<&str>,
     ) -> Result<bool, ()> {
-        let now = Instant::now();
-        if let Some(receipt) = self.accepted.get(command_id)
-            && receipt.accepted_at + RECEIPT_TTL > now
-        {
-            if receipt.fingerprint != fingerprint
-                || receipt.client_session_id.as_deref() != client_session_id
-            {
-                return Err(());
-            }
-            return Ok(false); // 重复：已接受且在 TTL 内
+        let command_id = command_id.to_string();
+        let fingerprint = fingerprint.to_string();
+        let owner = client_session_id.map(str::to_string);
+        let max_entries = self.max_entries;
+        #[derive(Debug)]
+        enum Admit {
+            New,
+            Duplicate,
+            Mismatch,
         }
-        self.accepted.insert(
-            command_id.to_string(),
-            CommandReceipt {
-                fingerprint: fingerprint.to_string(),
-                client_session_id: client_session_id.map(str::to_string),
-                accepted_at: now,
-                state: RingingCommandState::Accepted,
+        let outcome = self.db.write_blocking(move |conn| -> Result<Admit, qaqh_session::db::DbError> {
+            let tx = conn.transaction()?;
+            let now_ms = unix_millis();
+            let existing = receipts::get(&tx, &command_id)?;
+            if let Some(row) = existing.as_ref() {
+                let fresh = row.accepted_at_ms >= Self::ttl_cutoff_ms(now_ms)
+                    // 未来时间戳同样 unknown（不可信时钟不得续命幂等表）。
+                    && row.accepted_at_ms <= now_ms as i64;
+                if fresh {
+                    // 词表损坏的行不能证明「原回执存在」——既不 Duplicate
+                    // 放行,也不覆盖现场;按 Mismatch fail-closed 并留痕。
+                    if Self::state_from_db(&row.state).is_none() {
+                        log::error!(
+                            "[receipt] stored row {} has unparseable state vocabulary",
+                            row.command_id
+                        );
+                        return Ok(Admit::Mismatch);
+                    }
+                    if row.fingerprint != fingerprint
+                        || row.client_session_id != owner
+                    {
+                        return Ok(Admit::Mismatch);
+                    }
+                    return Ok(Admit::Duplicate); // 重复：已接受且在 TTL 内
+                }
+            }
+            tx.execute("DELETE FROM command_receipts WHERE command_id = ?1", [&command_id])?;
+            let row = receipts::ReceiptRow {
+                command_id: command_id.clone(),
+                fingerprint,
+                client_session_id: owner,
+                state: Self::state_to_db(RingingCommandState::Accepted).to_string(),
                 terminal_event_id: None,
                 error_code: None,
-                result: None,
-                sync_result: None,
-                last_stale_warn_ms: None,
-            },
-        );
-        while self.accepted.len() > self.max_entries {
-            let victim = self
-                .accepted
-                .iter()
-                .min_by_key(|(_, receipt)| receipt.accepted_at)
-                .map(|(id, _)| id.clone())
-                .expect("non-empty");
-            self.accepted.remove(&victim);
+                result_json: None,
+                sync_result_json: None,
+                accepted_at_ms: now_ms as i64,
+            };
+            receipts::upsert(&tx, &row)?;
+            receipts::delete_expired(&tx, Self::ttl_cutoff_ms(now_ms))?;
+            receipts::prune_oldest_over(&tx, max_entries)?;
+            tx.commit()?;
+            Ok(Admit::New)
+        });
+        match outcome {
+            Ok(Admit::New) => Ok(true),
+            Ok(Admit::Duplicate) => Ok(false),
+            // 指纹/owner 冲突与 DB 故障都是 Err——闸门 fail-closed，不派发执行。
+            Ok(Admit::Mismatch) => Err(()),
+            Err(error) => {
+                log::error!("[receipt] reservation gate storage failure, failing closed: {error}");
+                Err(())
+            }
         }
-        self.persist();
-        Ok(true)
     }
 
     pub fn is_known(&self, command_id: &str) -> bool {
-        self.accepted
-            .get(command_id)
-            .is_some_and(|receipt| receipt.accepted_at + RECEIPT_TTL > Instant::now())
+        let command_id = command_id.to_string();
+        self.db
+            .read_blocking(move |conn| receipts::get(conn, &command_id))
+            .map_err(|error| {
+                log::error!("[receipt] is_known storage failure, treating as unknown: {error}");
+                error
+            })
+            .ok()
+            .flatten()
+            .is_some_and(|row| Self::row_is_fresh(&row))
+    }
+
+    fn row_is_fresh(row: &receipts::ReceiptRow) -> bool {
+        let now_ms = unix_millis();
+        row.accepted_at_ms >= Self::ttl_cutoff_ms(now_ms) && row.accepted_at_ms <= now_ms as i64
     }
 
     /// 转发失败回滚预留。
     pub fn rollback(&mut self, command_id: &str) {
-        self.accepted.remove(command_id);
-        self.persist();
+        let command_id = command_id.to_string();
+        if let Err(error) = self
+            .db
+            .write_blocking(move |conn| receipts::delete(conn, &command_id))
+        {
+            log::error!("[receipt] rollback storage failure: {error}");
+        }
     }
 
     pub fn mark_running(&mut self, command_id: &str) {
-        if let Some(receipt) = self.accepted.get_mut(command_id) {
-            if receipt.state == RingingCommandState::Accepted {
-                receipt.state = RingingCommandState::Running;
-            }
-            self.persist();
+        let command_id = command_id.to_string();
+        if let Err(error) = self.db.write_blocking(move |conn| {
+            conn.execute(
+                "UPDATE command_receipts SET state = 'running' \
+                 WHERE command_id = ?1 AND state = 'accepted'",
+                [&command_id],
+            )
+        }) {
+            log::error!("[receipt] mark_running storage failure: {error}");
         }
     }
 
@@ -380,12 +348,22 @@ impl PendingCommandStore {
         error_code: Option<String>,
         result: Option<RingingV2CommandResult>,
     ) {
-        if let Some(receipt) = self.accepted.get_mut(command_id) {
-            receipt.state = state;
-            receipt.terminal_event_id = event_id;
-            receipt.error_code = error_code;
-            receipt.result = result;
-            self.persist();
+        let command_id = command_id.to_string();
+        let state = Self::state_to_db(state).to_string();
+        let result_json = result.as_ref().and_then(|result| serde_json::to_string(result).ok());
+        let write = self.db.write_blocking(move |conn| {
+            receipts::update_state(
+                conn,
+                &command_id,
+                &state,
+                event_id.as_deref(),
+                error_code.as_deref(),
+                result_json.as_deref(),
+                None,
+            )
+        });
+        if let Err(error) = write {
+            log::error!("[receipt] mark_terminal storage failure: {error}");
         }
     }
 
@@ -393,13 +371,28 @@ impl PendingCommandStore {
     /// ACK 丢失后重放原 command_id 或轮询 status 都能恢复原结果。
     /// `succeeded` 且不调用此方法 = 引擎类命令（无同步结果，不伪造）。
     pub fn mark_terminal_sync(&mut self, command_id: &str, sync_result: RingingV2SyncResult) {
-        if let Some(receipt) = self.accepted.get_mut(command_id) {
-            receipt.state = RingingCommandState::Succeeded;
-            receipt.terminal_event_id = None;
-            receipt.error_code = None;
-            receipt.result = None;
-            receipt.sync_result = Some(sync_result);
-            self.persist();
+        let command_id = command_id.to_string();
+        let sync_json = match serde_json::to_string(&sync_result) {
+            Ok(json) => json,
+            Err(error) => {
+                log::error!("[receipt] sync_result serialization failed, skip persisting: {error}");
+                return;
+            }
+        };
+        let state = Self::state_to_db(RingingCommandState::Succeeded).to_string();
+        let write = self.db.write_blocking(move |conn| {
+            receipts::update_state(
+                conn,
+                &command_id,
+                &state,
+                None,
+                None,
+                None,
+                Some(&sync_json),
+            )
+        });
+        if let Err(error) = write {
+            log::error!("[receipt] mark_terminal_sync storage failure: {error}");
         }
     }
 
@@ -418,42 +411,50 @@ impl PendingCommandStore {
         warn_after: Duration,
         repeat_interval: Duration,
     ) -> Vec<StaleRunningReceipt> {
-        let now = Instant::now();
         let now_ms = unix_millis();
         let repeat_ms = repeat_interval.as_millis() as u64;
-        let expired: Vec<String> = self
-            .accepted
+        let cutoff = Self::ttl_cutoff_ms(now_ms);
+        // 巡检顺带物理摘除过期行（原实现如此：过 TTL 的僵尸不再占告警面）。
+        let candidates = self
+            .db
+            .write_blocking(move |conn| -> Result<Vec<receipts::ReceiptRow>, qaqh_session::db::DbError> {
+                let tx = conn.transaction()?;
+                receipts::delete_expired(&tx, cutoff)?;
+                let rows = receipts::list_unsettled(&tx, cutoff)?;
+                tx.commit()?;
+                Ok(rows)
+            })
+            .unwrap_or_else(|error| {
+                log::error!("[receipt] stale scan storage failure, skipping this sweep: {error}");
+                Vec::new()
+            });
+        let live_ids: std::collections::HashSet<String> = candidates
             .iter()
-            .filter(|(_, receipt)| receipt.accepted_at + RECEIPT_TTL <= now)
-            .map(|(command_id, _)| command_id.clone())
+            .map(|row| row.command_id.clone())
             .collect();
-        for command_id in expired {
-            self.accepted.remove(&command_id);
-        }
+        let mut warn_state = self.warn_state.lock().unwrap_or_else(|e| e.into_inner());
+        warn_state.retain(|id, _| live_ids.contains(id));
         let mut stale = Vec::new();
-        for (command_id, receipt) in self.accepted.iter_mut() {
-            if !matches!(
-                receipt.state,
-                RingingCommandState::Accepted | RingingCommandState::Running
-            ) {
+        for row in &candidates {
+            let Some(state) = Self::state_from_db(&row.state) else {
+                continue;
+            };
+            let age_ms = now_ms.saturating_sub(row.accepted_at_ms.max(0) as u64);
+            if age_ms < warn_after.as_millis() as u64 {
                 continue;
             }
-            let age = now.saturating_duration_since(receipt.accepted_at);
-            if age < warn_after {
-                continue;
-            }
-            let warned_recently = receipt
-                .last_stale_warn_ms
-                .is_some_and(|last| now_ms.saturating_sub(last) < repeat_ms);
+            let warned_recently = warn_state
+                .get(&row.command_id)
+                .is_some_and(|last| now_ms.saturating_sub(*last) < repeat_ms);
             if warned_recently {
                 continue;
             }
-            receipt.last_stale_warn_ms = Some(now_ms);
+            warn_state.insert(row.command_id.clone(), now_ms);
             stale.push(StaleRunningReceipt {
-                command_id: command_id.clone(),
-                state: receipt.state,
-                age_secs: age.as_secs(),
-                client_session_id: receipt.client_session_id.clone(),
+                command_id: row.command_id.clone(),
+                state,
+                age_secs: age_ms / 1000,
+                client_session_id: row.client_session_id.clone(),
             });
         }
         for entry in &stale {
@@ -473,16 +474,13 @@ impl PendingCommandStore {
         command_id: &str,
         client_session_id: &str,
     ) -> Option<RingingCommandStatus> {
-        self.accepted.get(command_id).and_then(|receipt| {
-            (receipt.accepted_at + RECEIPT_TTL > Instant::now()
-                && receipt.client_session_id.as_deref() == Some(client_session_id))
-            .then(|| RingingCommandStatus {
-                command_id: command_id.to_string(),
-                state: receipt.state,
-                payload_fingerprint: receipt.fingerprint.clone(),
-                terminal_event_id: receipt.terminal_event_id.clone(),
-                error_code: receipt.error_code.clone(),
-            })
+        let existing = self.existing_row(command_id, client_session_id)?;
+        Some(RingingCommandStatus {
+            command_id: command_id.to_string(),
+            state: existing.state,
+            payload_fingerprint: existing.payload_fingerprint,
+            terminal_event_id: existing.terminal_event_id,
+            error_code: existing.error_code,
         })
     }
 
@@ -492,18 +490,15 @@ impl PendingCommandStore {
         command_id: &str,
         client_session_id: &str,
     ) -> Option<RingingV2CommandStatus> {
-        self.accepted.get(command_id).and_then(|receipt| {
-            (receipt.accepted_at + RECEIPT_TTL > Instant::now()
-                && receipt.client_session_id.as_deref() == Some(client_session_id))
-            .then(|| RingingV2CommandStatus {
-                command_id: command_id.to_string(),
-                state: receipt.state,
-                payload_fingerprint: receipt.fingerprint.clone(),
-                terminal_event_id: receipt.terminal_event_id.clone(),
-                error_code: receipt.error_code.clone(),
-                result: receipt.result.clone(),
-                sync_result: receipt.sync_result.clone(),
-            })
+        let existing = self.existing_row(command_id, client_session_id)?;
+        Some(RingingV2CommandStatus {
+            command_id: command_id.to_string(),
+            state: existing.state,
+            payload_fingerprint: existing.payload_fingerprint,
+            terminal_event_id: existing.terminal_event_id,
+            error_code: existing.error_code,
+            result: existing.result,
+            sync_result: existing.sync_result,
         })
     }
 
@@ -513,18 +508,27 @@ impl PendingCommandStore {
         command_id: &str,
         client_session_id: &str,
     ) -> Option<ExistingCommandReceipt> {
-        self.accepted.get(command_id).and_then(|receipt| {
-            (receipt.accepted_at + RECEIPT_TTL > Instant::now()
-                && receipt.client_session_id.as_deref() == Some(client_session_id))
-            .then(|| ExistingCommandReceipt {
-                state: receipt.state,
-                payload_fingerprint: receipt.fingerprint.clone(),
-                terminal_event_id: receipt.terminal_event_id.clone(),
-                error_code: receipt.error_code.clone(),
-                result: receipt.result.clone(),
-                sync_result: receipt.sync_result.clone(),
+        self.existing_row(command_id, client_session_id)
+    }
+
+    /// 三条读路径的共同闸门：行存在、在 TTL 内、owner 匹配；
+    /// DB 故障与损坏数据都是 `None`（unknown，SDK 不得自动重试副作用）。
+    fn existing_row(&self, command_id: &str, client_session_id: &str) -> Option<ExistingCommandReceipt> {
+        let command_id = command_id.to_string();
+        let owner = client_session_id.to_string();
+        let row = self
+            .db
+            .read_blocking(move |conn| receipts::get(conn, &command_id))
+            .map_err(|error| {
+                log::error!("[receipt] status storage failure, treating as unknown: {error}");
+                error
             })
-        })
+            .ok()
+            .flatten()?;
+        if !Self::row_is_fresh(&row) || row.client_session_id.as_deref() != Some(owner.as_str()) {
+            return None;
+        }
+        Self::row_to_existing(&row)
     }
 }
 
@@ -541,22 +545,39 @@ fn unix_millis() -> u64 {
 mod tests {
     use super::*;
 
+    fn test_store() -> (tempfile::TempDir, PendingCommandStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Arc::new(Db::open(dir.path().join("qaqh.db")).expect("open db"));
+        (dir, PendingCommandStore::new(db))
+    }
+
     /// 过 TTL 的条目不再参与幂等，也不该继续占着日志（2026-10-05 实测 2487 条
     /// 同源 `stuck in Running` 告警全部来自早已过期的僵尸条目）。
     #[test]
     fn expired_receipts_are_pruned_instead_of_warning_forever() {
-        let mut store = PendingCommandStore::new();
+        let (_dir, mut store) = test_store();
         let uuid_command = "92455601-b53a-4f25-8df5-94124676055b";
         assert!(
             store
                 .record_fingerprint_for_session(uuid_command, "fp", "session-a")
                 .expect("first accept")
         );
+        // 用 SQL 把行龄推过期——不靠私有字段,过期判据走的是同一条 TTL 口径。
+        let aged_row = receipts::ReceiptRow {
+            command_id: uuid_command.to_string(),
+            fingerprint: "fp".to_string(),
+            client_session_id: Some("session-a".to_string()),
+            state: "accepted".to_string(),
+            terminal_event_id: None,
+            error_code: None,
+            result_json: None,
+            sync_result_json: None,
+            accepted_at_ms: unix_millis() as i64 - RECEIPT_TTL.as_millis() as i64 - 1000,
+        };
         store
-            .accepted
-            .get_mut(uuid_command)
-            .expect("receipt")
-            .accepted_at = Instant::now() - RECEIPT_TTL - Duration::from_secs(1);
+            .db
+            .write_blocking(move |conn| receipts::upsert(conn, &aged_row))
+            .expect("age the row");
 
         assert!(
             store
@@ -565,14 +586,21 @@ mod tests {
             "an expired receipt must not keep emitting warnings"
         );
         assert!(
-            !store.accepted.contains_key(uuid_command),
-            "expired receipts are dropped from the index"
+            !store.is_known(uuid_command),
+            "expired receipts are dropped from the table"
         );
+        let alive: i64 = store
+            .db
+            .read_blocking(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM command_receipts", [], |row| row.get(0))
+            })
+            .expect("count");
+        assert_eq!(alive, 0, "过期行必须被巡检物理摘除");
     }
 
     #[test]
     fn pending_command_idempotency() {
-        let mut store = PendingCommandStore::new();
+        let (_dir, mut store) = test_store();
         assert!(store.record("cmd-1"), "first accept");
         assert!(!store.record("cmd-1"), "duplicate within TTL rejected");
         assert!(store.is_known("cmd-1"));
@@ -583,7 +611,7 @@ mod tests {
 
     #[test]
     fn command_receipts_are_scoped_to_the_owning_client_session() {
-        let mut store = PendingCommandStore::new();
+        let (_dir, mut store) = test_store();
         assert!(
             store
                 .record_fingerprint_for_session("cmd-owner", "fp", "session-a")
@@ -600,7 +628,7 @@ mod tests {
 
     #[test]
     fn stale_running_receipts_are_warned_and_rate_limited() {
-        let mut store = PendingCommandStore::new();
+        let (_dir, mut store) = test_store();
         assert!(store.record("cmd-stuck"));
         // 0s 阈值：任何 Accepted/Running 立即命中。
         let first = store.warn_stale_running(Duration::ZERO, Duration::from_secs(60));

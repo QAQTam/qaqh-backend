@@ -234,7 +234,7 @@ fn create_session(
     let custom_tools = input.custom_tools.unwrap_or_default();
     let preset = optional_tool_mode(input.tool_mode.as_deref(), &custom_tools)
         .map_err(QaqhError::message)?;
-    let session_id = service.sessions.allocate_session();
+    let session_id = service.owners().allocate_session();
     let (tool_mode, custom_tools) = preset
         .map(|(tool_mode, custom_tools)| (Some(tool_mode), Some(custom_tools)))
         .unwrap_or((None, None));
@@ -255,7 +255,7 @@ fn create_session(
         },
     )
     .inspect_err(|_| {
-        let _ = service.sessions.delete(&session_id);
+        let _ = service.owners().delete_session_resources(&session_id);
     })
     .map_err(QaqhError::message)?;
     service

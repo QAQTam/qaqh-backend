@@ -103,8 +103,7 @@ fn list_agents_reports_residency_and_canonical_status() {
             .unwrap_or_default()
             .as_nanos()
     ));
-    let sessions = Arc::new(qaqh_session::SessionManager::new(root_dir.clone()));
-    let root = sessions.allocate_session();
+    let root = test_owner_dir().allocate_session();
     let child = SessionId::new("0198f1a0-0000-7000-8000-000000000011");
     let child_path = AgentPath::parse_absolute("/root/review").expect("child path");
     let now = unix_ms();

@@ -1,46 +1,25 @@
-//! todo::store — 持久化与查询（todo.json 读写 + status/cancel JSON）。
+//! todo::store — 查询与服务面 JSON（status/cancel/meta）。
+//!
+//! v4.4 P1-3：持久化全部经 [`super::host::TodoHost`]——`todo.json` 的
+//! 读写函数与 `TODO_LOCK` 已物理删除，运行期不存在第二条读写路径。
 
 use crate::json_err_string;
 
-use super::model::{TODO_LOCK, TodoItem, TodoMode, TodoStatus, TodoStore};
+use super::host::{empty_store, require_host};
+use super::model::{TodoItem, TodoStatus, TodoStore};
 
 // ═══════════════════════════════════════════════════════
-// Persistence（P0-2：会话显式传递——RUNTIME_CTX 线程态读取路径全灭）
+// Persistence via the TodoHost port
 // ═══════════════════════════════════════════════════════
-
-/// Session-aware read: direct path `sessions/{seed}/todo.json` (no thread-local).
-pub(crate) fn todo_path_for(session_id: &str) -> std::path::PathBuf {
-    qaqh_types::platform::sessions_dir()
-        .join(session_id)
-        .join("todo.json")
-}
-
-pub(crate) fn read_store_for(session_id: &str) -> Result<TodoStore, String> {
-    if session_id.is_empty() {
-        return Err("no active session".into());
-    }
-    let path = todo_path_for(session_id);
-    if !path.exists() {
-        return Ok(TodoStore {
-            items: Vec::new(),
-            mode: TodoMode::Manual,
-            current_id: None,
-            auto_turns: 0,
-            max_auto_turns: 24,
-            archived: false,
-            cleared_notified: false,
-        });
-    }
-    let content = std::fs::read_to_string(&path).map_err(|e| format!("read todo.json: {e}"))?;
-    let store: TodoStore =
-        serde_json::from_str(&content).map_err(|e| format!("parse todo.json: {e}"))?;
-    Ok(store)
-}
 
 /// Session-aware variant: load TodoStore for an explicit seed (no RUNTIME_CTX).
 pub fn load_todo_for(session_id: &str) -> Result<TodoStore, String> {
-    let _guard = TODO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    read_store_for(session_id)
+    if session_id.is_empty() {
+        return Err("no active session".into());
+    }
+    Ok(require_host()?
+        .load_todo(session_id)?
+        .unwrap_or_else(empty_store))
 }
 
 /// Session-scoped todo status for the frontend Todo panel.
@@ -48,20 +27,10 @@ pub fn todo_status_value(session_id: &str) -> Result<serde_json::Value, String> 
     if session_id.is_empty() {
         return Ok(serde_json::Value::Null);
     }
-    // Serialise with writer to avoid reading a half-renamed tmp.
-    let _guard = TODO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = qaqh_types::platform::sessions_dir()
-        .join(session_id)
-        .join("todo.json");
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::Value::Null);
-        }
-        Err(e) => return Err(format!("read todo.json: {e}")),
+    // 无记录 = 旧「文件不存在」：对前端面板保持 Null。
+    let Some(store) = require_host()?.load_todo(session_id)? else {
+        return Ok(serde_json::Value::Null);
     };
-    let store: TodoStore =
-        serde_json::from_str(&content).map_err(|e| format!("parse todo.json: {e}"))?;
     let current = store
         .current_id
         .as_ref()
@@ -104,49 +73,41 @@ pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value
     if session_id.is_empty() {
         return Err(json_err_string("invalid_input", "no active session", ""));
     }
-    let _guard = TODO_LOCK
-        .lock()
-        .map_err(|_| "todo lock poisoned".to_string())?;
-    let path = qaqh_types::platform::sessions_dir()
-        .join(session_id)
-        .join("todo.json");
-    if !path.exists() {
+    let host = require_host()?;
+    if host.load_todo(session_id)?.is_none() {
         return Err(json_err_string(
             "not_found",
             "no todo list for this session",
             "",
         ));
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| format!("read todo.json: {e}"))?;
-    let mut store: TodoStore =
-        serde_json::from_str(&content).map_err(|e| format!("parse todo.json: {e}"))?;
-    let idx = store
-        .items
-        .iter()
-        .position(|item| item.id == id)
-        .ok_or_else(|| {
-            json_err_string(
-                "not_found",
-                format!("todo {id} not found"),
-                "Use the todo.list service method to see all IDs.",
-            )
-        })?;
-
-    store.items[idx].status = TodoStatus::Cancelled;
-    normalize_current_id(&mut store);
-
-    let item_json = todo_item_json(&store.items[idx]);
-    let tmp = path.with_extension("json.tmp");
-    let data = serde_json::to_vec_pretty(&store).map_err(|e| format!("serialize todo: {e}"))?;
-    std::fs::write(&tmp, data).map_err(|e| format!("write todo.tmp: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("rename todo: {e}"))?;
-
-    Ok(serde_json::json!({
-        "timeis": crate::now_utc8(),
-        "status": "ok",
-        "item": item_json,
-        "message": format!("Todo {id} cancelled.")
-    }))
+    // 读-改-写落在宿主的同一个写事务里（取代旧 TODO_LOCK 串行）。
+    let id = id.to_string();
+    host.mutate_todo(
+        session_id,
+        Box::new(move |store| {
+            let idx = store
+                .items
+                .iter()
+                .position(|item| item.id == id)
+                .ok_or_else(|| {
+                    json_err_string(
+                        "not_found",
+                        format!("todo {id} not found"),
+                        "Use the todo.list service method to see all IDs.",
+                    )
+                })?;
+            store.items[idx].status = TodoStatus::Cancelled;
+            normalize_current_id(store);
+            let item_json = todo_item_json(&store.items[idx]);
+            Ok(serde_json::json!({
+                "timeis": crate::now_utc8(),
+                "status": "ok",
+                "item": item_json,
+                "message": format!("Todo {id} cancelled.")
+            }))
+        }),
+    )
 }
 
 pub fn todo_cancel_json(session_id: &str, id: &str) -> Result<String, String> {
@@ -178,21 +139,6 @@ pub(crate) fn todo_item_json(item: &TodoItem) -> serde_json::Value {
         "status": status_name(&item.status),
         "evidence": item.evidence,
     })
-}
-
-/// Atomic write: temporary file → rename.
-/// 注意：本函数不加 TODO_LOCK——工具路径在持锁状态下调用它；
-/// 锁由工具入口（typed.rs）负责（W2），内部调用方须已持锁。
-pub(crate) fn write_store_for(session_id: &str, store: &TodoStore) -> Result<(), String> {
-    let path = todo_path_for(session_id);
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("create todo directory: {e}"))?;
-    }
-    // 唯一 tmp 名：并发写者不再互踩同一 json.tmp（W2）。
-    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
-    let data = serde_json::to_vec_pretty(store).map_err(|e| format!("serialize todo: {e}"))?;
-    std::fs::write(&tmp, data).map_err(|e| format!("write todo.tmp: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("rename todo: {e}"))
 }
 
 pub(crate) fn normalize_current_id(store: &mut TodoStore) {
@@ -229,11 +175,13 @@ pub(crate) fn refresh_archive_flag(store: &mut TodoStore) {
 /// **快照即冻结**：调用方把返回值写进 tool_result 后不得再改——历史
 /// append-only 是 KV cache 前缀命中的前提。
 pub fn todo_meta_snapshot(session_id: &str) -> Option<String> {
-    let _guard = TODO_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if session_id.is_empty() {
         return None;
     }
-    let mut store = read_store_for(session_id).ok()?;
+    // 快照注入是尽力而为的旁路：宿主缺失/读失败都归入「不注入」，
+    // 与原 read_store_for 失败路径同律（不伪装成功也不拖崩回合）。
+    let host = require_host().ok()?;
+    let mut store = host.load_todo(session_id).ok()??;
     if store.items.is_empty() {
         return None;
     }
@@ -243,10 +191,10 @@ pub fn todo_meta_snapshot(session_id: &str) -> Option<String> {
             return None;
         }
         store.cleared_notified = true;
-        let _ = write_store_for(session_id, &store);
+        let _ = host.save_todo(session_id, &store);
         return Some("[todos] all tasks done — list cleared.".to_string());
     }
-    // 防御：write/update 都会维护 archived，这里兜底直接写路径未覆盖的情形。
+    // 兜底：write/update 都会维护 archived，这里覆盖直接写路径未触达的情形。
     let total = store.items.len();
     let done = store
         .items
@@ -255,7 +203,7 @@ pub fn todo_meta_snapshot(session_id: &str) -> Option<String> {
         .count();
     if done == total {
         store.archived = true;
-        let _ = write_store_for(session_id, &store);
+        let _ = host.save_todo(session_id, &store);
         return Some("[todos] all tasks done — list cleared.".to_string());
     }
     // 并行工作：取第一个 in_progress；无则取第一个 pending（提示下一步）。

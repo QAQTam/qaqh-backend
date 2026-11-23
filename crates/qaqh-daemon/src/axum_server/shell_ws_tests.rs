@@ -392,19 +392,19 @@ async fn shell_stream_handshake_gate_reuses_the_single_identity_model() {
 
     let (interact_id, interact_token) = state
         .devices
-        .lock()
-        .expect("devices")
-        .issue("ws-gate-interact", "node", Scope::Interact);
+        .issue("ws-gate-interact", "node", Scope::Interact)
+        .await
+        .expect("issue interact device");
     let (_view_id, view_token) = state
         .devices
-        .lock()
-        .expect("devices")
-        .issue("ws-gate-view", "node", Scope::View);
+        .issue("ws-gate-view", "node", Scope::View)
+        .await
+        .expect("issue view device");
     let (thief_id, thief_token) = state
         .devices
-        .lock()
-        .expect("devices")
-        .issue("ws-gate-thief", "node", Scope::Interact);
+        .issue("ws-gate-thief", "node", Scope::Interact)
+        .await
+        .expect("issue thief device");
 
     let (interact_lease, _) = open_lease(&app, &interact_token, &interact_id).await;
     let (view_lease, _) = open_lease(&app, &view_token, "view-device").await;

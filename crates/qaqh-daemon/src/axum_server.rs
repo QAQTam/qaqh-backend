@@ -46,23 +46,23 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
     let leases = std::sync::Arc::new(std::sync::Mutex::new(
         qaqh_ringing_runtime::RingingLeaseStore::new(),
     ));
-    let pending = std::sync::Arc::new(std::sync::Mutex::new(
-        qaqh_ringing_runtime::PendingCommandStore::new(),
-    ));
     static TEST_SERVICE: std::sync::OnceLock<qaqh_runtime::QaqhService> =
         std::sync::OnceLock::new();
     let service = TEST_SERVICE
         .get_or_init(|| {
             init_session_manager();
-            qaqh_runtime::QaqhService::init(std::sync::Arc::new(qaqh_session::SessionManager::new(
-                qaqh_types::platform::data_dir(),
-            )))
+            qaqh_runtime::QaqhService::init(qaqh_types::platform::data_dir())
         })
         .clone();
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(
+        qaqh_ringing_runtime::PendingCommandStore::new(std::sync::Arc::clone(service.owners().db())),
+    ));
     let hub = std::sync::Arc::new(qaqh_ringing_runtime::RingingHub::with_database(
         String::from("test-epoch"),
         std::sync::Arc::clone(service.owners().db()),
     ));
+    // `service` 在结构体字面量里被 move,库句柄必须提前取。
+    let test_db = std::sync::Arc::clone(service.owners().db());
     let (shutdown, _) = tokio::sync::watch::channel(false);
     crate::axum_server::axum_impl::AppState {
         hub,
@@ -70,9 +70,7 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
         pending,
         service,
         admin_token: String::from("test-token"),
-        devices: std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_ringing_runtime::DeviceRegistry::new(),
-        )),
+        devices: std::sync::Arc::new(qaqh_ringing_runtime::DeviceRegistry::new(test_db)),
         pairings: std::sync::Arc::new(std::sync::Mutex::new(
             crate::axum_server::PairingTable::new(),
         )),

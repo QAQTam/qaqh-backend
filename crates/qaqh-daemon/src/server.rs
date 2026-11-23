@@ -165,10 +165,6 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             .map_err(stringify)?,
         )
     };
-    // Resource paths are injected; business session identity lives in SQLite.
-    let sessions = Arc::new(qaqh_session::SessionManager::new(
-        qaqh_types::platform::data_dir(),
-    ));
     let _lock = acquire_single_instance()?;
     let token = config.token.clone().unwrap_or_else(random_hex);
     if config.token.is_none() && !config.bind_ip.is_loopback() {
@@ -227,10 +223,13 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             lan_address.map(|a| a.port()).unwrap_or_default()
         );
     }
+    // v4.4 P1-3：SessionManager 删除——数据根目录直接进 init，
+    // 身份生成与资源清理经 service.owners()。
+    let service = QaqhService::init(qaqh_types::platform::data_dir());
+    // v4.4 P1-3：receipt 权威进 `command_receipts`，服务库先于幂等表装配。
     let pending_commands = Arc::new(Mutex::new(
-        qaqh_ringing_runtime::PendingCommandStore::new_persistent(),
+        qaqh_ringing_runtime::PendingCommandStore::new(service.owners().db().clone()),
     ));
-    let service = QaqhService::init(sessions);
     let hub = Arc::new(RingingHub::with_database(
         epoch.clone(),
         Arc::clone(service.owners().db()),
@@ -244,6 +243,9 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     qaqh_goal::install_host(Arc::new(service.clone()));
     // ADR-0033 切片 2：worktree 工具宿主（source_workspace 解析直达会话库）。
     qaqh_gitx::install_host(Arc::new(service.clone()));
+    // v4.4 P1-3：todo 工具面宿主——todo_* 直达 qaqh.db 单事务 RMW
+    //（MUST 铁闸 2 收编后运行期唯一读写路径）。
+    qaqh_runtime::install_todo_host(Arc::new(service.clone()));
     let ringing_leases = Arc::new(Mutex::new(qaqh_ringing_runtime::RingingLeaseStore::new()));
     let (shutdown, _) = watch::channel(false);
     // Route OS signals through the same loop/process shutdown path as the control endpoint.
@@ -254,8 +256,8 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         pending: pending_commands.clone(),
         service: service.clone(),
         admin_token: token.clone(),
-        devices: Arc::new(Mutex::new(
-            qaqh_ringing_runtime::DeviceRegistry::new_persistent(),
+        devices: Arc::new(qaqh_ringing_runtime::DeviceRegistry::new(
+            service.owners().db().clone(),
         )),
         pairings: Arc::new(Mutex::new(crate::axum_server::PairingTable::new())),
         tls_fingerprint: tls.as_ref().map(|material| material.fingerprint.clone()),

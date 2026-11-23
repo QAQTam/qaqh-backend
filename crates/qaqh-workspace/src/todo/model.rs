@@ -1,14 +1,14 @@
-//! todo::model — 数据模型（TodoItem/TodoStatus/TodoMode/TodoStore + TODO_LOCK）。
+//! todo::model — 数据模型（TodoItem/TodoStatus/TodoMode/TodoStore）。
+//!
+//! v4.4 P1-3：状态权威在 `qaqh.db`（经 [`super::host::TodoHost`]），全局
+//! `TODO_LOCK` 与 `sessions/<seed>/todo.json` 文件路径一并物理删除——
+//! 原子性由宿主侧单写事务收口。
 
 use serde::{Deserialize, Serialize};
-
-use std::sync::Mutex;
 
 // ═══════════════════════════════════════════════════════
 // Data model
 // ═══════════════════════════════════════════════════════
-
-pub(crate) static TODO_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TodoItem {

@@ -48,6 +48,10 @@ fn eight_threads_concurrent_tool_ports_never_cross_contaminate() {
     unsafe {
         std::env::set_var("QAQH_DATA_DIR", &data_dir);
     }
+    // v4.4 P1-3：todo_* 经 TodoHost 端口读写，内存宿主按 session key 隔离
+    // ——判据 2「零跨会话 todo 串台」在这里依旧成立（真 DB 形态的并发原子性
+    // 钉在 `qaqh-session/tests/todos_atomicity.rs`）。
+    qaqh_workspace::todo::install_memory_host();
 
     let owners = Arc::new(
         OwnerDirectory::open(data_dir.join("qaqh.db")).expect("open OwnerDirectory"),

@@ -3,46 +3,21 @@
 
 use super::actions::todo_set_for;
 use super::model::{TodoStatus, TodoStore};
-use super::store::{load_todo_for, todo_meta_snapshot, todo_path_for};
+use super::store::{load_todo_for, todo_meta_snapshot};
 use serde_json::Value;
 
-use std::ffi::OsString;
-
 // ═══════════════════════════════════════════════════════
-// harness
+// harness（v4.4 P1-3：内存宿主 + 按用例唯一 session key——旧的
+// QAQH_DATA_DIR 环境隔离与全局锁串行化整体退场，用例可并发跑）
 // ═══════════════════════════════════════════════════════
 
-static TODO_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SESSION_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// 隔离数据目录（USERPROFILE/HOME/QAQH_DATA_DIR → 临时目录）；
-/// 结束恢复环境，避免污染真实 ~/.qaqh/sessions。
 fn with_isolated_todo<F: FnOnce(&str)>(f: F) {
-    let _guard = TODO_ENV_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().unwrap();
-    let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
-    let old_home: Option<OsString> = std::env::var_os(home_var);
-    let old_data_dir: Option<OsString> = std::env::var_os("QAQH_DATA_DIR");
-    // SAFETY: Rust 2024 的 set_var/remove_var 是 unsafe；此处仅测试用，且所有
-    // 用例经 TODO_ENV_LOCK 串行化，不存在并发读者。
-    unsafe {
-        std::env::set_var(home_var, dir.path());
-        std::env::set_var("QAQH_DATA_DIR", dir.path());
-    }
-    let session_id = format!("test-seed-{}", std::process::id());
+    super::host::install_memory_host();
+    let n = SESSION_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session_id = format!("test-seed-{n}");
     f(&session_id);
-    // SAFETY: 恢复进入本函数前的 HOME/USERPROFILE/QAQH_DATA_DIR；同样受 TODO_ENV_LOCK 保护。
-    unsafe {
-        match old_home {
-            Some(value) => std::env::set_var(home_var, value),
-            None => std::env::remove_var(home_var),
-        }
-        match old_data_dir {
-            Some(value) => std::env::set_var("QAQH_DATA_DIR", value),
-            None => std::env::remove_var("QAQH_DATA_DIR"),
-        }
-    }
 }
 
 fn parse(result: &Result<String, String>) -> serde_json::Value {
@@ -349,26 +324,84 @@ fn set_status_never_erases_metadata() {
 
 #[test]
 fn legacy_t_id_store_still_loads() {
-    // 旧 T<n> todo.json 平滑迁移：serde 忽略 next_id/id 字段差异，
-    // title 即身份继续可 update。
+    // 旧 T<n> 代清单（id != title）的行为契约：title 仍是身份，id 原样保留。
+    // 「旧文件读进来」那一层已收编进启动吸入，由
+    // `qaqh-session/tests/sidecar_ingestion.rs` 钉住；这里只验证宿主形态下
+    // 的读写语义（内存宿主直接 seed 状态，不再有文件写路径）。
     with_isolated_todo(|session_id| {
-        let legacy = serde_json::json!({
-            "items": [
-                {"id": "T1", "title": "legacy-a", "description": "", "status": "pending"},
-                {"id": "T2", "title": "legacy-b", "description": "", "status": "pending"}
+        let legacy = TodoStore {
+            items: vec![
+                super::model::TodoItem {
+                    id: "T1".to_string(),
+                    title: "legacy-a".to_string(),
+                    description: String::new(),
+                    status: TodoStatus::Pending,
+                    evidence: None,
+                },
+                super::model::TodoItem {
+                    id: "T2".to_string(),
+                    title: "legacy-b".to_string(),
+                    description: String::new(),
+                    status: TodoStatus::Pending,
+                    evidence: None,
+                },
             ],
-            "mode": "manual",
-            "current_id": null,
-            "auto_turns": 0,
-            "max_auto_turns": 24,
-            "next_id": 3
-        });
-        let path = todo_path_for(session_id);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, legacy.to_string()).unwrap();
+            mode: Default::default(),
+            current_id: None,
+            auto_turns: 0,
+            max_auto_turns: 24,
+            archived: false,
+            cleared_notified: false,
+        };
+        super::host::require_host()
+            .expect("memory host installed")
+            .save_todo(session_id, &legacy)
+            .expect("seed legacy store");
         update_title(session_id, "legacy-a", "in_progress");
         let store = load_todo_for(session_id).unwrap();
         assert_eq!(store.items[0].status, TodoStatus::InProgress);
         assert_eq!(titles(&store), ["legacy-a", "legacy-b"]);
+        assert_eq!(store.items[0].id, "T1", "id 必须原样保留");
+    });
+}
+
+#[test]
+fn concurrent_updates_all_take_effect() {
+    // 原子性判据（内存宿主镜像；真 DB 形态钉在
+    // `qaqh-session/tests/todos_atomicity.rs`）：同一清单 8 个并发
+    // todo_update 交错 RMW，全部生效、不得有条目被旧快照覆盖回 pending。
+    with_isolated_todo(|session_id| {
+        write_list(session_id, "- [ ] t1\n- [ ] t2\n- [ ] t3\n- [ ] t4");
+        let session_id = session_id.to_string();
+        let workers: Vec<_> = (0..8)
+            .map(|worker| {
+                let sid = session_id.clone();
+                std::thread::spawn(move || {
+                    let title = format!("t{}", (worker % 4) + 1);
+                    let status = if worker < 4 { "completed" } else { "cancelled" };
+                    super::typed::todo_update_for_typed(
+                        &sid,
+                        &serde_json::json!({ "title": title, "status": status }),
+                    )
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("worker").expect("update ok");
+        }
+        let store = load_todo_for(&session_id).unwrap();
+        assert_eq!(store.items.len(), 4);
+        assert!(
+            store.items.iter().all(|item| matches!(
+                item.status,
+                TodoStatus::Completed | TodoStatus::Cancelled
+            )),
+            "8 个并发 update 必须全部生效: {:?}",
+            store
+                .items
+                .iter()
+                .map(|item| (item.title.clone(), item.status.clone()))
+                .collect::<Vec<_>>()
+        );
     });
 }
