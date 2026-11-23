@@ -242,6 +242,10 @@ pub fn delete_session_tree(conn: &mut Connection, root: &str) -> Result<Vec<Stri
             "interactions",
             "turns",
             "session_goals",
+            // v4.4 P1-3:session_todos* 无外键(孤儿 todo.json 不得拖垮启动),
+            // 行的生命周期在这里显式收口。
+            "session_todos",
+            "session_todo_state",
         ] {
             tx.execute(&format!("DELETE FROM {table} WHERE session_id = ?1"), [id])?;
         }
@@ -2152,7 +2156,7 @@ mod fork_tests {
     #[test]
     fn handoff_successor_gate_closes_once_a_successor_exists() {
         let mut conn = Connection::open_in_memory().expect("open");
-        crate::db::schema::initialize(&mut conn).expect("schema");
+        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("schema");
         new_session(&mut conn, "root", None);
         mark_handoff_sealed(&mut conn, "root").unwrap();
 
@@ -2194,7 +2198,7 @@ mod fork_tests {
     #[test]
     fn recent_handoff_calls_reads_newest_first_including_running() {
         let mut conn = Connection::open_in_memory().expect("open");
-        crate::db::schema::initialize(&mut conn).expect("schema");
+        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("schema");
         new_session(&mut conn, "s", None);
         handoff_call(
             &mut conn,
@@ -2260,7 +2264,7 @@ mod fork_tests {
     #[test]
     fn fork_seeds_completed_prefix_losslessly_and_rewrites_ids() {
         let mut conn = Connection::open_in_memory().expect("open");
-        crate::db::schema::initialize(&mut conn).expect("schema");
+        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("schema");
         new_session(&mut conn, "parent", None);
         new_session(&mut conn, "child", Some("parent"));
 
@@ -2432,7 +2436,7 @@ mod fork_tests {
         // 空前缀：在飞回合开头的会话 fork 出 0 回合。
         new_session(&mut conn, "child2", Some("parent"));
         let mut conn2 = Connection::open_in_memory().expect("open2");
-        crate::db::schema::initialize(&mut conn2).expect("schema2");
+        crate::db::schema::initialize(&mut conn2, &crate::db::schema::empty_data_dir()).expect("schema2");
         new_session(&mut conn2, "p2", None);
         new_session(&mut conn2, "c2", Some("p2"));
         start_turn(&mut conn2, "turn_x", "p2", None).unwrap();

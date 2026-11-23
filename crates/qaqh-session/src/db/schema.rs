@@ -7,13 +7,30 @@
 //! 收口——`session_contents.content_id` / `exec_sessions.output_content_id`
 //! 库内统一裸 64-hex,wire ref `sha256:<hex>` 只在视图边界组装(见
 //! `store::bare_content_id` / `store::canonical_content_ref`)。
+//! schema 12(v4.4 P1-3,MUST 铁闸 2):四类野生状态账本(todo.json /
+//! ringing-devices.json / ringing-command-receipts.json / quota ledger)
+//! 在启动期的同一个 EXCLUSIVE 事务里一次性吸入;旧手写阶梯(每个版本位
+//! 列一条链)整体废除,改数据驱动 `run_upgrade_step`——旧阶梯实测缺
+//! `upgrade_10_to_11` 步进且无 `Some(10)` 分支,会把 v5~v8 库存成 11 却
+//! 缺 `team_mode` 列、把 v10 库直接判死。
 
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 
 use super::DbError;
+use super::sidecar::{self, IngestionReport};
 use super::store::now_ms;
 
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
+
+/// 允许就地升级的最低存量版本;更低的库直接报错。
+const MIN_SUPPORTED_SCHEMA: u32 = 5;
+
+/// 单元测试专用 data_dir:不存在的空路径 ⇒ sidecar 扫描零命中,
+/// 只验 schema 行为,不误吸运行目录下的真实账本。
+#[cfg(test)]
+pub(crate) fn empty_data_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("qaqh-schema-test-vacant-sidecar-dir")
+}
 
 const DDL_BASE: &str = r#"
 CREATE TABLE sessions (
@@ -231,10 +248,85 @@ CREATE TABLE IF NOT EXISTS team_tasks (
 CREATE INDEX IF NOT EXISTS idx_team_tasks_root ON team_tasks(root_session_id, state);
 "#;
 
-/// 初始化 schema:空库建到最新版;已有库校验版本并按步进升级,比代码新直接报错。
-pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
+/// schema 12(v4.4 P1-3):四类野生账本的收编表。列名/词表与
+/// `sidecar::ingest_legacy_sidecar_files` 的 INSERT 逐字对齐——两边任何
+/// 一侧改动都必须同步另一侧,否则启动期吸入当场响。
+///
+/// `session_todos`/`session_todo_state` 刻意**不带外键**:孤儿
+/// todo.json(会话目录残留但 sessions 行不存在)不得让整个启动失败;
+/// 行的删除由 `store::delete_session_tree` 显式收口。其余三张是全局
+/// 账本(device/receipt/quota),与会话树无生命周期关系。
+const DDL_SIDECAR_V12: &str = r#"
+CREATE TABLE session_todos (
+    session_id   TEXT NOT NULL,
+    ord          INTEGER NOT NULL,
+    todo_id      TEXT NOT NULL,
+    title        TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL,
+    evidence     TEXT,
+    PRIMARY KEY (session_id, ord)
+);
+
+CREATE TABLE session_todo_state (
+    session_id       TEXT PRIMARY KEY,
+    mode             TEXT NOT NULL DEFAULT 'manual',
+    current_id       TEXT,
+    auto_turns       INTEGER NOT NULL DEFAULT 0,
+    max_auto_turns   INTEGER NOT NULL DEFAULT 24,
+    archived         INTEGER NOT NULL DEFAULT 0,
+    cleared_notified INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE paired_devices (
+    device_id     TEXT PRIMARY KEY,
+    name          TEXT NOT NULL DEFAULT '',
+    platform      TEXT NOT NULL DEFAULT '',
+    scope         TEXT NOT NULL,
+    token_digest  TEXT NOT NULL UNIQUE,
+    created_at_ms INTEGER NOT NULL,
+    last_seen_ms  INTEGER NOT NULL
+);
+
+CREATE TABLE command_receipts (
+    command_id        TEXT PRIMARY KEY,
+    fingerprint       TEXT NOT NULL,
+    client_session_id TEXT,
+    state             TEXT NOT NULL,
+    terminal_event_id TEXT,
+    error_code        TEXT,
+    result_json       TEXT,
+    sync_result_json  TEXT,
+    accepted_at_ms    INTEGER NOT NULL
+);
+CREATE INDEX idx_command_receipts_owner ON command_receipts(client_session_id, accepted_at_ms);
+
+CREATE TABLE quota_reservations (
+    reservation_id   TEXT PRIMARY KEY,
+    root_session_id  TEXT NOT NULL,
+    child_session_id TEXT,
+    kind             TEXT NOT NULL,
+    amount           INTEGER NOT NULL,
+    canonical_key    TEXT NOT NULL DEFAULT '',
+    state            TEXT NOT NULL,
+    release_reason   TEXT,
+    reserved_at_ms   INTEGER NOT NULL,
+    settled_at_ms    INTEGER
+);
+CREATE INDEX idx_quota_reservations_root ON quota_reservations(root_session_id, state);
+CREATE INDEX idx_quota_reservations_child ON quota_reservations(child_session_id);
+"#;
+
+/// 初始化 schema:空库建到最新版(并吸入 sidecar);已有库校验版本并按
+/// 数据驱动阶梯逐档升级;比代码新/低于下限直接报错。
+///
+/// 事务行为必须是 `EXCLUSIVE`(MUST 铁闸 2):吸入要读写 `data_dir` 下的
+/// 旧文件并落库,启动期不允许任何其他连接插进来。
+/// `data_dir` 是 `qaqh.db` 的父目录;吸入产生的墓碑改名只在 `COMMIT`
+/// 成功后执行。
+pub fn initialize(conn: &mut Connection, data_dir: &std::path::Path) -> Result<(), DbError> {
     // 版本读取、去重、DDL 和版本提交共用写事务,避免并发启动重复决定迁移。
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Exclusive)?;
     tx.execute(
         "CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)",
         [],
@@ -250,6 +342,7 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
          WHERE rowid <> (SELECT rowid FROM schema_version ORDER BY version DESC LIMIT 1);
          CREATE UNIQUE INDEX IF NOT EXISTS idx_schema_version_singleton ON schema_version ((1));",
     )?;
+    let mut reports: Vec<IngestionReport> = Vec::new();
     match existing {
         Some(found) if found > SCHEMA_VERSION => {
             return Err(DbError::SchemaTooNew {
@@ -257,49 +350,27 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
                 supported: SCHEMA_VERSION,
             });
         }
-        // schema 5 → 6(spec-exec-session-lifecycle §9.3)后接 6→7、7→8、8→9、9→10:
-        // 链式执行,否则旧代库会跳过后续的数据归一。
-        Some(5) => {
-            upgrade_5_to_6(&tx)?;
-            upgrade_6_to_7(&tx)?;
-            upgrade_7_to_8(&tx)?;
-            upgrade_8_to_9(&tx)?;
-            upgrade_9_to_10(&tx)?;
-        }
-        // schema 6 → 7:content id 形态收口(裸 hex),数据归一在新 daemon
-        // 对外服务前完成;随后接 7→8 存量 effects 归一、8→9 goal 表、9→10 任务板。
-        Some(6) => {
-            upgrade_6_to_7(&tx)?;
-            upgrade_7_to_8(&tx)?;
-            upgrade_8_to_9(&tx)?;
-            upgrade_9_to_10(&tx)?;
-        }
-        // schema 7 → 8:skills 裁剪的存量 effects 归一(ADR-0010)。
-        Some(7) => {
-            upgrade_7_to_8(&tx)?;
-            upgrade_8_to_9(&tx)?;
-            upgrade_9_to_10(&tx)?;
-        }
-        // schema 8 → 9:goal 表纯增量(ADR-0015)。
-        Some(8) => {
-            upgrade_8_to_9(&tx)?;
-            upgrade_9_to_10(&tx)?;
-        }
-        // schema 9 → 10:任务板 write_scopes 纯增量(ADR-0033 切片B)。
-        Some(9) => {
-            upgrade_9_to_10(&tx)?;
-            upgrade_10_to_11(&tx)?;
-        }
         Some(found) if found < SCHEMA_VERSION => {
-            return Err(DbError::SchemaTooOld {
-                found,
-                supported: SCHEMA_VERSION,
-            });
+            if found < MIN_SUPPORTED_SCHEMA {
+                return Err(DbError::SchemaTooOld {
+                    found,
+                    supported: SCHEMA_VERSION,
+                });
+            }
+            let mut version = found;
+            while version < SCHEMA_VERSION {
+                reports.push(run_upgrade_step(version, &tx, data_dir)?);
+                version += 1;
+            }
         }
         Some(_) => {}
         None => {
             tx.execute_batch(DDL_BASE)?;
             tx.execute_batch(DDL_TEAM)?;
+            tx.execute_batch(DDL_SIDECAR_V12)?;
+            // 空库首建同样过一遍吸入:目录里可能躺着上一代 daemon 留下的
+            // 旧账本文件,不吸就是野生数据悬空。
+            reports.push(sidecar::ingest_legacy_sidecar_files(&tx, data_dir)?);
         }
     }
     tx.execute(
@@ -307,6 +378,74 @@ pub fn initialize(conn: &mut Connection) -> Result<(), DbError> {
         [SCHEMA_VERSION],
     )?;
     tx.commit()?;
+    // 铁闸 2:改名只允许发生在 COMMIT 之后。retire 失败只 WARN(数据已
+    // 在库里),不得把一次成功的迁移降级成启动失败。
+    for report in reports {
+        report.retire();
+    }
+    Ok(())
+}
+
+/// 数据驱动阶梯:`from` 档升级到 `from+1` 档。11→12 附带 sidecar 吸入,
+/// 其余步进返回空报告。未知档位直接 `SchemaTooOld`(不可达路径不写
+/// `unreachable!`:版本位是外部可观察数据,坏数据走坏数据的路)。
+fn run_upgrade_step(
+    from: u32,
+    tx: &Transaction<'_>,
+    data_dir: &std::path::Path,
+) -> Result<IngestionReport, DbError> {
+    match from {
+        5 => upgrade_5_to_6(tx).map(|()| IngestionReport::default()),
+        6 => upgrade_6_to_7(tx).map(|()| IngestionReport::default()),
+        7 => upgrade_7_to_8(tx).map(|()| IngestionReport::default()),
+        8 => upgrade_8_to_9(tx).map(|()| IngestionReport::default()),
+        9 => upgrade_9_to_10(tx).map(|()| IngestionReport::default()),
+        10 => upgrade_10_to_11(tx).map(|()| IngestionReport::default()),
+        11 => {
+            repair_skipped_v11(tx)?;
+            upgrade_11_to_12(tx)?;
+            sidecar::ingest_legacy_sidecar_files(tx, data_dir)
+        }
+        other => Err(DbError::SchemaTooOld {
+            found: other,
+            supported: SCHEMA_VERSION,
+        }),
+    }
+}
+
+/// 修复旧手写阶梯的实锤缺陷:`Some(5)~Some(8)` 分支只执行到
+/// `upgrade_9_to_10` 就把版本位写成 11——存量库里存在「记着 11、实际缺
+/// `sessions.team_mode`」的错印库。进入 11→12 前按列位探测,缺列则幂等
+/// 补跑 10→11 的形态(`upgrade_10_to_11` 的 ALTER 非幂等,故这里重写
+/// 成 pragma 判定 + 条件 ALTER,DROP 侧本就有 IF EXISTS)。
+fn repair_skipped_v11(tx: &Transaction<'_>) -> Result<(), DbError> {
+    let has_team_mode: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'team_mode'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| DbError::Corrupt(format!("repair v11 inspect: {error}")))?;
+    if has_team_mode > 0 {
+        return Ok(());
+    }
+    tx.execute_batch(
+        "ALTER TABLE sessions ADD COLUMN team_mode INTEGER NOT NULL DEFAULT 0;
+         DROP TABLE IF EXISTS board_posts;
+         DROP TABLE IF EXISTS board_subscriptions;
+         DROP TABLE IF EXISTS board_threads;
+         DROP TABLE IF EXISTS board_channels;",
+    )
+    .map_err(|error| DbError::Corrupt(format!("repair v11 ddl: {error}")))?;
+    log::warn!("[schema] database was stamped v11 without the 10->11 step (legacy ladder bug); team_mode repaired");
+    Ok(())
+}
+
+/// schema 11 → 12(v4.4 P1-3,MUST 铁闸 2):sidecar 收编表纯增量建表;
+/// 数据吸入在同一事务由 `sidecar::ingest_legacy_sidecar_files` 完成。
+fn upgrade_11_to_12(tx: &Transaction<'_>) -> Result<(), DbError> {
+    tx.execute_batch(DDL_SIDECAR_V12)
+        .map_err(|error| DbError::Corrupt(format!("upgrade 11→12 ddl: {error}")))?;
     Ok(())
 }
 
@@ -942,18 +1081,28 @@ mod tests {
     fn initialize_keeps_one_version_and_recovers_mixed_version_history() {
         let mut conn = Connection::open_in_memory().expect("open");
         for _ in 0..3 {
-            initialize(&mut conn).expect("fresh/repeated initialize");
+            initialize(&mut conn, &empty_data_dir()).expect("fresh/repeated initialize");
         }
         // 还原真实故障:业务表停在旧代,但版本历史混着更旧的值。
-        // schema 9 后「旧代」= v8:先把 9 的增量(两列 + goal 表)退掉,
-        // 再伪造混合历史,让 8→9 链在真正的 v8 表上重放。
+        // 夹具必须是**真 v8 形态**:旧阶梯的 Some(5)~Some(8) 链跳过
+        // 10→11 直接印版本 11,本测试靠这个缺陷才让「带 team_mode 的
+        // 假 v8」过关。数据驱动阶梯把缺陷修掉后,夹具要如实退掉
+        // v8 之后每一档的增量(goal/handoff 列、team_mode、write_scopes、
+        // v12 sidecar 表),否则重放阶梯必然炸出现存形态不符。
         conn.execute_batch(
             "DROP INDEX idx_schema_version_singleton;
              DELETE FROM schema_version;
              INSERT INTO schema_version VALUES (5), (5), (8);
              ALTER TABLE sessions DROP COLUMN handoff_from_session_id;
              ALTER TABLE sessions DROP COLUMN handoff_sealed_at_ms;
-             DROP TABLE session_goals;",
+             DROP TABLE session_goals;
+             ALTER TABLE sessions DROP COLUMN team_mode;
+             ALTER TABLE team_tasks DROP COLUMN write_scopes;
+             DROP TABLE IF EXISTS paired_devices;
+             DROP TABLE IF EXISTS command_receipts;
+             DROP TABLE IF EXISTS quota_reservations;
+             DROP TABLE IF EXISTS session_todos;
+             DROP TABLE IF EXISTS session_todo_state;",
         )
         .expect("legacy metadata");
         conn.execute(
@@ -963,7 +1112,7 @@ mod tests {
         )
         .expect("business data");
         for _ in 0..3 {
-            initialize(&mut conn).expect("reopen migrated database");
+            initialize(&mut conn, &empty_data_dir()).expect("reopen migrated database");
             let versions: (i64, u32) = conn
                 .query_row(
                     "SELECT COUNT(*), MAX(version) FROM schema_version",
@@ -1023,7 +1172,7 @@ mod tests {
         // 在 DDL 已执行后制造行读取失败,检查整次升级是否回滚。
         conn.execute("UPDATE tool_calls SET output_text = x'ff'", [])
             .expect("invalid text");
-        assert!(initialize(&mut conn).is_err());
+        assert!(initialize(&mut conn, &empty_data_dir()).is_err());
         let before: (i64, u32, String) = conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM schema_version),
@@ -1044,7 +1193,7 @@ mod tests {
             [r#"{"status":"backgrounded","command":"cargo watch"}"#],
         )
         .expect("restore row");
-        initialize(&mut conn).expect("upgrade");
+        initialize(&mut conn, &empty_data_dir()).expect("upgrade");
         let migrated: (String, String, String) = conn
             .query_row(
                 "SELECT output_ref, state_json, exec_session_id FROM tool_calls",
@@ -1082,7 +1231,7 @@ mod tests {
             )
             .expect("exec outputs");
         assert_eq!(prefixed_outputs, 0);
-        initialize(&mut conn).expect("reopen after upgrade");
+        initialize(&mut conn, &empty_data_dir()).expect("reopen after upgrade");
         let versions: (i64, u32) = conn
             .query_row(
                 "SELECT COUNT(*), MAX(version) FROM schema_version",
@@ -1147,7 +1296,7 @@ mod tests {
     fn initialize_upgrades_v6_and_normalizes_content_ids_to_bare_hex() {
         let mut conn = Connection::open_in_memory().expect("open");
         conn.execute_batch(V6).expect("v6 fixture");
-        initialize(&mut conn).expect("upgrade");
+        initialize(&mut conn, &empty_data_dir()).expect("upgrade");
         let versions: (i64, u32) = conn
             .query_row(
                 "SELECT COUNT(*), MAX(version) FROM schema_version",
@@ -1247,7 +1396,7 @@ mod tests {
         use qaqh_ringing_contract::state::ToolEffectInfo;
         let mut conn = Connection::open_in_memory().expect("open");
         conn.execute_batch(V7).expect("v7 fixture");
-        initialize(&mut conn).expect("upgrade");
+        initialize(&mut conn, &empty_data_dir()).expect("upgrade");
         let versions: (i64, u32) = conn
             .query_row(
                 "SELECT COUNT(*), MAX(version) FROM schema_version",
@@ -1342,7 +1491,7 @@ mod tests {
             "expected legacy skill effect corruption before migration"
         );
 
-        initialize(&mut conn).expect("upgrade snapshot");
+        initialize(&mut conn, &empty_data_dir()).expect("upgrade snapshot");
 
         for id in &ids {
             super::super::view::load_session_state(&conn, id)
@@ -1358,7 +1507,7 @@ mod tests {
                 .expect("version table");
             conn.execute("INSERT INTO schema_version VALUES (?1), (?1)", [version])
                 .expect("version history");
-            let error = initialize(&mut conn).expect_err("unsupported version");
+            let error = initialize(&mut conn, &empty_data_dir()).expect_err("unsupported version");
             assert!(matches!(
                 error,
                 DbError::SchemaTooNew { found, .. } | DbError::SchemaTooOld { found, .. }

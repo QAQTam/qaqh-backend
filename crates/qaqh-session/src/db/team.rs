@@ -561,7 +561,7 @@ mod tests {
 
     fn test_conn() -> Connection {
         let mut conn = Connection::open_in_memory().expect("in-memory db");
-        crate::db::schema::initialize(&mut conn).expect("initialize schema");
+        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("initialize schema");
         conn
     }
 
