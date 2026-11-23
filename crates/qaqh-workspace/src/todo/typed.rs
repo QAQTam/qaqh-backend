@@ -394,7 +394,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
                 return Err(crate::json_err_string(
                     "not_found",
                     format!("no todo titled `{title}`"),
-                    &format!("Exact titles only. Current list:\n{available}"),
+                    format!("Exact titles only. Current list:\n{available}"),
                 ));
             };
             store.items[index].status = TodoStatus::from(args.status);

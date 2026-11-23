@@ -15,6 +15,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use super::model::{TodoMode, TodoStore};
 
+/// [`TodoHost::mutate_todo`] 的闭包类型（宿主侧在单写事务内调用）。
+pub type TodoMutation =
+    Box<dyn FnOnce(&mut TodoStore) -> Result<serde_json::Value, String> + Send>;
+
 pub trait TodoHost: Send + Sync {
     /// 只读加载。`None` = 从未建过清单(旧「文件不存在」语义,
     /// `todo.status` 查询面对前端回 Null 的判据)。
@@ -25,7 +29,7 @@ pub trait TodoHost: Send + Sync {
     fn mutate_todo(
         &self,
         session_id: &str,
-        f: Box<dyn FnOnce(&mut TodoStore) -> Result<serde_json::Value, String> + Send>,
+        f: TodoMutation,
     ) -> Result<serde_json::Value, String>;
 
     /// 条件整写(仅 `todo_meta_snapshot` 的归档/cleared 置位分支用)。

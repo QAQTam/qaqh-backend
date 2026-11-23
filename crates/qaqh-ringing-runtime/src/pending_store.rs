@@ -236,7 +236,7 @@ impl PendingCommandStore {
             let now_ms = unix_millis();
             let existing = receipts::get(&tx, &command_id)?;
             if let Some(row) = existing.as_ref() {
-                let fresh = row.accepted_at_ms >= Self::ttl_cutoff_ms(now_ms) as i64
+                let fresh = row.accepted_at_ms >= Self::ttl_cutoff_ms(now_ms)
                     // 未来时间戳同样 unknown（不可信时钟不得续命幂等表）。
                     && row.accepted_at_ms <= now_ms as i64;
                 if fresh {
@@ -270,7 +270,7 @@ impl PendingCommandStore {
                 accepted_at_ms: now_ms as i64,
             };
             receipts::upsert(&tx, &row)?;
-            receipts::delete_expired(&tx, Self::ttl_cutoff_ms(now_ms) as i64)?;
+            receipts::delete_expired(&tx, Self::ttl_cutoff_ms(now_ms))?;
             receipts::prune_oldest_over(&tx, max_entries)?;
             tx.commit()?;
             Ok(Admit::New)
@@ -302,7 +302,7 @@ impl PendingCommandStore {
 
     fn row_is_fresh(row: &receipts::ReceiptRow) -> bool {
         let now_ms = unix_millis();
-        row.accepted_at_ms >= Self::ttl_cutoff_ms(now_ms) as i64 && row.accepted_at_ms <= now_ms as i64
+        row.accepted_at_ms >= Self::ttl_cutoff_ms(now_ms) && row.accepted_at_ms <= now_ms as i64
     }
 
     /// 转发失败回滚预留。
@@ -419,8 +419,8 @@ impl PendingCommandStore {
             .db
             .write_blocking(move |conn| -> Result<Vec<receipts::ReceiptRow>, qaqh_session::db::DbError> {
                 let tx = conn.transaction()?;
-                receipts::delete_expired(&tx, cutoff as i64)?;
-                let rows = receipts::list_unsettled(&tx, cutoff as i64)?;
+                receipts::delete_expired(&tx, cutoff)?;
+                let rows = receipts::list_unsettled(&tx, cutoff)?;
                 tx.commit()?;
                 Ok(rows)
             })

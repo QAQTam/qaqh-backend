@@ -1,8 +1,8 @@
 //! Root-session quota ledger.
 //!
 //! v4.4 P1-3(MUST 铁闸 2):状态权威是 `qaqh.db` 的 `quota_reservations`
-//! 表。旧的「`quota/<root>/ledger.jsonl` 全量 replay + 无超时 `file.lock()`
-//! + 逐条 `sync_all()`」(L-02)整体删除:预算判定与预留行写入落在同一个
+//! 表。旧的「`quota/<root>/ledger.jsonl` 全量 replay、无超时 `file.lock()`
+//! 与逐条 `sync_all()`」(L-02)整体删除:预算判定与预留行写入落在同一个
 //! SQLite 写事务里(串行写执行器 = 互斥),durable-before-ack 语义由 WAL +
 //! synchronous=FULL 的提交保证。
 

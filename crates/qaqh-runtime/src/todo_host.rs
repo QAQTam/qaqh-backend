@@ -140,7 +140,6 @@ impl TodoHost for QaqhService {
                 Ok(())
             },
         )
-        .map(|()| ())
         .map_err(unwrap_workspace_error)
     }
 }
