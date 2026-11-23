@@ -370,10 +370,10 @@ impl QaqhService {
     pub fn diagnostics_memory_snapshot(
         &self,
         after_sequence: Option<u64>,
-    ) -> Result<Value, String> {
+    ) -> Result<qaqh_memwatch::MemorySnapshot, String> {
         self.refresh_memory_components();
         let monitor = qaqh_memwatch::global();
-        serde_json::to_value(monitor.snapshot_since(after_sequence)).map_err(err)
+        Ok(monitor.snapshot_since(after_sequence))
     }
 
     /// 归档会话（标签 × 语义）：关闭 registry 实例 + meta `archived=true`。
@@ -1228,7 +1228,7 @@ pub(crate) mod params;
 pub(crate) mod plan;
 pub(crate) mod stats;
 
-use self::common::{command_id, err, release_freed_heap_memory};
+use self::common::{command_id, release_freed_heap_memory};
 
 #[cfg(test)]
 mod tool_mode_tests {

@@ -12,10 +12,16 @@ use crate::service::stats::load_config;
 pub(crate) fn handle(service: &QaqhService, command: SystemCommand) -> QaqhResult<Value> {
     match command {
         SystemCommand::DaemonVersion(_) => Ok(json!(env!("QAQH_BUILD_VERSION"))),
-        SystemCommand::DiagnosticsMemorySnapshot(args) => service
-            .diagnostics_memory_snapshot(args.after_sequence)
-            .map_err(QaqhError::message),
-        SystemCommand::ConfigLoad(_) => load_config().map_err(QaqhError::message),
+        SystemCommand::DiagnosticsMemorySnapshot(args) => QaqhError::to_value(
+            "memory snapshot",
+            service
+                .diagnostics_memory_snapshot(args.after_sequence)
+                .map_err(QaqhError::message)?,
+        ),
+        SystemCommand::ConfigLoad(_) => QaqhError::to_value(
+            "config",
+            load_config().map_err(QaqhError::message)?,
+        ),
         SystemCommand::SandboxPreflightStart(args) => {
             let report: crate::ringing::service_methods::SandboxPreflightReport =
                 qaqh_sandbox::preflight::start(args.force.unwrap_or(false)).into();
@@ -37,7 +43,7 @@ pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) ->
                     QaqhError::invalid(format!("invalid config.save payload: {error}"))
                 })?;
             service.save_config(patch)?;
-            load_config().map_err(QaqhError::message)
+            QaqhError::to_value("config", load_config().map_err(QaqhError::message)?)
         }
         RingingCommand::ConfigSetPermissionLevel { level } => {
             if !(1..=4).contains(level) {

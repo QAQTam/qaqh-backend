@@ -95,14 +95,6 @@ async fn spawn_failure_preserves_the_session_baseline() {
 /// 会话态派生；outcome 不再承载终答（终答经回传消息进父会话 mailbox）。
 #[test]
 fn list_agents_reports_residency_and_canonical_status() {
-    let root_dir = std::env::temp_dir().join(format!(
-        "qaqh-registry-list-state-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
     let root = test_owner_dir().allocate_session();
     let child = SessionId::new("0198f1a0-0000-7000-8000-000000000011");
     let child_path = AgentPath::parse_absolute("/root/review").expect("child path");

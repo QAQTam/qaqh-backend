@@ -55,9 +55,10 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             let activities = service.registry().map_err(QaqhError::message)?.activities();
             QaqhError::to_value("session activity", activities)
         }
-        SessionCommand::SessionGetActivity(args) => {
-            activity(&service.owners, &args.session_id).map_err(QaqhError::message)
-        }
+        SessionCommand::SessionGetActivity(args) => QaqhError::to_value(
+            "session tool activity",
+            activity(&service.owners, &args.session_id).map_err(QaqhError::message)?,
+        ),
         SessionCommand::SessionDashboard(args) => {
             // B08 权威 DTO:typed 结构直出,序列化即 wire 形状。
             dashboard(&service.owners, &args.session_id)

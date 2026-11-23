@@ -1,6 +1,6 @@
 //! Typed account RPC contracts. All methods require administrator scope.
 
-use super::{READ_ADMIN, TypedMethodInfo, WRITE_ADMIN, validate_params, validate_result};
+use super::{READ_ADMIN, TypedMethodInfo, WRITE_ADMIN, validate_params};
 use crate::QaqhService;
 pub use qaqh_dsaccount::service::*;
 pub use qaqh_siwc::service::*;
@@ -72,7 +72,6 @@ macro_rules! method {
             result_type: $result_name,
             info: $info,
             validate_params: validate_params::<$params>,
-            validate_result: validate_result::<$result>,
         }
     };
 }
@@ -548,83 +547,52 @@ mod tests {
 
     #[test]
     fn result_fixtures_cover_every_account_method() {
+        // P1-4：结果形状由具体 DTO 直接 round-trip 断言——descriptor 的
+        // `validate_result` 运行时往返已物理删除，这里的类型清单即唯一形状权威。
+        fn check<T: DeserializeOwned>(seen: &mut usize, method: &str, value: Value) {
+            *seen += 1;
+            serde_json::from_value::<T>(value)
+                .unwrap_or_else(|error| panic!("{method}: {error}"));
+            assert!(
+                serde_json::from_value::<T>(json!(42)).is_err(),
+                "{method} 的 DTO 不得接受 number 结果"
+            );
+        }
         let siwc_status = json!({"status": "disconnected", "sharing": false, "profiles": 0,
             "usageUrl": "https://example.invalid/usage", "apiBase": "https://example.invalid/v1"});
         let ds_flow = json!({"attempt_id": null, "state": "idle", "authorize_url": null,
             "expires_at_ms": 0, "error": null});
-        let fixtures = vec![
-            ("siwc.status", siwc_status.clone()),
-            (
-                "siwc.profiles",
-                json!({"active": null, "profiles": [], "pending": []}),
-            ),
-            (
-                "siwc.models",
-                json!([{"slug": "model", "displayName": "Model"}]),
-            ),
-            (
-                "siwc.sign_in.start",
-                json!({"flowId": "flow", "authorizeUrl": "https://example.invalid/auth",
+        let mut seen = 0usize;
+        check::<SiwcStatusResult>(&mut seen, "siwc.status", siwc_status.clone());
+        check::<SiwcProfilesResult>(&mut seen, "siwc.profiles", json!({"active": null, "profiles": [], "pending": []}));
+        check::<Vec<SiwcModel>>(&mut seen, "siwc.models", json!([{"slug": "model", "displayName": "Model"}]));
+        check::<SiwcSignInStartResult>(&mut seen, "siwc.sign_in.start", json!({"flowId": "flow", "authorizeUrl": "https://example.invalid/auth",
                 "redirectUri": "http://127.0.0.1:1234/callback", "expiresAtMs": 123,
-                "usageUrl": "https://example.invalid/usage"}),
-            ),
-            (
-                "siwc.sign_in.status",
-                json!({"flowId": "flow", "state": "pending", "expiresAtMs": 123}),
-            ),
-            ("siwc.sign_in.cancel", Value::Null),
-            ("siwc.profile.select", siwc_status),
-            (
-                "siwc.sign_out",
-                json!({"profileId": "profile", "revoked": false, "hadRefreshToken": true,
-                "usageUrl": "https://example.invalid/usage"}),
-            ),
-            (
-                "dsaccount.status",
-                json!({"signedIn": false, "account": null, "storageError": null,
+                "usageUrl": "https://example.invalid/usage"}));
+        check::<SiwcSignInStatusResult>(&mut seen, "siwc.sign_in.status", json!({"flowId": "flow", "state": "pending", "expiresAtMs": 123}));
+        check::<()>(&mut seen, "siwc.sign_in.cancel", Value::Null);
+        check::<SiwcStatusResult>(&mut seen, "siwc.profile.select", siwc_status.clone());
+        check::<SiwcSignOutResult>(&mut seen, "siwc.sign_out", json!({"profileId": "profile", "revoked": false, "hadRefreshToken": true,
+                "usageUrl": "https://example.invalid/usage"}));
+        check::<DsAccountStatusResult>(&mut seen, "dsaccount.status", json!({"signedIn": false, "account": null, "storageError": null,
                 "inferenceOrigin": "https://example.invalid", "usageUrl": "https://example.invalid/usage",
                 "topUpUrl": "https://example.invalid/topup", "flow": {"attemptId": null,
                     "state": "idle", "authorizeUrl": null, "expiresAtMs": 0, "error": null},
-                "revoke": {"state": "idle", "attempts": 0, "message": null}}),
-            ),
-            (
-                "dsaccount.balance",
-                json!({"recharge": [{"currency": "CNY", "balance": "0E-16",
+                "revoke": {"state": "idle", "attempts": 0, "message": null}}));
+        check::<DsAccountBalanceResult>(&mut seen, "dsaccount.balance", json!({"recharge": [{"currency": "CNY", "balance": "0E-16",
                 "tokenEstimation": null}], "bonus": [], "totalCost": [{"currency": "CNY", "amount": "1.23"}],
-                "hasUsableBalance": false}),
-            ),
-            (
-                "dsaccount.bonuses",
-                json!([{"orderId": "order", "campaign": "campaign", "amount": "10",
-                "currency": "CNY", "grantedAt": "2026-01-01", "expiresAt": "2027-01-01", "message": "bonus"}]),
-            ),
-            (
-                "dsaccount.sign_in.start",
-                json!({"attemptId": "attempt", "authorizeUrl": "https://example.invalid/auth",
-                "redirectUri": "http://127.0.0.1:1234/callback", "expiresIn": 120}),
-            ),
-            ("dsaccount.sign_in.status", ds_flow),
-            ("dsaccount.sign_in.cancel", Value::Null),
-            ("dsaccount.sign_out", Value::Null),
-            ("dsaccount.bonus.ack", Value::Null),
-            (
-                "dsaccount.models",
-                json!([{"id": "model", "effort": {"supported_levels": ["high"]}}]),
-            ),
-            (
-                "dsaccount.verify",
-                json!({"valid": false, "reason": "synthetic failure", "cleared": false}),
-            ),
-        ];
-        assert_eq!(fixtures.len(), TYPED_METHODS.len());
-        for (method, value) in fixtures {
-            (descriptor(method).validate_result)(&value)
-                .unwrap_or_else(|error| panic!("{method}: {error}"));
-            assert!(
-                (descriptor(method).validate_result)(&json!(42)).is_err(),
-                "{method}"
-            );
-        }
+                "hasUsableBalance": false}));
+        check::<Vec<DsAccountBonus>>(&mut seen, "dsaccount.bonuses", json!([{"orderId": "order", "campaign": "campaign", "amount": "10",
+                "currency": "CNY", "grantedAt": "2026-01-01", "expiresAt": "2027-01-01", "message": "bonus"}]));
+        check::<DsAccountSignInStartResult>(&mut seen, "dsaccount.sign_in.start", json!({"attemptId": "attempt", "authorizeUrl": "https://example.invalid/auth",
+                "redirectUri": "http://127.0.0.1:1234/callback", "expiresIn": 120}));
+        check::<DsAccountSignInStatusResult>(&mut seen, "dsaccount.sign_in.status", ds_flow.clone());
+        check::<()>(&mut seen, "dsaccount.sign_in.cancel", Value::Null);
+        check::<()>(&mut seen, "dsaccount.sign_out", Value::Null);
+        check::<()>(&mut seen, "dsaccount.bonus.ack", Value::Null);
+        check::<Vec<DsAccountModel>>(&mut seen, "dsaccount.models", json!([{"id": "model", "effort": {"supported_levels": ["high"]}}]));
+        check::<DsAccountVerifyResult>(&mut seen, "dsaccount.verify", json!({"valid": false, "reason": "synthetic failure", "cleared": false}));
+        assert_eq!(seen, TYPED_METHODS.len());
     }
 
     #[test]
@@ -635,7 +603,7 @@ mod tests {
             json!({"flowId": "f", "state": "pending"}),
             json!({"flowId": "f", "state": "failed", "error": {"message": "failed"}}),
         ] {
-            assert!((descriptor("siwc.sign_in.status").validate_result)(&value).is_err());
+            assert!(serde_json::from_value::<SiwcSignInStatusResult>(value).is_err());
         }
         for state in [
             "idle",
@@ -645,33 +613,27 @@ mod tests {
             "failed",
             "cancelled",
         ] {
-            (descriptor("dsaccount.sign_in.status").validate_result)(&json!({"attempt_id": null,
+            serde_json::from_value::<DsAccountSignInStatusResult>(json!({"attempt_id": null,
                 "state": state, "authorize_url": null, "expires_at_ms": 0, "error": null}))
             .unwrap();
         }
-        assert!(
-            (descriptor("dsaccount.models").validate_result)(&json!([{"effort": {}}])).is_err()
-        );
+        assert!(serde_json::from_value::<Vec<DsAccountModel>>(json!([{"effort": {}}])).is_err());
     }
 
     #[test]
     fn present_nullable_fields_are_not_optional_keys() {
-        assert!(
-            (descriptor("siwc.profiles").validate_result)(&json!({"profiles": [], "pending": []}))
-                .is_err()
-        );
-        assert!(
-            (descriptor("dsaccount.verify").validate_result)(
-                &json!({"valid": true, "cleared": false})
-            )
-            .is_err()
-        );
-        assert!(
-            (descriptor("dsaccount.sign_in.status").validate_result)(
-                &json!({"state": "idle", "expires_at_ms": 0})
-            )
-            .is_err()
-        );
+        assert!(serde_json::from_value::<SiwcProfilesResult>(
+            json!({"profiles": [], "pending": []})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<DsAccountVerifyResult>(
+            json!({"valid": true, "cleared": false})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<DsAccountSignInStatusResult>(
+            json!({"state": "idle", "expires_at_ms": 0})
+        )
+        .is_err());
     }
 
     #[test]
