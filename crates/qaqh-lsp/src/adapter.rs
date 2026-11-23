@@ -4,7 +4,8 @@
 //!   （Unix `ProcessGroup::leader()` / Windows `JobObject`；env 注入 +
 //!   `cwd` 透传——path-sensitive server 用 cwd 钉住工作区）；
 //! - [`spawn_server`]：spawn 后拆出 stdin/stdout（stderr 默认 null，mcp §5.5
-//!   同款）+ 返回 [`SpawnedPipes`]（pid 由连接层登记 pgid，组杀兜底）；
+//!   同款）+ 返回 [`SpawnedPipes`]（**pid 交给本连接**做组杀兜底；v4.4 `L-07`
+//!   起不再有按 server 名键控的全局登记表）；
 //! - [`resolve_server_secrets`]：`${secret:name}` 连接时解析（mcp M1-3 同款，
 //!   secret 段复用 `[secrets.mcp]`，结果只进本次子进程 env，不回存）。
 //!
@@ -15,7 +16,6 @@
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
-use std::sync::{Mutex as StdMutex, OnceLock};
 
 use process_wrap::tokio::CommandWrap;
 use qaqh_config::config::{LspServerConfig, interpolate_secret_placeholders};
@@ -27,30 +27,6 @@ use process_wrap::tokio::JobObject;
 use process_wrap::tokio::ProcessGroup;
 
 use crate::error::{LspError, LspErrorKind};
-
-/// spawn 后的 pgid 登记表（server 名 → 直接子进程 pid；`ProcessGroup::leader`
-/// 使其即为进程组长 id）。连接层在 close/crash 后取走并做组杀兜底清扫——
-/// mcp adapter.rs 头注的 rmcp graceful 漏杀缺口同款。
-fn spawn_pid_slot() -> &'static StdMutex<BTreeMap<String, u32>> {
-    static SPAWN_PIDS: OnceLock<StdMutex<BTreeMap<String, u32>>> = OnceLock::new();
-    SPAWN_PIDS.get_or_init(|| StdMutex::new(BTreeMap::new()))
-}
-
-/// 登记 spawn 的直接子进程 pid（即 pgid）。
-pub(crate) fn record_spawn_pid(server: &str, pid: u32) {
-    spawn_pid_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(server.to_owned(), pid);
-}
-
-/// 取走登记的 pgid（清扫入口；None = 尚无登记或已被取走）。
-pub(crate) fn take_spawn_pid(server: &str) -> Option<u32> {
-    spawn_pid_slot()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(server)
-}
 
 /// stdio server → 进程组隔离的 [`CommandWrap`]（E-1：必须独立进程组）。
 ///
@@ -77,7 +53,12 @@ pub(crate) fn build_stdio_command(cfg: &LspServerConfig, root: &str) -> CommandW
 /// 调用方须在 spawn 前把 stdin/stdout 设为 piped、stderr 设为 null
 /// （见 [`build_stdio_command`] 的配套用法：tokio Command 默认 inherit，
 /// mainloop 需要 owned 管道）。返回 child 句柄 + pid——句柄由 connection
-/// 持有（drop 即 kill 链，mcp RAII 同款），pid 登记供兜底组杀。
+/// 持有（drop 即 kill 链，mcp RAII 同款）。
+///
+/// `pid` 是**本代** spawn 的进程组 id（Unix `ProcessGroup::leader` 使它即为
+/// 组长 id），只能交给发起这次 spawn 的那条 [`crate::connection::ServerConnection`]
+/// 持有（`L-07`）。mcp 侧仍需全局表是因为 factory 输出拿不到 pid；lsp 不需要，
+/// 表本身就是跨 root 误杀活进程组的病灶。
 pub(crate) struct SpawnedPipes {
     pub child: Box<dyn process_wrap::tokio::ChildWrapper>,
     pub pid: u32,

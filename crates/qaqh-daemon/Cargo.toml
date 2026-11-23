@@ -13,6 +13,10 @@ qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
 qaqh-mcp = { path = "../qaqh-mcp" }
+# L-08：daemon 的三条退出路径必须显式收尾 LSP 连接（进程 exit 不跑 Drop，
+# static 槽里的 manager 永不 shutdown_all ⇒ Unix 上 rust-analyzer 这类独立
+# 进程组的子进程成孤儿）。与 qaqh-mcp 同律：直接依赖 + 直接调用。
+qaqh-lsp = { path = "../qaqh-lsp" }
 qaqh-marketplace = { path = "../qaqh-marketplace" }
 qaqh-runtime = { path = "../qaqh-runtime" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }

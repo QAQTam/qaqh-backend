@@ -2762,6 +2762,7 @@ dependencies = [
  "qaqh-config",
  "qaqh-gitx",
  "qaqh-goal",
+ "qaqh-lsp",
  "qaqh-marketplace",
  "qaqh-mcp",
  "qaqh-process-tools",
