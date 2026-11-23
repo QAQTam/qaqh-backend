@@ -1,276 +1,27 @@
-//! Tool runtime state and ToolManager lifecycle.
+//! ToolManager lifecycle + process-manager access.
 //!
-//! Knife-1 step 2: per-actor state moved from process-wide `static`s into
-//! **thread-local** slots. Each in-process actor runs its Loop on its own daemon
-//! thread and tool execution is synchronous on that actor thread, so
-//! [`RUNTIME_CTX`], [`ACTOR_TOOL_MANAGER`], the sandbox flag and
-//! the tool-result fold policy live per-thread and give concurrent actors real
-//! isolation without `ACTOR_SERIAL`. 工具运行的显式上下文经 `ToolCallContext`
-//! 显式传递，不再落成线程局部视图。 The process-level [`TOOL_MANAGER`] stays as
-//! the stable fallback for non-actor threads (daemon `skills.list_tools`,
-//! CLI).
+//! P0-2 终局形态：本模块**零线程局部状态、零 ambient 视图**。旧的
+//! `RUNTIME_CTX` / `ACTOR_TOOL_MANAGER` / `ToolExecutionScope::install()`
+//! （每次工具调用人工维护 5 个 TLS 槽位的兼容视图）与 in-process actor
+//! 残留（`install_actor_tool_manager`，生产调用者为零）一并退役——生产执行
+//! 链是 `WorkspaceToolPort` 持有会话私有 `ToolManager` 并显式构造
+//! `ToolCallContext`（见 `execution::execute_authorized_with_context`）。
+//! 本模块只剩进程级快照面（daemon `skills.list_tools` 等基础设施查询用的
+//! `TOOL_MANAGER`）与装配入口 [`init_tools`]。
+//!
+//! serve/CLI 的显式入口参数类型 [`ToolCtx`] 留守于此（它本身不是线程态——
+//! 是调用方逐调用组装的参数；`sandbox` 字段 P0-2 起显式携带，不再读线程态）。
 
 use qaqh_types::ToolDef;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
-
-use crate::tool_api::context::ToolCallContext;
-
-/// Unified runtime security context used for session binding and admission.
-#[derive(Clone)]
-pub struct RuntimeContext {
-    pub active_session: String,
-    pub permission_level: u8,
-}
-
-thread_local! {
-    static RUNTIME_CTX: std::cell::RefCell<Option<RuntimeContext>> = const { std::cell::RefCell::new(None) };
-}
+use std::sync::{Mutex, OnceLock};
 
 static TOOL_MANAGER: OnceLock<Mutex<crate::ToolManager>> = OnceLock::new();
-
-// Optional in-process actor manager, **per actor thread**.
-//
-// When installed it shadows the process manager for every `with_manager`
-// caller on that thread — including tool threads spawned by that actor's turn
-// while they resolve tools on the actor thread. Each actor installs its own
-// before its Loop and clears on exit, so concurrent actors do not share a
-// tool allowlist or mutate each other's stats.
-thread_local! {
-    static ACTOR_TOOL_MANAGER: std::cell::RefCell<Option<Arc<Mutex<crate::ToolManager>>>> = const { std::cell::RefCell::new(None) };
-}
-
-pub fn set_context(session: &str, permission_level: u8) {
-    crate::set_current_session(session);
-    RUNTIME_CTX.with(|ctx| {
-        *ctx.borrow_mut() = Some(RuntimeContext {
-            active_session: session.to_string(),
-            permission_level,
-        });
-    });
-}
-
-pub fn clear_context() {
-    RUNTIME_CTX.with(|ctx| *ctx.borrow_mut() = None);
-}
-
-pub fn context() -> Option<RuntimeContext> {
-    RUNTIME_CTX.with(|ctx| ctx.borrow().clone())
-}
-
-/// Worker scope carrying one explicit tool context plus the non-SDK runtime
-/// state that still lives in thread-local storage (ToolManager and fold
-/// policy).
-///
-/// The explicit context remains authoritative for
-/// workspace/session/mode/sandbox/cancellation; manager and policy are
-/// captured on the actor thread and restored on the worker.
-#[derive(Clone)]
-pub struct ToolExecutionScope {
-    context: ToolCallContext,
-    manager: Option<Arc<Mutex<crate::ToolManager>>>,
-    policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
-}
-
-impl ToolExecutionScope {
-    /// Capture the actor-thread manager/policy and bind them to an explicit
-    /// tool context.
-    pub fn capture(context: ToolCallContext) -> Self {
-        Self {
-            context,
-            manager: ACTOR_TOOL_MANAGER.with(|slot| slot.borrow().clone()),
-            policy: crate::tool_side_fold::policy(),
-        }
-    }
-
-    /// Bind an explicit session-owned `ToolManager` and `ToolCallContext`
-    /// without reading actor thread-locals.
-    pub fn with_manager(context: ToolCallContext, manager: Arc<Mutex<crate::ToolManager>>) -> Self {
-        Self {
-            context,
-            manager: Some(manager),
-            policy: crate::tool_side_fold::policy(),
-        }
-    }
-
-    /// Explicit context bound to this worker scope.
-    pub fn context(&self) -> &ToolCallContext {
-        &self.context
-    }
-
-    /// Install the manager, policy and execution context on the current thread.
-    ///
-    /// 显式上下文同时同步本线程工作区与 ambient 视图，Drop 时完整恢复。
-    pub fn install(&self) -> ToolExecutionScopeGuard {
-        let previous_manager = ACTOR_TOOL_MANAGER
-            .with(|slot| std::mem::replace(&mut *slot.borrow_mut(), self.manager.clone()));
-        let previous_policy = crate::tool_side_fold::policy();
-        crate::tool_side_fold::set_thread_policy(self.policy.clone());
-        let workspace = (!self.context.workspace_root.as_os_str().is_empty())
-            .then(|| self.context.workspace_root.to_string_lossy().into_owned());
-        let previous_execution =
-            qaqh_permission::replace_execution_context(Some(qaqh_permission::ExecutionContext {
-                session_id: Some(self.context.session_id.clone()),
-                workspace,
-                cancellation: self.context.cancellation.shared_flag(),
-            }));
-        let previous_runtime = RUNTIME_CTX.with(|slot| {
-            std::mem::replace(
-                &mut *slot.borrow_mut(),
-                Some(RuntimeContext {
-                    active_session: self.context.session_id.clone(),
-                    permission_level: self.context.permission_level as u8,
-                }),
-            )
-        });
-        let previous_sandbox = crate::authorization::is_subagent_sandbox();
-        crate::authorization::set_subagent_sandbox(matches!(
-            self.context.sandbox,
-            crate::tool_api::SandboxMode::Subagent
-        ));
-        ToolExecutionScopeGuard {
-            previous_manager,
-            previous_policy,
-            previous_execution,
-            previous_runtime,
-            previous_sandbox,
-        }
-    }
-}
-
-/// Restores manager/policy/context state captured by
-/// [`ToolExecutionScope::install`].
-pub struct ToolExecutionScopeGuard {
-    previous_manager: Option<Arc<Mutex<crate::ToolManager>>>,
-    previous_policy: Arc<dyn crate::tool_side_fold::ToolResultFoldPolicy>,
-    previous_execution: Option<qaqh_permission::ExecutionContext>,
-    previous_runtime: Option<RuntimeContext>,
-    previous_sandbox: bool,
-}
-
-impl Drop for ToolExecutionScopeGuard {
-    fn drop(&mut self) {
-        ACTOR_TOOL_MANAGER.with(|slot| {
-            *slot.borrow_mut() = self.previous_manager.take();
-        });
-        crate::tool_side_fold::set_thread_policy(self.previous_policy.clone());
-        qaqh_permission::replace_execution_context(self.previous_execution.take());
-        RUNTIME_CTX.with(|slot| {
-            *slot.borrow_mut() = self.previous_runtime.take();
-        });
-        crate::authorization::set_subagent_sandbox(self.previous_sandbox);
-    }
-}
-
-/// Explicit tool-execution context (PR-3-2 / D5-G2): the caller (agent tool
-/// dispatch, CLI) assembles one per execution instead of
-/// mutating process/thread state first. Threaded through the execute path;
-/// the workspace installs it for the duration of the call and restores the
-/// previous ambient state on drop.
-#[derive(Clone, Debug)]
-pub struct ToolCtx {
-    pub session_id: String,
-    pub permission_level: u8,
-    /// Workspace root for this execution. `None` = keep the current process
-    /// workspace (the in-process agent path).
-    pub workspace_root: Option<String>,
-}
-
-impl ToolCtx {
-    /// Context for an already-admitted caller (CLI/tests): full permission,
-    /// current process workspace.
-    pub fn admitted(session_id: impl Into<String>) -> Self {
-        Self {
-            session_id: session_id.into(),
-            permission_level: 3,
-            workspace_root: None,
-        }
-    }
-}
-
-/// RAII guard restoring the thread's previous ambient context.
-pub struct ToolCtxGuard {
-    previous: Option<RuntimeContext>,
-}
-
-impl Drop for ToolCtxGuard {
-    fn drop(&mut self) {
-        RUNTIME_CTX.with(|ctx| *ctx.borrow_mut() = self.previous.take());
-    }
-}
-
-/// Install `ctx` as the ambient runtime context for this thread until the
-/// returned guard drops. The execute path calls this so tool handlers can
-/// keep reading ambient state while the *caller* stays explicit.
-pub fn install_tool_ctx(ctx: &ToolCtx) -> ToolCtxGuard {
-    let previous = RUNTIME_CTX.with(|slot| {
-        let previous = slot.borrow().clone();
-        *slot.borrow_mut() = Some(RuntimeContext {
-            active_session: ctx.session_id.clone(),
-            permission_level: ctx.permission_level,
-        });
-        previous
-    });
-    ToolCtxGuard { previous }
-}
-
-/// 运行时重设工具白名单（工具模式 Standard/Minimal/Custom 的入口）。
-/// 空列表 = 全量（标准模式）；未知名自动剔除并 warn（复用 apply_init 语义）。
-pub fn set_allowed_tools(tools: Vec<String>) {
-    with_manager(|manager| manager.set_allowed(tools));
-}
-
-/// Initialize the process-global tool manager.
-pub fn init_tools(
-    session_id: &str,
-    extra_registrars: &[crate::registration::ToolRegistrar],
-    allowed_tools: Vec<String>,
-) {
-    let mut manager = crate::registration::build_tool_manager(extra_registrars);
-    // `session_id` 只用于日志：装配不再写进程级 CURRENT_SESSION。
-    let _ = session_id;
-    manager.apply_init(allowed_tools);
-    let _ = TOOL_MANAGER.set(Mutex::new(manager));
-    crate::file_cache::clear();
-    crate::file_state::clear();
-    log::info!("qaqh: tool manager inited ({} tools)", all_tools().len());
-}
-
-/// Install a private manager for one in-process actor (per-actor thread-local).
-///
-/// Unlike [`init_tools`], this does not mutate the daemon/worker process
-/// manager. The caller is responsible for clearing it with
-/// [`clear_actor_tool_manager`] when the actor exits. Because it is
-/// thread-local, concurrent actors each get their own manager.
-pub fn install_actor_tool_manager(manager: crate::ToolManager) {
-    ACTOR_TOOL_MANAGER.with(|slot| {
-        *slot.borrow_mut() = Some(Arc::new(Mutex::new(manager)));
-    });
-    crate::file_cache::clear();
-    crate::file_state::clear();
-    log::info!("qaqh: in-process actor tool manager installed");
-}
-
-/// Remove the in-process actor manager, falling back to the process manager.
-/// Call on the same actor thread as [`install_actor_tool_manager`].
-pub fn clear_actor_tool_manager() {
-    ACTOR_TOOL_MANAGER.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-    crate::file_cache::clear();
-    crate::file_state::clear();
-    log::info!("qaqh: in-process actor tool manager cleared");
-}
 
 pub(crate) fn with_manager<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut crate::ToolManager) -> R,
 {
-    let actor_mgr = ACTOR_TOOL_MANAGER.with(|slot| slot.borrow().clone());
-    if let Some(actor_mgr) = actor_mgr {
-        let mut guard = lock_manager(&actor_mgr);
-        return Some(f(&mut guard));
-    }
     let mgr = TOOL_MANAGER.get()?;
     let mut guard = lock_manager(mgr);
     Some(f(&mut guard))
@@ -288,19 +39,43 @@ fn lock_manager(
     }
 }
 
+/// 进程快照 manager 的裸访问（serve/CLI 显式入口用；P0-2 后这是 with_manager
+/// 的唯一后端）。未初始化返回 `None`。
+pub fn process_manager() -> Option<&'static Mutex<crate::ToolManager>> {
+    TOOL_MANAGER.get()
+}
+
 #[cfg(test)]
 pub(crate) fn register_test_probe(probe: crate::probe::ProbeTool) {
     with_manager(|manager| manager.register_probe(probe));
 }
 
+/// 运行时重设工具白名单（工具模式 Standard/Minimal/Custom 的入口）。
+/// 空列表 = 全量（标准模式）；未知名自动剔除并 warn（复用 apply_init 语义）。
+pub fn set_allowed_tools(tools: Vec<String>) {
+    with_manager(|manager| manager.set_allowed(tools));
+}
+
+/// Initialize the process-global tool manager.
+pub fn init_tools(
+    session_id: &str,
+    extra_registrars: &[crate::registration::ToolRegistrar],
+    allowed_tools: Vec<String>,
+) {
+    let mut manager = crate::registration::build_tool_manager(extra_registrars);
+    // `session_id` 只用于日志：装配不写任何进程级/线程级会话状态。
+    let _ = session_id;
+    manager.apply_init(allowed_tools);
+    let _ = TOOL_MANAGER.set(Mutex::new(manager));
+    log::info!("qaqh: tool manager inited ({} tools)", all_tools().len());
+}
+
 /// Return the canonical workspace root used for authorization and execution.
+///
+/// P0-2：原形读线程态 `current_workspace()`；显式化后仅剩 serve/CLI 入口的
+/// 「进程工作目录」兜底语义——`workspace_root` 为空或 "." 时回落 cwd。
 pub(crate) fn active_workspace_root() -> PathBuf {
-    let workspace = crate::current_workspace();
-    let root = if workspace.is_empty() || workspace == "." {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    } else {
-        PathBuf::from(workspace)
-    };
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     crate::permission::resolve_target_path(root)
 }
 
@@ -308,13 +83,11 @@ pub fn all_tools() -> Vec<ToolDef> {
     with_manager(|manager| manager.filtered_defs()).unwrap_or_default()
 }
 
-/// MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义，thread-local 目标形态）。
+/// MCP 动态层全量重建（M1-5；设计 §5.3 refresh 语义）。
 ///
-/// 调用方：in-process actor（`install_actor_tool_manager` 的线程）与投影回归
-/// 测试。根会话模型面不走本函数——回合边界经
-/// `WorkspaceToolPort::apply_dynamic_projection` 直接重建会话私有 manager，
-/// 避免 thread-local 与 port 实例错位。必须在与 [`install_actor_tool_manager`]
-/// 相同的 actor 线程上调用（thread-local manager）。返回被拒绝的条目数。
+/// 调用方：投影回归测试与进程快照面。根会话模型面不走本函数——回合边界经
+/// `WorkspaceToolPort::apply_dynamic_projection` 直接重建会话私有 manager。
+/// 返回被拒绝的条目数。
 pub fn replace_dynamic_tools(batch: Vec<(String, crate::DynamicTool)>) -> usize {
     with_manager(|manager| {
         manager.clear_dynamic();
@@ -335,7 +108,7 @@ pub fn replace_dynamic_tools(batch: Vec<(String, crate::DynamicTool)>) -> usize 
 
 /// 按工具名调用作者声明的展示投影（09-18 展示契约 §3.4）。
 ///
-/// 未注册投影、或当前线程没有可用 manager 时返回 `None`；调用方必须完整
+/// 未注册投影、或进程快照 manager 未初始化时返回 `None`；调用方必须完整
 /// 回退旧字段（H16），不得自行解析工具输出。
 pub fn project_tool_display(
     name: &str,
@@ -375,10 +148,9 @@ pub fn lookup_category(name: &str) -> Option<crate::permission::ToolCategory> {
     with_manager(|manager| manager.category_of(name)).flatten()
 }
 
-/// Tool names from the **process** manager, ignoring any installed actor
-/// manager. Used by daemon-side snapshots (e.g. `skills.list_tools`) that must
-/// stay stable while an in-process subagent actor temporarily shadows the
-/// manager for its own tool execution.
+/// Tool names from the **process** manager. Used by daemon-side snapshots
+/// (e.g. `skills.list_tools`) that must stay stable while session ports run
+/// their own managers.
 pub fn process_all_tool_names() -> Vec<String> {
     let Some(manager) = TOOL_MANAGER.get() else {
         return Vec::new();
@@ -401,4 +173,30 @@ pub fn files_read() -> Vec<String> {
 
 pub fn files_written() -> Vec<String> {
     global_stats().files_written
+}
+
+/// serve/CLI 的显式工具执行入口参数（PR-3-2 / D5-G2）：调用方逐调用组装，
+/// 不改任何进程/线程状态。P0-2：`sandbox` 显式携带（原形读线程态
+/// `SUBAGENT_SANDBOX`——兼容视图已退役）。
+#[derive(Clone, Debug)]
+pub struct ToolCtx {
+    pub session_id: String,
+    pub permission_level: u8,
+    /// Workspace root for this execution. `None` = 进程 cwd（CLI 场景）。
+    pub workspace_root: Option<String>,
+    /// 生效沙箱模式。`None` = Main。
+    pub sandbox: Option<crate::tool_api::SandboxMode>,
+}
+
+impl ToolCtx {
+    /// Context for an already-admitted caller (CLI/tests): full permission,
+    /// current process workspace, Main sandbox.
+    pub fn admitted(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            permission_level: 3,
+            workspace_root: None,
+            sandbox: None,
+        }
+    }
 }

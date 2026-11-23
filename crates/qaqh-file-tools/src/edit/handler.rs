@@ -1,5 +1,6 @@
 //! handler — 三字段 str_replace 入口（`path` / `old_str` / `new_str`）。
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use schemars::JsonSchema;
@@ -11,8 +12,7 @@ use crate::edit::core::{
     ReplaceError, count_lf, render_ambiguous, render_not_found, render_success_snippet, run_replace,
 };
 use crate::file_mutate::{
-    ambient_tool_context, mutation_display, mutation_error, mutation_error_with_retryable,
-    resolve_mutation_path,
+    mutation_display, mutation_error, mutation_error_with_retryable, resolve_mutation_path,
 };
 use crate::file_shared::{
     Ending, LineEndings, atomic_write, ending_at, normalize_newlines, raw_offset_for_lf_offset,
@@ -93,7 +93,10 @@ impl ToolProjection for EditOutput {
     }
 }
 
-pub struct EditTool;
+pub struct EditTool {
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for EditTool {
     type Args = EditArgs;
@@ -258,7 +261,7 @@ impl TypedTool for EditTool {
             ));
         }
         // 台账 + 行号偏移链（delta=0 时 record_edit_with_shifts 内部跳过）。
-        crate::file_state::record_edit_with_shifts(&path, &write_content, &outcome.shifts);
+        self.files.record_edit_with_shifts(&path, &write_content, &outcome.shifts);
         crate::journal::record_change(
             &ctx.session_id,
             "",
@@ -333,24 +336,50 @@ fn splice_raw(raw: &str, new_lf: &str, matches: &[(usize, usize)], endings: Line
     out
 }
 
-pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_typed_tool(EditTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
+    mgr.register_typed_tool(EditTool {
+        files: files.clone(),
+    });
 }
 
 /// Compatibility entry retained for existing in-process callers/tests.
 ///
 /// Production registration uses [`EditTool`] directly. The pre-check keeps the
 /// legacy `PARSE_ERROR` shape for malformed calls while valid calls reuse the
-/// typed implementation.
+/// typed implementation.（P0-2：ambient 钩子语境删除——单调用用例自建显式 ctx +
+/// 独立 FileRuntime；跨调用链路用 [`exec_edit_with`]。）
 pub fn exec_edit(args: &Value) -> crate::ToolResult {
+    exec_edit_with(&crate::FileRuntime::default(), args)
+}
+
+/// 跨调用共享账本的变体（read → edit → read 链路用同一份 FileRuntime）。
+pub fn exec_edit_with(files: &crate::FileRuntime, args: &Value) -> crate::ToolResult {
     if let Some(result) = legacy_parse_error(args) {
         return result;
     }
-    let ctx = ambient_tool_context("edit-compat", Duration::from_secs(60));
-    TypedToolAdapter::new(EditTool)
-        .execute(ctx, args.clone())
-        .unwrap_or_else(|fatal| panic!("edit tool fatal: {}", fatal.message))
-        .to_tool_result()
+    let ctx = ToolCallContext {
+        call_id: "edit-compat".to_string(),
+        session_id: String::new(),
+        workspace_root: PathBuf::from("."),
+        permission_level: crate::permission::PermissionLevel::from_u8(0),
+        sandbox: crate::tool_api::SandboxMode::Main,
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(PathBuf::from(".")),
+        exec_default_shell: None,
+        exec_max_output_chars: None,
+        timeout: Duration::from_secs(60),
+        cancellation: crate::tool_api::CancellationToken::new(),
+        progress: None,
+        exec_progress: None,
+        exec_host: None,
+        official_web: None,
+        source: crate::tool_api::ToolCallSource::Model,
+    };
+    TypedToolAdapter::new(EditTool {
+        files: files.clone(),
+    })
+    .execute(ctx, args.clone())
+    .unwrap_or_else(|fatal| panic!("edit tool fatal: {}", fatal.message))
+    .to_tool_result()
 }
 
 fn legacy_parse_error(args: &Value) -> Option<crate::ToolResult> {

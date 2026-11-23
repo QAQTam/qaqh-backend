@@ -84,6 +84,7 @@ fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::Tool
         sandbox: crate::tool_api::SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
         exec_default_shell: exec_default_shell.map(str::to_string),
+        exec_max_output_chars: None,
         timeout: Duration::from_secs(30),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
@@ -1403,24 +1404,15 @@ fn backgrounded_status_refreshes_when_child_exits_while_grandchild_holds_pipe() 
 // ── exec 通用入口（方案 A 独占：shell 参数选壳）──
 
 fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
-    // 单测进程没有注入 workspace 上下文：current_workspace() 为空串会把
-    // 空 writable_root 一路传进沙箱 canonicalize（存量 4 失败的根因）。
     // 兜底到测试进程 cwd，等价"测试工作区=crate 目录"。
-    let workspace = {
-        let current = crate::current_workspace();
-        if current.trim().is_empty() {
-            std::env::current_dir()
-                .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            current
-        }
-    };
+    let workspace = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .to_string_lossy()
+        .into_owned();
     TestCall {
         ctx: crate::tool_api::ToolCallContext {
             call_id: "exec-test".into(),
-            session_id: crate::current_session().unwrap_or_default(),
+            session_id: String::new(),
             workspace_root: crate::permission::resolve_target_path(std::path::PathBuf::from(
                 &workspace,
             )),
@@ -1430,6 +1422,7 @@ fn make_ctx(name: &str, args: serde_json::Value) -> TestCall {
                 workspace,
             )),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: std::time::Duration::from_secs(30),
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,

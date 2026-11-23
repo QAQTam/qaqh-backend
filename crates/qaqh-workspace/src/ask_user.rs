@@ -369,10 +369,26 @@ pub fn register(mgr: &mut crate::ToolManager) {
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
 pub(super) fn exec_ask_user(args: &Value) -> crate::ToolResult {
-    use crate::file_mutate::ambient_tool_context;
-    use crate::tool_api::{ErasedTool, TypedToolAdapter};
+    use crate::tool_api::{ErasedTool, SandboxMode, ToolCallContext, ToolCallSource, TypedToolAdapter};
 
-    let ctx = ambient_tool_context("ask-compat", std::time::Duration::ZERO);
+    // P0-2：ambient 钩子语境删除——测试自建显式 ctx。
+    let ctx = ToolCallContext {
+        call_id: "ask-compat".to_string(),
+        session_id: String::new(),
+        workspace_root: std::path::PathBuf::from("."),
+        permission_level: crate::permission::PermissionLevel::from_u8(0),
+        sandbox: SandboxMode::Main,
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(std::path::PathBuf::from(".")),
+        exec_default_shell: None,
+        exec_max_output_chars: None,
+        timeout: std::time::Duration::ZERO,
+        cancellation: crate::tool_api::CancellationToken::new(),
+        progress: None,
+        exec_progress: None,
+        exec_host: None,
+        official_web: None,
+        source: ToolCallSource::Model,
+    };
     TypedToolAdapter::new(AskTool)
         .execute(ctx, args.clone())
         .unwrap_or_else(|fatal| panic!("ask tool fatal: {}", fatal.message))

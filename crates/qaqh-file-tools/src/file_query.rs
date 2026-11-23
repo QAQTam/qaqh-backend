@@ -118,7 +118,10 @@ struct ReadPart {
     body: String,
 }
 
-pub struct ReadTool;
+pub struct ReadTool {
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for ReadTool {
     type Args = ReadArgs;
@@ -160,7 +163,7 @@ impl TypedTool for ReadTool {
         let mut bodies = Vec::with_capacity(requests.len());
         let mut total_chars = 0usize;
         for request in requests {
-            let part = read_one(ctx, &request)?;
+            let part = read_one(ctx, &self.files, &request)?;
             total_chars += part.body.chars().count();
             if total_chars > 48_000 {
                 return Err(read_error(
@@ -181,7 +184,7 @@ impl TypedTool for ReadTool {
 }
 
 #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
-fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, ToolExecutionError> {
+fn read_one(ctx: &ToolCallContext, files: &crate::FileRuntime, request: &ReadRequest) -> Result<ReadPart, ToolExecutionError> {
     const MAX_LINES: usize = crate::file_shared::READ_MAX_LINES;
     const MAX_MODEL_CHARS: usize = crate::file_shared::READ_MAX_CHARS;
 
@@ -304,8 +307,8 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
     let mut offset: Option<i64> = None;
     if let (Some(s), Some(e)) = (start, end)
         && let (Some((s2, ds)), Some((e2, de))) = (
-            crate::file_state::correct_line(&path, s),
-            crate::file_state::correct_line(&path, e),
+            files.correct_line(&path, s),
+            files.correct_line(&path, e),
         )
         && (s2 != s || e2 != e)
         && ds == de
@@ -414,7 +417,7 @@ fn read_one(ctx: &ToolCallContext, request: &ReadRequest) -> Result<ReadPart, To
         metadata.original_lines = Some(vec![os, oe]);
         metadata.line_offset = Some(delta);
     }
-    crate::file_state::record_read(&metadata.path, &content, total_lines);
+    files.record_read(&metadata.path, &content, total_lines);
     Ok(ReadPart { metadata, body })
 }
 
@@ -509,27 +512,32 @@ fn read_error(
     ToolExecutionError::Recoverable(error)
 }
 
-pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_typed_tool(ReadTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
+    mgr.register_typed_tool(ReadTool {
+        files: files.clone(),
+    });
 }
 
 #[cfg(test)]
 pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
+    // 单次调用用例：独立 FileRuntime 即可（账本状态不跨调用）。
+    exec_read_with(&crate::FileRuntime::default(), args)
+}
+
+/// 跨调用共享账本的变体：行号修正/防漂移用例用一个 FileRuntime 串起
+/// read → record_edit → read 全链（P0-2：账本实例化，无进程级全局可依赖）。
+#[cfg(test)]
+pub(crate) fn exec_read_with(files: &crate::FileRuntime, args: &Value) -> crate::ToolResult {
     use crate::tool_api::ErasedTool;
-    let workspace = crate::current_workspace();
-    let workspace_root = if workspace.is_empty() {
-        PathBuf::from(".")
-    } else {
-        PathBuf::from(workspace)
-    };
     let ctx = ToolCallContext {
         call_id: "read-test".to_string(),
         session_id: "read-test-session".to_string(),
-        workspace_root: workspace_root.clone(),
+        workspace_root: PathBuf::from("."),
         permission_level: crate::permission::PermissionLevel::ReadOnly,
         sandbox: crate::tool_api::SandboxMode::Main,
-        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(PathBuf::from(".")),
         exec_default_shell: None,
+        exec_max_output_chars: None,
         timeout: Duration::from_secs(15),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
@@ -538,10 +546,12 @@ pub(crate) fn exec_read(args: &Value) -> crate::ToolResult {
         official_web: None,
         source: crate::tool_api::ToolCallSource::Model,
     };
-    crate::tool_api::TypedToolAdapter::new(ReadTool)
-        .execute(ctx, args.clone())
-        .expect("read must not return fatal")
-        .to_tool_result()
+    crate::tool_api::TypedToolAdapter::new(ReadTool {
+        files: files.clone(),
+    })
+    .execute(ctx, args.clone())
+    .expect("read must not return fatal")
+    .to_tool_result()
 }
 
 #[cfg(test)]
@@ -709,7 +719,7 @@ fn out_of_range_start_still_rejects() {
 #[test]
 fn read_registration_is_typed_and_schema_is_type_generated() {
     let mut manager = qaqh_workspace::ToolManager::new();
-    register(&mut manager);
+    register(&mut manager, &crate::FileRuntime::default());
     let registered = manager.builtin("read").expect("read registered");
     assert_eq!(
         registered.descriptor.name.as_str(),
@@ -796,22 +806,26 @@ fn ledger_corrects_stale_line_numbers_after_edit() {
     let p = dir.path().join("y.txt");
     std::fs::write(&p, "one\ntwo\nthree\n").unwrap();
     let path = p.to_string_lossy().to_string();
+    let files = crate::FileRuntime::default();
 
     // 基线 read（清空偏移链）
-    let r1 = exec_read(&serde_json::json!({ "path": path }));
+    let r1 = exec_read_with(&files, &serde_json::json!({ "path": path }));
     assert!(r1.is_success());
 
     // 账本 edit：在 L2 处插入两行（模拟 edit 的 record_edit_with_shifts）
     let new_content = "one\nINS1\nINS2\ntwo\nthree\n";
-    crate::file_state::record_edit_with_shifts(&path, new_content, &[(2, 2)]);
+    files.record_edit_with_shifts(&path, new_content, &[(2, 2)]);
     std::fs::write(&p, new_content).unwrap();
 
     // 模型仍用旧行号 L3（= 现在的 L5 three）盲定位 → 自动修正 + 透明回传
-    let r2 = exec_read(&serde_json::json!({
-        "path": path,
-        "start_line": 3,
-        "end_line": 3,
-    }));
+    let r2 = exec_read_with(
+        &files,
+        &serde_json::json!({
+            "path": path,
+            "start_line": 3,
+            "end_line": 3,
+        }),
+    );
     assert!(
         r2.is_success(),
         "stale line correction: {}",
@@ -855,19 +869,23 @@ fn write_clears_shift_chain() {
     let p = dir.path().join("w.txt");
     std::fs::write(&p, "one\ntwo\n").unwrap();
     let path = p.to_string_lossy().to_string();
+    let files = crate::FileRuntime::default();
 
-    let r1 = exec_read(&serde_json::json!({ "path": path }));
+    let r1 = exec_read_with(&files, &serde_json::json!({ "path": path }));
     assert!(r1.is_success());
-    crate::file_state::record_edit_with_shifts(&path, "one\ntwo\n", &[(1, 3)]);
+    files.record_edit_with_shifts(&path, "one\ntwo\n", &[(1, 3)]);
     // write 全覆盖：行号全失效 → 清链
-    crate::file_state::record_write(&path, "a\nb\nc\nd\n");
+    files.record_write(&path, "a\nb\nc\nd\n");
     std::fs::write(&p, "a\nb\nc\nd\n").unwrap();
 
-    let r2 = exec_read(&serde_json::json!({
-        "path": path,
-        "start_line": 3,
-        "end_line": 3,
-    }));
+    let r2 = exec_read_with(
+        &files,
+        &serde_json::json!({
+            "path": path,
+            "start_line": 3,
+            "end_line": 3,
+        }),
+    );
     assert!(r2.is_success());
     assert_eq!(r2.model_text(), "L3: c");
     let meta = &r2.data["files"][0];
@@ -880,16 +898,18 @@ fn write_clears_shift_chain() {
 #[test]
 fn end_to_end_edit_then_stale_read_is_corrected() {
     // 真实工具链路：read（基线）→ edit（落账本偏移）→ 旧行号 read（自动修正）。
+    // P0-2：read 与 edit 必须共享同一份 FileRuntime（账本实例化后的会话内共享）。
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("e2e.txt");
     std::fs::write(&p, "a\nb\nc\nd\ne\n").unwrap();
     let path = p.to_string_lossy().to_string();
+    let files = crate::FileRuntime::default();
 
-    let r1 = exec_read(&serde_json::json!({ "path": path }));
+    let r1 = exec_read_with(&files, &serde_json::json!({ "path": path }));
     assert!(r1.is_success());
 
     // 真实 edit 工具：L3 的 c 替换为 c+C1+C2（+2 偏移，等价于 c 后插入两行）
-    let e = crate::edit::exec_edit(&serde_json::json!({
+    let e = crate::edit::exec_edit_with(&files, &serde_json::json!({
         "path": path,
         "old_str": "c",
         "new_str": "c\nC1\nC2",
@@ -897,8 +917,10 @@ fn end_to_end_edit_then_stale_read_is_corrected() {
     assert!(e.is_success(), "edit: {}", e.model_text());
 
     // 模型仍用旧行号 L5（现在 = L7 e）→ 自动修正 + 透明回传
-    let r2 = exec_read(&serde_json::json!({
-        "path": path,
+    let r2 = exec_read_with(
+        &files,
+        &serde_json::json!({
+            "path": path,
         "start_line": 5,
         "end_line": 5,
     }));
@@ -913,14 +935,16 @@ fn end_to_end_edit_then_stale_read_is_corrected() {
 #[test]
 fn multi_line_edit_records_shifts_for_later_reads() {
     // 行号偏移入账本：多行替换后，旧行号的 read 自动修正（strict 全事务）。
+    // P0-2：read/edit/read 共享同一份 FileRuntime。
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("p.txt");
     std::fs::write(&p, "a\nb\nc\nd\n").unwrap();
     let path = p.to_string_lossy().to_string();
-    let r1 = exec_read(&serde_json::json!({ "path": path }));
+    let files = crate::FileRuntime::default();
+    let r1 = exec_read_with(&files, &serde_json::json!({ "path": path }));
     assert!(r1.is_success());
 
-    let e = crate::edit::exec_edit(&serde_json::json!({
+    let e = crate::edit::exec_edit_with(&files, &serde_json::json!({
         "path": path,
         "old_str": "b",
         "new_str": "B1\nB2",
@@ -928,7 +952,9 @@ fn multi_line_edit_records_shifts_for_later_reads() {
     assert!(e.is_success(), "edit: {}", e.model_text());
 
     // 旧 L4 d → 新 L5 d（仅成功 hunk 的偏移生效）
-    let r2 = exec_read(&serde_json::json!({
+    let r2 = exec_read_with(
+        &files,
+        &serde_json::json!({
         "path": path,
         "start_line": 4,
         "end_line": 4,

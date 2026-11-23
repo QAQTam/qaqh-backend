@@ -408,7 +408,10 @@ impl ToolProjection for CopyRangeOutput {
     }
 }
 
-pub struct CopyRangeTool;
+pub struct CopyRangeTool {
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for CopyRangeTool {
     type Args = CopyRangeArgs;
@@ -480,7 +483,7 @@ impl TypedTool for CopyRangeTool {
         // 键形态必须与 read/write 的账本键完全一致（lib 版本，不 canonicalize）。
         let ledger_key = resolve_mutation_path(ctx, &target_path);
         if let Ok(content) = std::fs::read_to_string(&tgt) {
-            crate::file_state::record_write(&ledger_key, &content);
+            self.files.record_write(&ledger_key, &content);
         }
 
         let copied_lines = result.copied.len();
@@ -529,8 +532,10 @@ impl TypedTool for CopyRangeTool {
     }
 }
 
-pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_typed_tool(CopyRangeTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
+    mgr.register_typed_tool(CopyRangeTool {
+        files: files.clone(),
+    });
 }
 
 /// Compatibility entry retained for existing in-process callers/tests.
@@ -538,7 +543,11 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
 /// Production registration uses [`CopyRangeTool`] directly; the pre-check keeps
 /// the legacy `MISSING_ARGUMENT` shape for malformed calls.
 #[cfg(test)]
-fn exec_copy_range(args: &Value) -> crate::ToolResult {
+fn exec_copy_range_with_ws(
+    files: &crate::FileRuntime,
+    workspace: &str,
+    args: &Value,
+) -> crate::ToolResult {
     use crate::tool_api::ErasedTool;
 
     let get = |key: &str| args.get(key).and_then(Value::as_str);
@@ -550,9 +559,12 @@ fn exec_copy_range(args: &Value) -> crate::ToolResult {
             "",
         );
     }
-    let ctx =
-        crate::file_mutate::ambient_tool_context("copy-range-compat", Duration::from_secs(60));
-    crate::tool_api::TypedToolAdapter::new(CopyRangeTool)
+    let ctx = crate::file_mutate::test_tool_context_in(
+        workspace,
+        "copy-range-compat",
+        Duration::from_secs(60),
+    );
+    crate::tool_api::TypedToolAdapter::new(CopyRangeTool { files: files.clone() })
         .execute(ctx, args.clone())
         .unwrap_or_else(|fatal| panic!("copy_range tool fatal: {}", fatal.message))
         .to_tool_result()
@@ -565,9 +577,6 @@ fn exec_copy_range(args: &Value) -> crate::ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 写 CURRENT_WORKSPACE 的测试必须串行（全局静态，并行测试会互相踩踏）。
-    static WS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn setup(files: &[(&str, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -583,6 +592,7 @@ mod tests {
     }
 
     fn run(
+        files: &crate::FileRuntime,
         dir: &std::path::Path,
         src: &str,
         start: &str,
@@ -591,7 +601,6 @@ mod tests {
         anchor: Option<&str>,
         mode: &str,
     ) -> Result<String, String> {
-        let _guard = WS_LOCK.lock().unwrap();
         let mut args = serde_json::json!({
             "source_path": src,
             "source_start": start,
@@ -604,9 +613,7 @@ mod tests {
         if let Some(a) = anchor {
             args["target_anchor"] = serde_json::json!(a);
         }
-        // 注入 workspace（避免依赖全局 CURRENT_WORKSPACE）
-        qaqh_permission::set_workspace(&dir.to_string_lossy().to_string());
-        let result = exec_copy_range(&args);
+        let result = exec_copy_range_with_ws(files, &dir.to_string_lossy(), &args);
         if result.is_success() {
             Ok(result.model_text().to_string())
         } else {
@@ -624,6 +631,7 @@ mod tests {
             ("dst.rs", "// header\n"),
         ]);
         let out = run(
+            &crate::FileRuntime::default(),
             &ws,
             "src.rs",
             "fn target() {",
@@ -648,6 +656,7 @@ mod tests {
             ("dst.rs", "a\nb\n"),
         ]);
         run(
+            &crate::FileRuntime::default(),
             &ws,
             "src.rs",
             "fn marker() {}",
@@ -670,6 +679,7 @@ mod tests {
             ("dst.rs", "head\nmid\ntail\n"),
         ]);
         run(
+            &crate::FileRuntime::default(),
             &ws,
             "src.rs",
             "line2",
@@ -689,6 +699,7 @@ mod tests {
     fn insert_before_anchor() {
         let (dir, ws) = setup(&[("src.rs", "X1\nX2\n"), ("dst.rs", "a\nb\nc\n")]);
         run(
+            &crate::FileRuntime::default(),
             &ws,
             "src.rs",
             "X1",
@@ -707,7 +718,7 @@ mod tests {
     #[test]
     fn prepend_to_file() {
         let (dir, ws) = setup(&[("src.rs", "HEADER\n"), ("dst.rs", "body\n")]);
-        run(&ws, "src.rs", "HEADER", None, "dst.rs", None, "prepend").unwrap();
+        run(&crate::FileRuntime::default(), &ws, "src.rs", "HEADER", None, "dst.rs", None, "prepend").unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dst.rs")).unwrap(),
             "HEADER\nbody\n"
@@ -717,7 +728,7 @@ mod tests {
     #[test]
     fn ambiguous_source_start_rejected_with_candidates() {
         let (_dir, ws) = setup(&[("src.rs", "dup\nx\ndup\ny\n"), ("dst.rs", "out\n")]);
-        let err = run(&ws, "src.rs", "dup", None, "dst.rs", None, "append").unwrap_err();
+        let err = run(&crate::FileRuntime::default(), &ws, "src.rs", "dup", None, "dst.rs", None, "append").unwrap_err();
         assert!(err.contains("source_start_ambiguous"), "got: {err}");
         assert!(err.contains("L1"), "candidates expected, got: {err}");
         assert!(err.contains("L3"), "candidates expected, got: {err}");
@@ -727,6 +738,7 @@ mod tests {
     fn end_anchor_missing_rejected() {
         let (_dir, ws) = setup(&[("src.rs", "start\nbody\n"), ("dst.rs", "out\n")]);
         let err = run(
+            &crate::FileRuntime::default(),
             &ws,
             "src.rs",
             "start",
@@ -743,6 +755,7 @@ mod tests {
     fn same_file_insert_inside_range_rejected() {
         let (_dir, ws) = setup(&[("f.rs", "a\nb\nc\nd\n")]);
         let err = run(
+            &crate::FileRuntime::default(),
             &ws,
             "f.rs",
             "b",
@@ -759,6 +772,7 @@ mod tests {
     fn same_file_insert_after_range_allowed() {
         let (dir, ws) = setup(&[("f.rs", "a\nb\nc\nd\n")]);
         run(
+            &crate::FileRuntime::default(),
             &ws,
             "f.rs",
             "b",
@@ -777,7 +791,7 @@ mod tests {
     #[test]
     fn crlf_target_uses_crlf_for_inserted_lines() {
         let (dir, ws) = setup(&[("src.rs", "s1\ns2\n"), ("dst.rs", "h1\r\nh2\r\n")]);
-        run(&ws, "src.rs", "s1", Some("s2"), "dst.rs", None, "append").unwrap();
+        run(&crate::FileRuntime::default(), &ws, "src.rs", "s1", Some("s2"), "dst.rs", None, "append").unwrap();
         assert_eq!(
             std::fs::read_to_string(dir.path().join("dst.rs")).unwrap(),
             "h1\r\nh2\r\ns1\r\ns2\r\n"
@@ -792,11 +806,12 @@ mod tests {
         let (dir, ws) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
         let raw_src = "src.rs";
         let raw_tgt = "dst.rs";
-        run(&ws, raw_src, "copied", None, raw_tgt, None, "append").unwrap();
+        let files = crate::FileRuntime::default();
+        run(&files, &ws, raw_src, "copied", None, raw_tgt, None, "append").unwrap();
 
-        // 键形态 = lib::resolve_workspace_path(CURRENT_WORKSPACE + 相对路径)，
+        // 键形态 = lib::resolve_workspace_path(workspace + 相对路径)，
         // 与 read（file_query）/write（file_mutate）记账键同源同形。
-        let expected_key = crate::resolve_workspace_path(raw_tgt);
+        let expected_key = qaqh_permission::resolve_workspace_path(&ws.to_string_lossy(), raw_tgt);
         assert!(
             std::path::Path::new(&expected_key).is_absolute(),
             "resolve_workspace_path must yield an absolute key, got {expected_key}"
@@ -809,13 +824,13 @@ mod tests {
         let expected_hash =
             crate::file_shared::content_hash(&crate::file_shared::normalize_newlines(&wrote).0);
         assert_eq!(
-            crate::file_state::last_hash(&expected_key),
+            files.last_hash(&expected_key),
             Some(expected_hash.clone()),
             "ledger key must be the resolved absolute path"
         );
         // 相对路径原样记账 = 缺陷形态：同一文件两套键
         assert_eq!(
-            crate::file_state::last_hash(raw_tgt),
+            files.last_hash(raw_tgt),
             None,
             "raw relative path must NOT be used as the ledger key"
         );
@@ -836,15 +851,13 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        // 全程用绝对路径（resolve_workspace_path 对绝对路径直接返回），
-        // 不依赖全局 CURRENT_WORKSPACE，可与其它并行测试共存。
-        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        qaqh_permission::set_workspace(&ws.to_string_lossy().to_string());
+        // P0-2：read/copy_range/write 全链共享同一份 FileRuntime（账本实例化）。
+        let files = crate::FileRuntime::default();
+        let ws_str = ws.to_string_lossy().to_string();
 
         // 先 read 一次，让账本持有「copy 之前」的基线指纹（键 = 绝对路径）。
-        let read_result = crate::file_query::exec_read(&serde_json::json!({"path": abs_tgt}));
+        let read_result =
+            crate::file_query::exec_read_with(&files, &serde_json::json!({"path": abs_tgt}));
         assert!(
             read_result.is_success(),
             "read failed: {}",
@@ -853,21 +866,22 @@ mod tests {
         let baseline =
             crate::file_shared::content_hash(&crate::file_shared::normalize_newlines("head\n").0);
         assert_eq!(
-            crate::file_state::last_hash(&abs_tgt),
+            files.last_hash(&abs_tgt),
             Some(baseline.clone()),
             "read establishes the ledger baseline on the absolute key"
         );
-        // copy_range 的目标路径用相对形态：缺陷正是「相对路径与绝对路径两套键」，
-        // 绝对参数路径在 resolve 后与账本键同形，无法暴露该缺陷。
-        qaqh_permission::set_workspace(&ws.to_string_lossy().to_string());
 
         // copy_range 追加一行（写工具改动了文件）。
-        let result = exec_copy_range(&serde_json::json!({
-            "source_path": raw_src,
-            "source_start": "copied",
-            "target_path": raw_tgt,
-            "mode": "append",
-        }));
+        let result = exec_copy_range_with_ws(
+            &files,
+            &ws_str,
+            &serde_json::json!({
+                "source_path": raw_src,
+                "source_start": "copied",
+                "target_path": raw_tgt,
+                "mode": "append",
+            }),
+        );
         assert!(
             result.is_success(),
             "copy_range failed: {}",
@@ -880,19 +894,19 @@ mod tests {
         // 同键），否则下面这条「copy 后的真实指纹」断言会拿到 copy 前的旧值。
         let disk_lf = crate::file_shared::normalize_newlines(&after_copy).0;
         assert_eq!(
-            crate::file_state::last_hash(&abs_tgt),
+            files.last_hash(&abs_tgt),
             Some(crate::file_shared::content_hash(&disk_lf)),
             "copy_range must refresh the ledger so STALE_FILE sees its write"
         );
         assert_ne!(
-            crate::file_state::last_hash(&abs_tgt),
+            files.last_hash(&abs_tgt),
             Some(baseline.clone()),
             "ledger key still holds the pre-copy fingerprint"
         );
 
         // 端到端复核：copy_range 之后的 write 校验应看到 copy_range 的写，
         // 传入 copy_range 之前的指纹必须被判定为 STALE_FILE。
-        let stale = crate::file_mutate::exec_write_file(&serde_json::json!({
+        let stale = crate::file_mutate::exec_write_file_with(&files, &serde_json::json!({
             "path": abs_tgt,
             "content": "clobbered\n",
             "expected_hash": baseline.clone(),
@@ -911,21 +925,23 @@ mod tests {
     #[test]
     fn typed_copy_range_registration_and_display_are_same_source() {
         let mut manager = qaqh_workspace::ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, &crate::FileRuntime::default());
         assert!(
             manager.builtin("copy_range").is_some(),
             "copy_range must be on the typed execution surface"
         );
 
         let (_dir, workspace) = setup(&[("src.rs", "copied\n"), ("dst.rs", "head\n")]);
-        let _guard = WS_LOCK.lock().unwrap();
-        qaqh_permission::set_workspace(&workspace.to_string_lossy().to_string());
-        let result = exec_copy_range(&serde_json::json!({
-            "source_path": "src.rs",
-            "source_start": "copied",
-            "target_path": "dst.rs",
-            "mode": "append",
-        }));
+        let result = exec_copy_range_with_ws(
+            &crate::FileRuntime::default(),
+            &workspace.to_string_lossy(),
+            &serde_json::json!({
+                "source_path": "src.rs",
+                "source_start": "copied",
+                "target_path": "dst.rs",
+                "mode": "append",
+            }),
+        );
         assert!(result.is_success(), "{}", result.model_text());
         assert_eq!(result.data["copied_lines"], serde_json::json!(1));
         let display = result.display().expect("typed display");
@@ -939,7 +955,7 @@ mod tests {
     #[test]
     fn missing_anchor_when_mode_requires_it() {
         let (_dir, ws) = setup(&[("src.rs", "s\n"), ("dst.rs", "t\n")]);
-        let err = run(&ws, "src.rs", "s", None, "dst.rs", None, "insert_after").unwrap_err();
+        let err = run(&crate::FileRuntime::default(), &ws, "src.rs", "s", None, "dst.rs", None, "insert_after").unwrap_err();
         assert!(err.contains("missing_target_anchor"), "got: {err}");
     }
 }

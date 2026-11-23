@@ -153,6 +153,10 @@ pub struct ToolCallContext {
     /// Host-configured default shell for the exec tool. `None` = platform
     /// priority auto-detection; an explicit exec `shell` argument still wins.
     pub exec_default_shell: Option<String>,
+    /// exec 输出字符上限（P0-2：原门面钩子 `hooks::EXEC_MAX_OUTPUT_CHARS` 的
+    /// 显式化——随 fold policy 在执行入口注入，exec handler 据此截断；
+    /// `None` = 调用侧按各自缺省兜底）。
+    pub exec_max_output_chars: Option<u32>,
     /// 生效超时（调用方显式值覆盖 descriptor 默认值；构造后定稿）。
     pub timeout: Duration,
     /// 取消信号（只读）。
@@ -207,6 +211,7 @@ mod tests {
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::workspace_write(PathBuf::from("/tmp/ws")),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,
@@ -232,6 +237,7 @@ mod tests {
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::disabled(),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,

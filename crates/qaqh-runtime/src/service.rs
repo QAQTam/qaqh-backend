@@ -1310,13 +1310,9 @@ mod plan_service_tests {
             "- [ ] item-1: do the thing\n- [ ] item-2: another thing\n",
         )
         .expect("write plan");
-        let previous =
-            qaqh_workspace::push_thread_workspace(Some(workspace.to_string_lossy().into_owned()));
-
         let outcome = plan_action_against_workspace(&plan_path);
 
         let rewritten = std::fs::read_to_string(&plan_path).expect("read plan");
-        qaqh_workspace::pop_thread_workspace(previous);
         outcome.expect("plan_action must accept a valid plan item");
         assert_eq!(
             rewritten, "- [✓] item-1: do the thing\n- [ ] item-2: another thing\n",

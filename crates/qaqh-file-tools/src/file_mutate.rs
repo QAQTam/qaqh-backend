@@ -12,9 +12,8 @@ use super::file_shared::{
 };
 use crate::ToolRisk;
 use crate::tool_api::{
-    CancellationToken, SandboxMode, ToolBody, ToolCallContext, ToolCallSource, ToolContentBlock,
-    ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind, ToolExecutionError, ToolHeader, ToolMeta,
-    ToolProjection, TypedTool,
+    ToolBody, ToolCallContext, ToolContentBlock, ToolDisplay, ToolError, ToolErrorCode, ToolErrorKind,
+    ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
 // ── Shared helpers ──
@@ -288,7 +287,10 @@ impl ToolProjection for WriteOutput {
     }
 }
 
-pub struct WriteTool;
+pub struct WriteTool {
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for WriteTool {
     type Args = WriteArgs;
@@ -365,7 +367,7 @@ impl TypedTool for WriteTool {
         // 用最近一次 read/edit/write 记录的指纹校验。失配 = 文件在工具外被修改，
         // 覆盖会丢掉外部改动 → 拒绝并提示重新 read（read 后账本自动刷新）。
         if expected_hash.is_empty()
-            && let Some(known) = crate::file_state::last_hash(&path)
+            && let Some(known) = self.files.last_hash(&path)
         {
             let disk_lf_hash = content_hash(&normalized_old);
             if known != disk_lf_hash {
@@ -468,7 +470,7 @@ impl TypedTool for WriteTool {
                         Some(old) => format!("{old}{content}"),
                         None => content.clone(),
                     };
-                    crate::file_state::record_write(&path, &full);
+                    self.files.record_write(&path, &full);
                     crate::journal::record_change(
                         &ctx.session_id,
                         "",
@@ -533,7 +535,7 @@ impl TypedTool for WriteTool {
 
         match atomic_write(&path, &content) {
             Ok(_) => {
-                crate::file_state::record_write(&path, &content);
+                self.files.record_write(&path, &content);
                 crate::journal::record_change(
                     &ctx.session_id,
                     "",
@@ -666,7 +668,10 @@ impl ToolProjection for DeleteOutput {
     }
 }
 
-pub struct DeleteTool;
+pub struct DeleteTool {
+    /// 会话私有文件运行时状态（账本 + 读缓存；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for DeleteTool {
     type Args = DeleteArgs;
@@ -705,7 +710,7 @@ impl TypedTool for DeleteTool {
         // 读失败（二进制/权限）则跳过校验（账本里也不会有对应记录）。
         if let Ok(raw) = std::fs::read_to_string(&path) {
             let (lf, _) = normalize_newlines(&raw);
-            if let Some(known) = crate::file_state::last_hash(&path) {
+            if let Some(known) = self.files.last_hash(&path) {
                 let disk_lf_hash = content_hash(&lf);
                 if known != disk_lf_hash {
                     return Err(mutation_error(
@@ -759,7 +764,7 @@ impl TypedTool for DeleteTool {
 
         match std::fs::rename(source, &trash_path) {
             Ok(_) => {
-                crate::file_state::record_delete(&path);
+                self.files.record_delete(&path);
                 crate::journal::record_change(
                     &ctx.session_id,
                     "",
@@ -807,7 +812,7 @@ impl TypedTool for DeleteTool {
                 }
                 match std::fs::remove_file(source) {
                     Ok(_) => {
-                        crate::file_state::record_delete(&path);
+                        self.files.record_delete(&path);
                         crate::journal::record_change(
                             &ctx.session_id,
                             "",
@@ -853,58 +858,75 @@ impl TypedTool for DeleteTool {
 
 // ── Registration ──
 
-pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_typed_tool(WriteTool);
-    mgr.register_typed_tool(DeleteTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
+    mgr.register_typed_tool(WriteTool {
+        files: files.clone(),
+    });
+    mgr.register_typed_tool(DeleteTool {
+        files: files.clone(),
+    });
 }
 
 /// Compatibility entry retained until `confirm_apply` is typed (Wave 6).
 ///
 /// Production registration uses [`WriteTool`] directly and therefore never
 /// takes this bridge. This helper only preserves the existing in-process
-/// confirm-apply call shape.
+/// confirm-apply call shape.（P0-2：原 ambient 钩子语境删除——测试自建显式 ctx。）
 #[cfg(test)]
 pub(super) fn exec_write_file(args: &Value) -> crate::ToolResult {
-    use crate::tool_api::{ErasedTool, TypedToolAdapter};
-
-    let ctx = ambient_tool_context("write-compat", Duration::from_secs(30));
-    TypedToolAdapter::new(WriteTool)
-        .execute(ctx, args.clone())
-        .unwrap_or_else(|fatal| panic!("write tool fatal: {}", fatal.message))
-        .to_tool_result()
+    exec_write_file_with(&crate::FileRuntime::default(), args)
 }
 
-pub fn ambient_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext {
-    let workspace = crate::current_workspace();
-    let workspace_root = if workspace.is_empty() {
+/// 共享账本的变体（read→write/STALE 链路用同一份 FileRuntime）。
+#[cfg(test)]
+pub(super) fn exec_write_file_with(files: &crate::FileRuntime, args: &Value) -> crate::ToolResult {
+    use crate::tool_api::{ErasedTool, TypedToolAdapter};
+
+    let ctx = test_tool_context("write-compat", Duration::from_secs(30));
+    TypedToolAdapter::new(WriteTool {
+        files: files.clone(),
+    })
+    .execute(ctx, args.clone())
+    .unwrap_or_else(|fatal| panic!("write tool fatal: {}", fatal.message))
+    .to_tool_result()
+}
+
+/// 测试专用显式语境（P0-2：ambient 钩子语境删除后的等价物——原形是
+/// 「执行线程 TLS 快照」，现在由测试按需自建，无任何线程态读取）。
+#[cfg(test)]
+pub(crate) fn test_tool_context(call_id: &str, timeout: Duration) -> ToolCallContext {
+    test_tool_context_in(".", call_id, timeout)
+}
+
+/// workspace 可指认的变体：需要临时仓库作根的测试用（Commit1 过渡期，
+/// 原形读执行线程 TLS 的 CURRENT_WORKSPACE；Commit3 收尾后 TLS 语义整体退役）。
+#[cfg(test)]
+pub(crate) fn test_tool_context_in(
+    workspace: &str,
+    call_id: &str,
+    timeout: Duration,
+) -> ToolCallContext {
+    let root = if workspace.is_empty() {
         PathBuf::from(".")
     } else {
         PathBuf::from(workspace)
     };
-    let cancellation = CancellationToken::new();
-    if crate::is_cancel() {
-        cancellation.cancel();
-    }
-    let ambient = crate::hooks::ambient();
     ToolCallContext {
         call_id: call_id.to_string(),
-        session_id: crate::current_session().unwrap_or_default(),
-        workspace_root: workspace_root.clone(),
-        permission_level: crate::permission::PermissionLevel::from_u8(ambient.permission_level),
-        sandbox: if ambient.subagent_sandbox {
-            SandboxMode::Subagent
-        } else {
-            SandboxMode::Main
-        },
-        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
+        session_id: String::new(),
+        workspace_root: root.clone(),
+        permission_level: crate::permission::PermissionLevel::from_u8(0),
+        sandbox: crate::tool_api::SandboxMode::Main,
+        sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root),
         exec_default_shell: None,
+        exec_max_output_chars: None,
         timeout,
-        cancellation,
+        cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,
         exec_progress: None,
         exec_host: None,
         official_web: None,
-        source: ToolCallSource::Model,
+        source: crate::tool_api::ToolCallSource::Model,
     }
 }
 
@@ -974,6 +996,7 @@ mod tests {
             sandbox: TestSandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root.to_path_buf()),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::from_secs(30),
             cancellation: TestCancellationToken::new(),
             progress: None,
@@ -985,14 +1008,32 @@ mod tests {
     }
 
     fn execute_write(root: &Path, args: Value) -> qaqh_types::ToolResult {
-        TypedToolAdapter::new(WriteTool)
+        execute_write_with(&crate::FileRuntime::default(), root, args)
+    }
+
+    /// 共享账本的变体（read→write/STALE 链路用同一份 FileRuntime）。
+    fn execute_write_with(
+        files: &crate::FileRuntime,
+        root: &Path,
+        args: Value,
+    ) -> qaqh_types::ToolResult {
+        TypedToolAdapter::new(WriteTool { files: files.clone() })
             .execute(test_ctx(root), args)
             .expect("write must not return fatal")
             .to_tool_result()
     }
 
     fn execute_delete(root: &Path, args: Value) -> qaqh_types::ToolResult {
-        TypedToolAdapter::new(DeleteTool)
+        execute_delete_with(&crate::FileRuntime::default(), root, args)
+    }
+
+    /// 共享账本的变体。
+    fn execute_delete_with(
+        files: &crate::FileRuntime,
+        root: &Path,
+        args: Value,
+    ) -> qaqh_types::ToolResult {
+        TypedToolAdapter::new(DeleteTool { files: files.clone() })
             .execute(test_ctx(root), args)
             .expect("delete must not return fatal")
             .to_tool_result()
@@ -1001,7 +1042,7 @@ mod tests {
     #[test]
     fn write_and_delete_registration_carries_no_legacy_executor() {
         let mut manager = qaqh_workspace::ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, &crate::FileRuntime::default());
         for name in ["write", "delete"] {
             let tool = manager
                 .builtin(name)
@@ -1078,7 +1119,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("typed.txt");
         std::fs::write(&path, "old\n").unwrap();
-        let outcome = TypedToolAdapter::new(WriteTool)
+        let outcome = TypedToolAdapter::new(WriteTool { files: crate::FileRuntime::default() })
             .execute(
                 test_ctx(dir.path()),
                 json!({"path": path, "content": "new\n"}),
@@ -1190,8 +1231,11 @@ mod tests {
         let path = dir.path().join("mixed.txt");
         std::fs::write(&path, "a\r\nb\rc\n").unwrap();
         let raw_path = path.to_string_lossy().to_string();
-        crate::file_state::record_read(&raw_path, "a\nb\nc\n", 3);
-        let result = execute_write(
+        // P0-2：read 与 write 共享同一份 FileRuntime（账本实例化）。
+        let files = crate::FileRuntime::default();
+        files.record_read(&raw_path, "a\nb\nc\n", 3);
+        let result = execute_write_with(
+            &files,
             dir.path(),
             json!({"path": raw_path, "content": "a\r\nB\rc\n"}),
         );
@@ -1223,7 +1267,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("delete-me.txt");
         std::fs::write(&path, "bye\n").unwrap();
-        let outcome = TypedToolAdapter::new(DeleteTool)
+        let outcome = TypedToolAdapter::new(DeleteTool { files: crate::FileRuntime::default() })
             .execute(test_ctx(dir.path()), json!({"path": path}))
             .expect("delete must not return fatal");
         let display_text = match &outcome.display.body {
@@ -1273,7 +1317,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("gone.txt");
         std::fs::write(&path, "keep\r\nbye\r\n").unwrap();
-        let outcome = TypedToolAdapter::new(DeleteTool)
+        let outcome = TypedToolAdapter::new(DeleteTool { files: crate::FileRuntime::default() })
             .execute(test_ctx(dir.path()), json!({"path": path}))
             .expect("delete must not return fatal");
         let diff = outcome
@@ -1301,7 +1345,7 @@ mod tests {
 
         // SAFETY: DELETE_LOCK 串行本模块所有 trash 相关用例；用完立刻撤掉。
         unsafe { std::env::set_var("QAQH_TRASH_DIR", outside.path()) };
-        let result = TypedToolAdapter::new(DeleteTool)
+        let result = TypedToolAdapter::new(DeleteTool { files: crate::FileRuntime::default() })
             .execute(test_ctx(dir.path()), json!({ "path": path }))
             .expect("delete must not return fatal")
             .to_tool_result();
@@ -1348,9 +1392,11 @@ mod tests {
         let path = dir.path().join("stale.txt");
         std::fs::write(&path, "original\n").unwrap();
         let raw_path = path.to_string_lossy().to_string();
-        crate::file_state::record_read(&raw_path, "original\n", 1);
+        // P0-2：read 与 delete 共享同一份 FileRuntime（账本实例化）。
+        let files = crate::FileRuntime::default();
+        files.record_read(&raw_path, "original\n", 1);
         std::fs::write(&path, "changed outside\n").unwrap();
-        let result = execute_delete(dir.path(), json!({"path": raw_path}));
+        let result = execute_delete_with(&files, dir.path(), json!({"path": raw_path}));
         assert!(!result.is_success());
         assert_eq!(result.error.as_ref().unwrap().code, "stale_file");
         assert!(path.exists());

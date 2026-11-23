@@ -645,6 +645,7 @@ impl WorkspaceToolPort {
             // sandbox.enabled=false.
             sandbox_spec: policy.sandbox_spec.clone(),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation,
             progress: None,
@@ -844,14 +845,11 @@ impl WorkspaceToolPort {
         }
         context.cancellation =
             qaqh_workspace::tool_api::CancellationToken::from_shared_flag(Arc::clone(&cancel));
-        let scope = qaqh_workspace::runtime::ToolExecutionScope::with_manager(
-            context.clone(),
-            Arc::clone(&self.manager),
-        );
-        let _guard = scope.install();
 
         // 进入实际执行:E09/E10 断点接通——直通 sender 注入 exec 处理器,
         // 实时输出经 owner 泵转成 tool.output.delta;终态带结构化结果与 effects。
+        // P0-2：会话私有 manager 与 fold policy 显式携带，不再安装任何
+        // 线程态 ambient 视图（ToolExecutionScope/install 已退役）。
         let run = self
             .lifecycle
             .started(&request.call_id, &request.tool_name, args_json);
@@ -861,6 +859,8 @@ impl WorkspaceToolPort {
                 authorized,
                 context,
                 Some(progress_tx),
+                &self.manager,
+                &qaqh_workspace::tool_side_fold::StandardPolicy,
             )
         }));
         let exec_result = match exec_result {

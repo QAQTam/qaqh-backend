@@ -758,6 +758,7 @@ mod tests {
             sandbox: qaqh_workspace::tool_api::SandboxMode::Main,
             sandbox_spec: qaqh_workspace::tool_api::SandboxSpec::disabled(),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::from_secs(30),
             cancellation,
             progress: None,

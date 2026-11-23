@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use crate::permission::PermissionLevel;
 use crate::tool_api::{CancellationToken, SandboxMode, ToolCallContext, ToolCallSource};
+use crate::tool_side_fold::StandardPolicy;
 
 /// Return type for tool execution with interrupt support.
 #[derive(Debug)]
@@ -24,80 +25,22 @@ pub struct ToolExecResult {
     pub outcome: Option<qaqh_types::ToolCallOutcome>,
 }
 
-/// Consume an authorization proof and dispatch the bound handler.
-///
-/// **测试专用**：从当前线程的 ambient 状态重建显式上下文，复刻 P2-4d 之前的入口
-/// 形态。生产路径（`qaqh-agent-runtime` 的 tool job）走
-/// [`execute_authorized_with_context`]；`execute_with_context` 也不再经这里往返
-/// （2026-10-31）。保留它只为让本文件的单元测试继续覆盖 admission → 执行的完整链路。
-#[cfg(test)]
-#[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项（闭包返回大 Err）
-pub fn execute_authorized(
-    call: AuthorizedToolCall,
-    progress_tx: Option<crate::ExecProgressSender>,
-) -> ToolExecResult {
-    let cancellation = CancellationToken::new();
-    if crate::is_cancel() {
-        cancellation.cancel();
-    }
-    let ambient = crate::runtime::context();
-    let workspace_root = {
-        let workspace = crate::current_workspace();
-        if workspace.is_empty() || workspace == "." {
-            call.workspace_root().to_path_buf()
-        } else {
-            std::path::PathBuf::from(workspace)
-        }
-    };
-    let permission_level = PermissionLevel::from_u8(
-        ambient
-            .as_ref()
-            .map(|ctx| ctx.permission_level)
-            .unwrap_or(0),
-    );
-    let context = ToolCallContext {
-        call_id: call.call_id().to_string(),
-        session_id: ambient
-            .as_ref()
-            .map(|ctx| ctx.active_session.clone())
-            .unwrap_or_else(|| call.session_id().to_string()),
-        workspace_root: workspace_root.clone(),
-        permission_level,
-        sandbox: if crate::authorization::is_subagent_sandbox() {
-            SandboxMode::Subagent
-        } else {
-            SandboxMode::Main
-        },
-        sandbox_spec: crate::tool_api::SandboxSpec::for_permission(
-            workspace_root,
-            permission_level,
-            true,
-        ),
-        exec_default_shell: None,
-        timeout: Duration::ZERO,
-        cancellation,
-        progress: None,
-        exec_progress: None,
-        exec_host: None,
-        official_web: None,
-        source: ToolCallSource::Model,
-    };
-    execute_authorized_with_context(call, context, progress_tx)
-}
-
 /// Consume an authorization proof and dispatch under an explicit runtime
 /// context. All session/workspace/mode/cancel/sandbox decisions below use the
-/// supplied context; thread-local state is installed only as a compatibility
-/// view for legacy handlers.
+/// supplied context; P0-2 后**零线程态**——会话私有 manager 与 fold policy
+/// （结果折叠与 exec 输出上限的单一事实源）由调用方显式携带。
 #[allow(clippy::result_large_err)] // 错误装箱属结构塑形，另立项（闭包返回大 Err）
 pub fn execute_authorized_with_context(
     call: AuthorizedToolCall,
     context: ToolCallContext,
     progress_tx: Option<crate::ExecProgressSender>,
+    manager: &std::sync::Mutex<crate::ToolManager>,
+    fold: &dyn crate::tool_side_fold::ToolResultFoldPolicy,
 ) -> ToolExecResult {
     let started = Instant::now();
     let (invocation, authorized_resources, authorized_workspace, grant) = call.into_parts();
     let pre_bind_level = Some(context.permission_level as u8).filter(|level| *level > 0);
+    let is_subagent_sandbox = matches!(context.sandbox, SandboxMode::Subagent);
 
     // 拒绝路径同样落审计（kind=tool_rejected）：商业审计要求"未执行的
     // 调用"也可追溯，不能只在成功路径记账。
@@ -108,6 +51,7 @@ pub fn execute_authorized_with_context(
             "session_mismatch",
             None,
             None,
+            is_subagent_sandbox,
             started,
         );
         return failure(&invocation.tool_name, crate::ToolError::SessionMismatch);
@@ -121,6 +65,7 @@ pub fn execute_authorized_with_context(
             "workspace_mismatch",
             None,
             pre_bind_level,
+            is_subagent_sandbox,
             started,
         );
         return failure(
@@ -150,6 +95,7 @@ pub fn execute_authorized_with_context(
             "resource_mismatch",
             None,
             pre_bind_level,
+            is_subagent_sandbox,
             started,
         );
         return failure(&invocation.tool_name, crate::ToolError::ResourceMismatch);
@@ -162,6 +108,7 @@ pub fn execute_authorized_with_context(
             "cancelled",
             None,
             pre_bind_level,
+            is_subagent_sandbox,
             started,
         );
         return failure(&invocation.tool_name, crate::ToolError::Cancelled);
@@ -177,9 +124,23 @@ pub fn execute_authorized_with_context(
 
     let timeout_secs = (!context.timeout.is_zero()).then_some(context.timeout.as_secs());
     let cancel_flag = context.cancellation.shared_flag();
+    // P0-2：会话 manager 显式携带（不再经 TLS ACTOR_TOOL_MANAGER 中转）。
+    fn with_session_manager<R>(
+        manager: &std::sync::Mutex<crate::ToolManager>,
+        f: impl FnOnce(&mut crate::ToolManager) -> R,
+    ) -> R {
+        let mut guard = match manager.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                log::warn!("[TOOLS] session ToolManager Mutex poisoned — recovering");
+                poisoned.into_inner()
+            }
+        };
+        f(&mut guard)
+    }
     // Phase 1: prepare while holding the manager lock.
-    let prepared = crate::runtime::with_manager(|manager| {
-        manager.prepare_req_with_cancel(
+    let prepared = match with_session_manager(manager, |mgr: &mut crate::ToolManager| {
+        mgr.prepare_req_with_cancel(
             call_id.clone(),
             &name,
             args.clone(),
@@ -187,10 +148,9 @@ pub fn execute_authorized_with_context(
             timeout_secs,
             cancel_flag,
         )
-    });
-    let prepared = match prepared {
-        Some(Ok(prepared)) => prepared,
-        Some(Err(report)) => {
+    }) {
+        Ok(prepared) => prepared,
+        Err(report) => {
             // prepare 阶段拒绝（未知工具/白名单外/参数预检失败等）：不进入
             // 执行，但仍必须落审计。
             let audit_invocation = ToolInvocation {
@@ -206,6 +166,7 @@ pub fn execute_authorized_with_context(
                 "prepare_rejected",
                 Some(&report.content),
                 pre_bind_level,
+                is_subagent_sandbox,
                 started,
             );
             let canonical = crate::ToolResult::error(report.content.clone());
@@ -218,24 +179,6 @@ pub fn execute_authorized_with_context(
                 code_delta: None,
                 effects: Vec::new(),
             };
-        }
-        None => {
-            let audit_invocation = ToolInvocation {
-                session_id: session_id.clone(),
-                call_id: call_id.clone(),
-                tool_name: name.clone(),
-                args: args.clone(),
-                category,
-            };
-            audit_rejected(
-                &audit_invocation,
-                "rejected",
-                "manager_unavailable",
-                None,
-                pre_bind_level,
-                started,
-            );
-            return failure(&name, crate::ToolError::ManagerUnavailable);
         }
     };
 
@@ -252,13 +195,18 @@ pub fn execute_authorized_with_context(
     // 进度通道 sender 在此直通注入 handler。此前该 sender 在 prepare 阶段被
     // `_progress_tx` 丢弃，exec 全程零 realtime tool_progress。
     exec_ctx.exec_progress = progress_tx;
+    // P0-2：exec 输出字符上限随 fold policy 显式落进上下文（原 hooks 钩子的
+    // 线程态穿越退役——handler 据此截断，NoFold 时 None = 调用侧缺省兜底）。
+    exec_ctx.exec_max_output_chars = fold.exec_max_output_chars();
     let _ = (authorized_workspace, authorized_resources);
     // 审计对象 before 指纹：派发前按与 finalize 同源的 args 口径快照
     // file_state 账本（键一致，命中即 before，未命中为 None）。
+    // P0-2：账本是 manager 的会话私有 FileRuntime（与工具 handler 同源）。
+    let file_runtime = with_session_manager(manager, |manager| manager.file_runtime().clone());
     let audit_paths = crate::manager::extract_files_affected(&name, &args);
     let before_hashes: Vec<(String, Option<String>)> = audit_paths
         .iter()
-        .map(|path| (path.clone(), crate::file_state::last_hash(path)))
+        .map(|path| (path.clone(), file_runtime.last_hash(path)))
         .collect();
     // P4 A1: write/exec/net 必须先写 durable audit intent；失败不得进入 handler。
     let high_risk = matches!(
@@ -308,6 +256,7 @@ pub fn execute_authorized_with_context(
             effective_name: prepared.effective_tool_name.clone(),
             decision: Some(grant.as_str().to_string()),
             decision_reason: None,
+            sandbox: is_subagent_sandbox,
             objects,
         };
         if let Err(error) = crate::audit::append_audit_intent(&intent) {
@@ -364,7 +313,7 @@ pub fn execute_authorized_with_context(
     };
     // 工具侧折叠：结果在工具执行层定型（取代 message 侧折叠），
     // 模型看到的、存储的就是最终形态——不再有位置相关的二次改写。
-    crate::tool_side_fold::apply(&name, &mut tool_result);
+    crate::tool_side_fold::apply(fold, &name, &mut tool_result);
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let success = tool_result.is_success();
     let mut canonical = tool_result.clone();
@@ -373,7 +322,7 @@ pub fn execute_authorized_with_context(
     let effective_tool_name = prepared.effective_tool_name.clone();
 
     // Phase 3: finalize while holding the manager lock again.
-    let report = crate::runtime::with_manager(|manager| {
+    let report = with_session_manager(manager, |manager| {
         manager.finalize_req(prepared, tool_result, elapsed_ms)
     });
     // 行差统计的唯一事实源是工具自己算好的展示投影（真 diff，见 code_delta
@@ -387,101 +336,79 @@ pub fn execute_authorized_with_context(
         })
         .flatten();
 
-    match report {
-        Some(report) => {
-            // 运行元数据由执行层统一落盘（H4）：elapsed/output size 只有这里
-            // 同时可知；`user_initiated` 由用户直调路径在返回后翻牌。
-            canonical.metrics = qaqh_types::ToolResultMetrics {
-                elapsed_ms: Some(report.meta.elapsed_ms),
-                output_bytes: report.meta.output_size as u64,
-                retry_count: 0,
-                effective_tool_name,
-                user_initiated: false,
-            };
-            let error_code = canonical.error.as_ref().map(|error| error.code.clone());
-            // 对象可追溯：路径 + before/after 内容指纹（file_state LF 规范
-            // 视图 hash；未建立基线/新文件为 None）。
-            let objects: Vec<crate::audit::v2::AuditObject> = report
-                .files_affected
+    // 运行元数据由执行层统一落盘（H4）：elapsed/output size 只有这里
+    // 同时可知；`user_initiated` 由用户直调路径在返回后翻牌。
+    canonical.metrics = qaqh_types::ToolResultMetrics {
+        elapsed_ms: Some(report.meta.elapsed_ms),
+        output_bytes: report.meta.output_size as u64,
+        retry_count: 0,
+        effective_tool_name,
+        user_initiated: false,
+    };
+    let error_code = canonical.error.as_ref().map(|error| error.code.clone());
+    // 对象可追溯：路径 + before/after 内容指纹（file_state LF 规范
+    // 视图 hash；未建立基线/新文件为 None）。
+    let objects: Vec<crate::audit::v2::AuditObject> = report
+        .files_affected
+        .iter()
+        .map(|path| crate::audit::v2::AuditObject {
+            kind: "file".to_string(),
+            path: path.clone(),
+            before_sha: before_hashes
                 .iter()
-                .map(|path| crate::audit::v2::AuditObject {
-                    kind: "file".to_string(),
-                    path: path.clone(),
-                    before_sha: before_hashes
-                        .iter()
-                        .find(|(candidate, _)| candidate == path)
-                        .and_then(|(_, hash)| hash.clone()),
-                    after_sha: crate::file_state::last_hash(path),
-                })
-                .collect();
-            let audit_entry = crate::audit::AuditEntry {
-                ts: chrono::Utc::now().to_rfc3339(),
-                user: "agent".into(),
-                tool: name.clone(),
-                action: String::new(),
-                args_hash: crate::audit::hash_args(&args),
-                args_bytes: crate::audit::args_size(&args),
-                status: crate::audit::status_str(canonical.status).to_string(),
-                elapsed_ms: report.meta.elapsed_ms,
-                kind: crate::audit::v2::AuditKind::ToolCall,
-                session: session_id,
-                call_id,
-                category: category.as_str().to_string(),
-                permission_level: pre_bind_level,
-                error_code,
-                output_bytes: report.meta.output_size as u64,
-                retry_count: canonical.metrics.retry_count,
-                effective_name: canonical.metrics.effective_tool_name.clone(),
-                decision: Some(grant.as_str().to_string()),
-                decision_reason: None,
-                objects,
-            };
-            let result = ToolExecResult {
-                content: report.content,
-                success: report.success,
-                result: canonical,
-                meta: report.meta,
-                code_delta,
-                effects,
-                outcome: call_outcome,
-            };
-            if let Err(e) = crate::audit::append_audit(&audit_entry) {
-                log::error!("audit: append failed for {name}: {e}");
-                if high_risk {
-                    let reason =
-                        format!("result audit barrier failed after handler execution: {e}");
-                    if let Err(quarantine_error) = crate::audit::quarantine(&audit_entry, &reason) {
-                        log::error!(
-                            "audit: quarantine sink failed for {name} after result barrier failure: {quarantine_error}"
-                        );
-                    }
-                    return failure(
-                        &name,
-                        crate::ToolError::AuditQuarantined { message: reason },
-                    );
-                }
+                .find(|(candidate, _)| candidate == path)
+                .and_then(|(_, hash)| hash.clone()),
+            after_sha: file_runtime.last_hash(path),
+        })
+        .collect();
+    let audit_entry = crate::audit::AuditEntry {
+        ts: chrono::Utc::now().to_rfc3339(),
+        user: "agent".into(),
+        tool: name.clone(),
+        action: String::new(),
+        args_hash: crate::audit::hash_args(&args),
+        args_bytes: crate::audit::args_size(&args),
+        status: crate::audit::status_str(canonical.status).to_string(),
+        elapsed_ms: report.meta.elapsed_ms,
+        kind: crate::audit::v2::AuditKind::ToolCall,
+        session: session_id,
+        call_id,
+        category: category.as_str().to_string(),
+        permission_level: pre_bind_level,
+        error_code,
+        output_bytes: report.meta.output_size as u64,
+        retry_count: canonical.metrics.retry_count,
+        effective_name: canonical.metrics.effective_tool_name.clone(),
+        decision: Some(grant.as_str().to_string()),
+        decision_reason: None,
+        sandbox: is_subagent_sandbox,
+        objects,
+    };
+    let result = ToolExecResult {
+        content: report.content,
+        success: report.success,
+        result: canonical,
+        meta: report.meta,
+        code_delta,
+        effects,
+        outcome: call_outcome,
+    };
+    if let Err(e) = crate::audit::append_audit(&audit_entry) {
+        log::error!("audit: append failed for {name}: {e}");
+        if high_risk {
+            let reason = format!("result audit barrier failed after handler execution: {e}");
+            if let Err(quarantine_error) = crate::audit::quarantine(&audit_entry, &reason) {
+                log::error!(
+                    "audit: quarantine sink failed for {name} after result barrier failure: {quarantine_error}"
+                );
             }
-            result
-        }
-        None => {
-            let audit_invocation = ToolInvocation {
-                session_id,
-                call_id,
-                tool_name: name.clone(),
-                args: args.clone(),
-                category,
-            };
-            audit_rejected(
-                &audit_invocation,
-                "rejected",
-                "manager_unavailable",
-                None,
-                pre_bind_level,
-                started,
+            return failure(
+                &name,
+                crate::ToolError::AuditQuarantined { message: reason },
             );
-            failure(&name, crate::ToolError::ManagerUnavailable)
         }
     }
+    result
 }
 
 /// Parse, admit, and execute a call under an explicit [`ToolCtx`](crate::runtime::ToolCtx)
@@ -532,14 +459,19 @@ pub fn execute_with_context(
                 error.code(),
                 Some(&error.to_string()),
                 Some(ctx.permission_level),
+                matches!(ctx.sandbox, Some(SandboxMode::Subagent)),
                 started,
             );
             return failure(&resolved_name, error);
         }
     };
-    let _ctx_guard = crate::runtime::install_tool_ctx(ctx);
-
-    let workspace_root = crate::runtime::active_workspace_root();
+    // P0-2：workspace/sandbox 显式来自 ToolCtx——不再读写任何线程态。
+    let workspace_root = match ctx.workspace_root.as_deref() {
+        Some(root) if !root.is_empty() && root != "." => {
+            crate::permission::resolve_target_path(std::path::PathBuf::from(root))
+        }
+        _ => crate::runtime::active_workspace_root(),
+    };
     // 能力类别来自 handler 声明（单一事实源）；查不到时保守回退 Write。
     let category = crate::runtime::lookup_category(&resolved_name)
         .unwrap_or(crate::permission::ToolCategory::Write);
@@ -560,20 +492,14 @@ pub fn execute_with_context(
         &HashSet::new(),
     ) {
         Admission::Authorized(authorized) => {
-            // 显式上下文的收口：直接把它落成 `ToolCallContext`，不再经
-            // `execute_authorized`（ambient 适配器）把 `install_tool_ctx` 刚写进
-            // 线程局部的值再读回来。那条往返不但白跑一次，还让两个入口在
-            // 「workspace / mode / cancel 由谁决定」上分叉。
+            // 显式上下文的收口：直接把它落成 `ToolCallContext`（P0-2：原
+            // `install_tool_ctx`→线程态→回读 的往返与 `SUBAGENT_SANDBOX`
+            // 读取一并退役，sandbox 从 ToolCtx 显式到达）。
             let permission_level = PermissionLevel::from_u8(ctx.permission_level);
-            let cancellation = CancellationToken::new();
-            if crate::is_cancel() {
-                cancellation.cancel();
-            }
-            // 与旧 ambient 适配器逐字等价：进程级工作区为空/`"."` 时回落到
-            // 授权凭证自带的 root，否则用 `admit` 那一侧解析出的 root。
             let context_workspace = {
-                let workspace = crate::current_workspace();
-                if workspace.is_empty() || workspace == "." {
+                if ctx.workspace_root.is_none()
+                    || ctx.workspace_root.as_deref() == Some(".")
+                {
                     authorized.workspace_root().to_path_buf()
                 } else {
                     workspace_root.clone()
@@ -584,26 +510,33 @@ pub fn execute_with_context(
                 session_id: ctx.session_id.clone(),
                 workspace_root: context_workspace.clone(),
                 permission_level,
-                sandbox: if crate::authorization::is_subagent_sandbox() {
-                    SandboxMode::Subagent
-                } else {
-                    SandboxMode::Main
-                },
+                sandbox: ctx.sandbox.unwrap_or(SandboxMode::Main),
                 sandbox_spec: crate::tool_api::SandboxSpec::for_permission(
                     context_workspace,
                     permission_level,
                     true,
                 ),
                 exec_default_shell: None,
+                exec_max_output_chars: None,
                 timeout: Duration::ZERO,
-                cancellation,
+                cancellation: CancellationToken::new(),
                 progress: None,
                 exec_progress: None,
                 exec_host: None,
                 official_web: None,
                 source: ToolCallSource::Model,
             };
-            execute_authorized_with_context(authorized, context, progress_tx)
+            // P0-2：serve/CLI 面走进程快照 manager + Standard 折叠（显式携带）。
+            if let Some(manager) = crate::runtime::process_manager() {
+                return execute_authorized_with_context(
+                    authorized,
+                    context,
+                    progress_tx,
+                    manager,
+                    &StandardPolicy,
+                );
+            }
+            failure(&resolved_name, crate::ToolError::RuntimeNotInitialized)
         }
         Admission::ApprovalRequired(challenge) => {
             let error = crate::ToolError::PermissionDenied {
@@ -615,6 +548,7 @@ pub fn execute_with_context(
                 error.code(),
                 Some(challenge.reason()),
                 Some(ctx.permission_level),
+                matches!(ctx.sandbox, Some(SandboxMode::Subagent)),
                 started,
             );
             failure(&resolved_name, error)
@@ -629,6 +563,7 @@ pub fn execute_with_context(
                 error.code(),
                 Some(&reason),
                 Some(ctx.permission_level),
+                matches!(ctx.sandbox, Some(SandboxMode::Subagent)),
                 started,
             );
             failure(&resolved_name, error)
@@ -647,6 +582,7 @@ fn audit_rejected(
     error_code: &str,
     reason: Option<&str>,
     permission_level: Option<u8>,
+    sandbox: bool,
     started: Instant,
 ) {
     let entry = crate::audit::AuditEntry {
@@ -671,6 +607,7 @@ fn audit_rejected(
         // 原因上界 512 字符：账本可读性与磁盘占用保护（截断标记不必要——
         // 结构上仍是前缀，verify 只校验链）。
         decision_reason: reason.map(|text| text.chars().take(512).collect::<String>()),
+        sandbox,
         objects: Vec::new(),
     };
     if let Err(e) = crate::audit::append_audit(&entry) {
@@ -735,22 +672,46 @@ mod tests {
         )))
     }
 
-    struct WorkspaceReset;
+    /// 测试专用锁：仅串行本模块共享 `TOOL_MANAGER` / `TEST_HANDLER_COUNT` 的单测。
+    static TEST_MANAGER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    impl Drop for WorkspaceReset {
-        fn drop(&mut self) {
-            crate::set_workspace(".");
+    fn test_ctx(session_id: &str, workspace_root: PathBuf, permission_level: u8) -> ToolCallContext {
+        let level = PermissionLevel::from_u8(permission_level);
+        ToolCallContext {
+            call_id: String::new(),
+            session_id: session_id.to_string(),
+            workspace_root: workspace_root.clone(),
+            permission_level: level,
+            sandbox: SandboxMode::Main,
+            sandbox_spec: crate::tool_api::SandboxSpec::for_permission(
+                workspace_root,
+                level,
+                true,
+            ),
+            exec_default_shell: None,
+            exec_max_output_chars: None,
+            timeout: Duration::ZERO,
+            cancellation: CancellationToken::new(),
+            progress: None,
+            exec_progress: None,
+            exec_host: None,
+            official_web: None,
+            source: ToolCallSource::Model,
         }
     }
 
-    struct ActorContextReset;
-
-    impl Drop for ActorContextReset {
-        fn drop(&mut self) {
-            crate::clear_actor_context();
-            crate::runtime::clear_context();
-            crate::authorization::set_subagent_sandbox(false);
-        }
+    fn execute_test_authorized(
+        call: AuthorizedToolCall,
+        context: ToolCallContext,
+        progress_tx: Option<crate::ExecProgressSender>,
+    ) -> ToolExecResult {
+        execute_authorized_with_context(
+            call,
+            context,
+            progress_tx,
+            crate::runtime::process_manager().expect("test process_manager initialized"),
+            &StandardPolicy,
+        )
     }
 
     /// 探针改为直接读显式上下文——TLS 兼容视图退场后，handler 唯一的事实源
@@ -770,10 +731,9 @@ mod tests {
     }
 
     fn setup_test_manager() -> MutexGuard<'static, ()> {
-        let test_guard = crate::TEST_RUNTIME_SERIAL
+        let test_guard = TEST_MANAGER_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        crate::set_workspace(".");
         let allowed: Vec<String> = vec![];
         crate::runtime::init_tools("test", &[], allowed);
         crate::runtime::register_test_probe(crate::probe::ProbeTool {
@@ -814,7 +774,7 @@ mod tests {
     fn exec_progress_sender_reaches_the_exec_handler() {
         let _test_guard = setup_test_manager();
         let (tx, rx) = crate::bounded_exec_progress_channel();
-        let workspace_root = std::path::PathBuf::from(crate::current_workspace());
+        let workspace_root = crate::runtime::active_workspace_root();
         let context = crate::tool_api::ToolCallContext {
             call_id: "exec-progress-1".to_string(),
             session_id: "test_session".to_string(),
@@ -823,6 +783,7 @@ mod tests {
             sandbox: crate::tool_api::SandboxMode::Main,
             sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -840,7 +801,7 @@ mod tests {
             _ => panic!("exec must be admitted under skip-permissions"),
         };
         let handle = std::thread::spawn(move || {
-            crate::execution::execute_authorized_with_context(authorized, context, Some(tx))
+            execute_test_authorized(authorized, context, Some(tx))
         });
         let first = rx
             .recv_timeout(Duration::from_secs(10))
@@ -914,15 +875,19 @@ mod tests {
         ).unwrap();
         std::fs::create_dir_all(skill_dir.join("references")).unwrap();
         std::fs::write(skill_dir.join("references/info.md"), "complete reference").unwrap();
-        crate::set_workspace(&temp.path().to_string_lossy());
-        crate::runtime::set_context("test_session", 3);
+        let ctx = crate::runtime::ToolCtx {
+            session_id: "test_session".into(),
+            permission_level: 3,
+            workspace_root: Some(temp.path().to_string_lossy().into_owned()),
+            sandbox: None,
+        };
 
         let list = execute_with_context(
             "skill_list",
             r#"{}"#,
             "skills-list-1",
             None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
+            &ctx,
         );
         assert!(list.success);
         assert!(list.content.contains("typed-skill"));
@@ -932,7 +897,7 @@ mod tests {
             r#"{"name":"typed-skill"}"#,
             "skills-resources-1",
             None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
+            &ctx,
         );
         assert!(resources.success);
         assert!(resources.content.contains("SKILL.md"));
@@ -944,7 +909,7 @@ mod tests {
             &serde_json::json!({"path": skill_dir.join("SKILL.md")}).to_string(),
             "generic-skill-read",
             None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
+            &ctx,
         );
         assert!(generic_read.success, "read must serve skill files directly");
         assert!(generic_read.content.contains("Typed instructions"));
@@ -954,10 +919,9 @@ mod tests {
             r#"{"name":"nope"}"#,
             "skills-unknown-1",
             None,
-            &crate::runtime::ToolCtx::admitted("test_session"),
+            &ctx,
         );
         assert!(!unknown.success);
-        crate::set_workspace(".");
     }
 
     fn make_invocation(tool_name: &str, call_id: &str) -> ToolInvocation {
@@ -979,14 +943,15 @@ mod tests {
     #[test]
     fn auto_approved_call_executes_normally() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 3);
         let inv = make_invocation("test_counter", "call-1");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
         let admission = admit(inv, 3, &ws, &trusted);
+        let mut ctx = test_ctx("test_session", ws, 3);
+        ctx.call_id = "call-1".into();
         match admission {
             Admission::Authorized(auth) => {
-                let result = execute_authorized(auth, None);
+                let result = execute_test_authorized(auth, ctx, None);
                 assert!(result.success, "auto-approved call should succeed");
             }
             other => panic!(
@@ -1000,9 +965,6 @@ mod tests {
     #[test]
     fn explicit_context_drives_admission_and_execution() {
         let _test_guard = setup_test_manager();
-        let _actor_reset = ActorContextReset;
-        crate::set_actor_context("/tmp/qaqh-legacy-ambient", "legacy-seed");
-        crate::authorization::set_subagent_sandbox(false);
 
         let workspace = tempfile::tempdir().unwrap();
         let context = crate::tool_api::ToolCallContext {
@@ -1015,6 +977,7 @@ mod tests {
                 workspace.path().to_path_buf(),
             ),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1031,7 +994,7 @@ mod tests {
             Admission::Authorized(call) => call,
             _ => panic!("explicit context probe must be authorized"),
         };
-        let result = execute_authorized_with_context(authorized, context, None);
+        let result = execute_test_authorized(authorized, context, None);
         assert!(result.success, "{}", result.content);
 
         let observed: serde_json::Value = serde_json::from_str(&result.content).unwrap();
@@ -1041,18 +1004,11 @@ mod tests {
             workspace.path().to_string_lossy().as_ref()
         );
         assert_eq!(observed["cancelled"], false);
-        assert_eq!(
-            crate::current_session().as_deref(),
-            Some("legacy-seed"),
-            "执行不得改动 ambient 会话状态（无 per-call TLS 视图可装可还）"
-        );
     }
 
     #[test]
     fn explicit_sandbox_controls_admission_without_tls() {
         let _test_guard = setup_test_manager();
-        let _actor_reset = ActorContextReset;
-        crate::authorization::set_subagent_sandbox(false);
         let workspace = tempfile::tempdir().unwrap();
         let args = serde_json::json!({
             "path": workspace.path().join("inside.txt").to_string_lossy(),
@@ -1068,6 +1024,7 @@ mod tests {
                 workspace.path().to_path_buf(),
             ),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation: crate::tool_api::CancellationToken::new(),
             progress: None,
@@ -1113,6 +1070,7 @@ mod tests {
                 crate::runtime::active_workspace_root(),
             ),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::ZERO,
             cancellation,
             progress: None,
@@ -1129,7 +1087,7 @@ mod tests {
             Admission::Authorized(call) => call,
             _ => panic!("test_counter must be authorized before cancellation check"),
         };
-        let result = execute_authorized_with_context(authorized, context, None);
+        let result = execute_test_authorized(authorized, context, None);
         assert!(!result.success);
         assert_eq!(
             result
@@ -1169,7 +1127,6 @@ mod tests {
     #[test]
     fn approved_call_executes_exactly_once() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 3);
         let mut inv = make_invocation("test_write", "call-3-once");
         // test_write 是文件型 Destructive 工具：缺 path 会被 SafetyPolicy
         // fail-closed 拦下；带工作区内 path 才能到达 handler。
@@ -1186,7 +1143,9 @@ mod tests {
         };
 
         let authorized = challenge.approve(true).expect("approval should succeed");
-        let result = execute_authorized(authorized, None);
+        let mut ctx = test_ctx("test_session", ws, 3);
+        ctx.call_id = "call-3-once".into();
+        let result = execute_test_authorized(authorized, ctx, None);
         assert!(result.success, "approved call should execute");
         assert_eq!(
             TEST_HANDLER_COUNT.load(Ordering::SeqCst),
@@ -1246,7 +1205,6 @@ mod tests {
     #[test]
     fn challenge_cannot_be_replayed() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 3);
         let mut inv = make_invocation("test_write", "call-6");
         // 同 call-3-once：Destructive 工具缺 path 被 SafetyPolicy 拦下。
         inv.args = serde_json::json!({ "path": "audit-target.txt" });
@@ -1262,7 +1220,9 @@ mod tests {
         let auth = challenge
             .approve(true)
             .expect("first approval should succeed");
-        let _result = execute_authorized(auth, None);
+        let mut ctx = test_ctx("test_session", ws, 3);
+        ctx.call_id = "call-6".into();
+        let _result = execute_test_authorized(auth, ctx, None);
         assert_eq!(TEST_HANDLER_COUNT.load(Ordering::SeqCst), 1);
 
         // Cannot consume the same challenge twice — it was moved
@@ -1297,7 +1257,6 @@ mod tests {
     #[test]
     fn authorization_bound_to_call_identity() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 3);
         let inv1 = make_invocation("test_counter", "bound-1");
         let inv2 = make_invocation("test_counter", "bound-2");
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1322,7 +1281,6 @@ mod tests {
     #[test]
     fn compat_wrapper_delegates_to_secured_path() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         // With SkipPermissions context, auto-approve should work
         let result = execute_with_context(
@@ -1345,7 +1303,6 @@ mod tests {
     #[test]
     fn structured_success_propagates_correctly() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
 
         // auto-approve
@@ -1354,7 +1311,9 @@ mod tests {
         let trusted = HashSet::new();
         match admit(inv, 3, &ws, &trusted) {
             Admission::Authorized(auth) => {
-                let result = execute_authorized(auth, None);
+                let mut ctx = test_ctx("test_session", ws, 3);
+                ctx.call_id = "struc-1".into();
+                let result = execute_test_authorized(auth, ctx, None);
                 assert!(result.success, "structured success should be true");
                 assert!(
                     !result.content.contains("[ERROR]"),
@@ -1370,7 +1329,6 @@ mod tests {
     #[test]
     fn ui_and_llm_same_permission_decision() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test_session", 1); // read-only: writes need approval
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let trusted = HashSet::new();
 
@@ -1426,7 +1384,6 @@ mod tests {
     #[test]
     fn invalid_json_does_not_execute() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         let result = execute_with_context(
             "test_counter",
@@ -1478,12 +1435,9 @@ mod tests {
     #[test]
     fn workspace_change_after_authorization_is_rejected() {
         let _test_guard = setup_test_manager();
-        let _workspace_reset = WorkspaceReset;
-        crate::runtime::set_context("test_session", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
         let authorized_workspace = tempfile::tempdir().unwrap();
         let changed_workspace = tempfile::tempdir().unwrap();
-        crate::set_workspace(&authorized_workspace.path().to_string_lossy());
 
         let authorized = match admit(
             make_invocation("test_workspace", "workspace-bound-1"),
@@ -1495,8 +1449,9 @@ mod tests {
             _ => panic!("expected workspace call to be authorized"),
         };
 
-        crate::set_workspace(&changed_workspace.path().to_string_lossy());
-        let result = execute_authorized(authorized, None);
+        let mut ctx = test_ctx("test_session", changed_workspace.path().to_path_buf(), 3);
+        ctx.call_id = "workspace-bound-1".into();
+        let result = execute_test_authorized(authorized, ctx, None);
         assert!(!result.success, "changed workspace must invalidate proof");
         assert!(
             result.content.contains("workspace mismatch"),
@@ -1515,8 +1470,8 @@ mod tests {
     #[test]
     fn session_mismatch_rejected() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("session-A", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
+        let ws = crate::runtime::active_workspace_root();
         let inv = ToolInvocation {
             session_id: "session-B".to_string(),
             call_id: "sess-mis-1".to_string(),
@@ -1527,10 +1482,12 @@ mod tests {
         let auth = AuthorizedToolCall::new(
             inv,
             vec![],
-            crate::runtime::active_workspace_root(),
+            ws.clone(),
             crate::authorization::GrantKind::Auto,
         );
-        let result = execute_authorized(auth, None);
+        let mut ctx = test_ctx("session-A", ws, 3);
+        ctx.call_id = "sess-mis-1".into();
+        let result = execute_test_authorized(auth, ctx, None);
         assert!(!result.success, "session mismatch should be rejected");
         assert!(
             result.content.contains("session mismatch"),
@@ -1542,8 +1499,6 @@ mod tests {
             0,
             "handler must never be reached"
         );
-        // Cleanup runtime context for subsequent tests
-        crate::runtime::clear_context();
     }
 
     // ── Test: Resource mismatch rejected ──
@@ -1551,7 +1506,6 @@ mod tests {
     #[test]
     fn resource_mismatch_rejected() {
         let _test_guard = setup_test_manager();
-        crate::runtime::set_context("test", 3);
         TEST_HANDLER_COUNT.store(0, Ordering::SeqCst);
 
         let ws = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1588,7 +1542,9 @@ mod tests {
             auth.workspace_root().to_path_buf(),
             crate::authorization::GrantKind::Auto,
         );
-        let result = execute_authorized(forged_auth, None);
+        let mut ctx = test_ctx("test", ws, 3);
+        ctx.call_id = "res-mis-1".into();
+        let result = execute_test_authorized(forged_auth, ctx, None);
         assert!(!result.success, "resource mismatch should be rejected");
         assert!(
             result.content.contains("Resource mismatch"),

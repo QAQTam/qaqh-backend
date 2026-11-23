@@ -85,7 +85,10 @@ impl ToolProjection for ConfirmApplyOutput {
     }
 }
 
-pub struct ConfirmApplyTool;
+pub struct ConfirmApplyTool {
+    /// 会话私有文件运行时状态（透传给 write / apply_patch 回放；P0-2 实例化）。
+    pub files: crate::FileRuntime,
+}
 
 impl TypedTool for ConfirmApplyTool {
     type Args = ConfirmApplyArgs;
@@ -152,7 +155,9 @@ impl TypedTool for ConfirmApplyTool {
                                 json!({}),
                             )
                         })?;
-                        TypedToolAdapter::new(crate::file_mutate::WriteTool)
+                        TypedToolAdapter::new(crate::file_mutate::WriteTool {
+                            files: self.files.clone(),
+                        })
                             .execute(ctx.clone(), pending.args.clone())
                             .map_err(ToolExecutionError::Fatal)?
                             .to_tool_result()
@@ -171,7 +176,9 @@ impl TypedTool for ConfirmApplyTool {
                                 json!({}),
                             )
                         })?;
-                        TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool)
+                        TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool {
+                            files: self.files.clone(),
+                        })
                             .execute(ctx.clone(), pending.args.clone())
                             .map_err(ToolExecutionError::Fatal)?
                             .to_tool_result()
@@ -256,23 +263,31 @@ impl TypedTool for ConfirmApplyTool {
     }
 }
 
-pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
-    mgr.register_typed_tool(ConfirmApplyTool);
+pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
+    mgr.register_typed_tool(ConfirmApplyTool {
+        files: files.clone(),
+    });
 }
 
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
-fn exec_confirm_apply(args: &Value) -> crate::ToolResult {
+fn exec_confirm_apply_in(workspace: &str, args: &Value) -> crate::ToolResult {
     use crate::tool_api::ErasedTool;
 
-    let ctx = crate::file_mutate::ambient_tool_context(
+    let ctx = crate::file_mutate::test_tool_context_in(
+        workspace,
         "confirm-apply-compat",
         std::time::Duration::from_secs(60),
     );
-    TypedToolAdapter::new(ConfirmApplyTool)
+    TypedToolAdapter::new(ConfirmApplyTool { files: crate::FileRuntime::default() })
         .execute(ctx, args.clone())
         .unwrap_or_else(|fatal| panic!("confirm_apply tool fatal: {}", fatal.message))
         .to_tool_result()
+}
+
+#[cfg(test)]
+fn exec_confirm_apply(args: &Value) -> crate::ToolResult {
+    exec_confirm_apply_in(".", args)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -283,14 +298,14 @@ fn exec_confirm_apply(args: &Value) -> crate::ToolResult {
 mod tests {
     use super::*;
 
-    /// 写 CURRENT_WORKSPACE 的测试必须串行（全局静态，并行测试会互相踩踏）。
-    static WS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn run_confirm(id: &str, action: &str) -> serde_json::Value {
-        let result = exec_confirm_apply(&serde_json::json!({
-            "pending_id": id,
-            "action": action,
-        }));
+    fn run_confirm_in(workspace: &str, id: &str, action: &str) -> serde_json::Value {
+        let result = exec_confirm_apply_in(
+            workspace,
+            &serde_json::json!({
+                "pending_id": id,
+                "action": action,
+            }),
+        );
         let data = result.data.clone();
         if data.as_object().is_none_or(|o| o.is_empty()) {
             // 无结构化 data → 尝试解析错误 JSON；失败则按状态兜底。
@@ -311,10 +326,14 @@ mod tests {
         }
     }
 
+    fn run_confirm(id: &str, action: &str) -> serde_json::Value {
+        run_confirm_in(".", id, action)
+    }
+
     #[test]
     fn typed_confirm_apply_registration_and_discard() {
         let mut manager = qaqh_workspace::ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, &crate::FileRuntime::default());
         assert!(
             manager.builtin("confirm_apply").is_some(),
             "confirm_apply must be on the typed execution surface"
@@ -359,27 +378,21 @@ mod tests {
 
     #[test]
     fn apply_patch_dry_run_then_confirm() {
-        // 本测试写全局 CURRENT_WORKSPACE：仅靠模块内 WS_LOCK 不足以与
-        // 其他模块的并行测试互斥，必须按家规叠加全仓串行锁。
-        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _guard = WS_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("a.txt"), "line1\nline2\n").unwrap();
         let ws = dir.path().to_string_lossy().to_string();
-        // 引擎的 workspace-bounded 检查要求绝对路径落在 cwd 内：
-        // cwd = CURRENT_WORKSPACE（并行测试可能被踩踏）→ 用 cwd 无关的
-        // 方式不可行，因此这里直接设置全局并立即 confirm（串行窗口内安全）。
         let apath = format!("{}/a.txt", ws.replace('\\', "/"));
-        qaqh_permission::set_workspace(&ws);
         let patch = format!(
             "*** Begin Patch\n*** Update File: {apath}\n@@\n-line2\n+LINE2\n*** End Patch\n"
         );
-        let dry = crate::apply_patch::exec_apply_patch(&serde_json::json!({
-            "patch": patch,
-            "dry_run": true,
-        }));
+        let dry = crate::apply_patch::exec_apply_patch_in_ws(
+            &crate::FileRuntime::default(),
+            &ws,
+            &serde_json::json!({
+                "patch": patch,
+                "dry_run": true,
+            }),
+        );
         let data = dry.data.clone();
         let pending_id = data["pending_id"].as_str().expect("pending_id").to_string();
         assert_eq!(
@@ -387,10 +400,7 @@ mod tests {
             "line1\nline2\n"
         );
 
-        // 并行测试可能覆盖 CURRENT_WORKSPACE（Linux 调度差异放大竞争）：
-        // confirm 重放前重新钉住本测试的 workspace。
-        qaqh_permission::set_workspace(&ws);
-        let out = run_confirm(&pending_id, "apply");
+        let out = run_confirm_in(&ws, &pending_id, "apply");
         assert_eq!(out["status"], "ok", "confirm patch failed: {out}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
@@ -405,12 +415,12 @@ mod tests {
         let path = dir.path().join("a.txt");
         std::fs::write(&path, "old\n").expect("write fixture");
         let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
-        let mut ctx = crate::file_mutate::ambient_tool_context(
+        let mut ctx = crate::file_mutate::test_tool_context(
             "patch-preview-revalidate",
             std::time::Duration::from_secs(60),
         );
         ctx.workspace_root = dir.path().to_path_buf();
-        let dry = TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool)
+        let dry = TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool { files: crate::FileRuntime::default() })
             .execute(
                 ctx.clone(),
                 serde_json::json!({"patch": patch, "dry_run": true}),
@@ -422,7 +432,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old\n");
         std::fs::write(&path, "changed externally\n").expect("external change");
         let args = serde_json::json!({"pending_id": id, "action": "apply"});
-        let first = TypedToolAdapter::new(ConfirmApplyTool)
+        let first = TypedToolAdapter::new(ConfirmApplyTool { files: crate::FileRuntime::default() })
             .execute(ctx.clone(), args.clone())
             .expect("confirm adapter")
             .to_tool_result();
@@ -434,7 +444,7 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "changed externally\n"
         );
-        let second = TypedToolAdapter::new(ConfirmApplyTool)
+        let second = TypedToolAdapter::new(ConfirmApplyTool { files: crate::FileRuntime::default() })
             .execute(ctx, args)
             .expect("second confirm adapter")
             .to_tool_result();
@@ -455,13 +465,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("a.txt");
         std::fs::write(&path, "old\n").expect("write fixture");
-        let mut ctx = crate::file_mutate::ambient_tool_context(
+        let mut ctx = crate::file_mutate::test_tool_context(
             "preview-discard",
             std::time::Duration::from_secs(60),
         );
         ctx.workspace_root = dir.path().to_path_buf();
         let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
-        let preview = TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool)
+        let preview = TypedToolAdapter::new(crate::apply_patch::ApplyPatchTool { files: crate::FileRuntime::default() })
             .execute(
                 ctx.clone(),
                 serde_json::json!({"patch": patch, "dry_run": true}),
@@ -470,7 +480,7 @@ mod tests {
             .to_tool_result();
         assert!(preview.is_success());
         let id = preview.data["pending_id"].as_str().expect("pending id");
-        let discarded = TypedToolAdapter::new(ConfirmApplyTool)
+        let discarded = TypedToolAdapter::new(ConfirmApplyTool { files: crate::FileRuntime::default() })
             .execute(
                 ctx.clone(),
                 serde_json::json!({"pending_id": id, "action":"discard"}),
@@ -478,7 +488,7 @@ mod tests {
             .expect("discard adapter")
             .to_tool_result();
         assert!(discarded.is_success());
-        let replay = TypedToolAdapter::new(ConfirmApplyTool)
+        let replay = TypedToolAdapter::new(ConfirmApplyTool { files: crate::FileRuntime::default() })
             .execute(ctx, serde_json::json!({"pending_id": id, "action":"apply"}))
             .expect("replay adapter")
             .to_tool_result();

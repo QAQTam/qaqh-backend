@@ -230,7 +230,7 @@ impl TypedTool for ExecCommandTool {
             )
             .into());
         }
-        let max_output_chars = output_budget(args.max_output_chars)?;
+        let max_output_chars = output_budget(context.exec_max_output_chars, args.max_output_chars)?;
         let shell = crate::exec::handler::resolve_shell(
             context,
             args.shell.as_ref().map(|shell| shell.config_name()),
@@ -362,7 +362,7 @@ impl TypedTool for WriteStdinTool {
             ))
             .into());
         }
-        let max_output_chars = output_budget(args.max_output_chars)?;
+        let max_output_chars = output_budget(context.exec_max_output_chars, args.max_output_chars)?;
         let host = context.exec_host.as_ref().ok_or_else(|| {
             ToolExecutionError::from(ToolError::new(
                 ToolErrorKind::Unavailable,
@@ -382,9 +382,12 @@ impl TypedTool for WriteStdinTool {
     }
 }
 
-fn output_budget(requested: Option<u32>) -> Result<u32, ToolExecutionError> {
-    let default = crate::hooks::exec_max_output_chars().unwrap_or(32_000);
-    let budget = requested.unwrap_or(default);
+fn output_budget(
+    policy_default: Option<u32>,
+    requested: Option<u32>,
+) -> Result<u32, ToolExecutionError> {
+    // P0-2：上限随 ToolCallContext 显式到达（fold policy 在执行入口注入）。
+    let budget = requested.unwrap_or(policy_default.unwrap_or(32_000));
     if !(1..=200_000).contains(&budget) {
         return Err(
             ToolError::invalid_arguments("max_output_chars must be between 1 and 200000").into(),

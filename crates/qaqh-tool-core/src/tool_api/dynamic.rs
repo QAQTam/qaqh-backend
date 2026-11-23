@@ -110,6 +110,7 @@ mod tests {
             sandbox: SandboxMode::Main,
             sandbox_spec: SandboxSpec::workspace_write(std::path::PathBuf::from("/tmp/dyn-ws")),
             exec_default_shell: None,
+            exec_max_output_chars: None,
             timeout: Duration::from_secs(30),
             cancellation: CancellationToken::new(),
             progress: None,

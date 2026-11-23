@@ -650,11 +650,11 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
 
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
-fn exec_journal(args: &Value) -> crate::ToolResult {
-    use crate::file_mutate::ambient_tool_context;
+fn exec_journal_in(workspace: &str, args: &Value) -> crate::ToolResult {
+    use crate::file_mutate::test_tool_context_in;
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
-    let ctx = ambient_tool_context("journal-compat", Duration::from_secs(30));
+    let ctx = test_tool_context_in(workspace, "journal-compat", Duration::from_secs(30));
     TypedToolAdapter::new(JournalTool)
         .execute(ctx, args.clone())
         .unwrap_or_else(|fatal| panic!("journal tool fatal: {}", fatal.message))
@@ -757,15 +757,10 @@ mod tests {
 
     /// Tool-entry `out` must resolve against the workspace root BEFORE the
     /// write, matching the permission layer's resolve_target_path anchoring.
-    /// Serializes on TEST_RUNTIME_SERIAL (writes global CURRENT_WORKSPACE).
     #[test]
     fn journal_replay_out_resolves_against_workspace() {
-        let _guard = qaqh_workspace::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
         with_temp_journal(|| {
             let ws = tempfile::tempdir().expect("ws tempdir");
-            crate::set_workspace(&ws.path().to_string_lossy());
             record_change(
                 "s1",
                 "c1",
@@ -785,7 +780,7 @@ mod tests {
                 "file": "a.txt",
                 "out": "restored",
             });
-            let result = exec_journal(&args);
+            let result = exec_journal_in(&ws.path().to_string_lossy(), &args);
             assert!(
                 result.is_success(),
                 "replay failed: {}",
@@ -794,8 +789,6 @@ mod tests {
             let written = std::fs::read_to_string(out_dir.join("a.txt"))
                 .expect("out must be workspace-anchored");
             assert_eq!(written, "restored bytes\n");
-
-            crate::set_workspace("");
         });
     }
 
@@ -849,7 +842,7 @@ mod tests {
                 Some("data\n"),
                 "ok",
             );
-            let result = exec_journal(&serde_json::json!({
+            let result = exec_journal_in(".", &serde_json::json!({
                 "action": "query",
                 "session": "s1",
             }));

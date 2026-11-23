@@ -102,7 +102,7 @@ fn mcp_prefix_and_model_face_merge() {
 #[test]
 fn collision_rejected_against_dynamic_and_builtin() {
     let mut mgr = ToolManager::new();
-    qaqh_workspace::file_query::register(&mut mgr);
+    qaqh_workspace::file_query::register(&mut mgr, &std::sync::Arc::new(qaqh_file_tools::FileRuntime::default()));
 
     // 动态↔内置：与真实注册的内置名撞 → Err。
     let (_, clashing) = echo_entry("read", "x", "");
@@ -249,7 +249,10 @@ fn description_truncates_at_char_boundary_with_marker() {
 #[test]
 fn category_of_covers_builtin_and_dynamic() {
     let mut mgr = ToolManager::new();
-    qaqh_workspace::file_query::register(&mut mgr);
+    qaqh_workspace::file_query::register(
+        &mut mgr,
+        &std::sync::Arc::new(qaqh_file_tools::FileRuntime::default()),
+    );
     let (name, tool) = echo_entry("demo", "echo", "d");
     mgr.register_dynamic(name, tool).expect("register");
 
@@ -262,39 +265,49 @@ fn category_of_covers_builtin_and_dynamic() {
 
 #[test]
 fn replace_dynamic_tools_clears_and_rebuilds() {
-    // runtime::replace_dynamic_tools 操作 thread-local actor manager——
-    // 测试线程安装私有 manager，用完 clear 回退进程 manager（actor 语义一致）。
-    qaqh_workspace::runtime::install_actor_tool_manager(ToolManager::new());
+    // P0-2：会话私有 ToolManager 直接承担动态层全量重建（不再经 TLS
+    // `install_actor_tool_manager` 中转）。
+    let mut manager = ToolManager::new();
+    let apply_batch = |mgr: &mut ToolManager, batch: Vec<(String, qaqh_workspace::DynamicTool)>| -> usize {
+        mgr.clear_dynamic();
+        let mut rejected = 0usize;
+        for (name, tool) in batch {
+            if mgr.register_dynamic(name, tool).is_err() {
+                rejected += 1;
+            }
+        }
+        mgr.reapply_allowed_after_dynamic_change();
+        rejected
+    };
 
     let batch1 = vec![
         echo_entry("demo", "echo", "v1"),
         echo_entry("demo", "slow", "v1"),
     ];
-    assert_eq!(qaqh_workspace::runtime::replace_dynamic_tools(batch1), 0);
-    let dynamic_names = |expected: &[&str]| {
-        let names: Vec<String> = qaqh_workspace::runtime::all_tools()
+    assert_eq!(apply_batch(&mut manager, batch1), 0);
+    let dynamic_names = |mgr: &ToolManager, expected: &[&str]| {
+        let names: Vec<String> = mgr
+            .filtered_defs()
             .into_iter()
             .filter(|def| def.function.name.starts_with(MCP_DYNAMIC_PREFIX))
             .map(|def| def.function.name)
             .collect();
         assert_eq!(names, expected);
     };
-    dynamic_names(&["mcp__demo__echo", "mcp__demo__slow"]);
+    dynamic_names(&manager, &["mcp__demo__echo", "mcp__demo__slow"]);
 
     // 第二代批次（server 缩到只剩 echo）：clear + 重建后动态层只剩新集合。
     let batch2 = vec![echo_entry("demo", "echo", "v2")];
-    assert_eq!(qaqh_workspace::runtime::replace_dynamic_tools(batch2), 0);
-    dynamic_names(&["mcp__demo__echo"]);
+    assert_eq!(apply_batch(&mut manager, batch2), 0);
+    dynamic_names(&manager, &["mcp__demo__echo"]);
 
     // 完整名不同的两条（demo/echo vs other/echo）互不冲突，零拒绝。
     let batch3 = vec![
         echo_entry("demo", "echo", "v3"),
         echo_entry("other", "echo", "v3"),
     ];
-    assert_eq!(qaqh_workspace::runtime::replace_dynamic_tools(batch3), 0);
-    dynamic_names(&["mcp__demo__echo", "mcp__other__echo"]);
-
-    qaqh_workspace::runtime::clear_actor_tool_manager();
+    assert_eq!(apply_batch(&mut manager, batch3), 0);
+    dynamic_names(&manager, &["mcp__demo__echo", "mcp__other__echo"]);
 }
 
 // ── 7. T-8-1：Exec/Net 动态工具默认要求审批（安全审查 P1-1 / O-4）──

@@ -39,13 +39,20 @@ fn setup_with_v2_block(label: &str, block_v2: bool) -> Env {
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("USERPROFILE", tmp.path());
     }
-    qaqh_workspace::set_workspace(&workspace.to_string_lossy());
     qaqh_workspace::runtime::init_tools(label, &[], vec![]);
-    qaqh_workspace::runtime::set_context(label, 4);
     Env {
         _tmp: tmp,
         data,
         workspace,
+    }
+}
+
+fn admitted_ctx(env: &Env, session_id: &str) -> qaqh_workspace::runtime::ToolCtx {
+    qaqh_workspace::runtime::ToolCtx {
+        session_id: session_id.to_string(),
+        permission_level: 3,
+        workspace_root: Some(env.workspace.to_string_lossy().into_owned()),
+        sandbox: None,
     }
 }
 
@@ -62,7 +69,7 @@ fn call(
 fn audit_intent_failure_blocks_write_before_side_effect() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let env = setup("audit-intent-block");
-    let ctx = qaqh_workspace::runtime::ToolCtx::admitted("audit-intent-block");
+    let ctx = admitted_ctx(&env, "audit-intent-block");
     let target = env.workspace.join("must-not-exist.txt");
 
     let result = call(
@@ -96,7 +103,7 @@ fn audit_intent_failure_blocks_write_before_side_effect() {
 fn audit_intent_failure_blocks_exec_before_side_effect() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let env = setup("audit-intent-exec");
-    let ctx = qaqh_workspace::runtime::ToolCtx::admitted("audit-intent-exec");
+    let ctx = admitted_ctx(&env, "audit-intent-exec");
     let target = env.workspace.join("exec-must-not-exist.txt");
 
     let result = call(
@@ -126,7 +133,7 @@ fn audit_intent_failure_blocks_exec_before_side_effect() {
 fn audit_intent_failure_blocks_net_before_request() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let env = setup("audit-intent-net");
-    let ctx = qaqh_workspace::runtime::ToolCtx::admitted("audit-intent-net");
+    let ctx = admitted_ctx(&env, "audit-intent-net");
 
     let result = call(
         "web_fetch",
@@ -151,7 +158,7 @@ fn audit_intent_failure_blocks_net_before_request() {
 fn audit_intent_failure_does_not_block_read_only() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let env = setup("audit-read-open");
-    let ctx = qaqh_workspace::runtime::ToolCtx::admitted("audit-read-open");
+    let ctx = admitted_ctx(&env, "audit-read-open");
     let target = env.workspace.join("readable.txt");
     std::fs::write(&target, "readable body").expect("write readable file");
 
@@ -179,7 +186,7 @@ fn audit_intent_failure_does_not_block_read_only() {
 fn audit_result_failure_quarantines_and_blocks_subsequent_high_risk_tools() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let env = setup_result_failure("audit-result-quarantine");
-    let ctx = qaqh_workspace::runtime::ToolCtx::admitted("audit-result-quarantine");
+    let ctx = admitted_ctx(&env, "audit-result-quarantine");
     let first_target = env.workspace.join("first-side-effect.txt");
 
     // Let the intent barrier succeed, then fail only the terminal result write.

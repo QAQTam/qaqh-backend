@@ -137,29 +137,10 @@ pub fn extract_target_paths_in(
         .collect()
 }
 
-/// Workspace base for relative-target resolution: the actor-local or
-/// process-global workspace, empty when unset (resolving against the
-/// process cwd).
-fn workspace_base() -> PathBuf {
-    let ws = crate::current_workspace();
-    if ws.is_empty() || ws == "." {
-        PathBuf::new()
-    } else {
-        PathBuf::from(ws)
-    }
-}
-
-/// Thread-local-backed variant for callers outside a tool context.
-/// Production authorization and execution paths must use
-/// [`extract_target_paths_in`] with an explicit base.
-pub fn extract_target_paths(tool_name: &str, args: &serde_json::Value) -> Vec<PathBuf> {
-    extract_target_paths_in(tool_name, args, &workspace_base())
-}
-
 /// Build the bounded, user-facing operation summary for an approval dialog.
 ///
 /// `exec_command` is the one built-in tool whose effect cannot be inferred from
-/// [`extract_target_paths`]: the command text may write outside `workdir`. Include
+/// [`extract_target_paths_in`]: the command text may write outside `workdir`. Include
 /// the command, shell and workdir for informed approval, but deliberately
 /// omit `env` and all other arbitrary tool args so the dialog cannot become a
 /// secret-dumping surface.
@@ -260,7 +241,7 @@ pub fn patch_target_paths(patch: &str) -> Vec<String> {
 /// Resolve symlinks/junctions in the nearest existing ancestor, then append
 /// any missing suffix. This keeps authorization checks correct for new files.
 pub fn resolve_target_path(path: PathBuf) -> PathBuf {
-    resolve_target_path_in(path, &workspace_base())
+    resolve_target_path_in(path, Path::new(""))
 }
 
 /// [`resolve_target_path`] with an explicit base for relative targets, so the
@@ -726,7 +707,7 @@ impl TrustedFolderSet {
 }
 
 fn trusted_folders_path(session_id: &str) -> PathBuf {
-    crate::workspace::qaqh_dir()
+    crate::workspace::qaqh_dir_in("")
         .join("sessions")
         .join(session_id)
         .join("trusted_folders.json")
@@ -1062,21 +1043,17 @@ mod w3_w7_tests {
 
     #[test]
     fn shell_cwd_and_patch_targets_enter_authorization_resources() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(ws.join("src")).unwrap();
-        let old = crate::current_workspace();
-        crate::set_workspace(ws.to_str().unwrap());
         let ws_canon = std::fs::canonicalize(&ws).unwrap_or_else(|_| ws.clone());
         let inside_ws = |p: &std::path::Path| p.starts_with(&ws_canon) || p.starts_with(&ws);
 
         // 执行会话命令入口：workdir 必须进授权资源。
-        let res = extract_target_paths(
+        let res = extract_target_paths_in(
             "exec_command",
             &serde_json::json!({ "cmd": "ls", "workdir": "./src" }),
+            &ws,
         );
         assert_eq!(
             res.len(),
@@ -1086,9 +1063,10 @@ mod w3_w7_tests {
         assert!(inside_ws(&res[0]), "exec cwd not under ws: {:?}", res[0]);
 
         // W3：apply_patch 目标从 patch 文本解析进授权资源（两条目标）。
-        let res2 = extract_target_paths(
+        let res2 = extract_target_paths_in(
             "apply_patch",
             &serde_json::json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-old\n+new\n*** Add File: src/new.rs\n+seed\n*** End Patch"}),
+            &ws,
         );
         assert_eq!(res2.len(), 2, "patch targets missing: {res2:?}");
 
@@ -1096,28 +1074,18 @@ mod w3_w7_tests {
         for p in res2.iter().chain(res.iter()) {
             assert!(inside_ws(p), "resource not under ws: {:?}", p);
         }
-
-        crate::set_workspace(&old);
     }
 
     #[test]
-    fn extract_resolves_relative_targets_against_explicit_base_not_tls() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    fn extract_resolves_relative_targets_against_explicit_base() {
         let tmp = tempfile::tempdir().unwrap();
         let base = tmp.path().join("session-ws");
         std::fs::create_dir_all(&base).unwrap();
         let elsewhere = tmp.path().join("other-ws");
         std::fs::create_dir_all(&elsewhere).unwrap();
 
-        // TLS 工作区指向另一目录：显式 base 必须完全接管相对路径解析，
-        // 授权快照与执行复核才不因线程上下文不同而错位（resource_mismatch）。
-        let old = crate::current_workspace();
-        crate::set_workspace(elsewhere.to_str().unwrap());
         let args = serde_json::json!({ "path": "src/lib.rs" });
         let res = extract_target_paths_in("read", &args, &base);
-        crate::set_workspace(&old);
 
         let base_canon = std::fs::canonicalize(&base).unwrap();
         let elsewhere_canon = std::fs::canonicalize(&elsewhere).unwrap();
@@ -1129,7 +1097,7 @@ mod w3_w7_tests {
         );
         assert!(
             !res[0].starts_with(&elsewhere_canon),
-            "thread-local workspace must not leak into explicit-base resolution"
+            "unrelated workspace must not appear in explicit-base resolution"
         );
     }
 
@@ -1254,9 +1222,6 @@ mod w3_w7_tests {
         ignore = "root-only trust entries are Windows path semantics (\\)"
     )]
     fn root_only_trust_entry_is_not_resolved_to_current_drive_root() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         for bogus in ["/", "\\", "C:\\"] {
             let resolved = resolve_target_path(PathBuf::from(bogus));
             assert!(

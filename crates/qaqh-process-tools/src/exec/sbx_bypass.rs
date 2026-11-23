@@ -383,9 +383,7 @@ pub(crate) fn sbx_exec(
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) => {
-                if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-                    || crate::is_cancel()
-                {
+                if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
                     child.kill_tree();
                     cancelled = true;
                     break;

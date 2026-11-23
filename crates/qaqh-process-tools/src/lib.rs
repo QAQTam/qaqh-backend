@@ -4,16 +4,14 @@
 //! 依赖 qaqh-sandbox（沙箱执行）、qaqh-policy、qaqh-file-tools（exec 结果
 //! 落 journal）、qaqh-tool-core（SDK）。
 //!
-//! 对门面的两条单向回接线：
-//! - exec 输出字符上限经 [`hooks::set_exec_max_output_chars`] 注入
-//!   （单一事实源是执行线程 thread-local 的 fold policy，回调仍在调用线程
-//!   读取，语义不变）；
-//! - `process` 工具的 display 投影经 [`hooks::set_project_process`] 注入
-//!   （投影实现留守门面 `display::project_process`）。
+//! P0-2：门面注入钩子（`hooks::EXEC_MAX_OUTPUT_CHARS` / `PROJECT_PROCESS`
+//! 两个 `OnceLock<fn()>`）随线程态穿越一并退役——exec 输出上限随
+//! [`qaqh_tool_core::tool_api::ToolCallContext::exec_max_output_chars`] 显式
+//! 到达（fold policy 在执行入口注入），`process` 显示投影单一事实源收归
+//! [`process_inspect::project_process`]。
 
 pub mod exec;
 pub mod exec_session;
-pub mod hooks;
 #[cfg(test)]
 mod process_inspect;
 pub mod process_registry;
@@ -23,7 +21,6 @@ pub mod process_registry;
 pub use qaqh_file_tools::file_mutate;
 pub use qaqh_file_tools::support::{json_err, json_err_string, json_ok};
 pub use qaqh_permission::permission;
-pub use qaqh_permission::{current_session, current_workspace, is_cancel, resolve_workspace_path};
 pub use qaqh_tool_core::ToolRisk;
 pub use qaqh_tool_core::tool_api;
 pub use qaqh_tool_core::{
