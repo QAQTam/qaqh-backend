@@ -365,7 +365,7 @@ pub fn exec_edit_with(files: &crate::FileRuntime, args: &Value) -> crate::ToolRe
         sandbox: crate::tool_api::SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(PathBuf::from(".")),
         exec_default_shell: None,
-            exec_max_output_chars: None,
+        exec_max_output_chars: None,
         timeout: Duration::from_secs(60),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,

@@ -84,7 +84,7 @@ fn shell_test_context(exec_default_shell: Option<&str>) -> crate::tool_api::Tool
         sandbox: crate::tool_api::SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(workspace_root),
         exec_default_shell: exec_default_shell.map(str::to_string),
-            exec_max_output_chars: None,
+        exec_max_output_chars: None,
         timeout: Duration::from_secs(30),
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,

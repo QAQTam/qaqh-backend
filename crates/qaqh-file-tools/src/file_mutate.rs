@@ -919,7 +919,7 @@ pub(crate) fn test_tool_context_in(
         sandbox: crate::tool_api::SandboxMode::Main,
         sandbox_spec: crate::tool_api::SandboxSpec::workspace_write(root),
         exec_default_shell: None,
-            exec_max_output_chars: None,
+        exec_max_output_chars: None,
         timeout,
         cancellation: crate::tool_api::CancellationToken::new(),
         progress: None,

@@ -58,34 +58,6 @@ fn fallback_display(label: &str, output: &str) -> ToolDisplay {
     )
 }
 
-/// 用工具名 + 兜底摘要构造单行 summary；没有可用文本时保持 `None`。
-fn with_line_summary(mut display: ToolDisplay, summary: Option<String>) -> ToolDisplay {
-    if let Some(summary) = summary.filter(|summary| !summary.is_empty()) {
-        display.summary = Some(first_line(&summary));
-    }
-    display
-}
-
-fn first_line(value: &str) -> String {
-    // P0-③：错误信封首行是 `[timeis: ...]` 戳，实质消息在后续行。摘要
-    // 跳过戳行，避免「首行渲染」的前端只显示时间戳而看不到真正的错误
-    // （实例：`[DENIED] subagent sandbox denied 'read' ...` 被吞）。
-    // 全文只有戳行时回退到首个非空行，保持旧行为。
-    let mut fallback = "";
-    let line = value.lines().find(|line| {
-        let trimmed = line.trim();
-        if fallback.is_empty() && !trimmed.is_empty() {
-            fallback = trimmed;
-        }
-        !trimmed.is_empty() && !trimmed.starts_with("[timeis:")
-    });
-    let line = line
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .unwrap_or(fallback);
-    line.chars().take(160).collect()
-}
-
 /// todo 系列的面板数据由 dashboard 维护；display 只保留 canonical 摘要行。
 fn todo_display(label: &'static str, output: &str) -> ToolDisplay {
     ToolDisplay::new(
@@ -194,27 +166,6 @@ fn compact_args_summary(args: &serde_json::Value) -> String {
     } else {
         format!("args [{}]", parts.join(", "))
     }
-}
-
-pub fn project_process(args: &serde_json::Value, output: &str) -> ToolDisplay {
-    let action = args
-        .get("action")
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("process");
-    let view = json_view(output);
-    let summary = json_string(view.as_ref(), &["status"]);
-    let display = ToolDisplay::new(
-        ToolHeader::Other {
-            label: format!("process {action}"),
-        },
-        ToolBody::Text {
-            text: json_string(view.as_ref(), &["content"]).unwrap_or_else(|| output.to_string()),
-            truncated: false,
-        },
-    );
-    with_line_summary(display, summary)
 }
 
 #[cfg(test)]
@@ -368,17 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn process_and_subagent_fallbacks_never_emit_json_summary() {
-        let output =
-            crate::json_ok(json!({"content": "process 12: completed", "status": "completed"}));
-        let process = project_process(&json!({"action": "check", "id": 12}), &output);
-        assert_eq!(process.summary.as_deref(), Some("completed"));
-        assert_ne!(
-            process.summary.as_deref(),
-            Some("process 12: completed"),
-            "process summary must be status metadata, not the body's first line"
-        );
-
+    fn fallback_display_never_emits_json_summary() {
         let fallback = fallback_display("exec-ish", "{\"message\":\"json\"}");
         assert_eq!(fallback.summary, None);
         assert_eq!(fallback.metrics, ToolMetrics::default());

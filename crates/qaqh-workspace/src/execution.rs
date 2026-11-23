@@ -536,7 +536,7 @@ pub fn execute_with_context(
                     &StandardPolicy,
                 );
             }
-            return failure(&resolved_name, crate::ToolError::RuntimeNotInitialized);
+            failure(&resolved_name, crate::ToolError::RuntimeNotInitialized)
         }
         Admission::ApprovalRequired(challenge) => {
             let error = crate::ToolError::PermissionDenied {
