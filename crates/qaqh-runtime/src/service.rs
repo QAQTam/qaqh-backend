@@ -814,6 +814,20 @@ impl QaqhService {
         }
     }
 
+    /// v4.4 `P1-0b`：`registry` 锁内**只**取一次内存运行态快照，出本方法即放锁
+    /// （快照本体见 [`AgentRegistry::run_state_snapshot`]）。
+    ///
+    /// 读侧（`session.list` / `session.meta`）一律先拿快照、再碰 SQLite——
+    /// 这是 L-01.2 复合停摆的止血点：`registry` 是中央 std Mutex，持锁跨
+    /// `read_blocking`（`busy_timeout=5s`）或 `write_blocking`（单写者线程
+    /// `rx.recv()` + `synchronous=FULL` fsync）会把慢 IO 放大成全控制面冻结。
+    pub(crate) fn run_state_snapshot(
+        &self,
+    ) -> QaqhResult<std::collections::HashMap<String, ActivityState>> {
+        let registry = self.registry().map_err(QaqhError::message)?;
+        Ok(registry.run_state_snapshot())
+    }
+
     /// `session.list` 的条目（前端契约 **G2**）。
     /// 返回**类型化**条目而非 `Value`：形状由 `qaqh_types::SessionListEntry` 承载，
     /// 序列化只发生在 dispatch 边界。此前这里是 `to_value(&meta)` 之后再
@@ -826,7 +840,13 @@ impl QaqhService {
         &self,
         include_archived: bool,
     ) -> QaqhResult<Vec<qaqh_types::SessionListEntry>> {
-        let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        // P1-0b：锁边界收紧——registry 只护住上面那份内存快照，取出即放。
+        // 之后的两次 `read_blocking`、每行一次 `session_run_status`（其兜底
+        // 分支自己会再 `read_blocking`）、以及未绑定工作区行的
+        // `write_blocking` 自动绑定，**全部在锁外**执行。判定语义不变：
+        // 快照键集合等价于逐条 `is_running`，值等价于原先每行重扫
+        // `activities().find(..)` 的结果，且顺带消掉那个 O(行×实例) 的锁内重扫。
+        let running = self.run_state_snapshot()?;
         let rows = self
             .owners
             .db()
@@ -842,12 +862,8 @@ impl QaqhService {
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
             let session_id = row.session_id.clone();
-            let loaded = registry.is_running(&session_id);
-            let fallback = registry
-                .activities()
-                .into_iter()
-                .find(|activity| activity.session_id == session_id)
-                .map(|activity| activity.state);
+            let loaded = running.contains_key(&session_id);
+            let fallback = running.get(&session_id).copied();
             let status = self.session_run_status(loaded, fallback, &session_id);
             let meta = qaqh_types::SessionMeta {
                 session_id: session_id.clone(),

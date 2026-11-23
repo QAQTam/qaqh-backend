@@ -26,13 +26,18 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
             // 单条与 `session.list` 的条目**同一个形状**（G2）：同样的
             // `SessionMeta` + 运行期字段。此前这里也是手拼 `value["running"]`，
             // 且不带 `workspace_id`——同一个形状两处各拼一次，正是漂移的温床。
-            let registry = service.registry().map_err(QaqhError::message)?;
-            let loaded = registry.is_running(&meta.session_id);
-            let fallback = registry
-                .activities()
-                .into_iter()
-                .find(|activity| activity.session_id == meta.session_id)
-                .map(|activity| activity.state);
+            // P1-0b（L-01.2 同律）：`registry` 锁只圈住这一次内存查找，guard
+            // 出表达式即释放；`session_run_status` 的 DB 兜底与下面
+            // `workspace_of` 的 `read_blocking` 都在锁外。旧实现的 guard
+            // 一路活到 `read_blocking` 之后，把单条查询也变成了持锁 IO。
+            let (loaded, fallback) = {
+                let registry = service.registry().map_err(QaqhError::message)?;
+                let loaded = registry.is_running(&meta.session_id);
+                let fallback = registry
+                    .activity(&meta.session_id)
+                    .map(|activity| activity.state);
+                (loaded, fallback)
+            };
             let entry = qaqh_types::SessionListEntry {
                 status: service.session_run_status(loaded, fallback, &meta.session_id),
                 workspace_id: service

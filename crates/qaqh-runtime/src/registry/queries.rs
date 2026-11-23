@@ -353,4 +353,18 @@ impl AgentRegistry {
     pub fn is_running(&self, session_id: &str) -> bool {
         self.instances.contains_key(session_id)
     }
+
+    /// v4.4 `P1-0b`（L-01.2）：运行态**值类型**快照，只读 `instances` 内存态，
+    /// 零 IO，供调用方**放掉 `registry` 锁之后**在锁外完成 DB 读写与逐行状态计算。
+    ///
+    /// 键集合与原逐条 `is_running` 判定同源（两者都是 `self.instances` 的键），
+    /// 值与原逐行重扫 `activities().find(..).map(|a| a.state)` 同源
+    /// （`activities()` 本就由 `instances.values()` 全量派生），因此语义逐字不变。
+    /// 同时把 `list_sessions` 原先 O(行×实例) 的锁内全表重扫降为一趟快照。
+    pub fn run_state_snapshot(&self) -> HashMap<String, qaqh_ringing_contract::SessionActivityState> {
+        self.activities()
+            .into_iter()
+            .map(|activity| (activity.session_id, activity.state))
+            .collect()
+    }
 }
