@@ -661,10 +661,14 @@ fn execute_windows_preflight(run_id: &str) {
     };
 
     let ok_file = ws_a.join("ok.txt");
-    let allow_ok = run_probe(format!("echo x > {}", quoted(&ok_file)))
+    let allow_res = run_probe(format!("echo x > {}", quoted(&ok_file)));
+    let allow_ok = allow_res
+        .as_ref()
         .map(|e| e.code == 0 && ok_file.exists())
         .unwrap_or(false);
-    let deny_outside_ok = run_probe(format!("echo x > {}", quoted(&protected_file)))
+    let deny_res = run_probe(format!("echo x > {}", quoted(&protected_file)));
+    let deny_outside_ok = deny_res
+        .as_ref()
         .map(|e| {
             e.code != 0
                 && std::fs::read_to_string(&protected_file)
@@ -684,17 +688,26 @@ fn execute_windows_preflight(run_id: &str) {
         );
     } else {
         let _ = std::fs::remove_dir_all(&base);
+        let probe_status = |res: &std::io::Result<spawn::Exit>| -> String {
+            match res {
+                Ok(e) => format!("exit=0x{:08X}", e.code),
+                Err(err) => format!("err={err}"),
+            }
+        };
+        let effective_deny = allow_ok && deny_outside_ok;
         complete_step(
             run_id,
             2,
             SandboxPreflightStepStatus::Failed,
             format!(
-                "DACL 写隔离探针未通过 (allow_write={allow_ok}, deny_outside={deny_outside_ok})"
+                "DACL 写隔离探针未通过 (allow_write={allow_ok} [{}], deny_outside={effective_deny} [{}])",
+                probe_status(&allow_res),
+                probe_status(&deny_res),
             ),
             Some(if elevated {
                 "当前处于管理员提权状态导致受限令牌未能拦截外部写入，请降权以普通用户身份重新启动应用。".into()
             } else {
-                "请确认工作区与临时目录位于支持 NTFS ACL 的磁盘分区。".into()
+                "请确认工作区与临时目录位于支持 NTFS ACL 的磁盘分区，且受限子进程未被安全策略拦截启动。".into()
             }),
             t2.elapsed().as_millis() as u64,
         );

@@ -13,9 +13,15 @@ use crate::error::{GitxError, Result};
 
 /// 执行 git 子命令并要求成功；返回 stdout（UTF-8 lossy）。
 fn run_git(dir: &Path, args: &[&OsStr]) -> Result<String> {
-    let output = Command::new("git")
-        .current_dir(dir)
-        .args(args)
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir).args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
         .output()
         .map_err(|error| match error.kind() {
             std::io::ErrorKind::NotFound => GitxError::GitUnavailable,
