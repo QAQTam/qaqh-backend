@@ -61,7 +61,7 @@ pub(crate) fn dashboard(
 pub(crate) fn activity(
     owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
-) -> Result<Value, String> {
+) -> Result<Vec<SessionToolActivity>, String> {
     // 终态工具调用直查业务表:最近 50 条,新→旧。
     let owned = session_id.to_string();
     let rows = owners
@@ -109,12 +109,12 @@ pub(crate) fn activity(
             }
         })
         .collect();
-    serde_json::to_value(result).map_err(err)
+    Ok(result)
 }
 
-pub(crate) fn load_config() -> Result<Value, String> {
+pub(crate) fn load_config() -> Result<qaqh_config_api::ConfigDto, String> {
     let cfg = qaqh_config::Config::load().map_err(err)?;
     // P1-C2：读模型统一走 ConfigDto（camelCase wire + providers 目录内聚到
     // qaqh-config::dto），service 层不再手拼 json。
-    serde_json::to_value(qaqh_config::dto::to_dto(&cfg)).map_err(err)
+    Ok(qaqh_config::dto::to_dto(&cfg))
 }

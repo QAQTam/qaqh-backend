@@ -105,7 +105,7 @@ pub(crate) async fn handle_service(
     if method == "clients.list" {
         // daemon 基础设施查询:lease store 是连接 presence,归 axum 层所有,
         // 不进 runtime dispatch。结果由 typed Vec 直接序列化,形状由类型保证
-        // (与 validate_typed_result 同源 DTO)。
+        // (与 typed 表 descriptor 的 result 类型同源 DTO)。
         let clients = state
             .leases
             .lock()
@@ -123,8 +123,8 @@ pub(crate) async fn handle_service(
     // 为什么在 axum 层执行而不是丢进 runtime dispatch：owner **只能**来自已鉴权
     // 身份，而 `service_methods::dispatch(&service, method, params)` 的签名里根本
     // 没有身份位。先例就是上面的 `clients.list`（presence 归 axum 层）。方法表
-    // (METHODS/TYPED_METHODS) 照登记，形状由那批 typed DTO + validators 锁死，
-    // 结果侧与此前 `validate_typed_result` 同一份 DTO —— 类型即形状保证。
+    // (METHODS/TYPED_METHODS) 照登记，形状由那批 typed DTO 锁死；P1-4 起
+    // 结果侧不再有 `validate_typed_result` 运行时往返——DTO 类型即形状唯一权威。
     //
     // owner/scope 的取法在 `shell_owner` 这一处，ws 数据面（`shell_ws`）调的是**同一个**
     // 函数：终端流与 RPC 面对同一个身份只能有一套判定，否则「谁能连这条流」就有了两个

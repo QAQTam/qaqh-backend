@@ -1071,12 +1071,10 @@ pub(crate) async fn handle_events_v2(
                         && let Ok(snapshot) =
                             diagnostics_service.diagnostics_memory_snapshot(diagnostics_cursor)
                     {
-                        diagnostics_cursor = snapshot
-                            .get("latest_phase_sequence")
-                            .and_then(serde_json::Value::as_u64);
+                        diagnostics_cursor = Some(snapshot.latest_phase_sequence);
                         let frame = Event::default()
                             .event("diagnostics.memory")
-                            .data(snapshot.to_string());
+                            .data(serde_json::to_string(&snapshot).unwrap_or_else(|_| "{}".into()));
                         if tx.send(Ok(frame)).await.is_err() {
                             break;
                         }

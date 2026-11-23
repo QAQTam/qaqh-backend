@@ -29,16 +29,22 @@ pub(crate) fn handle(service: &QaqhService, command: WorkspaceCommand) -> QaqhRe
         }
         // 远端文件浏览（临时跨端模式）：路径一律是 daemon 侧绝对路径，
         // 且必须落在会话工作区根 / 数据根白名单内（T-2-1）。
-        WorkspaceCommand::FsList(args) => list_remote_directory(
-            &service.owners,
-            &args.path,
-            args.scope_session_id.as_deref(),
+        WorkspaceCommand::FsList(args) => QaqhError::to_value(
+            "fs listing",
+            list_remote_directory(
+                &service.owners,
+                &args.path,
+                args.scope_session_id.as_deref(),
+            )?,
         ),
-        WorkspaceCommand::FsRead(args) => read_remote_file(
-            &service.owners,
-            &args.path,
-            args.max_bytes.unwrap_or(512 * 1024),
-            args.scope_session_id.as_deref(),
+        WorkspaceCommand::FsRead(args) => QaqhError::to_value(
+            "fs read",
+            read_remote_file(
+                &service.owners,
+                &args.path,
+                args.max_bytes.unwrap_or(512 * 1024),
+                args.scope_session_id.as_deref(),
+            )?,
         ),
     }
 }

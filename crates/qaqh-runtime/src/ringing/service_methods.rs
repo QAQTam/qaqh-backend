@@ -658,25 +658,19 @@ pub struct TypedMethodInfo {
     pub result_type: &'static str,
     pub info: MethodInfo,
     pub validate_params: fn(&Value) -> Result<(), String>,
-    pub validate_result: fn(&Value) -> Result<(), String>,
 }
 
-/// `TypedMethodInfo` 需要的两种校验函数指针，都只是对泛型 [`validate_params`] /
-/// [`validate_result`] 的单态化。此前这里是 31 对手写转发函数（每加一个方法要
-/// 抄两行、漏抄就编译失败），改为宏一次性生成：类型清单本身就是文档。
+/// `TypedMethodInfo` 的 params 校验函数指针，是对泛型 [`validate_params`] 的单
+/// 态化（P1-4：result 臂已随 `validate_typed_result` 物理删除——结果形状由执行体
+/// 的 typed DTO 在编译期锁死）。此前这里是手写转发函数（每加一个方法要抄一行、
+/// 漏抄就编译失败），改为宏一次性生成：类型清单本身就是文档。
 macro_rules! validators {
     (
-        params: $($pname:ident => $pty:ty),* $(,)? ;
-        result: $($rname:ident => $rty:ty),* $(,)?
+        params: $($pname:ident => $pty:ty),* $(,)?
     ) => {
         $(
             fn $pname(value: &Value) -> Result<(), String> {
                 validate_params::<$pty>(value)
-            }
-        )*
-        $(
-            fn $rname(value: &Value) -> Result<(), String> {
-                validate_result::<$rty>(value)
             }
         )*
     };
@@ -717,39 +711,6 @@ validators! {
         validate_shell_list_params => ShellListParams,
         validate_sandbox_preflight_start_params => SandboxPreflightStartParams,
         validate_sandbox_preflight_status_params => SandboxPreflightStatusParams,
-        ;
-    result:
-        validate_string_result => String,
-        validate_fs_list_result => Vec<FsEntry>,
-        validate_fs_read_result => FsReadResult,
-        validate_session_list_result => Vec<qaqh_types::SessionListEntry>,
-        validate_session_meta_result => Option<qaqh_types::SessionListEntry>,
-        validate_session_activity_result => Vec<qaqh_ringing_contract::SessionActivity>,
-        validate_session_get_activity_result => Vec<SessionToolActivity>,
-        validate_exec_session_list_result => ExecSessionListResult,
-        validate_exec_session_output_result => ExecSessionOutputResult,
-        validate_session_turn_result => Option<qaqh_ringing_contract::SessionTurnSnapshot>,
-        validate_skills_catalog_result => SkillsCatalogResult,
-        validate_workspace_list_result => Vec<qaqh_ringing_contract::WorkspaceEntry>,
-        validate_config_dto_result => qaqh_config_api::ConfigDto,
-        validate_memory_snapshot_result => qaqh_memwatch::MemorySnapshot,
-        validate_session_dashboard_result => SessionDashboard,
-        validate_string_list_result => Vec<String>,
-        validate_todo_list_result => TodoListSnapshot,
-        validate_todo_status_result => Option<TodoStatusSnapshot>,
-        validate_plan_read_result => Vec<PlanReadItem>,
-        validate_clients_list_result => Vec<qaqh_ringing::v2::RingingV2ClientView>,
-        validate_shell_view_result => ShellView,
-        validate_shell_close_result => ShellCloseResult,
-        validate_shell_list_result => ShellListResult,
-        validate_sandbox_preflight_report_result => SandboxPreflightReport,
-        validate_gitx_snapshot_result => qaqh_ringing_contract::GitSnapshot,
-        validate_gitx_status_result => qaqh_ringing_contract::GitStatusSnapshot,
-        validate_gitx_worktree_list_result => qaqh_ringing_contract::GitxWorktreeListResult,
-        validate_gitx_worktree_create_result => qaqh_ringing_contract::GitxWorktreeCreateResult,
-        validate_gitx_worktree_remove_result => qaqh_ringing_contract::GitxWorktreeRemoveResult,
-        validate_gitx_worktree_bind_result => qaqh_ringing_contract::WorktreeBindingView,
-        validate_gitx_worktree_unbind_result => qaqh_ringing_contract::GitxWorktreeUnbindResult,
 }
 
 pub const TYPED_METHODS: &[TypedMethodInfo] = &[
@@ -762,7 +723,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "ShellView",
         info: WRITE,
         validate_params: validate_shell_open_params,
-        validate_result: validate_shell_view_result,
     },
     TypedMethodInfo {
         method: "shell.close",
@@ -770,7 +730,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "ShellCloseResult",
         info: WRITE,
         validate_params: validate_shell_close_params,
-        validate_result: validate_shell_close_result,
     },
     TypedMethodInfo {
         method: "shell.list",
@@ -778,7 +737,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "ShellListResult",
         info: READ,
         validate_params: validate_shell_list_params,
-        validate_result: validate_shell_list_result,
     },
     TypedMethodInfo {
         method: "daemon.version",
@@ -790,7 +748,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_daemon_version_params,
-        validate_result: validate_string_result,
     },
     TypedMethodInfo {
         method: "clients.list",
@@ -802,7 +759,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: true,
         },
         validate_params: validate_clients_list_params,
-        validate_result: validate_clients_list_result,
     },
     TypedMethodInfo {
         method: "skills.catalog",
@@ -814,7 +770,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_skills_catalog_params,
-        validate_result: validate_skills_catalog_result,
     },
     TypedMethodInfo {
         method: "fs.list",
@@ -826,7 +781,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_fs_list_params,
-        validate_result: validate_fs_list_result,
     },
     TypedMethodInfo {
         method: "fs.read",
@@ -838,7 +792,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_fs_read_params,
-        validate_result: validate_fs_read_result,
     },
     TypedMethodInfo {
         method: "session.list",
@@ -851,7 +804,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_session_list_params,
-        validate_result: validate_session_list_result,
     },
     TypedMethodInfo {
         method: "session.meta",
@@ -865,7 +817,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_session_meta_params,
-        validate_result: validate_session_meta_result,
     },
     TypedMethodInfo {
         method: "session.activity",
@@ -879,7 +830,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_session_activity_params,
-        validate_result: validate_session_activity_result,
     },
     TypedMethodInfo {
         method: "session.get_activity",
@@ -891,7 +841,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_session_get_activity_params,
-        validate_result: validate_session_get_activity_result,
     },
     TypedMethodInfo {
         method: "workspace.get",
@@ -904,7 +853,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_workspace_get_params,
-        validate_result: validate_string_result,
     },
     TypedMethodInfo {
         method: "workspace.list",
@@ -917,7 +865,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_workspace_list_params,
-        validate_result: validate_workspace_list_result,
     },
     TypedMethodInfo {
         method: "config.load",
@@ -930,7 +877,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_config_load_params,
-        validate_result: validate_config_dto_result,
     },
     TypedMethodInfo {
         method: "session.dashboard",
@@ -942,7 +888,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_session_dashboard_params,
-        validate_result: validate_session_dashboard_result,
     },
     TypedMethodInfo {
         method: "exec_session.list",
@@ -954,7 +899,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_exec_session_list_params,
-        validate_result: validate_exec_session_list_result,
     },
     TypedMethodInfo {
         method: "exec_session.output",
@@ -966,7 +910,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_exec_session_output_params,
-        validate_result: validate_exec_session_output_result,
     },
     TypedMethodInfo {
         method: "session.turn",
@@ -978,7 +921,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_session_turn_params,
-        validate_result: validate_session_turn_result,
     },
     TypedMethodInfo {
         method: "skills.list_tools",
@@ -990,7 +932,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_skills_list_tools_params,
-        validate_result: validate_string_list_result,
     },
     TypedMethodInfo {
         method: "todo.list",
@@ -1002,7 +943,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_todo_list_params,
-        validate_result: validate_todo_list_result,
     },
     TypedMethodInfo {
         method: "todo.status",
@@ -1015,7 +955,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_todo_status_params,
-        validate_result: validate_todo_status_result,
     },
     TypedMethodInfo {
         method: "plan.read",
@@ -1027,7 +966,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: false,
         },
         validate_params: validate_plan_read_params,
-        validate_result: validate_plan_read_result,
     },
     TypedMethodInfo {
         method: "diagnostics.memory.snapshot",
@@ -1039,7 +977,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
             admin_only: true,
         },
         validate_params: validate_diagnostics_memory_snapshot_params,
-        validate_result: validate_memory_snapshot_result,
     },
     TypedMethodInfo {
         method: "sandbox.preflight.start",
@@ -1047,7 +984,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "SandboxPreflightReport",
         info: WRITE,
         validate_params: validate_sandbox_preflight_start_params,
-        validate_result: validate_sandbox_preflight_report_result,
     },
     TypedMethodInfo {
         method: "sandbox.preflight.status",
@@ -1055,7 +991,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "SandboxPreflightReport",
         info: READ,
         validate_params: validate_sandbox_preflight_status_params,
-        validate_result: validate_sandbox_preflight_report_result,
     },
     // gitx 域（ADR-0041）：worktree 隔离与 git 快照。读面 scope 到会话工作区
     // （绑定生效即视图落 worktree）；写面操作源工作区的注册表。
@@ -1065,7 +1000,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "GitSnapshot",
         info: READ,
         validate_params: validate_gitx_snapshot_params,
-        validate_result: validate_gitx_snapshot_result,
     },
     TypedMethodInfo {
         method: "gitx.status",
@@ -1073,7 +1007,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "GitStatusSnapshot",
         info: READ,
         validate_params: validate_gitx_status_params,
-        validate_result: validate_gitx_status_result,
     },
     TypedMethodInfo {
         method: "gitx.worktree_list",
@@ -1081,7 +1014,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "GitxWorktreeListResult",
         info: READ,
         validate_params: validate_gitx_worktree_list_params,
-        validate_result: validate_gitx_worktree_list_result,
     },
     TypedMethodInfo {
         method: "gitx.worktree_create",
@@ -1089,7 +1021,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "GitxWorktreeCreateResult",
         info: WRITE,
         validate_params: validate_gitx_worktree_create_params,
-        validate_result: validate_gitx_worktree_create_result,
     },
     TypedMethodInfo {
         method: "gitx.worktree_remove",
@@ -1097,7 +1028,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "GitxWorktreeRemoveResult",
         info: WRITE,
         validate_params: validate_gitx_worktree_remove_params,
-        validate_result: validate_gitx_worktree_remove_result,
     },
     TypedMethodInfo {
         method: "gitx.worktree_bind",
@@ -1105,7 +1035,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "WorktreeBindingView",
         info: WRITE,
         validate_params: validate_gitx_worktree_bind_params,
-        validate_result: validate_gitx_worktree_bind_result,
     },
     TypedMethodInfo {
         method: "gitx.worktree_unbind",
@@ -1113,7 +1042,6 @@ pub const TYPED_METHODS: &[TypedMethodInfo] = &[
         result_type: "GitxWorktreeUnbindResult",
         info: WRITE,
         validate_params: validate_gitx_worktree_unbind_params,
-        validate_result: validate_gitx_worktree_unbind_result,
     },
 ];
 
@@ -1121,12 +1049,6 @@ fn validate_params<T: DeserializeOwned>(params: &Value) -> Result<(), String> {
     serde_json::from_value::<T>(params.clone())
         .map(|_| ())
         .map_err(|error| format!("invalid typed service params: {error}"))
-}
-
-fn validate_result<T: DeserializeOwned>(result: &Value) -> Result<(), String> {
-    serde_json::from_value::<T>(result.clone())
-        .map(|_| ())
-        .map_err(|error| format!("typed service result does not match descriptor: {error}"))
 }
 
 /// Apply the DTO boundary for methods declared in [`TYPED_METHODS`].
@@ -1139,17 +1061,6 @@ pub fn validate_typed_params(method: &str, params: &Value) -> Result<bool, Strin
         return Ok(false);
     };
     (descriptor.validate_params)(params)?;
-    Ok(true)
-}
-
-pub fn validate_typed_result(method: &str, result: &Value) -> Result<bool, String> {
-    let Some(descriptor) = TYPED_METHODS
-        .iter()
-        .find(|descriptor| descriptor.method == method)
-    else {
-        return Ok(false);
-    };
-    (descriptor.validate_result)(result)?;
     Ok(true)
 }
 
@@ -1314,7 +1225,7 @@ pub fn error_response(kind: MethodKind, error: &crate::error::QaqhError) -> Valu
 ///
 /// 账号面（siwc/dsaccount）先走 [`accounts::dispatch`] 的逐方法 DTO 收口
 /// （params 解码 → 调用管理器 → DTO 投影），其余方法经 `service.handle`
-/// 执行并按 [`TYPED_METHODS`] 做边界校验。
+/// 执行；结果形状由各执行体的 typed DTO 序列化单点在编译期锁死（P1-4）。
 pub fn dispatch(
     service: &QaqhService,
     method: &str,
@@ -1328,11 +1239,10 @@ pub fn dispatch(
     // 等价于 `validate_typed_params`。此前这里先校验一遍再让 handle 解一遍，同一份
     // JSON 被解两次、方法表被查两次。`validate_typed_params` 仍保留：契约导出与单测
     // 直接用它断言 DTO 边界。
-    let result = service.handle(method, params)?;
-    // 结果侧不能省：handler 产出的是 `Value`，没有 DTO 边界兜底（非 typed 方法
-    // 返回 `Ok(false)`，等价于旧行为的 `typed == false` 分支）。
-    validate_typed_result(method, &result).map_err(crate::error::QaqhError::message)?;
-    Ok(result)
+    // 结果侧边界是编译期的：typed 执行体产出具体 DTO 并经
+    // `QaqhError::to_value` 单点序列化；旧的 `validate_typed_result` 运行时二次
+    // JSON 往返已物理删除——形状漂移现在只能以编译错误的形式出现。
+    service.handle(method, params)
 }
 
 #[cfg(test)]
@@ -1498,77 +1408,64 @@ mod tests {
 
     #[test]
     fn typed_method_results_match_descriptors() {
+        // P1-4：descriptor 不再有 `validate_result` fn 指针——结果形状由具体
+        // DTO 的 round-trip 直接断言（下面每一项即 typed 表 result 列的类型）。
+        assert!(serde_json::from_value::<String>(serde_json::json!("2.0.0")).is_ok());
+        assert!(serde_json::from_value::<String>(serde_json::json!({})).is_err());
+        assert!(serde_json::from_value::<Vec<qaqh_types::SessionListEntry>>(
+            serde_json::json!([])
+        )
+        .is_ok());
         assert!(
-            validate_typed_result("daemon.version", &serde_json::json!("2.0.0"))
-                .expect("valid result")
-        );
-        assert!(validate_typed_result("daemon.version", &serde_json::json!({})).is_err());
-        assert!(
-            validate_typed_result("session.list", &serde_json::json!([])).expect("typed result")
-        );
-        assert!(
-            validate_typed_result("session.list", &serde_json::json!([{}])).is_err(),
+            serde_json::from_value::<Vec<qaqh_types::SessionListEntry>>(serde_json::json!([{}]))
+                .is_err(),
             "空对象不是 SessionListEntry（G2 形状必须响亮失败）"
         );
+        assert!(serde_json::from_value::<Option<qaqh_types::SessionListEntry>>(Value::Null)
+            .expect("meta 缺失 → null 是合法结果")
+            .is_none());
         assert!(
-            validate_typed_result("session.meta", &Value::Null)
-                .expect("meta 缺失 → null 是合法结果")
-        );
-        assert!(
-            validate_typed_result("session.meta", &serde_json::json!([])).is_err(),
+            serde_json::from_value::<Option<qaqh_types::SessionListEntry>>(serde_json::json!([]))
+                .is_err(),
             "数组不是 session.meta 的结果形状"
         );
-        assert!(
-            validate_typed_result(
-                "session.activity",
-                &serde_json::json!([{
+        assert!(serde_json::from_value::<Vec<qaqh_ringing_contract::SessionActivity>>(
+            serde_json::json!([{
                     "session_id": "s1",
                     "state": "running",
                     "turn_id": "t1",
                     "seq": 3,
                     "updated_at": 1759000000000u64
                 }])
-            )
-            .expect("valid activity entry")
-        );
+        )
+        .is_ok());
         assert!(
-            validate_typed_result(
-                "session.activity",
-                &serde_json::json!([{
+            serde_json::from_value::<Vec<qaqh_ringing_contract::SessionActivity>>(serde_json::json!([{
                     "session_id": "s1",
                     "state": "hibernating",
                     "seq": 1,
                     "updated_at": 1u64
-                }])
-            )
-            .is_err(),
+                }]))
+                .is_err(),
             "state 是 Ringing ActivityState 闭集枚举"
         );
-        assert!(
-            validate_typed_result(
-                "session.get_activity",
-                &serde_json::json!([{
+        assert!(serde_json::from_value::<Vec<SessionToolActivity>>(serde_json::json!([{
                     "tool_name": "fs_read",
                     "summary": "read file",
                     "status": "ok",
                     "finished_at_ms": 1_759_000_042_000i64,
                     "args": "{\"path\":\"/a\"}"
-                }])
-            )
-            .expect("valid tool activity")
-        );
+                }]))
+        .is_ok());
         assert!(
-            validate_typed_result(
-                "session.get_activity",
-                &serde_json::json!([{"tool_name": "fs_read", "status": "done"}])
+            serde_json::from_value::<Vec<SessionToolActivity>>(
+                serde_json::json!([{"tool_name": "fs_read", "status": "done"}])
             )
             .is_err(),
             "summary/finished_at_ms/args 必填，status 是闭集枚举"
         );
-        assert!(
-            validate_typed_result(
-                "workspace.list",
-                &serde_json::json!([{
+        assert!(serde_json::from_value::<Vec<qaqh_ringing_contract::WorkspaceEntry>>(
+            serde_json::json!([{
                     "id": "ws-1",
                     "path": "/synthetic/workspace",
                     "title": "workspace",
@@ -1576,45 +1473,28 @@ mod tests {
                     "session_ids": ["0199a0f0-0000-7000-8000-000000000001"],
                     "missing_dir": false
                 }])
-            )
-            .expect("valid workspace entry")
-        );
+        )
+        .is_ok());
         assert!(
-            validate_typed_result(
-                "workspace.list",
-                &serde_json::json!([{
+            serde_json::from_value::<Vec<qaqh_ringing_contract::WorkspaceEntry>>(serde_json::json!([{
                     "id": "ws-1",
                     "path": "/synthetic/workspace",
                     "title": "workspace",
                     "order": 0,
                     "session_ids": []
-                }])
-            )
-            .is_err(),
+                }]))
+                .is_err(),
             "missing_dir 是 list 条目的必备键（与 create/rename 形状区分）"
         );
-        assert!(
-            validate_typed_result("workspace.get", &serde_json::json!(""))
-                .expect("unbound workspace is an empty string, not null")
+        assert_eq!(
+            serde_json::from_value::<String>(serde_json::json!(""))
+                .expect("unbound workspace 是空串不是 null"),
+            ""
         );
-        assert!(validate_typed_result(
-            "fs.list",
-            &serde_json::json!([{ "name": "a", "path": "/a", "is_dir": false, "is_file": true, "size": 1, "modified_ms": null }])
-        )
-        .expect("valid listing"));
-        assert!(validate_typed_result("fs.list", &serde_json::json!([{ "name": "a" }])).is_err());
-        assert!(
-            validate_typed_result(
-                "fs.read",
-                &serde_json::json!({ "path": "/a", "size": 1, "truncated": false, "content": "a" })
-            )
-            .expect("valid read")
-        );
-        assert!(validate_typed_result(
-            "fs.read",
-            &serde_json::json!({ "path": "/a", "size": "1", "truncated": false, "content": "a" })
-        )
-        .is_err());
+        assert!(serde_json::from_value::<Vec<FsEntry>>(serde_json::json!([{ "name": "a", "path": "/a", "is_dir": false, "is_file": true, "size": 1, "modified_ms": null }])).is_ok());
+        assert!(serde_json::from_value::<Vec<FsEntry>>(serde_json::json!([{ "name": "a" }])).is_err());
+        assert!(serde_json::from_value::<FsReadResult>(serde_json::json!({ "path": "/a", "size": 1, "truncated": false, "content": "a" })).is_ok());
+        assert!(serde_json::from_value::<FsReadResult>(serde_json::json!({ "path": "/a", "size": "1", "truncated": false, "content": "a" })).is_err());
     }
 
     /// 客户端服务面白名单（R1）必须与方法表**两向**对齐：
