@@ -48,9 +48,7 @@ fn service() -> &'static QaqhService {
             tmp
         });
         let _ = tmp;
-        QaqhService::init(Arc::new(qaqh_session::SessionManager::new(
-            qaqh_types::platform::data_dir(),
-        )))
+        QaqhService::init(qaqh_types::platform::data_dir())
     })
 }
 

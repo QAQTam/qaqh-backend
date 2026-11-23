@@ -36,14 +36,11 @@ fn service() -> &'static qaqh_runtime::QaqhService {
         unsafe {
             std::env::set_var("QAQH_DATA_DIR", root.join("data"));
         }
-        let manager = std::sync::Arc::new(qaqh_session::SessionManager::new(
-            qaqh_types::platform::data_dir(),
-        ));
+        let service = qaqh_runtime::QaqhService::init(qaqh_types::platform::data_dir());
         // 业务行:cwd 落 SQLite —— 白名单(`allowed_roots`)与 scope 判定的
         // 唯一读取源就是 `sessions.cwd`。
         let workspace_text = workspace().to_str().expect("utf8 workspace").to_string();
-        let session_id = manager.allocate_session();
-        let service = qaqh_runtime::QaqhService::init(manager);
+        let session_id = service.owners().allocate_session();
         service
             .owners()
             .db()

@@ -16,9 +16,8 @@ pub struct QaqhService {
     pub(crate) hub: std::sync::OnceLock<Arc<RingingHub>>,
     /// 会话 owner 目录:SQLite 业务权威 + 每会话事件单流。
     pub(crate) owners: Arc<qaqh_session::owner::OwnerDirectory>,
-    /// 会话存储句柄（PR-3-1 注入化：daemon main 装配点 init 后注入，
-    /// service 内不再触达会话单例的全局访问器）。
-    pub(crate) sessions: Arc<qaqh_session::SessionManager>,
+    // v4.4 P1-3：原 `sessions: Arc<SessionManager>` 字段删除——身份生成与
+    // 资源清理并入 OwnerDirectory，库路径口径唯一。
     /// Sign in with ChatGPT（套餐用量）会话管理器。懒装配：只有真正用到该能力时
     /// 才去建目录、读 host id——未使用它的用户不该多出任何磁盘副作用。
     pub(crate) siwc: std::sync::OnceLock<Arc<qaqh_siwc::SiwcManager>>,
@@ -28,7 +27,9 @@ pub struct QaqhService {
 }
 
 impl QaqhService {
-    pub fn init(sessions: Arc<qaqh_session::SessionManager>) -> Self {
+    /// v4.4 P1-3：`SessionManager` 已删除（职责并入 `OwnerDirectory`），
+    /// init 只收数据根目录——库路径、身份生成、资源清理都从这一个句柄出。
+    pub fn init(data_dir: std::path::PathBuf) -> Self {
         let mut config = qaqh_config::Config::load().unwrap_or_default();
         // PR-M3-2 路线 A：用户级外部 MCP 配置只读合并（Codex/Claude/opencode，
         // import_external 默认开）。只改运行时视图，不回写 config；报告落日志。
@@ -85,7 +86,7 @@ impl QaqhService {
         qaqh_workspace::runtime::init_tools("daemon", &[], vec![]);
         // 业务库:SQLite WAL 单权威(报告一 §7)。打不开就停止启动,不降级。
         let owners = Arc::new(
-            qaqh_session::owner::OwnerDirectory::open(sessions.data_dir().join("qaqh.db"))
+            qaqh_session::owner::OwnerDirectory::open(data_dir.join("qaqh.db"))
                 .expect("open business database"),
         );
         // ADR-0018：子代理限额是内核常量（registry 缺省：depth=1、配额
@@ -95,7 +96,6 @@ impl QaqhService {
             registry: Arc::new(Mutex::new(registry)),
             hub: std::sync::OnceLock::new(),
             owners,
-            sessions,
             siwc: std::sync::OnceLock::new(),
             dsaccount: std::sync::OnceLock::new(),
         };
@@ -473,7 +473,7 @@ impl QaqhService {
                 .map_err(|error| error.to_string())?;
             registry.forget_sessions(&ids);
             for id in ids {
-                service.sessions.delete(&id)?;
+                service.owners.delete_session_resources(&id)?;
                 service.release_session_process_state(&id);
             }
             Ok(())

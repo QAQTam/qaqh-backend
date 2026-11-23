@@ -51,9 +51,7 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
     let service = TEST_SERVICE
         .get_or_init(|| {
             init_session_manager();
-            qaqh_runtime::QaqhService::init(std::sync::Arc::new(qaqh_session::SessionManager::new(
-                qaqh_types::platform::data_dir(),
-            )))
+            qaqh_runtime::QaqhService::init(qaqh_types::platform::data_dir())
         })
         .clone();
     let pending = std::sync::Arc::new(std::sync::Mutex::new(
