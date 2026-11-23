@@ -97,6 +97,12 @@ impl AgentRegistry {
                 .unwrap_or(0);
             log::info!("[registry] idle unload seed={session_id} idle={idle}s");
             self.close(&session_id);
+            // MUST 铁闸 3 / P1-2 验收「`unload_idle_sessions` 后任务句柄立即 drop
+            // 回收」：close 已释放 loop/hooks 对 owner 的 Arc 引用，这里同步摘掉
+            // `OwnerDirectory` 里的最后一条目录引用——语句末的 Arc drop 即
+            // `SessionOwner::drop` → `pump_task.abort()`，泵任务与 ReplayRing
+            // 当场回收（业务行与 SQLite 权威不动）。
+            self.owners.take_session(&session_id);
             unloaded.push(session_id);
         }
         unloaded

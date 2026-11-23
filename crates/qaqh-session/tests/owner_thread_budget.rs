@@ -207,6 +207,104 @@ async fn dropped_owners_reclaim_their_pump_tasks() {
     );
 }
 
+/// 闲置卸载回收（MUST 铁闸 3 / P1-2 验收「`unload_idle_sessions` 后任务句柄立即
+/// drop 回收」的本体）。生产接线是 `AgentRegistry::unload_idle_sessions` 的
+/// `close` 之后 `owners.take_session`——map 是 owner 的唯一长持有者（泵任务持
+/// `Arc<OwnerPump>`，`ToolLifecycle` 只克隆 sender），摘出即最后一个引用。
+///
+/// 判据分两层，不再依赖调度运气：
+/// 1. **确定性主证**：take 出的 `Arc::strong_count == 1` —— 目录之外零持有者，
+///    drop 它必触发 `SessionOwner::drop` → `pump_task.abort()`。lifecycle 克隆
+///    句柄全程留住（通道不断，泵不可能靠 recv-Err 自行退出——旧实现的假设）。
+/// 2. **观察面**：drop 前后宿主 runtime 的 alive 任务数对比。abort 的 future
+///    drop 由其他 worker 调度完成，回收需要真实 CPU 时间片（纯 `yield_now` 在
+///    2 worker 机器上实测只能清空 2/20，这正是首轮红测的成因——观测竞态，
+///    非回收缺失）；这里给 250ms 窗口，实测清空 20 个只需亚毫秒级调度。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn evicted_owners_reclaim_pump_tasks() {
+    const SESSIONS: usize = 20;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owners = Arc::new(
+        OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open owner directory db"),
+    );
+
+    // 预热走同一入口并等回收窗口结束再取基线（与 dropped_* 同律，只是慢启动）。
+    owners
+        .ensure_session("ses_WARMUP", None, false)
+        .expect("warm row");
+    let warm = owners.get_or_create("ses_WARMUP");
+    let warm_lifecycle = warm.lifecycle();
+    drop(warm);
+    drop(owners.take_session("ses_WARMUP").expect("warm owner"));
+    drop(warm_lifecycle);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    let baseline = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+
+    let mut lingering_lifecycles = Vec::with_capacity(SESSIONS);
+    let mut ids = Vec::with_capacity(SESSIONS);
+    for index in 0..SESSIONS {
+        let session_id = format!("ses_EVICT{index:02}");
+        owners
+            .ensure_session(&session_id, None, false)
+            .expect("business row");
+        let owner = owners.get_or_create(&session_id);
+        lingering_lifecycles.push(owner.lifecycle());
+        drop(owner);
+        ids.push(session_id);
+    }
+
+    // 主证：目录是最后持有者，strong_count==1 意味着随后的 drop 必回收泵。
+    let taken: Vec<_> = ids
+        .iter()
+        .map(|session_id| owners.take_session(session_id))
+        .collect();
+    for (session_id, owner) in ids.iter().zip(taken.iter()) {
+        let owner = owner.as_ref().unwrap_or_else(|| panic!("{session_id} 首次 take 必须摘出条目"));
+        assert_eq!(
+            Arc::strong_count(owner),
+            1,
+            "{session_id} 的 owner 摘出目录后必须只剩这一个引用（close 路径之外不得有长持有者）"
+        );
+    }
+    for session_id in ids.iter().chain(std::iter::once(&"ses_WARMUP".to_string())) {
+        assert!(
+            owners.take_session(session_id).is_none(),
+            "重复 take 是幂等 None，不是错误"
+        );
+    }
+
+    // 观察面：drop 前 20 个 abort 尚未发生，任务仍在册。
+    let before = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    assert!(
+        before >= baseline + SESSIONS,
+        "take 出但未 drop 时泵任务必须仍存活（观察面自检：基线 {baseline}，应 >= {}，实得 {before}）",
+        baseline + SESSIONS
+    );
+
+    drop(taken);
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    let after = tokio::runtime::Handle::current()
+        .metrics()
+        .num_alive_tasks();
+    assert_eq!(
+        after, baseline,
+        "{SESSIONS} 个 owner drop 后仍有基线 {baseline} 之外的泵任务存活：         take 出的 Arc drop 即应触发 SessionOwner::drop → pump_task.abort()         （MUST 铁闸 3：unload 后任务句柄立即 drop 回收）"
+    );
+
+    // 与 delete_session_tree 的正交性：evict 不碰业务行，会话可原地重建。
+    let revived = owners.get_or_create(&ids[0]);
+    assert_eq!(revived.session_id(), ids[0]);
+    drop(owners.take_session(&ids[0]));
+    drop(lingering_lifecycles);
+}
+
 /// 泵在等 DB 时必须**让出宿主 worker**,而不是把它占住(Actor 化的本体主张)。
 ///
 /// 载体是 runtime 上的任务之后,泵里再出现同步阻塞 IO(比如把 `db.read().await`

@@ -3,7 +3,7 @@
 //! `git.*` 服务面与其 `git()` 助手已于 2026-10-31 删除（见 `handlers::workspace`
 //! 模块注释）。
 
-use serde_json::{Value, json};
+use crate::ringing::service_methods::{FsEntry, FsReadResult};
 
 /// 平台中立的"绝对路径"判定。
 ///
@@ -111,7 +111,7 @@ pub(crate) fn list_remote_directory(
     owners: &qaqh_session::owner::OwnerDirectory,
     path: &str,
     scope_session: Option<&str>,
-) -> QaqhResult<Value> {
+) -> QaqhResult<Vec<FsEntry>> {
     let dir = std::path::Path::new(path);
     if !is_absolute_like(path) {
         return Err(QaqhError::invalid("fs.list requires an absolute path"));
@@ -119,7 +119,7 @@ pub(crate) fn list_remote_directory(
     if !path_allowed(owners, dir, scope_session)? {
         return Err(forbidden("fs.list", path));
     }
-    let mut entries: Vec<Value> = Vec::new();
+    let mut entries: Vec<FsEntry> = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(|source| QaqhError::Io {
         op: "fs.list",
         path: path.to_string(),
@@ -132,50 +132,38 @@ pub(crate) fn list_remote_directory(
         })?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let entry_path = entry.path();
-        let meta = match entry.metadata() {
-            Ok(meta) => meta,
-            // 软链接/权限问题不阻塞整个目录，标记 unknown 继续。
-            Err(_) => {
-                entries.push(json!({
-                    "name": name,
-                    "path": entry_path.to_string_lossy(),
-                    "is_dir": false,
-                    "is_file": false,
-                    "size": 0,
-                    "modified_ms": null,
-                }));
-                continue;
-            }
+        // 软链接/权限问题不阻塞整个目录，标记 unknown 继续。
+        let Ok(meta) = entry.metadata() else {
+            entries.push(FsEntry {
+                name,
+                path: entry_path.to_string_lossy().into_owned(),
+                is_dir: false,
+                is_file: false,
+                size: 0,
+                modified_ms: None,
+            });
+            continue;
         };
         let modified_ms = meta
             .modified()
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64);
-        entries.push(json!({
-            "name": name,
-            "path": entry_path.to_string_lossy(),
-            "is_dir": meta.is_dir(),
-            "is_file": meta.is_file(),
-            "size": meta.len(),
-            "modified_ms": modified_ms,
-        }));
+        entries.push(FsEntry {
+            name,
+            path: entry_path.to_string_lossy().into_owned(),
+            is_dir: meta.is_dir(),
+            is_file: meta.is_file(),
+            size: meta.len(),
+            modified_ms,
+        });
     }
     entries.sort_by(|a, b| {
-        let (ad, bd) = (
-            a["is_dir"].as_bool().unwrap_or(false),
-            b["is_dir"].as_bool().unwrap_or(false),
-        );
-        match bd.cmp(&ad) {
-            std::cmp::Ordering::Equal => a["name"]
-                .as_str()
-                .unwrap_or_default()
-                .to_ascii_lowercase()
-                .cmp(&b["name"].as_str().unwrap_or_default().to_ascii_lowercase()),
-            other => other,
-        }
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
     });
-    Ok(Value::Array(entries))
+    Ok(entries)
 }
 
 /// `fs.read`：文本预览。读满 `max_bytes + 1` 以判断截断；内容按 UTF-8
@@ -187,7 +175,7 @@ pub(crate) fn read_remote_file(
     path: &str,
     max_bytes: u64,
     scope_session: Option<&str>,
-) -> QaqhResult<Value> {
+) -> QaqhResult<FsReadResult> {
     let file_path = std::path::Path::new(path);
     if !is_absolute_like(path) {
         return Err(QaqhError::invalid("fs.read requires an absolute path"));
@@ -219,12 +207,12 @@ pub(crate) fn read_remote_file(
         })?;
     let truncated = data.len() > cap;
     data.truncate(cap);
-    Ok(json!({
-        "path": path,
-        "size": meta.len(),
-        "truncated": truncated,
-        "content": String::from_utf8_lossy(&data),
-    }))
+    Ok(FsReadResult {
+        path: path.to_string(),
+        size: meta.len(),
+        truncated,
+        content: String::from_utf8_lossy(&data).into_owned(),
+    })
 }
 
 pub(crate) fn workspace(owners: &qaqh_session::owner::OwnerDirectory, session_id: &str) -> String {

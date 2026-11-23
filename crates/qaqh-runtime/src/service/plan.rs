@@ -2,51 +2,30 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::ringing::service_methods::{PlanItemStatusView, PlanReadItem};
 use super::common::err;
 
 use super::fs_git::qaqh_dir;
 
 /// plan 条目状态的规范词表(B08/D9):旧 wire 的 "✓/-/?" 字形无 typed 消费方,
 /// 收口为 snake_case 枚举;PLAN.md 文件本身仍是标记字形,解析在此边界映射。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum PlanItemStatus {
-    #[serde(rename = "pending")]
-    Pending,
-    #[serde(rename = "approved")]
-    Approved,
-    #[serde(rename = "rejected")]
-    Rejected,
-    #[serde(rename = "question")]
-    Question,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct PlanItemView {
-    pub id: String,
-    pub title: String,
-    pub status: PlanItemStatus,
-    pub comment: String,
-    pub actions: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub(crate) struct PlanListOutput(pub Vec<PlanItemView>);
+/// 唯一权威类型是契约 DTO [`PlanItemStatusView`]/[`PlanReadItem`]
+/// （P1-4 收口：本模块不再维护平行结构,漂移直接编译红）。
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PlanActionOutput {
     pub item_id: String,
     pub action: String,
-    pub item: Option<PlanItemView>,
+    pub item: Option<PlanReadItem>,
 }
 
 pub(crate) fn read_plan(
     owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
-) -> Result<PlanListOutput, String> {
+) -> Result<Vec<PlanReadItem>, String> {
     let content = match std::fs::read_to_string(qaqh_dir(owners, session_id).join("PLAN.md")) {
         Ok(value) => value,
-        Err(_) => return Ok(PlanListOutput(Vec::new())),
+        Err(_) => return Ok(Vec::new()),
     };
     Ok(parse_plan(&content))
 }
@@ -102,7 +81,6 @@ pub(crate) fn plan_action(
         output
     };
     let item = parse_plan(&output)
-        .0
         .into_iter()
         .find(|item| item.id == item_id);
     std::fs::write(path, output).map_err(err)?;
@@ -113,19 +91,19 @@ pub(crate) fn plan_action(
     })
 }
 
-fn parse_plan(content: &str) -> PlanListOutput {
-    PlanListOutput(content.lines().filter_map(parse_plan_line).collect())
+fn parse_plan(content: &str) -> Vec<PlanReadItem> {
+    content.lines().filter_map(parse_plan_line).collect()
 }
 
-fn parse_plan_line(line: &str) -> Option<PlanItemView> {
+fn parse_plan_line(line: &str) -> Option<PlanReadItem> {
     let line = line.trim();
     let rest = line.strip_prefix("- [")?;
     let end = rest.find(']')?;
     let status = match rest.get(..end)? {
-        " " => PlanItemStatus::Pending,
-        "✓" => PlanItemStatus::Approved,
-        "-" => PlanItemStatus::Rejected,
-        "?" => PlanItemStatus::Question,
+        " " => PlanItemStatusView::Pending,
+        "✓" => PlanItemStatusView::Approved,
+        "-" => PlanItemStatusView::Rejected,
+        "?" => PlanItemStatusView::Question,
         _ => return None,
     };
     let rest = rest.get(end + 1..)?.trim();
@@ -135,7 +113,7 @@ fn parse_plan_line(line: &str) -> Option<PlanItemView> {
         .map_or((title, String::new()), |(title, comment)| {
             (title, comment.to_string())
         });
-    Some(PlanItemView {
+    Some(PlanReadItem {
         id: id.to_string(),
         title: title.to_string(),
         status,
