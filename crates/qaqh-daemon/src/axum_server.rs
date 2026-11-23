@@ -5,6 +5,8 @@
 mod authz_matrix_tests;
 mod axum_impl;
 #[cfg(test)]
+mod dispatch_pool_tests;
+#[cfg(test)]
 mod route_table_tests;
 #[cfg(test)]
 mod shell_ws_tests;

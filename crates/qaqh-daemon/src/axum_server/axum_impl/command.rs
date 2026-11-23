@@ -103,7 +103,8 @@ pub(crate) async fn dispatch_session(
                     StatusCode::BAD_REQUEST,
                     "missing_session_id",
                     "SessionClose requires seed",
-                );
+                )
+                .await;
             }
             // 关闭涉及 registry 和持久化状态，放到阻塞任务中处理。
             let close_result = {
@@ -123,29 +124,40 @@ pub(crate) async fn dispatch_session(
                     StatusCode::BAD_GATEWAY,
                     "dispatch_failed",
                     error,
-                );
+                )
+                .await;
             }
             state
                 .leases
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .detach_session(&session_id, &close_session);
-            complete(state, envelope.command_id)
+            complete(state, envelope.command_id).await
         }
         Route::Rename {
             session: target,
             title,
         } => {
-            if let Err(error) = state.service.rename_session(&target, &title) {
+            // P1-0a：rename_session 经 owner 泵同步等 `rx.recv()`（L-03），迁阻塞池。
+            let service = state.service.clone();
+            let rename_target = target.clone();
+            let rename_title = title.clone();
+            let rename_result = tokio::task::spawn_blocking(move || {
+                service.rename_session(&rename_target, &rename_title)
+            })
+            .await
+            .unwrap_or_else(|join_error| Err(format!("rename worker failed: {join_error}")));
+            if let Err(error) = rename_result {
                 return fail(
                     state,
                     envelope.command_id,
                     StatusCode::BAD_GATEWAY,
                     "dispatch_failed",
                     error,
-                );
+                )
+                .await;
             }
-            complete(state, envelope.command_id)
+            complete(state, envelope.command_id).await
         }
         Route::Lifecycle { op, target } => {
             if target.is_empty() {
@@ -155,7 +167,8 @@ pub(crate) async fn dispatch_session(
                     StatusCode::BAD_REQUEST,
                     "missing_session_id",
                     format!("Session{op} requires seed"),
-                );
+                )
+                .await;
             }
             let result = if op == "delete" {
                 state.service.delete_session(&target).await
@@ -178,7 +191,8 @@ pub(crate) async fn dispatch_session(
                     StatusCode::BAD_GATEWAY,
                     "dispatch_failed",
                     error,
-                );
+                )
+                .await;
             }
             if op == "delete" {
                 state
@@ -187,7 +201,7 @@ pub(crate) async fn dispatch_session(
                     .unwrap_or_else(|e| e.into_inner())
                     .detach_session(&session_id, &target);
             }
-            complete(state, envelope.command_id)
+            complete(state, envelope.command_id).await
         }
         Route::Resume { session: target } => {
             // BUG-2026-09-12-10：attach 必须先于（较慢的）worker 拉起副作用。
@@ -205,7 +219,8 @@ pub(crate) async fn dispatch_session(
                     StatusCode::UNAUTHORIZED,
                     "lease_required",
                     "lease is not active".to_string(),
-                );
+                )
+                .await;
             }
             // BUG-2026-10-05-01：这里此前传的是 header 的 `session_id`
             //（= client_session_id 租约标识），不是命令里的目标会话。后果：
@@ -214,16 +229,26 @@ pub(crate) async fn dispatch_session(
             // actor resume 加载失败后 lifecycle 兜底又静默分配一个幽灵会话
             // 目录（worker 只写一条 system prompt 后永久闲置）。TUI 每次重启
             // 换 client_session_id 就再产生一对。必须恢复**命令声明的目标会话**。
-            if let Err(e) = state.service.resume_session(&target) {
+            // P1-0a：resume_session 同步取 registry 锁并 get_or_spawn（与 Engine
+            // 同一条 spawn_session_inprocess 路径），迁阻塞池。
+            let service = state.service.clone();
+            let resume_target = target.clone();
+            let resume_result = tokio::task::spawn_blocking(move || {
+                service.resume_session(&resume_target)
+            })
+            .await
+            .unwrap_or_else(|join_error| Err(format!("resume worker failed: {join_error}")));
+            if let Err(e) = resume_result {
                 return fail(
                     state,
                     envelope.command_id,
                     StatusCode::BAD_GATEWAY,
                     "dispatch_failed",
                     e,
-                );
+                )
+                .await;
             }
-            complete(state, envelope.command_id)
+            complete(state, envelope.command_id).await
         }
         // 仅 attach（无 actor 副作用）：供前端订阅子代理等只读观测 seed 的
         // 频道流。与 SessionResume 的差异见 ControlCommand 文档。
@@ -235,7 +260,8 @@ pub(crate) async fn dispatch_session(
                     StatusCode::BAD_REQUEST,
                     "missing_session_id",
                     "session.attach requires a non-empty seed".to_string(),
-                );
+                )
+                .await;
             }
             let attached = state
                 .leases
@@ -249,9 +275,10 @@ pub(crate) async fn dispatch_session(
                     StatusCode::UNAUTHORIZED,
                     "lease_required",
                     "lease is not active".to_string(),
-                );
+                )
+                .await;
             }
-            complete(state, envelope.command_id)
+            complete(state, envelope.command_id).await
         }
         Route::Engine => {
             let session_id = envelope.session_id().unwrap_or_default().to_string();
@@ -265,7 +292,8 @@ pub(crate) async fn dispatch_session(
                     StatusCode::BAD_REQUEST,
                     &code,
                     "attachment is unavailable or invalid".to_string(),
-                );
+                )
+                .await;
             }
             let worker_env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
                 session_id.as_str(),
@@ -275,7 +303,21 @@ pub(crate) async fn dispatch_session(
             .with_actor(identity_worker_actor(state, identity));
             // 领域拒绝保留命令面稳定码(见 `CommandRejection`):客户端按码分支,
             // 不 grep 文案。状态档在这里定——协议层的码不绑 HTTP 语义。
-            if let Err(error) = state.service.send_ringing_command(&session_id, &worker_env) {
+            // P1-0a：send_ringing_command 同步取 registry 锁并 get_or_spawn /
+            // session_effective_config / truncate_from_turn（L-01/L-03 复合停摆路径），
+            // 迁阻塞池。`QaqhError::Rejected` 变体原样保留，稳定码映射不变。
+            let service = state.service.clone();
+            let engine_session_id = session_id.clone();
+            let send_result = tokio::task::spawn_blocking(move || {
+                service.send_ringing_command(&engine_session_id, &worker_env)
+            })
+            .await
+            .unwrap_or_else(|join_error| {
+                Err(qaqh_runtime::QaqhError::message(format!(
+                    "engine dispatch worker failed: {join_error}"
+                )))
+            });
+            if let Err(error) = send_result {
                 return match error {
                     qaqh_runtime::QaqhError::Rejected { code, message } => fail(
                         state,
@@ -288,30 +330,24 @@ pub(crate) async fn dispatch_session(
                         },
                         code.code(),
                         message,
-                    ),
+                    )
+                    .await,
                     other => fail(
                         state,
                         envelope.command_id.clone(),
                         StatusCode::BAD_GATEWAY,
                         "dispatch_failed",
                         other.to_string(),
-                    ),
+                    )
+                    .await,
                 };
             }
             // 回执终态由 execute_command 的返回值直接落库:命令成功进入会话
             // 循环即 Succeeded(回合的业务进展经 SSE 事件承载,不再有第二条
             // 折叠链把回执拖到 Running 僵尸态)。
-            state
-                .pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal(
-                    &envelope.command_id,
-                    RingingCommandState::Succeeded,
-                    None,
-                    None,
-                );
-            (StatusCode::OK, accept_ack(envelope.command_id, None))
+            // P1-0a：终态落库经 persist（回执文件全量写盘），随 complete 的
+            // 持久化边界进阻塞池。
+            complete(state, envelope.command_id).await
         }
     }
 }
@@ -363,33 +399,48 @@ fn route(command: &qaqh_ringing::RingingCommand, envelope_session: Option<&str>)
     }
 }
 
-/// 回滚未完成的回执，让同一 `command_id` 可以被重试。
-fn rollback_pending(state: &AppState, command_id: &str) {
-    state
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .rollback(command_id);
-}
-
 /// 成功收尾：回执置终态并 ACK。
-pub(crate) fn complete(state: &AppState, command_id: String) -> (StatusCode, RingingV2CommandAck) {
-    state
-        .pending
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .mark_terminal(&command_id, RingingCommandState::Succeeded, None, None);
-    (StatusCode::OK, accept_ack(command_id, None))
+///
+/// P1-0a：`mark_terminal` 走 `PendingCommandStore::persist`（回执文件全量写盘），
+/// 与失败收尾同属持久化边界，一并迁阻塞池，不在 Tokio worker 上持 `pending` 锁写盘。
+pub(crate) async fn complete(
+    state: &AppState,
+    command_id: String,
+) -> (StatusCode, RingingV2CommandAck) {
+    let pending = state.pending.clone();
+    let ack_command_id = command_id.clone();
+    tokio::task::spawn_blocking(move || {
+        pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .mark_terminal(&command_id, RingingCommandState::Succeeded, None, None);
+    })
+    .await
+    .expect("receipt terminal task must not panic");
+    (StatusCode::OK, accept_ack(ack_command_id, None))
 }
 
 /// 失败收尾：回滚回执并拒绝。所有拒绝路径共用，避免「回滚了但没拒」或反之。
-pub(crate) fn fail(
+///
+/// P1-0a：`rollback` 同样触发回执 persist，迁阻塞池（同上）。
+pub(crate) async fn fail(
     state: &AppState,
     command_id: String,
     status: StatusCode,
     code: &str,
     message: impl Into<String>,
 ) -> (StatusCode, RingingV2CommandAck) {
-    rollback_pending(state, &command_id);
-    (status, reject_ack(command_id, code, message.into()))
+    let message = message.into();
+    let pending = state.pending.clone();
+    let rollback_command_id = command_id.clone();
+    tokio::task::spawn_blocking(move || {
+        // 回滚未完成的回执，让同一 `command_id` 可以被重试。
+        pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rollback(&rollback_command_id);
+    })
+    .await
+    .expect("receipt rollback task must not panic");
+    (status, reject_ack(command_id, code, message))
 }

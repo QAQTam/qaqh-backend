@@ -32,15 +32,43 @@ use super::v2::{
 };
 use super::{AppState, Scope};
 
+/// P1-0a：同步分派臂统一迁阻塞池。这些调用点持 `registry` / `config_io_lock` /
+/// `secrets.toml.lock` / `TODO_LOCK` 跨同步写盘或同步 IPC 等待（`L-01` 复合停摆的
+/// worker 暴露面）；join error 如实上报 `operation_failed`，语义对齐
+/// `service_api.rs` 的 PR #28 先例。
+async fn block_on_command<T, F>(what: &str, f: F) -> Result<T, qaqh_runtime::QaqhError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, qaqh_runtime::QaqhError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .unwrap_or_else(|join_error| {
+            Err(qaqh_runtime::QaqhError::message(format!(
+                "{what} worker failed: {join_error}"
+            )))
+        })
+}
+
+/// 回执预留 admission 的结果：persist 边界进阻塞池后 early-return 无法在闭包内
+/// 携带，用枚举把判定结果带回 async 侧再出回执。
+enum Admission {
+    First,
+    Duplicate,
+    Mismatch,
+}
+
 /// `fail` 的 Response 包装：回执置终态并按 HTTP 状态返回。
-fn fail_response(
+///
+/// P1-0a：`fail` 内的回执 rollback 走 persist（全量写盘），本包装随之转 async。
+async fn fail_response(
     state: &AppState,
     command_id: String,
     status: StatusCode,
     code: &str,
     message: impl Into<String>,
 ) -> Response {
-    let (status, ack) = fail(state, command_id, status, code, message);
+    let (status, ack) = fail(state, command_id, status, code, message).await;
     json_response(status, &ack)
 }
 
@@ -137,7 +165,13 @@ pub(crate) async fn execute_command(
         }
     }
     if let CommandTarget::ExecSession { id } = &envelope.target {
-        let owner_session_id = match state.service.exec_session_owner(id) {
+        // P1-0a：owner 反查同步取 registry 锁（进程句柄读），迁阻塞池。
+        let service = state.service.clone();
+        let exec_id = id.clone();
+        let owner_lookup = tokio::task::spawn_blocking(move || service.exec_session_owner(&exec_id))
+            .await
+            .expect("exec owner lookup task must not panic");
+        let owner_session_id = match owner_lookup {
             Ok(Some(owner_session_id)) => owner_session_id,
             Ok(None) => {
                 return json_response(
@@ -156,7 +190,8 @@ pub(crate) async fn execute_command(
                     StatusCode::BAD_GATEWAY,
                     "operation_failed",
                     error,
-                );
+                )
+                .await;
             }
         };
         if !identity.is_admin()
@@ -238,11 +273,32 @@ pub(crate) async fn execute_command(
             .unwrap_or_else(|e| e.into_inner())
             .instance_for_session(&client_session)
             .unwrap_or_else(|| client_session.clone());
-        let mut pending = state.pending.lock().unwrap_or_else(|e| e.into_inner());
-        match pending.record_fingerprint_for_session(&envelope.command_id, &fingerprint, &owner_key)
-        {
-            Ok(first) if first => {}
-            Ok(_) => {
+        // P1-0a：`record_fingerprint_for_session` 触发回执 persist（
+        // `ringing-command-receipts.json` 全量覆写，L-06），预留闸门随终态
+        // 持久化一并迁阻塞池，不在 Tokio worker 上持 `pending` 锁写盘。
+        let pending = state.pending.clone();
+        let admission_command_id = envelope.command_id.clone();
+        let admission_fingerprint = fingerprint.clone();
+        let admission = tokio::task::spawn_blocking(move || {
+            match pending
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record_fingerprint_for_session(
+                    &admission_command_id,
+                    &admission_fingerprint,
+                    &owner_key,
+                )
+            {
+                Ok(first) if first => Admission::First,
+                Ok(_) => Admission::Duplicate,
+                Err(()) => Admission::Mismatch,
+            }
+        })
+        .await
+        .expect("receipt admission task must not panic");
+        match admission {
+            Admission::First => {}
+            Admission::Duplicate => {
                 return json_response(
                     StatusCode::OK,
                     &super::command::accept_ack(
@@ -251,7 +307,7 @@ pub(crate) async fn execute_command(
                     ),
                 );
             }
-            Err(()) => {
+            Admission::Mismatch => {
                 return json_response(
                     StatusCode::CONFLICT,
                     &super::command::reject_ack(
@@ -363,14 +419,27 @@ async fn dispatch(
             custom_tools,
             handoff_from,
         } => {
-            let created = match service.create_session_command(
-                cwd.clone(),
-                title.clone(),
-                model_selection.clone(),
-                tool_mode.clone(),
-                custom_tools.clone(),
-                handoff_from.clone(),
-            ) {
+            // P1-0a：同步分派臂（含回执持久化边界）统一迁阻塞池，见
+            // `block_on_command`；lease attach 是纯内存判定，留在原路径。
+            let service = service.clone();
+            let cwd = cwd.clone();
+            let title = title.clone();
+            let model_selection = model_selection.clone();
+            let tool_mode = tool_mode.clone();
+            let custom_tools = custom_tools.clone();
+            let handoff_from = handoff_from.clone();
+            let created = match block_on_command("session.create", move || {
+                service.create_session_command(
+                    cwd,
+                    title,
+                    model_selection,
+                    tool_mode,
+                    custom_tools,
+                    handoff_from,
+                )
+            })
+            .await
+            {
                 Ok(created) => created,
                 Err(error) => {
                     return fail_response(
@@ -379,7 +448,8 @@ async fn dispatch(
                         StatusCode::BAD_GATEWAY,
                         "operation_failed",
                         error.to_string(),
-                    );
+                    )
+                    .await;
                 }
             };
             let attached = state
@@ -394,7 +464,8 @@ async fn dispatch(
                     StatusCode::UNAUTHORIZED,
                     "lease_required",
                     "lease is not active",
-                );
+                )
+                .await;
             }
             match serde_json::to_value(created) {
                 Ok(result) => Ok((result, None)),
@@ -411,12 +482,20 @@ async fn dispatch(
                     StatusCode::BAD_REQUEST,
                     "target_mismatch",
                     "session.settings.patch requires a session target",
-                );
+                )
+                .await;
             };
             let revision = envelope
                 .precondition("settings_revision")
                 .expect("validated settings revision precondition");
-            match service.patch_session_settings(session_id, patch.clone(), revision) {
+            let service = service.clone();
+            let session_id = session_id.clone();
+            let patch = patch.clone();
+            match block_on_command("session.settings.patch", move || {
+                service.patch_session_settings(&session_id, patch, revision)
+            })
+            .await
+            {
                 Ok(revision) => Ok((json!({ "settings_revision": revision }), Some(revision))),
                 Err(qaqh_runtime::QaqhError::Conflict { message }) => {
                     return fail_response(
@@ -425,16 +504,25 @@ async fn dispatch(
                         StatusCode::CONFLICT,
                         "settings_revision_conflict",
                         message,
-                    );
+                    )
+                    .await;
                 }
                 Err(error) => Err(error),
             }
         }
         RingingCommand::ProviderList { .. } => {
-            service.provider_catalog().map(|value| (value, None))
+            let service = service.clone();
+            block_on_command("provider.list", move || {
+                service.provider_catalog().map(|value| (value, None))
+            })
+            .await
         }
         RingingCommand::ProviderPresets { .. } => {
-            service.provider_presets().map(|value| (value, None))
+            let service = service.clone();
+            block_on_command("provider.presets", move || {
+                service.provider_presets().map(|value| (value, None))
+            })
+            .await
         }
         RingingCommand::ExecSessionInterrupt {} | RingingCommand::ExecSessionTerminate {} => {
             let CommandTarget::ExecSession { id } = &envelope.target else {
@@ -444,9 +532,20 @@ async fn dispatch(
                     StatusCode::BAD_REQUEST,
                     "target_mismatch",
                     "exec session stop commands require an execution-session target",
-                );
+                )
+                .await;
             };
-            let owner_session_id = match service.exec_session_owner(id) {
+            // P1-0a：owner 反查与 stop 都同步取 registry 锁并操作进程句柄，迁阻塞池。
+            let lookup_service = service.clone();
+            let exec_id = id.clone();
+            let owner_session_id =
+                match block_on_command("exec session owner lookup", move || {
+                    lookup_service
+                        .exec_session_owner(&exec_id)
+                        .map_err(qaqh_runtime::QaqhError::message)
+                })
+                .await
+            {
                 Ok(Some(owner_session_id)) => owner_session_id,
                 Ok(None) => {
                     return fail_response(
@@ -455,7 +554,8 @@ async fn dispatch(
                         StatusCode::NOT_FOUND,
                         "exec_session_not_found",
                         "execution session was not found",
-                    );
+                    )
+                    .await;
                 }
                 Err(error) => {
                     return fail_response(
@@ -463,8 +563,9 @@ async fn dispatch(
                         command_id,
                         StatusCode::BAD_GATEWAY,
                         "operation_failed",
-                        error,
-                    );
+                        error.to_string(),
+                    )
+                    .await;
                 }
             };
             let reason = match &envelope.command {
@@ -476,53 +577,92 @@ async fn dispatch(
                 }
                 _ => unreachable!(),
             };
-            service
-                .stop_exec_session(&owner_session_id, id, reason)
-                .map(|status| (json!({ "status": status }), None))
-                .map_err(qaqh_runtime::QaqhError::message)
+            let stop_service = service.clone();
+            let exec_id = id.clone();
+            block_on_command("exec session stop", move || {
+                stop_service
+                    .stop_exec_session(&owner_session_id, &exec_id, reason)
+                    .map(|status| (json!({ "status": status }), None))
+                    .map_err(qaqh_runtime::QaqhError::message)
+            })
+            .await
         }
-        RingingCommand::ProviderUpsert { id, provider } => service
-            .provider_upsert(id, provider, expected_revision_from(&envelope))
+        RingingCommand::ProviderUpsert { id, provider } => {
+            let service = service.clone();
+            let id = id.clone();
+            let provider = provider.clone();
+            let expected_revision = expected_revision_from(&envelope);
+            block_on_command("provider.upsert", move || {
+                service.provider_upsert(&id, &provider, expected_revision)
+            })
+            .await
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            }),
-        RingingCommand::ProviderDelete { id } => service
-            .provider_delete(id, expected_revision_from(&envelope))
+            })
+        }
+        RingingCommand::ProviderDelete { id } => {
+            let service = service.clone();
+            let id = id.clone();
+            let expected_revision = expected_revision_from(&envelope);
+            block_on_command("provider.delete", move || {
+                service.provider_delete(&id, expected_revision)
+            })
+            .await
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            }),
+            })
+        }
         RingingCommand::ProviderModelUpsert {
             provider_id,
             model_id,
             model,
-        } => service
-            .provider_model_upsert(
-                provider_id,
-                model_id,
-                expected_revision_from(&envelope),
-                model.clone(),
-            )
+        } => {
+            let service = service.clone();
+            let provider_id = provider_id.clone();
+            let model_id = model_id.clone();
+            let model = model.clone();
+            let expected_revision = expected_revision_from(&envelope);
+            block_on_command("provider.model.upsert", move || {
+                service.provider_model_upsert(&provider_id, &model_id, expected_revision, model)
+            })
+            .await
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            }),
+            })
+        }
         RingingCommand::ProviderModelDelete {
             provider_id,
             model_id,
-        } => service
-            .provider_model_delete(provider_id, model_id, expected_revision_from(&envelope))
+        } => {
+            let service = service.clone();
+            let provider_id = provider_id.clone();
+            let model_id = model_id.clone();
+            let expected_revision = expected_revision_from(&envelope);
+            block_on_command("provider.model.delete", move || {
+                service.provider_model_delete(&provider_id, &model_id, expected_revision)
+            })
+            .await
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            }),
-        RingingCommand::ModelSelectionSetDefault { selection } => service
-            .set_default_model_selection(expected_revision_from(&envelope), selection.clone())
+            })
+        }
+        RingingCommand::ModelSelectionSetDefault { selection } => {
+            let service = service.clone();
+            let selection = selection.clone();
+            let expected_revision = expected_revision_from(&envelope);
+            block_on_command("model.selection.set_default", move || {
+                service.set_default_model_selection(expected_revision, selection)
+            })
+            .await
             .map(|value| {
                 let revision = catalog_revision(&value);
                 (value, revision)
-            }),
+            })
+        }
         RingingCommand::ConfigSave { .. }
         | RingingCommand::ConfigSetPermissionLevel { .. }
         | RingingCommand::WorkspaceSet { .. }
@@ -538,9 +678,18 @@ async fn dispatch(
         | RingingCommand::TodoCancel { .. }
         | RingingCommand::PlanAction { .. }
         | RingingCommand::DiagnosticsMemoryStart {}
-        | RingingCommand::DiagnosticsMemoryStop {} => service
-            .execute_ringing_command(&envelope.target, &envelope.command)
-            .map(|value| (value, None)),
+        | RingingCommand::DiagnosticsMemoryStop {} => {
+            // P1-0a：config/workspace/goal/todo 组合同步走 `config_io_lock` /
+            // `TODO_LOCK` / secrets 写盘，迁阻塞池。
+            let service = service.clone();
+            let target = envelope.target.clone();
+            let command = envelope.command.clone();
+            block_on_command("ringing mutation", move || {
+                service.execute_ringing_command(&target, &command)
+            })
+            .await
+            .map(|value| (value, None))
+        }
         _ => {
             let (status, ack) =
                 super::command::dispatch_session(state, client_session, identity, envelope).await;
@@ -556,18 +705,24 @@ async fn dispatch(
             ack.revision = revision;
             // B05:同步结果原样落 receipt——ACK 丢失后重放原 command_id 或
             // 轮询 status 都能恢复首次执行承诺的 result/operation/revision。
-            state
-                .pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .mark_terminal_sync(
-                    &command_id,
-                    qaqh_ringing::RingingV2SyncResult {
-                        operation: operation.to_string(),
-                        result,
-                        revision,
-                    },
-                );
+            // P1-0a：`mark_terminal_sync` 走回执 persist（全量写盘），持久化
+            // 边界迁阻塞池。
+            let pending = state.pending.clone();
+            tokio::task::spawn_blocking(move || {
+                pending
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .mark_terminal_sync(
+                        &command_id,
+                        qaqh_ringing::RingingV2SyncResult {
+                            operation: operation.to_string(),
+                            result,
+                            revision,
+                        },
+                    );
+            })
+            .await
+            .expect("receipt terminal-sync task must not panic");
             json_response(StatusCode::OK, &ack)
         }
         Err(qaqh_runtime::QaqhError::Conflict { message }) => {
@@ -580,6 +735,7 @@ async fn dispatch(
                 "revision_conflict",
                 message,
             )
+            .await
         }
         Err(error) => fail_response(
             &state,
@@ -587,7 +743,8 @@ async fn dispatch(
             StatusCode::BAD_GATEWAY,
             "operation_failed",
             error.to_string(),
-        ),
+        )
+        .await,
     }
 }
 

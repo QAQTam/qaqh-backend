@@ -16,7 +16,26 @@ pub(crate) async fn health(State(state): State<AppState>) -> impl IntoResponse {
 /// 活动状态，供冻结排查使用。**需 Bearer 鉴权**（不同于免鉴权的
 /// `/health`），仅含 seed/state/turn_id/seq/updated_at，无用户内容。
 pub(crate) async fn activity(State(state): State<AppState>) -> Response {
-    let (has_active_work, activities) = state.service.activity_snapshot();
+    // P1-0a：`activity_snapshot` 同步取 `registry` 锁（持锁方 `list_sessions`
+    // 可含慢 IO，L-01 复合停摆的观测面），与 `handle_stop` 的 D-4 先例同律迁阻塞池。
+    let service = state.service.clone();
+    let (has_active_work, activities) =
+        match tokio::task::spawn_blocking(move || service.activity_snapshot()).await {
+            Ok(snapshot) => snapshot,
+            Err(join_error) => {
+                log::warn!("[activity] snapshot worker failed: {join_error}");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    serde_json::json!({
+                        "code": "operation_failed",
+                        "message": format!("activity snapshot worker failed: {join_error}"),
+                    })
+                    .to_string(),
+                )
+                    .into_response();
+            }
+        };
     let body = serde_json::json!({
         "has_active_work": has_active_work,
         "activities": activities,
