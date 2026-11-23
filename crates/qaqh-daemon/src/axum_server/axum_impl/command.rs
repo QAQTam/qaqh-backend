@@ -282,41 +282,57 @@ pub(crate) async fn dispatch_session(
         }
         Route::Engine => {
             let session_id = envelope.session_id().unwrap_or_default().to_string();
-            let mut worker_command = envelope.command.clone();
-            if let Err(code) =
-                hydrate_attachment_previews(&state.hub, &session_id, &mut worker_command)
-            {
-                return fail(
-                    state,
-                    envelope.command_id,
-                    StatusCode::BAD_REQUEST,
-                    &code,
-                    "attachment is unavailable or invalid".to_string(),
-                )
-                .await;
-            }
-            let worker_env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
-                session_id.as_str(),
-                envelope.command_id.clone(),
-                worker_command,
-            )
-            .with_actor(identity_worker_actor(state, identity));
             // 领域拒绝保留命令面稳定码(见 `CommandRejection`):客户端按码分支,
             // 不 grep 文案。状态档在这里定——协议层的码不绑 HTTP 语义。
             // P1-0a：send_ringing_command 同步取 registry 锁并 get_or_spawn /
             // session_effective_config / truncate_from_turn（L-01/L-03 复合停摆路径），
             // 迁阻塞池。`QaqhError::Rejected` 变体原样保留，稳定码映射不变。
+            // P1-0b：附件水合每个引用都是一次 `hub.get_content` ⇒ `read_blocking`
+            // （`busy_timeout=5s`），P1-0a 只迁走了后半段的投递，水合仍直跑在
+            // Tokio worker 上。现在水合 → 组装 worker 信封 → 投递合并成**同一次**
+            // 阻塞池执行，async 侧只做稳定码与状态档映射，wire 回执形状不变。
             let service = state.service.clone();
+            let hub = std::sync::Arc::clone(&state.hub);
+            let actor = identity_worker_actor(state, identity);
             let engine_session_id = session_id.clone();
-            let send_result = tokio::task::spawn_blocking(move || {
-                service.send_ringing_command(&engine_session_id, &worker_env)
+            let command_id = envelope.command_id.clone();
+            let engine_command = envelope.command.clone();
+            let outcome = tokio::task::spawn_blocking(move || {
+                let mut worker_command = engine_command;
+                if let Err(code) =
+                    hydrate_attachment_previews(&hub, &engine_session_id, &mut worker_command)
+                {
+                    return EngineOutcome::AttachmentRejected { code };
+                }
+                let worker_env = qaqh_ringing::RingingWorkerCommandEnvelope::new(
+                    engine_session_id.as_str(),
+                    command_id,
+                    worker_command,
+                )
+                .with_actor(actor);
+                EngineOutcome::Dispatched {
+                    result: service.send_ringing_command(&engine_session_id, &worker_env),
+                }
             })
             .await
-            .unwrap_or_else(|join_error| {
-                Err(qaqh_runtime::QaqhError::message(format!(
+            .unwrap_or_else(|join_error| EngineOutcome::Dispatched {
+                result: Err(qaqh_runtime::QaqhError::message(format!(
                     "engine dispatch worker failed: {join_error}"
-                )))
+                ))),
             });
+            let send_result = match outcome {
+                EngineOutcome::AttachmentRejected { code } => {
+                    return fail(
+                        state,
+                        envelope.command_id,
+                        StatusCode::BAD_REQUEST,
+                        &code,
+                        "attachment is unavailable or invalid".to_string(),
+                    )
+                    .await;
+                }
+                EngineOutcome::Dispatched { result } => result,
+            };
             if let Err(error) = send_result {
                 return match error {
                     qaqh_runtime::QaqhError::Rejected { code, message } => fail(
@@ -370,6 +386,20 @@ enum Route {
     Attach { session: String },
     /// 其余命令一律进 worker 命令通道。
     Engine,
+}
+
+/// `Route::Engine` 在阻塞池里的两个出口。
+///
+/// 附件水合（`hub.get_content` ⇒ `read_blocking`）与命令投递（`registry` 锁 +
+/// `get_or_spawn` / `session_effective_config` / `truncate_from_turn`）都是同步
+/// IO，v4.4 起合并成**同一次**阻塞池投递，Tokio worker 全程不碰 DB：
+/// `P1-0a` 收口了后半段，`P1-0b` 把前半段也接上，`QaqhError` 原型仍由 async
+/// 侧映射状态档（稳定码语义不变）。
+enum EngineOutcome {
+    /// 附件不可用或校验失败：`code` 是命令面稳定码，出 HTTP 400。
+    AttachmentRejected { code: String },
+    /// 已投递会话循环（或领域拒绝），保留 `QaqhError` 变体。
+    Dispatched { result: Result<(), qaqh_runtime::QaqhError> },
 }
 
 fn route(command: &qaqh_ringing::RingingCommand, envelope_session: Option<&str>) -> Route {

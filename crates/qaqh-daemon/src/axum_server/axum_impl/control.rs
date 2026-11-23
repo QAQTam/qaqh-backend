@@ -74,7 +74,19 @@ pub(crate) async fn handle_stop_if_idle(
     if let Err(response) = require_scope(&identity, Scope::Admin) {
         return response;
     }
-    if state.service.has_active_work() {
+    // P1-0b（P1-0a 排期备注遗留项）：`has_active_work` 走的就是 `/activity`
+    // 那条 `activity_snapshot()` —— 同步取 `registry` 中央锁，持锁方可能是
+    // 还没收口干净的慢 IO。与 `/activity`（上面 P1-0a 已迁）和 `handle_stop`
+    // 的 D-4 先例同律进阻塞池，worker 不在这里等锁。
+    // 探测任务本身失败时按「有活干」处理：宁可不接受停机，也不误杀正在跑的回合。
+    let service = state.service.clone();
+    let has_active_work = tokio::task::spawn_blocking(move || service.has_active_work())
+        .await
+        .unwrap_or_else(|join_error| {
+            log::warn!("[stop-if-idle] active-work snapshot worker failed: {join_error}");
+            true
+        });
+    if has_active_work {
         return (StatusCode::CONFLICT, "").into_response();
     }
     // D-4：同 handle_stop。
