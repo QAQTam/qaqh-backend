@@ -13,7 +13,6 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use qaqh_config::secrets::SecretStore;
 
-use crate::bridge;
 use crate::connection::{ConnStatus, ConnectFactory, LifecycleSettings, ServerConnection};
 use crate::error::{McpError, McpErrorKind};
 use qaqh_config::config::McpConfig;
@@ -355,17 +354,21 @@ impl Drop for McpManager {
         // 兜底网络：有 runtime 则派生关闭任务（连接 Arc 已被移出，独立存活）；
         // 无 runtime（daemon 退出末端）只能依赖"集成方在 runtime 结束前显式
         // shutdown_all"的约定——rmcp 的 kill 任务需要 runtime（adapter.rs 注）。
+        //
+        // L-22 就地埋葬：旧实现这里读的是 `dedicated_runtime_checked()` 里
+        // **另一个从未初始化的** `OnceLock`（与 `runtime_handle()` 用的 cell
+        // 不同名不同体），恒返回 `None`，于是这条兜底网络在 Drop 里从来没通过
+        // ——只有本行注释里的"有 runtime 则派生关闭任务"是实话，代码不是。
+        // P1-1 收敛成单 cell（`async_rt::try_runtime_handle`：ambient 优先，
+        // 其次已构建的兜底 runtime）后，判据与句柄同源。
         let pending_len = pending.len();
-        let current = tokio::runtime::Handle::try_current().ok();
-        let spawned = bridge::try_runtime_handle()
-            .or(current.as_ref())
-            .map(|handle| {
-                handle.spawn(async move {
-                    for conn in pending {
-                        conn.shutdown().await;
-                    }
-                });
+        let spawned = qaqh_tool_core::async_rt::try_runtime_handle().map(|handle| {
+            handle.spawn(async move {
+                for conn in pending {
+                    conn.shutdown().await;
+                }
             });
+        });
         if spawned.is_none() {
             log::warn!(
                 "[mcp] manager dropped without tokio runtime; {pending_len} connection(s) left to drop-chain reaping — call shutdown_all before teardown"

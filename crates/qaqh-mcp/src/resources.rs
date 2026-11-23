@@ -19,11 +19,13 @@
 //! 场，与连接状态解耦：零 server 配置时 `list_servers` 也能答"无配置"）。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use qaqh_config::config::McpServerConfig;
-use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_tool_core::async_rt::block_on_host;
+use qaqh_tool_core::tool_api::{
+    CancellationToken, FatalToolError, ToolCallContext, ToolOutcome, map_tool_result,
+};
 use qaqh_types::{ToolDef, ToolFunction, ToolResult};
 use qaqh_workspace::{DynamicTool, ToolRisk};
 
@@ -34,9 +36,6 @@ use crate::manager::McpManager;
 
 /// 聚合工具的模型面名（无 `mcp__` 前缀）。
 pub const AGGREGATE_TOOL_NAME: &str = "mcp";
-
-/// `read_resource` 等待桥接结果的轮询间隔（与 bridge::wait_response 同款）。
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// 聚合工具的 description 后缀：告知存在性而不占历史。
 ///
@@ -135,7 +134,7 @@ pub fn aggregate_dispatch(
     ctx: &ToolCallContext,
     args: serde_json::Value,
 ) -> Result<ToolOutcome, FatalToolError> {
-    let cancel = ctx.cancellation.shared_flag();
+    let cancel = ctx.cancellation.clone();
     let timeout_hint = (!ctx.timeout.is_zero()).then(|| ctx.timeout.as_secs());
     Ok(map_tool_result(aggregate_dispatch_with(
         &crate::manager_slot(),
@@ -152,7 +151,7 @@ pub fn aggregate_dispatch(
 pub fn aggregate_dispatch_with(
     manager: &Arc<McpManager>,
     args: &serde_json::Value,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout_hint: Option<u64>,
 ) -> ToolResult {
     if !manager.config().effective_enabled() {
@@ -201,7 +200,7 @@ fn list_servers(manager: &Arc<McpManager>) -> ToolResult {
 /// 与投影管线；`server` 缺省 = 逐个连接全部已声明 server。
 fn list_tools(
     manager: &Arc<McpManager>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout_hint: Option<u64>,
     server: Option<&serde_json::Value>,
 ) -> ToolResult {
@@ -224,12 +223,28 @@ fn list_tools(
         return ToolResult::ok("no MCP servers configured in config.toml ([mcp.servers])");
     }
     let timeout_secs = timeout_hint.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 3600);
-    let (tx, rx) = std::sync::mpsc::channel();
-    let manager_task = Arc::clone(manager);
-    crate::bridge::runtime_handle().spawn(async move {
+    block_on_host(run_list_tools(
+        manager,
+        names,
+        cancel,
+        Duration::from_secs(timeout_secs),
+        timeout_secs,
+    ))
+}
+
+/// `list_tools` 主体：逐个 lazy connect → 读工具缓存清单；取消/超时在
+/// `select!` 里与连接竞争（P1-1：事件驱动，无轮询步长）。
+async fn run_list_tools(
+    manager: &Arc<McpManager>,
+    names: Vec<String>,
+    cancel: &CancellationToken,
+    timeout: Duration,
+    timeout_secs: u64,
+) -> ToolResult {
+    let collect = async {
         let mut lines = Vec::new();
         for name in &names {
-            match manager_task.get_or_connect(name).await {
+            match manager.get_or_connect(name).await {
                 Ok(conn) => match conn.cached_tools() {
                     Some(tools) => {
                         lines.push(format!("## {name} ({} tool(s))", tools.len()));
@@ -244,36 +259,20 @@ fn list_tools(
                 Err(error) => lines.push(format!("## {name} (connect failed: {})", error.message)),
             }
         }
-        // 桥接方超时/取消后提前放弃等待 → rx 已 drop，send 失败属预期。
-        let _ = tx.send(lines.join("\n"));
-    });
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(text) => return ToolResult::ok(text),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if cancel.load(Ordering::Relaxed) {
-                    return error_result(
-                        McpErrorKind::Cancelled,
-                        "list_tools cancelled; in-flight result discarded".to_owned(),
-                    );
-                }
-                if Instant::now() >= deadline {
-                    return error_result(
-                        McpErrorKind::Timeout,
-                        format!(
-                            "list_tools timed out after {timeout_secs}s; some servers may still be connecting"
-                        ),
-                    );
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return error_result(
-                    McpErrorKind::Protocol,
-                    "bridge task dropped the list_tools result channel".to_owned(),
-                );
-            }
-        }
+        lines.join("\n")
+    };
+    tokio::select! {
+        text = collect => ToolResult::ok(text),
+        _ = cancel.cancelled() => error_result(
+            McpErrorKind::Cancelled,
+            "list_tools cancelled; in-flight result discarded".to_owned(),
+        ),
+        _ = tokio::time::sleep(timeout) => error_result(
+            McpErrorKind::Timeout,
+            format!(
+                "list_tools timed out after {timeout_secs}s; some servers may still be connecting"
+            ),
+        ),
     }
 }
 
@@ -357,7 +356,7 @@ fn list_resources(manager: &Arc<McpManager>, server: Option<&serde_json::Value>)
 /// `read_resource`：读取内容（server+uri 必填；lazy connect；不缓存）。
 fn read_resource(
     manager: &Arc<McpManager>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout_hint: Option<u64>,
     args: &serde_json::Value,
 ) -> ToolResult {
@@ -385,50 +384,29 @@ fn read_resource(
     let timeout_secs = timeout_hint.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 3600);
     let timeout = Duration::from_secs(timeout_secs);
 
-    // 与 per-server 工具的 dispatch_with 同款 async→sync 桥（250ms 轮询
-    // cancel/deadline）；read 不是 tools/call，取消只丢弃结果、不发通知。
-    let (tx, rx) = std::sync::mpsc::channel();
-    let manager_task = Arc::clone(manager);
-    let server_task = server.clone();
-    let uri_task = uri.clone();
-    crate::bridge::runtime_handle().spawn(async move {
-        let result = run_read(&manager_task, &server_task, &uri_task, timeout).await;
-        // 桥接方超时/取消后提前放弃等待 → rx 已 drop，send 失败属预期。
-        let _ = tx.send(result);
-    });
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(Ok(result)) => return render_read_result(&result),
-            Ok(Err(error)) => return error_result(error.kind, error.message),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                if cancel.load(Ordering::Relaxed) {
-                    return error_result(
-                        McpErrorKind::Cancelled,
-                        format!(
-                            "server {server}: read {uri:?} cancelled; in-flight result discarded \
-                             (resource reads are not notified — the server may still be processing)"
-                        ),
-                    );
-                }
-                if Instant::now() >= deadline {
-                    return error_result(
-                        McpErrorKind::Timeout,
-                        format!(
-                            "server {server}: read {uri:?} timed out after {timeout_secs}s — \
-                             server may still be processing"
-                        ),
-                    );
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return error_result(
-                    McpErrorKind::Protocol,
-                    "bridge task dropped the result channel unexpectedly".to_owned(),
-                );
-            }
+    // read 不是 tools/call，取消只丢弃结果、不发通知。
+    block_on_host(async move {
+        tokio::select! {
+            result = run_read(manager, &server, &uri, timeout) => match result {
+                Ok(result) => render_read_result(&result),
+                Err(error) => error_result(error.kind, error.message),
+            },
+            _ = cancel.cancelled() => error_result(
+                McpErrorKind::Cancelled,
+                format!(
+                    "server {server}: read {uri:?} cancelled; in-flight result discarded \
+                     (resource reads are not notified — the server may still be processing)"
+                ),
+            ),
+            _ = tokio::time::sleep(timeout) => error_result(
+                McpErrorKind::Timeout,
+                format!(
+                    "server {server}: read {uri:?} timed out after {timeout_secs}s — \
+                     server may still be processing"
+                ),
+            ),
         }
-    }
+    })
 }
 
 /// 读取任务主体：lazy connect → `resources/read`（连接层超时/错误映射）。
@@ -687,7 +665,7 @@ fn list_prompts(manager: &Arc<McpManager>, server: Option<&serde_json::Value>) -
 /// read_resource 同款：未连接时先连）。
 fn read_prompt(
     manager: &Arc<McpManager>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout_hint: Option<u64>,
     args: &serde_json::Value,
 ) -> ToolResult {
@@ -708,8 +686,6 @@ fn read_prompt(
         .and_then(|value| value.as_object())
         .cloned();
     let (server, prompt_name) = (server.to_owned(), prompt_name.to_owned());
-    let prompt_label = prompt_name.clone();
-    let prompt_label_sync = prompt_label.clone();
     let cfg_snapshot = manager.config();
     if !cfg_snapshot.servers.contains_key(&server) {
         let available: Vec<&str> = cfg_snapshot.servers.keys().map(String::as_str).collect();
@@ -721,70 +697,70 @@ fn read_prompt(
     let timeout_secs = timeout_hint.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, 3600);
     let timeout = Duration::from_secs(timeout_secs);
 
-    // 与 read_resource 同款 async→sync 桥（250ms 轮询 cancel/deadline）。
-    let (tx, rx) = std::sync::mpsc::channel();
-    let manager = Arc::clone(manager);
-    crate::bridge::runtime_handle().spawn(async move {
-        let conn = match manager.get_or_connect(&server).await {
+    block_on_host(run_prompt(
+        manager,
+        &server,
+        &prompt_name,
+        arguments,
+        cancel,
+        timeout,
+        timeout_secs,
+    ))
+}
+
+/// `read_prompt` 主体（与 read_resource 同款 `select!` 桥，P1-1）。
+async fn run_prompt(
+    manager: &Arc<McpManager>,
+    server: &str,
+    prompt_name: &str,
+    arguments: Option<rmcp::model::JsonObject>,
+    cancel: &CancellationToken,
+    timeout: Duration,
+    timeout_secs: u64,
+) -> ToolResult {
+    let request = async {
+        let conn = match manager.get_or_connect(server).await {
             Ok(conn) => conn,
-            Err(error) => {
-                let _ = tx.send(error_result(error.kind, error.to_string()));
-                return;
-            }
+            Err(error) => return error_result(error.kind, error.to_string()),
         };
         // #39：超时/断连硬顶与错误映射在连接层（与 call_tool/read_resource 同款）。
-        let _ = tx.send(
-            match conn.get_prompt(&prompt_name, arguments, timeout).await {
-                Ok(result) => {
-                    let mut lines = Vec::new();
-                    for message in &result.messages {
-                        let role = match message.role {
-                            rmcp::model::Role::User => "user",
-                            rmcp::model::Role::Assistant => "assistant",
-                        };
-                        let text = message
-                            .content
-                            .as_text()
-                            .map(|text| text.text.clone())
-                            .unwrap_or_else(|| "[non-text content]".to_owned());
-                        lines.push(format!("{role}: {text}"));
-                    }
-                    if let Some(description) = &result.description {
-                        lines.insert(0, format!("# {description}"));
-                    }
-                    ToolResult::ok(lines.join("\n"))
-                }
-                Err(error) => error_result(
-                    error.kind,
-                    format!("prompts/get {prompt_label:?} failed on server {server:?}: {error}"),
-                ),
-            },
-        );
-    });
-    let deadline = Instant::now() + timeout + Duration::from_secs(5);
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return error_result(McpErrorKind::Cancelled, "cancelled by user".to_owned());
+        match conn.get_prompt(prompt_name, arguments, timeout).await {
+            Ok(result) => render_prompt_result(&result),
+            Err(error) => error_result(
+                error.kind,
+                format!("prompts/get {prompt_name:?} failed on server {server:?}: {error}"),
+            ),
         }
-        match rx.try_recv() {
-            Ok(result) => return result,
-            Err(std::sync::mpsc::TryRecvError::Empty) => {
-                if Instant::now() >= deadline {
-                    return error_result(
-                        McpErrorKind::Timeout,
-                        format!(
-                            "prompts/get {prompt_label_sync:?} exceeded {timeout_secs}s budget"
-                        ),
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(250));
-            }
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                return error_result(
-                    McpErrorKind::Protocol,
-                    "prompt worker exited unexpectedly".to_owned(),
-                );
-            }
-        }
+    };
+    tokio::select! {
+        out = request => out,
+        _ = cancel.cancelled() => error_result(McpErrorKind::Cancelled, "cancelled by user".to_owned()),
+        // 连接层已有 `timeout` 硬顶，这里只留 5s 兜底窗口（旧桥同款预算），
+        // 覆盖「连接层之外的等待」。
+        _ = tokio::time::sleep(timeout + Duration::from_secs(5)) => error_result(
+            McpErrorKind::Timeout,
+            format!("prompts/get {prompt_name:?} exceeded {timeout_secs}s budget"),
+        ),
     }
+}
+
+/// `GetPromptResult` → 行式消息序列（role: text；非文本 content 占位）。
+fn render_prompt_result(result: &rmcp::model::GetPromptResult) -> ToolResult {
+    let mut lines = Vec::new();
+    for message in &result.messages {
+        let role = match message.role {
+            rmcp::model::Role::User => "user",
+            rmcp::model::Role::Assistant => "assistant",
+        };
+        let text = message
+            .content
+            .as_text()
+            .map(|text| text.text.clone())
+            .unwrap_or_else(|| "[non-text content]".to_owned());
+        lines.push(format!("{role}: {text}"));
+    }
+    if let Some(description) = &result.description {
+        lines.insert(0, format!("# {description}"));
+    }
+    ToolResult::ok(lines.join("\n"))
 }

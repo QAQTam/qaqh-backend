@@ -125,28 +125,19 @@ struct LoopInner {
 }
 
 /// 回合任务统一 spawn 口:daemon 在 tokio 上下文里直接 spawn;CLI/测试等
-/// 同步调用方回落进程级共享运行时(旧 host.rs 的 driver_runtime 同款兜底)。
+/// 同步调用方回落进程级共享运行时。
+///
+/// L-33 就地收敛:本 crate 曾有自己的一套惰性 `shared_runtime`(2 worker),与
+/// mcp/lsp 的专属 runtime 并列成 daemon 内的第 3、4 套。现在兜底 cell 只剩
+/// `qaqh_tool_core::async_rt` 里那一个——宿主存在时 `runtime_handle()` 直接
+/// 返回宿主 ambient 句柄,daemon 全程只有宿主一套(带 `debug_assert` 防止
+/// 已有 ambient 时又长出第二套)。
 pub(crate) fn spawn_task<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) => handle.spawn(future),
-        Err(_) => shared_runtime().spawn(future),
-    }
-}
-
-fn shared_runtime() -> &'static tokio::runtime::Runtime {
-    static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
-    RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .thread_name("qaqh-loop-runtime")
-            .build()
-            .expect("build shared loop runtime")
-    })
+    qaqh_workspace::async_rt::runtime_handle().spawn(future)
 }
 
 fn unix_now_ms() -> i64 {
@@ -1595,24 +1586,31 @@ impl SessionLoop {
             ToolAdmission::Authorized => {}
         }
 
-        let flag = Arc::new(AtomicBool::new(*cancel_rx.borrow()));
+        // 取消投影：per-turn watch → CancellationToken。P1-1 起旗标由 token
+        // 持有，`cancel()` 同时唤醒挂在 `cancelled()` 上的 MCP/LSP 桥任务
+        // （旧实现只 `store` 裸旗标，异步面只能靠 250ms `recv_timeout` 发现）。
+        // 本任务仍是 watch 的唯一读取方：工具面只见 token，不见 watch。
+        let cancellation = qaqh_workspace::tool_api::CancellationToken::new();
+        if *cancel_rx.borrow() {
+            cancellation.cancel();
+        }
         {
             let mut rx = cancel_rx.clone();
-            let flag = Arc::clone(&flag);
+            let cancellation = cancellation.clone();
             spawn_task(async move {
                 loop {
                     if rx.changed().await.is_err() {
                         break;
                     }
                     if *rx.borrow() {
-                        flag.store(true, Ordering::Release);
+                        cancellation.cancel();
                         break;
                     }
                 }
             });
         }
         let port = Arc::clone(&self.port);
-        let joined = tokio::task::spawn_blocking(move || port.execute(&request, flag))
+        let joined = tokio::task::spawn_blocking(move || port.execute(&request, cancellation))
             .await
             .unwrap_or_else(|error| {
                 Err(ToolFailure::AfterStart(format!(

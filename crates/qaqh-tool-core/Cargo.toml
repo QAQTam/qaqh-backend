@@ -21,6 +21,9 @@ serde_json = "1"
 # ToolError 的诊断 source（base spec §7.1/§7.2，不序列化）。
 anyhow = "1"
 log = "0.4"
+# 进程内 Tokio 宿主选择与同步线程等待桥（async_rt，v4.4 P1-1）：工具执行面是
+# 同步的，MCP/LSP 的 async actor 必须落到某个被驱动的 runtime 上。
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 
 [dev-dependencies]
 qaqh-permission = { path = "../qaqh-permission" }

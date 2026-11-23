@@ -6,6 +6,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::Duration;
 
 use super::official_web::OfficialWebBackend;
@@ -90,13 +92,29 @@ pub trait ExecSessionHost: std::fmt::Debug + Send + Sync {
     ) -> Result<ExecCommandResult, super::error::ToolError>;
 }
 
-/// 取消信号（v1 同步执行器形态：`Arc<AtomicBool>` 只读句柄）。
+/// 取消信号：同步轮询面与异步等待面共用一个真身。
 ///
-/// 未来引入 async 执行器时可替换为框架级 token（保留同名替换点，
-/// 见 base spec §6.4 备注）。
+/// - **同步面**（exec 子进程循环、ptc 工具）： [`Self::shared_flag`] 拿
+///   `Arc<AtomicBool>` 在 IO 边界轮询——v1 同步执行器的既有形态，逐字不变。
+/// - **异步面**（MCP/LSP 的 `tokio::select!` 桥，v4.4 P1-1）： [`Self::cancelled`]
+///   是可等待的 future，`cancel()` 置旗后**逐个唤醒**登记的 waker。取消延迟
+///   因此等于一次线程唤醒，不再是轮询步长（旧实现 250ms `recv_timeout`）。
+///
+/// 置旗与唤醒必须同源：异步面若挂在别处造的裸 `AtomicBool` 上，`cancel()`
+/// 就没人能唤醒它——所以「从外部旗标构造 token」的反向入口已随 P1-1 一并删除
+/// （调用方改为持有 token 本身，需要裸旗标时用 [`Self::shared_flag`]）。
 #[derive(Debug, Clone, Default)]
 pub struct CancellationToken {
-    inner: Arc<AtomicBool>,
+    inner: Arc<TokenState>,
+}
+
+#[derive(Debug, Default)]
+struct TokenState {
+    /// 同步轮询面直接读这枚旗（[`CancellationToken::shared_flag`] 交出同一个
+    /// `Arc`，因此 exec 子进程循环看到的与异步面看到的是同一份真相）。
+    flag: Arc<AtomicBool>,
+    /// 挂在 [`CancellationToken::cancelled`] 上的任务 waker。
+    waiters: Mutex<Vec<Waker>>,
 }
 
 impl CancellationToken {
@@ -105,30 +123,65 @@ impl CancellationToken {
         Self::default()
     }
 
-    /// Build a token sharing an existing cancellation flag.
-    ///
-    /// This is the bridge used when a runtime-owned cancellation tree must be
-    /// projected into an explicit [`ToolCallContext`].
-    pub fn from_shared_flag(flag: Arc<AtomicBool>) -> Self {
-        Self { inner: flag }
-    }
-
-    /// 置位取消（宿主调用；工具侧只读）。
+    /// 置位取消并唤醒全部异步等待者（宿主调用；工具侧只读）。
     pub fn cancel(&self) {
-        self.inner.store(true, Ordering::SeqCst);
+        self.inner.flag.store(true, Ordering::SeqCst);
+        let pending = std::mem::take(&mut *self.lock_waiters());
+        for waker in pending {
+            waker.wake();
+        }
     }
 
-    /// 是否已取消（工具在 IO 边界/循环批次处轮询）。
+    /// 是否已取消（同步面在 IO 边界/循环批次处轮询）。
     pub fn is_cancelled(&self) -> bool {
-        self.inner.load(Ordering::SeqCst)
+        self.inner.flag.load(Ordering::SeqCst)
     }
 
-    /// 共享取消标志的 `Arc<AtomicBool>` 句柄。
+    /// 共享取消标志的 `Arc<AtomicBool>` 句柄（同步轮询面专用）。
     ///
-    /// 桥接专用：需要 `&AtomicBool` 轮询取消的执行面（MCP/LSP 的 250ms 轮询
-    /// 桥、exec 子进程轮询）用它；与 [`Self::from_shared_flag`] 互为反向映射。
+    /// 注意该句柄**不带**唤醒能力：绕过 [`Self::cancel`] 直接对旗标 `store`
+    /// 只会让同步面看见取消，异步等待者不会被唤醒。取消的唯一入口是本类型的
+    /// [`Self::cancel`]。
     pub fn shared_flag(&self) -> Arc<AtomicBool> {
-        self.inner.clone()
+        Arc::clone(&self.inner.flag)
+    }
+
+    /// 等待取消发生的 future（已在取消后轮询立即 Ready）。
+    pub fn cancelled(&self) -> Cancelled<'_> {
+        Cancelled { token: self }
+    }
+
+    fn lock_waiters(&self) -> std::sync::MutexGuard<'_, Vec<Waker>> {
+        self.inner
+            .waiters
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+/// [`CancellationToken::cancelled`] 的 future：输出恒为 `()`，仅在取消置位
+/// 时被唤醒（`select!` 里当作「取消分支」用）。
+#[derive(Debug)]
+pub struct Cancelled<'a> {
+    token: &'a CancellationToken,
+}
+
+impl std::future::Future for Cancelled<'_> {
+    type Output = ();
+
+    fn poll(self: std::pin::Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        if self.token.is_cancelled() {
+            return Poll::Ready(());
+        }
+        let mut waiters = self.token.lock_waiters();
+        // 取锁后再看一次：置旗与唤醒之间若插进本次 poll，会丢唤醒。
+        if self.token.is_cancelled() {
+            return Poll::Ready(());
+        }
+        if !waiters.iter().any(|waker| waker.will_wake(cx.waker())) {
+            waiters.push(cx.waker().clone());
+        }
+        Poll::Pending
     }
 }
 
@@ -249,5 +302,60 @@ mod tests {
 
         assert!(!ctx.sandbox_spec().enabled);
         assert!(ctx.sandbox_spec().writable_roots.is_empty());
+    }
+
+    /// park/unpark 版一次性执行器：给 [`CancellationToken::cancelled`] 一个
+    /// waker，让当前线程只被「取消」唤醒。不引 tokio 依赖（本 crate 的 runtime
+    /// 依赖只有 async_rt 的 rt 面），也不睡轮询。
+    struct ParkWaker(std::thread::Thread);
+
+    impl std::task::Wake for ParkWaker {
+        fn wake(self: std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+
+        fn wake_by_ref(self: &std::sync::Arc<Self>) {
+            self.0.unpark();
+        }
+    }
+
+    /// **P1-1 反证常驻（原语级）**：`cancel()` 必须在远小于旧轮询步长
+    /// （mcp `recv_timeout` / lsp `cancel_tick` 都是 250ms）的时间内叫醒挂在
+    /// `cancelled()` 上的等待者。旧原语根本没有唤醒面——等待者只能靠轮询
+    /// 发现取消，下界就是轮询间隔本身。
+    #[test]
+    fn cancel_wakes_registered_waiter_without_polling() {
+        let token = CancellationToken::new();
+        let waiting = {
+            let token = token.clone();
+            std::thread::spawn(move || {
+                let mut future = std::pin::pin!(token.cancelled());
+                let waker = std::task::Waker::from(std::sync::Arc::new(ParkWaker(
+                    std::thread::current(),
+                )));
+                let mut cx = std::task::Context::from_waker(&waker);
+                loop {
+                    if std::future::Future::poll(future.as_mut(), &mut cx).is_ready() {
+                        break std::time::Instant::now();
+                    }
+                    // 只可能被 cancel() 的 wake 唤醒（虚假唤醒由上面的重poll 兜住）。
+                    std::thread::park();
+                }
+            })
+        };
+        // 让等待者确实进入 Pending（注册过 waker）再取消。
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let cancelled_at = std::time::Instant::now();
+        token.cancel();
+        let ready_at = waiting.join().expect("waiter thread joined");
+        let latency = ready_at.saturating_duration_since(cancelled_at);
+        assert!(
+            latency < std::time::Duration::from_millis(50),
+            "取消唤醒延迟 {latency:?} 达到旧实现的轮询步长量级（250ms）"
+        );
+        // 已取消后再等待必须立即 Ready（不会永久 Pending）。
+        let already = std::pin::pin!(token.cancelled())
+            .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+        assert!(already.is_ready(), "已取消后不得再挂起等待者");
     }
 }

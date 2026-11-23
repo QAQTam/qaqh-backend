@@ -7,24 +7,32 @@
 //! |---|---|
 //! | `echo_round_trip` | connect→tools/list 缓存→投影批次→注册→调用成功 |
 //! | `tool_error_maps_is_error` | `isError=true` → `mcp_tool_error` + content 透传 |
-//! | `cancel_hits_and_sends_notification` | 250ms 轮询命中 cancel → `mcp_cancelled` + 通知送达 mock |
+//! | `cancel_hits_and_sends_notification` | cancel 命中 → `mcp_cancelled` + 通知送达 mock |
+//! | `cancel_latency_is_below_poll_step` | **P1-1 反证常驻**：置旗→桥返回 < 50ms（旧 250ms `recv_timeout` 轮询必红） |
 //! | `timeout_keeps_connection_healthy` | 超时 → `mcp_timeout`；连接不 crash，后续调用正常 |
 //! | `subprocess_crash_mid_call_reports_server_crashed` | 在飞断连（子进程 SIGKILL）→ `mcp_server_crashed`；下次调用单次重启 |
 //! | `busy_rejects_over_concurrency_cap` | `max_concurrent_calls=1` → 第二路 `mcp_busy`，排空后恢复 |
 //! | `malformed_and_unknown_names` | 前缀/未知 server → `mcp_not_found`（附名单） |
 //!
-//! 红线呼应：本文件不含 `set_cancel(false)`；取消只读注入的 `AtomicBool`。
+//! 红线呼应：本文件不含复位取消旗标的写法；取消只经注入的
+//! `CancellationToken::cancel()` 单向置位。
+//!
+//! 线程形态：`dispatch_with` 是同步工具入口，生产里恒在宿主 runtime 的
+//! `spawn_blocking` 线程上被调用（`session_loop.rs` 工具执行面）。async 测试体
+//! 直接调它等于在 runtime worker 线程上 `block_on`，tokio 当场 panic——因此
+//! 所有直调点都经 [`dispatch_on_tool_thread`] 复刻生产线程形态。
 
 #![allow(clippy::unwrap_used)] // 测试代码豁免（仓库惯例，见 clippy.toml）
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use qaqh_config::config::{McpConfig, McpServerConfig, McpTransportKind};
 use qaqh_mcp::McpManager;
 use qaqh_mcp::connection::{ConnectFactory, LifecycleSettings};
+use qaqh_tool_core::tool_api::CancellationToken;
 use qaqh_workspace::ToolResult;
 use rmcp::RoleServer;
 use rmcp::handler::server::ServerHandler;
@@ -220,10 +228,29 @@ fn dispatch_sync(
     manager: &Arc<McpManager>,
     tool: &str,
     args: serde_json::Value,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout_secs: Option<u64>,
 ) -> ToolResult {
     qaqh_mcp::bridge_for_tests::dispatch_with(manager, tool, &args, cancel, timeout_secs)
+}
+
+/// 同步工具入口的测试夹具：把它搬到 `spawn_blocking` 线程上跑，复刻生产
+/// （`session_loop.rs`）的线程形态。`std::thread::spawn` 的在飞用例不经此处
+/// ——裸线程无 ambient runtime，走的是同一 `block_on_host` 的兜底分支。
+async fn dispatch_on_tool_thread(
+    manager: &Arc<McpManager>,
+    tool: &'static str,
+    args: serde_json::Value,
+    cancel: &CancellationToken,
+    timeout_secs: Option<u64>,
+) -> ToolResult {
+    let manager = Arc::clone(manager);
+    let cancel = cancel.clone();
+    tokio::task::spawn_blocking(move || {
+        dispatch_sync(&manager, tool, args, &cancel, timeout_secs)
+    })
+        .await
+        .expect("tool thread joined")
 }
 
 /// 解析错误 ToolResult 的 §7 JSON（错误结果的 model_text 即 JSON 文本）。
@@ -291,14 +318,15 @@ async fn echo_round_trip() {
     );
 
     // 调用：echo 回声。
-    let cancel = AtomicBool::new(false);
-    let result = dispatch_sync(
+    let cancel = CancellationToken::new();
+    let result = dispatch_on_tool_thread(
         &manager,
         "mcp__mock__echo",
         json!({ "text": "hi" }),
         &cancel,
         None,
-    );
+    )
+    .await;
     assert!(
         result.is_success(),
         "echo should succeed: {}",
@@ -316,8 +344,9 @@ async fn tool_error_maps_is_error() {
     let (manager, _calls) = make_manager(4, 0);
     manager.get_or_connect("mock").await.unwrap();
     wait_cached_tools(&manager, "mock");
-    let cancel = AtomicBool::new(false);
-    let result = dispatch_sync(&manager, "mcp__mock__fail", json!({}), &cancel, None);
+    let cancel = CancellationToken::new();
+    let result =
+        dispatch_on_tool_thread(&manager, "mcp__mock__fail", json!({}), &cancel, None).await;
     assert!(!result.is_success());
     let (code, message) = error_code_of(&result);
     assert_eq!(code, "mcp_tool_error");
@@ -333,16 +362,17 @@ async fn cancel_hits_and_sends_notification() {
     manager.get_or_connect("mock").await.unwrap();
     wait_cached_tools(&manager, "mock");
 
-    let cancel = Arc::new(AtomicBool::new(false));
-    let cancel_thread = Arc::clone(&cancel);
+    let cancel = CancellationToken::new();
+    let cancel_thread = cancel.clone();
     // 300ms 后置取消；slow 工具睡 2s——命中必须远早于工具完成。
     let flagger = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(300));
-        cancel_thread.store(true, Ordering::Relaxed);
+        cancel_thread.cancel();
     });
 
     let started = Instant::now();
-    let result = dispatch_sync(&manager, "mcp__mock__slow", json!({}), &cancel, None);
+    let result =
+        dispatch_on_tool_thread(&manager, "mcp__mock__slow", json!({}), &cancel, None).await;
     flagger.join().unwrap();
     let elapsed = started.elapsed();
     let (code, _message) = error_code_of(&result);
@@ -364,14 +394,89 @@ async fn cancel_hits_and_sends_notification() {
     );
 }
 
+/// **P1-1 反证常驻**：置旗 → 桥返回的延迟必须远小于旧实现的轮询步长。
+///
+/// 旧实现 `wait_response` 用 `recv_timeout(250ms)` 轮询取消旗标，最坏要多等
+/// 一整个周期才看见取消；新实现 `CancellationToken::cancel()` 直接唤醒挂在
+/// `cancelled()` 上的 `select!` 分支，延迟 = 一次线程唤醒。50ms 阈值只有
+/// 旧步长的 1/5，旧实现不可能通过。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancel_latency_is_below_poll_step() {
+    const BUDGET: Duration = Duration::from_millis(50);
+
+    let (manager, _calls) = make_manager(4, 0);
+    manager.get_or_connect("mock").await.unwrap();
+    wait_cached_tools(&manager, "mock");
+
+    let manager_task = Arc::clone(&manager);
+    let cancel = CancellationToken::new();
+    let cancel_task = cancel.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        // slow 工具在 mock 侧睡 ≥500ms（夹具下限），timeout 给 60s：
+        // 桥提前返回的唯一可能就是取消，不存在"自己跑完了"。
+        let result =
+            dispatch_sync(&manager_task, "mcp__mock__slow", json!({}), &cancel_task, Some(60));
+        (Instant::now(), result)
+    });
+
+    // 反证装置：等连接上报 inflight>0（RPC 真的在飞）。没等到就说明本用例
+    // 压根没测取消路径，当场报错而不是假绿。
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let flying = manager.connection("mock").is_some_and(|conn| {
+            matches!(conn.status(), qaqh_mcp::ConnStatus::Connected { inflight } if inflight > 0)
+        });
+        if flying {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "反证装置失效：slow 调用从未进入在飞态，取消延迟无从测量"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let cancelled_at = Instant::now();
+    cancel.cancel();
+    let (returned_at, result) = handle.await.expect("tool thread joined");
+    assert!(
+        returned_at > cancelled_at,
+        "反证装置失效：桥在置旗前就已返回（取消路径未被测量）"
+    );
+    let latency = returned_at.saturating_duration_since(cancelled_at);
+    let (code, _message) = error_code_of(&result);
+    assert_eq!(code, "mcp_cancelled", "实际返回：{}", result.model_text());
+    assert!(
+        latency < BUDGET,
+        "取消延迟 {latency:?} 超过 {BUDGET:?}（旧实现的轮询步长是 250ms）"
+    );
+}
+
+/// **P1-1 反证常驻**：身处宿主 runtime 时，MCP 用的必须就是宿主那套——
+/// 旧实现在本 crate 私建 `dedicated_runtime()`，这条断言当场红。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_handle_is_the_ambient_host() {
+    assert_eq!(
+        qaqh_mcp::runtime_handle().id(),
+        tokio::runtime::Handle::current().id(),
+        "ambient runtime 存在时不得另起 runtime"
+    );
+    // 同一进程内的兜底 cell 只有一个（L-22 的成因就是第二个 cell）。
+    assert_eq!(
+        qaqh_mcp::runtime_handle().id(),
+        qaqh_workspace::async_rt::runtime_handle().id(),
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn timeout_keeps_connection_healthy() {
     let (manager, _calls) = make_manager(4, 0);
     let conn = manager.get_or_connect("mock").await.unwrap();
     wait_cached_tools(&manager, "mock");
 
-    let cancel = AtomicBool::new(false);
-    let result = dispatch_sync(&manager, "mcp__mock__slow", json!({}), &cancel, Some(1));
+    let cancel = CancellationToken::new();
+    let result =
+        dispatch_on_tool_thread(&manager, "mcp__mock__slow", json!({}), &cancel, Some(1)).await;
     let (code, message) = error_code_of(&result);
     assert_eq!(code, "mcp_timeout");
     assert!(
@@ -393,13 +498,14 @@ async fn timeout_keeps_connection_healthy() {
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    let result = dispatch_sync(
+    let result = dispatch_on_tool_thread(
         &manager,
         "mcp__mock__echo",
         json!({ "text": "after" }),
         &cancel,
         None,
-    );
+    )
+    .await;
     assert!(
         result.is_success(),
         "超时后 echo 应正常：{}",
@@ -471,9 +577,11 @@ async fn subprocess_crash_mid_call_reports_server_crashed() {
 
     let pid = wait_pid_file(&pid_file("crash"));
     // 在飞 slow（8s）途中 SIGKILL node → transport EOF → ServerCrashed。
-    let cancel = Arc::new(AtomicBool::new(false));
+    // 这一路走裸线程（无 ambient runtime → block_on_host 落兜底分支），
+    // 与 spawn_blocking 分支同为受支持形态。
+    let cancel = CancellationToken::new();
     let manager_bg = Arc::clone(&manager);
-    let cancel_bg = Arc::clone(&cancel);
+    let cancel_bg = cancel.clone();
     let slow = std::thread::spawn(move || {
         dispatch_sync(
             &manager_bg,
@@ -503,14 +611,15 @@ async fn subprocess_crash_mid_call_reports_server_crashed() {
 
     // 下一次调用单次重启（设计 §5.1：crash 不设冷却；attempts 无法计数——
     // 真实 adapter 无 mock 工厂，以“echo 恢复成功”作为重启证据）。
-    let cancel2 = AtomicBool::new(false);
-    let result = dispatch_sync(
+    let cancel2 = CancellationToken::new();
+    let result = dispatch_on_tool_thread(
         &manager,
         "mcp__crash__echo",
         json!({ "text": "back" }),
         &cancel2,
         None,
-    );
+    )
+    .await;
     assert!(
         result.is_success(),
         "crash 后应单次重启成功：{}",
@@ -527,29 +636,31 @@ async fn busy_rejects_over_concurrency_cap() {
     manager.get_or_connect("mock").await.unwrap();
     wait_cached_tools(&manager, "mock");
 
-    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel = CancellationToken::new();
     let manager_bg = Arc::clone(&manager);
-    let cancel_bg = Arc::clone(&cancel);
+    let cancel_bg = cancel.clone();
     let first = std::thread::spawn(move || {
         dispatch_sync(&manager_bg, "mcp__mock__slow", json!({}), &cancel_bg, None)
     });
     // 等第一路真正开始（连接 + RPC 发出）。
     std::thread::sleep(Duration::from_millis(500));
 
-    let cancel2 = AtomicBool::new(false);
-    let second = dispatch_sync(&manager, "mcp__mock__echo", json!({}), &cancel2, None);
+    let cancel2 = CancellationToken::new();
+    let second =
+        dispatch_on_tool_thread(&manager, "mcp__mock__echo", json!({}), &cancel2, None).await;
     let (code, message) = error_code_of(&second);
     assert_eq!(code, "mcp_busy", "并发上限拒绝：{message}");
 
     first.join().unwrap();
     // 排空后恢复可用。
-    let result = dispatch_sync(
+    let result = dispatch_on_tool_thread(
         &manager,
         "mcp__mock__echo",
         json!({ "text": "drained" }),
         &cancel2,
         None,
-    );
+    )
+    .await;
     assert!(result.is_success(), "排空后应恢复：{}", result.model_text());
     let _ = calls;
 }
@@ -559,13 +670,14 @@ async fn malformed_and_unknown_names() {
     let (manager, _calls) = make_manager(4, 0);
     manager.get_or_connect("mock").await.unwrap();
     wait_cached_tools(&manager, "mock");
-    let cancel = AtomicBool::new(false);
+    let cancel = CancellationToken::new();
 
-    let result = dispatch_sync(&manager, "echo", json!({}), &cancel, None);
+    let result = dispatch_on_tool_thread(&manager, "echo", json!({}), &cancel, None).await;
     let (code, message) = error_code_of(&result);
     assert_eq!(code, "mcp_not_found", "缺前缀：{message}");
 
-    let result = dispatch_sync(&manager, "mcp__nope__echo", json!({}), &cancel, None);
+    let result =
+        dispatch_on_tool_thread(&manager, "mcp__nope__echo", json!({}), &cancel, None).await;
     let (code, message) = error_code_of(&result);
     assert_eq!(code, "mcp_not_found");
     assert!(message.contains("mock"), "附可用名单：{message}");

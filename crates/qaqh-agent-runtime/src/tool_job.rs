@@ -23,7 +23,6 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -723,10 +722,10 @@ impl WorkspaceToolPort {
     pub fn execute(
         &self,
         request: &ToolRequest,
-        cancel: Arc<AtomicBool>,
+        cancel: qaqh_workspace::tool_api::CancellationToken,
     ) -> Result<ToolExecOutput, ToolFailure> {
         let args_json = String::from_utf8(request.args.clone()).ok();
-        if cancel.load(Ordering::Acquire) {
+        if cancel.is_cancelled() {
             self.lifecycle.settled(
                 &request.call_id,
                 &request.tool_name,
@@ -817,7 +816,7 @@ impl WorkspaceToolPort {
                 }
             };
 
-        if cancel.load(Ordering::Acquire) {
+        if cancel.is_cancelled() {
             self.lifecycle.settled(
                 &request.call_id,
                 &request.tool_name,
@@ -843,8 +842,7 @@ impl WorkspaceToolPort {
                     qaqh_workspace::tool_api::SandboxSpec::disabled().network;
             }
         }
-        context.cancellation =
-            qaqh_workspace::tool_api::CancellationToken::from_shared_flag(Arc::clone(&cancel));
+        context.cancellation = cancel;
 
         // 进入实际执行:E09/E10 断点接通——直通 sender 注入 exec 处理器,
         // 实时输出经 owner 泵转成 tool.output.delta;终态带结构化结果与 effects。

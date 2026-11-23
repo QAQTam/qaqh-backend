@@ -10,7 +10,6 @@
 
 use std::sync::{
     Arc, Barrier, Mutex,
-    atomic::AtomicBool,
 };
 
 use qaqh_agent_runtime::ExecSessionManager;
@@ -33,7 +32,7 @@ fn call_port(
         read_only,
         args: serde_json::to_vec(&args).expect("serialize args"),
     };
-    port.execute(&req, Arc::new(AtomicBool::new(false)))
+    port.execute(&req, qaqh_workspace::tool_api::CancellationToken::new())
         .unwrap_or_else(|err| panic!("{tool_name} ({call_id}) failed: {err:?}"))
         .text
 }
