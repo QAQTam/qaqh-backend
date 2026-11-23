@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use qaqh_tool_core::tool_api::CancellationToken;
 
 use async_lsp::LanguageClient;
 use async_lsp::router::Router;
@@ -342,7 +342,7 @@ fn unknown_server_reports_not_found() {
             "line": 1, "character": 1,
             "server": "nope",
         }),
-        &AtomicBool::new(false),
+        &CancellationToken::new(),
         Some(5),
         "/tmp",
     );
@@ -366,7 +366,7 @@ fn unknown_file_reports_protocol() {
             "filePath": "nope-missing.rs",
             "line": 1, "character": 1,
         }),
-        &AtomicBool::new(false),
+        &CancellationToken::new(),
         Some(5),
         "/nonexistent-root-qaqh-lsp",
     );
@@ -380,7 +380,8 @@ fn unknown_file_reports_protocol() {
 #[test]
 fn cancel_before_request_reports_cancelled() {
     let manager = test_manager();
-    let cancel = AtomicBool::new(true);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
     let out = qaqh_lsp::tool::aggregate_dispatch_with(
         &manager,
         &serde_json::json!({

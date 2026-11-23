@@ -15,7 +15,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use qaqh_tool_core::tool_api::CancellationToken;
 use std::time::Duration;
 
 use qaqh_config::config::{McpConfig, McpServerConfig, McpTransportKind};
@@ -181,8 +181,28 @@ fn make_manager(url: Option<String>) -> Arc<McpManager> {
 }
 
 fn aggregate(manager: &Arc<McpManager>, args: serde_json::Value) -> ToolResult {
-    let cancel = AtomicBool::new(false);
-    qaqh_mcp::bridge_for_tests::aggregate_dispatch_with(manager, &args, &cancel, None)
+    tokio::task::block_in_place(|| {
+        qaqh_mcp::bridge_for_tests::aggregate_dispatch_with(
+            manager,
+            &args,
+            &CancellationToken::new(),
+            None,
+        )
+    })
+}
+
+/// per-server 工具的同步入口夹具（同 `aggregate`：用例直接在 async 测试体里
+/// 调同步桥，用 `block_in_place` 先挪出 worker）。
+fn dispatch(manager: &Arc<McpManager>, tool: &str, args: serde_json::Value) -> ToolResult {
+    tokio::task::block_in_place(|| {
+        qaqh_mcp::bridge_for_tests::dispatch_with(
+            manager,
+            tool,
+            &args,
+            &CancellationToken::new(),
+            None,
+        )
+    })
 }
 
 async fn wait_caches(manager: &Arc<McpManager>, name: &str) {
@@ -218,13 +238,10 @@ async fn http_round_trip() {
     );
 
     // echo 调用经 HTTP 传输往返。
-    let cancel = AtomicBool::new(false);
-    let result = qaqh_mcp::bridge_for_tests::dispatch_with(
+    let result = dispatch(
         &manager,
         "mcp__mock__echo",
-        &serde_json::json!({ "text": "hi over http" }),
-        &cancel,
-        None,
+        serde_json::json!({ "text": "hi over http" }),
     );
     assert!(
         result.is_success(),
@@ -381,13 +398,10 @@ async fn unix_socket_round_trip() {
         .expect("unix socket connect");
     wait_caches(&manager, "mock").await;
 
-    let cancel = AtomicBool::new(false);
-    let result = qaqh_mcp::bridge_for_tests::dispatch_with(
+    let result = dispatch(
         &manager,
         "mcp__mock__echo",
-        &serde_json::json!({ "text": "hi over uds" }),
-        &cancel,
-        None,
+        serde_json::json!({ "text": "hi over uds" }),
     );
     assert!(result.is_success(), "{}", result.model_text());
     assert!(result.model_text().contains("echo: hi over uds"));

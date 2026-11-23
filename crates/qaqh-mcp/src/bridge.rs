@@ -2,27 +2,30 @@
 //!
 //! 职责（设计 §5.4 契约）：
 //! - E-5 单一 dispatcher：[`dispatch`] 是全体 MCP 工具共用的唯一 fn 指针；
-//! - mpsc req/resp：同步 handler 线程不做 `block_on`（嵌套 runtime 风险），
-//!   改为向 qaqh-mcp 专属 runtime（[`runtime_handle`]，"rmcp 客户端住在
-//!   专属 actor"）派生调用任务，再以 250ms 粒度 `recv_timeout` 等待；
-//! - 取消/超时：等待期间只读 `ctx.cancel`（L1/L2 已接线的 `Arc<AtomicBool>`，
-//!   禁触碰全局 `qaqh_workspace::CANCEL`，禁以任何字面形式复位取消旗标——
-//!   契约红线1），
-//!   命中即 best-effort 发送 `notifications/cancelled`、丢弃结果、返回
-//!   `mcp_cancelled`；超时链 = `ctx.timeout_secs`（来自 server 配置的
-//!   `default_timeout_secs`）→ 缺省 60s → 封顶 3600s；
+//! - 同步↔async 桥（v4.4 P1-1 收敛）：调用线程经
+//!   [`qaqh_tool_core::async_rt::block_on_host`] 等有界结果——runtime 由
+//!   [`runtime_handle`]（宿主 ambient 优先，仅 CLI/裸线程落共享兜底）选定，
+//!   不再有 mcp 专属常驻 runtime，也不再有 `spawn + recv_timeout` 轮询；
+//! - 取消/超时：在 future 内部 `tokio::select!` 竞争，取消走
+//!   [`CancellationToken::cancelled`]（事件唤醒，延迟 = 一次线程唤醒），
+//!   超时走 `tokio::time::sleep`。禁触碰全局 `qaqh_workspace::CANCEL`，
+//!   禁以任何字面形式复位取消旗标（契约红线1）。命中取消即 best-effort 发送
+//!   `notifications/cancelled`、丢弃结果、返回 `mcp_cancelled`；
+//!   超时链 = `ctx.timeout_secs`（来自 server 配置的 `default_timeout_secs`）
+//!   → 缺省 60s → 封顶 3600s；
 //! - 错误码映射：`McpError`/`CallToolResult::is_error` → 设计 §7 的
 //!   ToolResult JSON（timeis/status/code/message/hint）；
 //! - 投影批次：连接层工具缓存变化（[`crate::connection::ServerConnection`]
 //!   bump 代数）后，[`projection_batch`] 产出全量重建批次，会话 loop 在回合
 //!   边界 `clear_dynamic` + 逐条 `register_dynamic`（refresh 语义）。
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
-use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_tool_core::async_rt::block_on_host;
+use qaqh_tool_core::tool_api::{
+    CancellationToken, FatalToolError, ToolCallContext, ToolOutcome, map_tool_result,
+};
 use qaqh_types::{
     ToolResultDisplay, ToolResultDisplayBody, ToolResultDisplayHeader, ToolResultDisplayOutcome,
     ToolResultDisplayOutcomeState,
@@ -35,51 +38,26 @@ use crate::error::{McpError, McpErrorKind};
 use crate::manager_slot;
 use crate::projection::project_tools;
 
-/// 桥接轮询粒度（设计 §5.4：~250ms）。
-const POLL_INTERVAL: Duration = Duration::from_millis(250);
 /// ctx 超时缺省（设计 §4：默认 60s，封顶 3600）。
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const MAX_TIMEOUT_SECS: u64 = 3600;
-/// qaqh-mcp 专属 runtime worker 数：rmcp 客户端 actor + IO，不需要更多。
-const RUNTIME_WORKERS: usize = 2;
 
-fn dedicated_runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(RUNTIME_WORKERS)
-            .enable_all()
-            .build()
-            .expect("qaqh-mcp dedicated runtime must build")
-    })
-}
-
-/// qaqh-mcp 专属 runtime 句柄（惰性构建，进程级单例）。
+/// MCP actor 所在 runtime 句柄（P1-1：宿主 ambient 优先，共享兜底其次）。
 ///
-/// 工具执行线程是裸线程（无 ambient runtime），rmcp 的 RPC/关闭任务必须
-/// 落在一个持续被驱动的 runtime 上——专属 runtime 与 daemon 自身的 runtime
-/// 形态解耦（设计 §3："rmcp 客户端住在专属 actor（tokio runtime 线程）里"）。
-pub fn runtime_handle() -> &'static tokio::runtime::Handle {
-    dedicated_runtime().handle()
+/// 见 [`qaqh_tool_core::async_rt`]：本 crate 不再自建常驻 runtime，rmcp 的
+/// RPC/关闭/watchdog 任务与 daemon 宿主 runtime 同域。
+pub fn runtime_handle() -> tokio::runtime::Handle {
+    qaqh_tool_core::async_rt::runtime_handle()
 }
 
-/// 已构建的专属 runtime 句柄（不触发惰性构建；manager `Drop` 兜底网络用）。
-pub fn try_runtime_handle() -> Option<&'static tokio::runtime::Handle> {
-    dedicated_runtime_checked().map(tokio::runtime::Runtime::handle)
-}
-
-fn dedicated_runtime_checked() -> Option<&'static tokio::runtime::Runtime> {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get()
-}
-
-/// daemon 退出路径的优雅关闭入口：block_on 全局 manager 的 `shutdown_all`。
+/// daemon 退出路径的优雅关闭入口：全局 manager 的 `shutdown_all`。
 ///
-/// 只允许从非异步线程调用（daemon main 收尾）；block_on 驱动专属 runtime
-/// 完成逐连接 cancel → transport close → 子进程组杀兜底（设计 §5.1）。
-pub fn shutdown_global() {
-    let manager = manager_slot();
-    runtime_handle().block_on(manager.shutdown_all());
+/// **必须在宿主 runtime 仍被驱动时 `await`**（daemon main 在
+/// `runtime.block_on(...)` 的 async 块内收尾）：P1-1 之后 rmcp 的 transport
+/// actor 就挂在这个 runtime 上，runtime 停摆后再找它收尾等于自己等自己。
+/// 逐连接 cancel → transport close → 子进程组杀兜底（设计 §5.1）。
+pub async fn shutdown_global() {
+    manager_slot().shutdown_all().await;
 }
 
 /// E-5 单一 dispatcher：全体 MCP 工具共用的 fn 指针（注册进 `DynamicTool`）。
@@ -93,7 +71,7 @@ pub fn dispatch(
     ctx: &ToolCallContext,
     args: serde_json::Value,
 ) -> Result<ToolOutcome, FatalToolError> {
-    let cancel = ctx.cancellation.shared_flag();
+    let cancel = ctx.cancellation.clone();
     let timeout_hint = (!ctx.timeout.is_zero()).then(|| ctx.timeout.as_secs());
     Ok(map_tool_result(dispatch_with(
         &manager_slot(),
@@ -111,7 +89,7 @@ pub fn dispatch_with(
     manager: &Arc<McpManager>,
     name: &str,
     args: &serde_json::Value,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout_secs: Option<u64>,
 ) -> ToolResult {
     let (server, tool) = match resolve_call(manager, name) {
@@ -122,19 +100,53 @@ pub fn dispatch_with(
         .unwrap_or(DEFAULT_TIMEOUT_SECS)
         .clamp(1, MAX_TIMEOUT_SECS);
     let timeout = Duration::from_secs(timeout_secs);
+    // future 借的是本栈帧的值，`block_on_host` 就在本线程驱动，无需 'static。
+    block_on_host(run_bridged(
+        manager,
+        &server,
+        &tool,
+        args.clone(),
+        cancel,
+        timeout,
+        timeout_secs,
+    ))
+}
 
-    let (tx, rx): (Sender<Result<CallToolResult, McpError>>, _) = std::sync::mpsc::channel();
-    let server_name = server.clone();
-    let tool_name = tool.clone();
-    let args_value = args.clone();
-    let manager_task = Arc::clone(manager);
-    runtime_handle().spawn(async move {
-        let result = run_call(&manager_task, &server_name, &tool_name, args_value, timeout).await;
-        // 桥接方超时/取消后提前放弃等待 → rx 已 drop，send 失败属预期。
-        let _ = tx.send(result);
-    });
-
-    wait_response(manager, &rx, cancel, &server, &tool, timeout_secs)
+/// 桥接主体：调用 / 取消 / 超时三路竞争（P1-1：全部事件驱动，无轮询步长）。
+async fn run_bridged(
+    manager: &Arc<McpManager>,
+    server: &str,
+    tool: &str,
+    args: serde_json::Value,
+    cancel: &CancellationToken,
+    timeout: Duration,
+    timeout_secs: u64,
+) -> ToolResult {
+    tokio::select! {
+        result = run_call(manager, server, tool, args, timeout) => match result {
+            Ok(result) => call_result_to_tool_result(result),
+            Err(error) => mcp_error_to_tool_result(error),
+        },
+        _ = cancel.cancelled() => {
+            send_cancelled(manager, server, tool, "caller cancelled the tool call");
+            error_result(
+                McpErrorKind::Cancelled,
+                format!(
+                    "tool {tool:?} on server {server:?} cancelled by caller; result discarded"
+                ),
+            )
+        }
+        // 超时也尽力取消（§7 hint：未取消成功时勿盲目重发）。
+        _ = tokio::time::sleep(timeout) => {
+            send_cancelled(manager, server, tool, "client-side timeout");
+            error_result(
+                McpErrorKind::Timeout,
+                format!(
+                    "tool {tool:?} on server {server:?} timed out after {timeout_secs}s — server may still be executing; do not blindly resend until it settles"
+                ),
+            )
+        }
+    }
 }
 
 /// 解析 `mcp__{server}__{tool}` → (server, tool)。
@@ -207,53 +219,6 @@ fn type_name_of(value: &serde_json::Value) -> &'static str {
         serde_json::Value::Array(_) => "array",
         serde_json::Value::Null => "null",
         serde_json::Value::Object(_) => "object",
-    }
-}
-
-/// 阻塞等待桥接结果（设计 §5.4 `bridge::wait_response`）：250ms `recv_timeout`
-/// 轮询 cancel 与 deadline；命中即发取消通知、丢弃结果、按 §7 返回。
-fn wait_response(
-    manager: &McpManager,
-    rx: &Receiver<Result<CallToolResult, McpError>>,
-    cancel: &AtomicBool,
-    server: &str,
-    tool: &str,
-    timeout_secs: u64,
-) -> ToolResult {
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(Ok(result)) => return call_result_to_tool_result(result),
-            Ok(Err(error)) => return mcp_error_to_tool_result(error),
-            Err(RecvTimeoutError::Timeout) => {
-                if cancel.load(Ordering::Relaxed) {
-                    send_cancelled(manager, server, tool, "caller cancelled the tool call");
-                    return error_result(
-                        McpErrorKind::Cancelled,
-                        format!(
-                            "tool {tool:?} on server {server:?} cancelled by caller; result discarded"
-                        ),
-                    );
-                }
-                if Instant::now() >= deadline {
-                    // 超时也尽力取消（§7 hint：未取消成功时勿盲目重发）。
-                    send_cancelled(manager, server, tool, "client-side timeout");
-                    return error_result(
-                        McpErrorKind::Timeout,
-                        format!(
-                            "tool {tool:?} on server {server:?} timed out after {timeout_secs}s — server may still be executing; do not blindly resend until it settles"
-                        ),
-                    );
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                // worker panic / runtime 消亡而未 send：协议层异常，如实上报。
-                return error_result(
-                    McpErrorKind::Protocol,
-                    format!("bridge worker for tool {tool:?} terminated without a response"),
-                );
-            }
-        }
     }
 }
 
@@ -430,7 +395,9 @@ pub fn projection_batch() -> Vec<(String, DynamicTool)> {
     projection_batch_with(&manager_slot())
 }
 
-/// `get_prompt` 的可测形态：阻塞桥（与 `dispatch` 同款 250ms 轮询/超时/取消）。
+/// `get_prompt` 的可测形态：阻塞桥（与 [`dispatch_with`] 同款 `block_on_host`
+/// 等有界结果）。超时硬顶在连接层 `ServerConnection::get_prompt` 内完成；
+/// prompts/get 不是 `tools/call`，无取消通知面。
 /// 仅经 [`crate::bridge_for_tests`] 垫片暴露（doc(hidden)，非公共 API 契约）。
 #[doc(hidden)]
 pub fn get_prompt_blocking(
@@ -439,33 +406,7 @@ pub fn get_prompt_blocking(
     arguments: Option<rmcp::model::JsonObject>,
     timeout: Duration,
 ) -> Result<rmcp::model::GetPromptResult, McpError> {
-    let (tx, rx): (Sender<Result<rmcp::model::GetPromptResult, McpError>>, _) =
-        std::sync::mpsc::channel();
-    let conn_task = Arc::clone(conn);
-    let prompt_name = name.to_owned();
-    runtime_handle().spawn(async move {
-        let _ = tx.send(conn_task.get_prompt(&prompt_name, arguments, timeout).await);
-    });
-    let deadline = Instant::now() + timeout;
-    loop {
-        match rx.recv_timeout(POLL_INTERVAL) {
-            Ok(result) => return result,
-            Err(RecvTimeoutError::Timeout) => {
-                if Instant::now() >= deadline {
-                    return Err(McpError::new(
-                        McpErrorKind::Timeout,
-                        format!("prompts/get {name:?} exceeded the caller budget"),
-                    ));
-                }
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(McpError::new(
-                    McpErrorKind::Protocol,
-                    format!("bridge worker for prompts/get {name:?} terminated without a response"),
-                ));
-            }
-        }
-    }
+    block_on_host(conn.get_prompt(name, arguments, timeout))
 }
 
 /// [`projection_batch`] 的可测形态：manager 显式注入（代数门控已上移到调用方

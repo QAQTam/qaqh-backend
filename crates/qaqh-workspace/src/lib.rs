@@ -40,6 +40,9 @@ pub mod skill;
 // tool_capabilities 直接 re-export（能力迁移表随 SDK 下沉）。
 pub mod tool_api;
 pub use qaqh_tool_core::tool_capabilities;
+// 进程内 Tokio 宿主选择与同步线程等待桥（P1-1）：工具执行面统一从这里取
+// runtime 句柄，禁止任何 crate 再私建常驻 runtime。
+pub use qaqh_tool_core::async_rt;
 pub mod tool_side_fold;
 mod web;
 

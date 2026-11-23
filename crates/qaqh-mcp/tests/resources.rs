@@ -27,7 +27,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use qaqh_tool_core::tool_api::CancellationToken;
 use std::time::{Duration, Instant};
 
 use qaqh_config::config::{McpConfig, McpServerConfig, McpTransportKind};
@@ -313,17 +313,33 @@ fn disabled_manager() -> Arc<McpManager> {
     McpManager::disabled()
 }
 
+/// 同步工具入口的测试夹具。
+///
+/// 生产里这条路恒在 `spawn_blocking` 线程上（`session_loop.rs` 工具执行面），
+/// 本文件的用例却直接在 async 测试体里调它——那就用 tokio 文档化的
+/// `task::block_in_place` 先把自己挪出 worker，再在合法线程上 `block_on_host`
+/// （`multi_thread` + 2 worker 的测试 runtime 下 worker 不会因此饿死）。
+/// 线程形态的正面用例见 `call_path.rs::dispatch_on_tool_thread`。
+fn aggregate_with(
+    manager: &Arc<McpManager>,
+    args: &serde_json::Value,
+    cancel: &CancellationToken,
+) -> ToolResult {
+    tokio::task::block_in_place(|| {
+        qaqh_mcp::bridge_for_tests::aggregate_dispatch_with(manager, args, cancel, None)
+    })
+}
+
 fn aggregate(manager: &Arc<McpManager>, args: serde_json::Value) -> ToolResult {
-    let cancel = AtomicBool::new(false);
-    qaqh_mcp::bridge_for_tests::aggregate_dispatch_with(manager, &args, &cancel, None)
+    aggregate_with(manager, &args, &CancellationToken::new())
 }
 
 fn aggregate_cancelled(
     manager: &Arc<McpManager>,
     args: serde_json::Value,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
 ) -> ToolResult {
-    qaqh_mcp::bridge_for_tests::aggregate_dispatch_with(manager, &args, cancel, None)
+    aggregate_with(manager, &args, cancel)
 }
 
 /// 解析错误 ToolResult 的 §7 JSON（错误结果的 model_text 即 JSON 文本）。
@@ -660,7 +676,8 @@ async fn read_resource_honours_cancel() {
     // 通知——read 非 tools/call，无 request id 可取消，语义 §5.4/§7）。
     let manager = make_manager_named(Some("mock"));
     connect_and_wait(&manager, "mock").await;
-    let cancel = AtomicBool::new(true);
+    let cancel = CancellationToken::new();
+    cancel.cancel();
     let result = aggregate_cancelled(
         &manager,
         json!({
@@ -873,7 +890,9 @@ async fn get_prompt_times_out_and_frees_the_service_lock() {
     let timeout = Duration::from_millis(250);
 
     let started = Instant::now();
-    let result = qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "hang", None, timeout);
+    let result = tokio::task::block_in_place(|| {
+        qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "hang", None, timeout)
+    });
     let elapsed = started.elapsed();
     let error = result.expect_err("hung prompt must not succeed");
     assert_eq!(error.kind.code(), "mcp_timeout", "{error:?}");
@@ -883,7 +902,9 @@ async fn get_prompt_times_out_and_frees_the_service_lock() {
     );
 
     // service 锁已释放：下一次 RPC 不被钉住。
-    let ok = qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "greet", None, timeout);
+    let ok = tokio::task::block_in_place(|| {
+        qaqh_mcp::bridge_for_tests::get_prompt_blocking(&conn, "greet", None, timeout)
+    });
     assert!(
         ok.is_ok(),
         "service lock must be free after timeout: {ok:?}"

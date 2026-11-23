@@ -9,7 +9,6 @@
 //!   → 查；常驻 open 不做增量。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use lsp_types::{
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentSymbolParams,
@@ -18,7 +17,10 @@ use lsp_types::{
     WorkDoneProgressParams, WorkspaceSymbolParams,
 };
 
-use qaqh_tool_core::tool_api::{FatalToolError, ToolCallContext, ToolOutcome, map_tool_result};
+use qaqh_tool_core::async_rt::block_on_host;
+use qaqh_tool_core::tool_api::{
+    CancellationToken, FatalToolError, ToolCallContext, ToolOutcome, map_tool_result,
+};
 use qaqh_types::{ToolDef, ToolFunction, ToolResult};
 use qaqh_workspace::{DynamicTool, ToolRisk};
 
@@ -104,7 +106,7 @@ pub fn aggregate_dispatch(
     ctx: &ToolCallContext,
     args: serde_json::Value,
 ) -> Result<ToolOutcome, FatalToolError> {
-    let cancel = ctx.cancellation.shared_flag();
+    let cancel = ctx.cancellation.clone();
     let timeout_hint = (!ctx.timeout.is_zero()).then(|| ctx.timeout.as_secs());
     let root = context_root(ctx);
     Ok(map_tool_result(aggregate_dispatch_with(
@@ -133,7 +135,7 @@ fn context_root(ctx: &ToolCallContext) -> String {
 pub fn aggregate_dispatch_with(
     manager: &Arc<LspManager>,
     args: &serde_json::Value,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout_hint: Option<u64>,
     root: &str,
 ) -> ToolResult {
@@ -152,7 +154,7 @@ pub fn aggregate_dispatch_with(
             ),
         );
     };
-    if cancel.load(Ordering::Relaxed) {
+    if cancel.is_cancelled() {
         return error_result(
             LspErrorKind::Cancelled,
             "cancelled before LSP dispatch".to_owned(),
@@ -189,7 +191,7 @@ fn position_action(
     manager: &Arc<LspManager>,
     action: &str,
     args: &serde_json::Value,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout: std::time::Duration,
     root: &str,
 ) -> ToolResult {
@@ -250,7 +252,6 @@ fn position_action(
         .map(|c| c.default_timeout_secs)
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let timeout = std::time::Duration::from_secs(default_timeout.min(timeout.as_secs().max(1)));
-    let handle = crate::bridge::runtime_handle();
     let req = PositionRequest {
         manager,
         server: &server,
@@ -262,7 +263,10 @@ fn position_action(
         cancel,
         timeout,
     };
-    handle.block_on(async { run_position_action(req).await })
+    // P1-1：旧形状是 `dedicated_runtime().block_on(...)` sandwich——同步工具
+    // 线程把整段 LSP 会话塞进本 crate 私建的 runtime。现在 future 就在本线程
+    // 驱动，async-lsp 的 transport/driver 任务留在宿主 runtime（见 bridge.rs）。
+    block_on_host(run_position_action(req))
 }
 
 /// position 系操作的参数束（clippy 7 参上限：9 参收拢为结构体）。
@@ -274,7 +278,7 @@ struct PositionRequest<'a> {
     path: &'a str,
     line: u64,
     character: u64,
-    cancel: &'a AtomicBool,
+    cancel: &'a CancellationToken,
     timeout: std::time::Duration,
 }
 
@@ -300,7 +304,7 @@ async fn run_position_action(req: PositionRequest<'_>) -> ToolResult {
             );
         }
     };
-    if cancelled(req.cancel) {
+    if req.cancel.is_cancelled() {
         return error_result(
             LspErrorKind::Cancelled,
             "cancelled before didOpen".to_owned(),
@@ -393,7 +397,7 @@ async fn run_position_action(req: PositionRequest<'_>) -> ToolResult {
 fn workspace_symbol(
     manager: &Arc<LspManager>,
     args: &serde_json::Value,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout: std::time::Duration,
     root: &str,
 ) -> ToolResult {
@@ -432,8 +436,7 @@ fn workspace_symbol(
         .unwrap_or(DEFAULT_TIMEOUT_SECS);
     let timeout = std::time::Duration::from_secs(default_timeout.min(timeout.as_secs().max(1)));
     let query = query.to_owned();
-    let handle = crate::bridge::runtime_handle();
-    handle.block_on(async {
+    block_on_host(async {
         let conn = match manager.get_or_connect(&server, root).await {
             Ok(conn) => conn,
             Err(e) => return error_result(e.kind, e.message),
@@ -529,15 +532,12 @@ fn absolutize(root: &str, path: &str) -> String {
     }
 }
 
-fn cancelled(cancel: &AtomicBool) -> bool {
-    cancel.load(Ordering::Relaxed)
-}
-
-/// 带 cancel 轮询 + 超时的请求执行（mcp bridge 250ms 轮询同款语义，LSP 简化版：
-/// async-lsp 请求 future 直接 tokio::select 超时/cancel——无 mpsc 桥接层）。
+/// 带取消 + 超时的请求执行（P1-1：取消是 `CancellationToken::cancelled()` 事件
+/// 唤醒，不再是 250ms `sleep` 轮询 tick；async-lsp 请求 future 直接
+/// `tokio::select!` 三路竞争——无 mpsc 桥接层）。
 async fn request_with_cancel<F, Fut>(
     conn: &Arc<ServerConnection>,
-    cancel: &AtomicBool,
+    cancel: &CancellationToken,
     timeout: std::time::Duration,
     run: F,
 ) -> Result<String, LspError>
@@ -559,18 +559,9 @@ where
     let socket = session.lock().await.socket.clone();
     let fut = run(socket);
     tokio::pin!(fut);
-    let cancel_tick = async {
-        loop {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            if cancel.load(Ordering::Relaxed) {
-                break;
-            }
-        }
-    };
-    tokio::pin!(cancel_tick);
     tokio::select! {
         out = &mut fut => out,
-        _ = &mut cancel_tick => Err(LspError::new(
+        _ = cancel.cancelled() => Err(LspError::new(
             LspErrorKind::Cancelled,
             "cancelled during LSP request".to_owned(),
         )),
@@ -636,7 +627,7 @@ mod tests {
         let out = aggregate_dispatch_with(
             &manager,
             &serde_json::json!({}),
-            &AtomicBool::new(false),
+            &CancellationToken::new(),
             None,
             "/tmp",
         );
@@ -650,7 +641,7 @@ mod tests {
         let out = aggregate_dispatch_with(
             &manager,
             &serde_json::json!({"action": "list_servers"}),
-            &AtomicBool::new(false),
+            &CancellationToken::new(),
             None,
             "/tmp",
         );
@@ -679,7 +670,7 @@ mod tests {
         let out = aggregate_dispatch_with(
             &manager,
             &serde_json::json!({"action": "definition", "filePath": "a.xyz", "line": 1, "character": 1}),
-            &AtomicBool::new(false),
+            &CancellationToken::new(),
             None,
             "/tmp",
         );
@@ -712,7 +703,7 @@ mod tests {
         let out = aggregate_dispatch_with(
             &manager,
             &serde_json::json!({"action": "hover", "filePath": "a.rs", "line": 0, "character": 1}),
-            &AtomicBool::new(false),
+            &CancellationToken::new(),
             None,
             "/tmp",
         );

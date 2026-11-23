@@ -11,6 +11,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #[cfg(feature = "native-tool-plan")]
 pub mod model_tool_plan;
+pub mod async_rt;
 pub mod permission;
 pub mod tool_api;
 pub mod tool_capabilities;
