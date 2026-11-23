@@ -4,6 +4,7 @@
 //! 并轮询 `sandbox.preflight.status` 驱动逐项检查动画与开启指引（如 Windows
 //! `Client-ProjFS` 启用命令、非管理员运行建议等）。
 
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -64,7 +65,10 @@ pub struct SandboxPreflightReport {
 }
 
 static PREFLIGHT_STATE: OnceLock<Mutex<SandboxPreflightReport>> = OnceLock::new();
-static RUN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static RUN_SEQ: AtomicU64 = AtomicU64::new(1);
+/// 0 = 未完成验证 (`None`)；1 = 验证写隔离未生效 (`Some(false)`)；2 = 验证写隔离生效 (`Some(true)`)。
+/// 使用独立原子缓存，避免 `SandboxCapabilities::detect()` 在持有或争用 `PREFLIGHT_STATE` 时发生自死锁。
+static CACHED_WRITE_ISOLATION: AtomicU8 = AtomicU8::new(0);
 
 fn now_ms() -> i64 {
     SystemTime::now()
@@ -206,11 +210,9 @@ fn state_slot() -> &'static Mutex<SandboxPreflightReport> {
 
 /// 读取最近一次已完成的自检写隔离结论（尚未完成时返回 `None`，调用方回退静态探测）。
 pub fn cached_write_isolation_verified() -> Option<bool> {
-    let guard = PREFLIGHT_STATE.get()?.lock().ok()?;
-    match guard.state {
-        SandboxPreflightState::Completed | SandboxPreflightState::Failed => {
-            Some(guard.filesystem_write_enforced)
-        }
+    match CACHED_WRITE_ISOLATION.load(Ordering::Acquire) {
+        1 => Some(false),
+        2 => Some(true),
         _ => None,
     }
 }
@@ -221,6 +223,7 @@ pub fn cached_write_isolation_verified() -> Option<bool> {
 /// - 若已 `Completed`/`Failed` 且 `force == false`，直接返回既有快照；
 /// - 否则初始化新一轮 `run_id`，后台线程逐项执行探针并实时刷新进度。
 pub fn start(force: bool) -> SandboxPreflightReport {
+    let caps = SandboxCapabilities::detect();
     let run_id = {
         let mut guard = state_slot()
             .lock()
@@ -236,11 +239,10 @@ pub fn start(force: bool) -> SandboxPreflightReport {
         {
             return guard.clone();
         }
-        let seq = RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
         let run_id = format!("preflight_{}_{seq}", std::process::id());
         let steps = initial_steps();
         let first_step = steps.first().map(|s| s.id.clone());
-        let caps = SandboxCapabilities::detect();
         *guard = SandboxPreflightReport {
             run_id: run_id.clone(),
             state: SandboxPreflightState::Running,
@@ -288,7 +290,8 @@ pub fn status() -> SandboxPreflightReport {
 
 /// 同步跑完一轮自检并返回最终报告（供测试或阻塞式调用）。
 pub fn run_blocking() -> SandboxPreflightReport {
-    let seq = RUN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let caps = SandboxCapabilities::detect();
+    let seq = RUN_SEQ.fetch_add(1, Ordering::Relaxed);
     let run_id = format!("preflight_sync_{}_{seq}", std::process::id());
     {
         let mut guard = state_slot()
@@ -296,7 +299,6 @@ pub fn run_blocking() -> SandboxPreflightReport {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let steps = initial_steps();
         let first_step = steps.first().map(|s| s.id.clone());
-        let caps = SandboxCapabilities::detect();
         *guard = SandboxPreflightReport {
             run_id: run_id.clone(),
             state: SandboxPreflightState::Running,
@@ -386,6 +388,15 @@ fn finish_run(
     guard.progress_percent = 100;
     guard.current_step_id = None;
     guard.finished_at_ms = Some(now_ms());
+    if matches!(
+        state,
+        SandboxPreflightState::Completed | SandboxPreflightState::Failed
+    ) {
+        CACHED_WRITE_ISOLATION.store(
+            if filesystem_write_enforced { 2 } else { 1 },
+            Ordering::Release,
+        );
+    }
 }
 
 fn execute_preflight_run(run_id: &str) {
@@ -879,8 +890,31 @@ fn execute_linux_preflight(run_id: &str) {
 mod tests {
     use super::*;
 
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn wait_terminal_status(timeout_secs: u64) -> SandboxPreflightReport {
+        let deadline = Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        loop {
+            let snap = status();
+            let _ = SandboxCapabilities::detect();
+            if matches!(
+                snap.state,
+                SandboxPreflightState::Completed | SandboxPreflightState::Failed
+            ) {
+                return snap;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "preflight start/status did not finish within {timeout_secs}s (last state: {:?})",
+                snap.state
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     #[test]
     fn preflight_runs_all_steps_and_updates_cached_report() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let report = run_blocking();
         assert_eq!(report.progress_percent, 100);
         assert!(matches!(
@@ -911,5 +945,27 @@ mod tests {
             cached_write_isolation_verified(),
             Some(report.filesystem_write_enforced)
         );
+    }
+
+    #[test]
+    fn start_and_status_do_not_deadlock_with_capability_detect() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let initial = start(false);
+        assert_ne!(initial.state, SandboxPreflightState::Idle);
+        let final_report = wait_terminal_status(15);
+        assert_eq!(final_report.progress_percent, 100);
+        assert_eq!(
+            cached_write_isolation_verified(),
+            Some(final_report.filesystem_write_enforced)
+        );
+        let rerun = start(true);
+        assert!(matches!(
+            rerun.state,
+            SandboxPreflightState::Running
+                | SandboxPreflightState::Completed
+                | SandboxPreflightState::Failed
+        ));
+        let rerun_final = wait_terminal_status(15);
+        assert_eq!(rerun_final.progress_percent, 100);
     }
 }
