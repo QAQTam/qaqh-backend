@@ -445,7 +445,7 @@ pub struct PlanReadParams {
 
 /// `plan.read` 的单条条目;`status` 是规范枚举(pending/approved/rejected/
 /// question),不再使用旧 "✓/-/?" 字形(契约裁定 D9)。
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 pub struct PlanReadItem {
     pub id: String,

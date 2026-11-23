@@ -2149,6 +2149,21 @@ impl OwnerDirectory {
         )
     }
 
+    /// 闲置卸载回收（MUST 铁闸 3 / P1-2 验收「`unload_idle_sessions` 后任务句柄
+    /// 立即 drop 回收」）：把 owner 的 Arc 从目录摘出交给调用方，**不碰业务行**
+    /// ——与 [`Self::delete_session_tree`] 的删除语义正交。map 是 owner 的唯一
+    /// 长持有者（泵任务持 `Arc<OwnerPump>`，`ToolLifecycle` 只克隆 sender），
+    /// 调用方 drop 返回值即 `SessionOwner::drop` → `pump_task.abort()`，
+    /// ReplayRing 随任务释放；Arc 的 Drop 一定发生在目录锁之外。
+    /// 幂等：条目不存在返回 `None`，不是错误。
+    pub fn take_session(&self, session_id: &str) -> Option<Arc<SessionOwner>> {
+        let mut owners = self
+            .owners
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        owners.remove(session_id)
+    }
+
     /// 建会话并返回其 owner:完整输入路径的第一站。
     pub async fn create_session(
         &self,
