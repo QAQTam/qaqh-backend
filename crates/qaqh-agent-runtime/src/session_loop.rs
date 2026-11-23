@@ -443,7 +443,12 @@ impl SessionLoop {
     /// 是上一次 provider 反馈的占用,历史变短后它高估上下文,宁可等下次反馈重算,
     /// 也不拿旧值去算 handoff 压力。
     pub fn truncate_turn(&self, turn_id: &str) -> Result<(), LoopError> {
-        self.owner.truncate_from_turn(turn_id)?;
+        // `truncate_from_turn` 改 async(P1-2/L-03)。调用链
+        // `command.rs(Route::Engine) → block_on_command/send_ringing_command →
+        // AgentRegistry::send_ringing(持 std MutexGuard) → 本函数` 整段在阻塞池
+        // 上且跨不过 await,故走项目唯一的同步→异步桥;在 worker 上误用会当场
+        // panic,不会像旧实现那样静默把 worker 钉在 `rx.recv()` + fsync 上。
+        qaqh_workspace::async_rt::block_on_host(self.owner.truncate_from_turn(turn_id))?;
         let mut inner = self.lock();
         inner.handed_off_turn = None;
         inner.reminded_turn = None;
@@ -2194,7 +2199,10 @@ impl SessionLoop {
                 title: Some(title.clone()),
                 title_source: Some("auto".to_string()),
                 ..Default::default()
-            });
+            })
+            // L-03 的第③条路径:模型自命名原本在 async 回合任务里同步
+            // `rx.recv()` 等泵——现在就地 await,回合任务不再钉住 worker。
+            .await;
         match result {
             Ok(_) => {
                 let text = crate::session_title::success_output(&title);

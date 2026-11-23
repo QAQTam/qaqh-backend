@@ -88,7 +88,15 @@ fn patch_columns(
         expected_settings_revision: expected_revision,
         increment_settings_revision,
     };
-    owners.get_or_create(session_id).update_metadata(columns)
+    // P1-2/L-03:`update_metadata` 改 `async`——泵成了宿主 runtime 上的任务,
+    // 同步 `rx.recv()` 等回执在 current_thread runtime 上就是死锁。本函数与其
+    // 调用臂(`session.settings.patch`/`workspace.set`/rename/archive/resume)
+    // 全部经 daemon `block_on_command` 走阻塞池(P1-0a 已收口),故用
+    // `async_rt::block_on_host` 桥接:阻塞池线程上合法,worker 上误用当场 panic
+    // 而不是静默僵死——这条同步等回执的路径再也不会钉住 worker。
+    qaqh_workspace::async_rt::block_on_host(
+        owners.get_or_create(session_id).update_metadata(columns),
+    )
 }
 
 /// Commit a title change to the business row.
@@ -107,13 +115,15 @@ pub(crate) fn set_title(
         TitleSource::Auto => "auto",
         TitleSource::Migration => "migration",
     };
-    owners
-        .get_or_create(session_id)
-        .update_metadata(qaqh_session::db::store::SessionColumnPatch {
-            title: Some(title.to_string()),
-            title_source: Some(source_text.to_string()),
-            ..Default::default()
-        })
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    qaqh_workspace::async_rt::block_on_host(
+        owners
+            .get_or_create(session_id)
+            .update_metadata(qaqh_session::db::store::SessionColumnPatch {
+                title: Some(title.to_string()),
+                title_source: Some(source_text.to_string()),
+                ..Default::default()
+            }),
+    )
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }

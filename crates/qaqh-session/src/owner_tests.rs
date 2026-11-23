@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio::sync::broadcast;
 
@@ -141,18 +141,17 @@ mod tests {
         assert_eq!((next, text.as_str()), (0, ""));
     }
 
-    /// 泵线程异步落库/广播:轮询等待事件帧。
-    fn recv_event(rx: &mut broadcast::Receiver<SessionEventFrame>) -> SessionEvent {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            match rx.try_recv() {
-                Ok(frame) => return frame.event,
-                Err(broadcast::error::TryRecvError::Empty) => {
-                    assert!(Instant::now() < deadline, "event not delivered in time");
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("event channel: {error}"),
-            }
+    /// 泵异步落库/广播:等待事件帧,上限仍是原来的 5s。
+    ///
+    /// P1-2 后泵是宿主 runtime 上的**任务**,不再是泵线程。这里的等待必须是
+    /// `recv().await`(让出线程给泵),不能是 `try_recv()` + `thread::sleep`
+    /// 自旋:自旋把本用例唯一能驱动泵的线程占住,任务永远排不上,事件永远不到
+    /// ——旧写法只在"泵是另一条 OS 线程"的前提下成立。断言与超时上限一字未改。
+    async fn recv_event(rx: &mut broadcast::Receiver<SessionEventFrame>) -> SessionEvent {
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv()).await {
+            Ok(Ok(frame)) => frame.event,
+            Ok(Err(error)) => panic!("event channel: {error}"),
+            Err(_) => panic!("event not delivered in time"),
         }
     }
 
@@ -209,22 +208,22 @@ mod tests {
                 .expect("append input");
 
             assert!(matches!(
-                recv_event(&mut rx),
+                recv_event(&mut rx).await,
                 SessionEvent::TurnStarted { .. }
             ));
             assert!(matches!(
-                recv_event(&mut rx),
+                recv_event(&mut rx).await,
                 SessionEvent::TurnPhaseChanged {
                     phase: qaqh_ringing_contract::state::TurnPhase::Running,
                     ..
                 }
             ));
             assert!(matches!(
-                recv_event(&mut rx),
+                recv_event(&mut rx).await,
                 SessionEvent::ActivityChanged { .. }
             ));
             assert!(matches!(
-                recv_event(&mut rx),
+                recv_event(&mut rx).await,
                 SessionEvent::TimelineAppended { .. }
             ));
 
@@ -242,7 +241,7 @@ mod tests {
                 });
             }
             // running 的首次迁移就是执行开始;不再有独立 tool_started 事件。
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::ToolStateChanged {
                     call_id,
                     state: ToolCallState::Running,
@@ -251,7 +250,7 @@ mod tests {
                 other => panic!("expected tool state changed running, got {other:?}"),
             }
             for chunk in ["file-a\n", "file-b\n"] {
-                match recv_event(&mut rx) {
+                match recv_event(&mut rx).await {
                     SessionEvent::ToolOutputDelta {
                         call_id,
                         stream,
@@ -304,11 +303,11 @@ mod tests {
             );
 
             assert!(
-                matches!(recv_event(&mut rx), SessionEvent::ToolOutputDelta {
+                matches!(recv_event(&mut rx).await, SessionEvent::ToolOutputDelta {
                 stream: OutputStream::Stderr, text, ..
             } if text == "warning\n")
             );
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::ToolFinished {
                     call_id,
                     outcome,
@@ -343,7 +342,7 @@ mod tests {
                 bytes_total: 0,
             });
             assert!(
-                matches!(recv_event(&mut rx), SessionEvent::ToolOutputDelta {
+                matches!(recv_event(&mut rx).await, SessionEvent::ToolOutputDelta {
                 stream: OutputStream::Stdout, text, ..
             } if text == "background\n")
             );
@@ -366,7 +365,7 @@ mod tests {
                 .await
                 .expect("interaction requested");
             assert!(matches!(
-                recv_event(&mut rx),
+                recv_event(&mut rx).await,
                 SessionEvent::InteractionRequested { .. }
             ));
             let resolved = owner
@@ -378,7 +377,7 @@ mod tests {
                 .await
                 .expect("resolve");
             assert!(resolved);
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::InteractionResolved {
                     decision, status, ..
                 } => {
@@ -402,7 +401,7 @@ mod tests {
                 .await
                 .expect("finish turn");
             assert!(matches!(
-                recv_event(&mut rx),
+                recv_event(&mut rx).await,
                 SessionEvent::TurnEnded { .. }
             ));
 
@@ -481,7 +480,7 @@ mod tests {
             );
 
             let content_id = loop {
-                match recv_event(&mut rx) {
+                match recv_event(&mut rx).await {
                     SessionEvent::ToolFinished {
                         call_id, output, ..
                     } if call_id.as_ref() == "C9" => match output {
@@ -692,19 +691,19 @@ mod tests {
                 )
                 .await
                 .expect("declare");
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::TurnStarted { .. } => {}
                 other => panic!("expected turn started, got {other:?}"),
             }
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::TurnPhaseChanged { .. } => {}
                 other => panic!("expected turn phase changed, got {other:?}"),
             }
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::ActivityChanged { .. } => {}
                 other => panic!("expected activity changed, got {other:?}"),
             }
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::ToolDeclared {
                     call_id,
                     tool_name,
@@ -781,7 +780,7 @@ mod tests {
                 .await
                 .expect("append answer");
 
-            let reasoning_ord = match recv_event(&mut rx) {
+            let reasoning_ord = match recv_event(&mut rx).await {
                 SessionEvent::TimelineAppended {
                     entry:
                         TimelineEntry::AssistantBlock {
@@ -792,7 +791,7 @@ mod tests {
                 } => ord,
                 other => panic!("expected reasoning timeline_appended, got {other:?}"),
             };
-            let answer_ord = match recv_event(&mut rx) {
+            let answer_ord = match recv_event(&mut rx).await {
                 SessionEvent::TimelineAppended {
                     entry:
                         TimelineEntry::AssistantBlock {
@@ -861,8 +860,9 @@ mod tests {
                     title: Some("renamed".into()),
                     ..Default::default()
                 })
+                .await
                 .expect("set title");
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::SessionMetaChanged { title } => {
                     assert_eq!(title.as_deref(), Some("renamed"));
                 }
@@ -903,19 +903,10 @@ mod tests {
             owner.publish(SessionEvent::SessionMetaChanged {
                 title: Some("via-publish".into()),
             });
-            let frame = {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                loop {
-                    match rx.try_recv() {
-                        Ok(frame) => break frame,
-                        Err(broadcast::error::TryRecvError::Empty) => {
-                            assert!(Instant::now() < deadline, "event not delivered in time");
-                            std::thread::sleep(Duration::from_millis(5));
-                        }
-                        Err(error) => panic!("event channel: {error}"),
-                    }
-                }
-            };
+            let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("event not delivered in time"))
+                .expect("event channel");
             assert_eq!(frame.seq, 0);
             match frame.event {
                 SessionEvent::SessionMetaChanged { title } => {
@@ -1033,7 +1024,7 @@ mod tests {
                 .expect("interaction row");
 
             let mut rx = owner.subscribe();
-            let removed = owner.truncate_from_turn("T2").expect("truncate");
+            let removed = owner.truncate_from_turn("T2").await.expect("truncate");
             assert_eq!(
                 removed
                     .iter()
@@ -1042,7 +1033,7 @@ mod tests {
                 vec!["T2".to_string(), "T3".to_string()],
                 "撤回含自身:目标回合与其后每个回合都要现身"
             );
-            match recv_event(&mut rx) {
+            match recv_event(&mut rx).await {
                 SessionEvent::TimelineTruncated {
                     from_turn_id,
                     removed_turn_ids,
@@ -1066,6 +1057,7 @@ mod tests {
             // 同一 turn_id 第二次撤回:回合已经不在了,必须当场报错而不是「什么都没删」的假成功。
             let error = owner
                 .truncate_from_turn("T2")
+                .await
                 .expect_err("already truncated");
             assert!(
                 matches!(error, crate::db::DbError::TurnNotFound { .. }),
@@ -1076,6 +1068,7 @@ mod tests {
             owner.start_turn("T4", None).await.expect("start T4");
             let error = owner
                 .truncate_from_turn("T1")
+                .await
                 .expect_err("active turn must block truncate");
             assert!(
                 matches!(error, crate::db::DbError::TruncateConflict { .. }),
@@ -1192,7 +1185,7 @@ mod tests {
             }
             assert_eq!(feeds, 400);
             // Request 让位 ⇒ 此前所有 delta 必已 flush（T6 顺序 + T5 尾批）。
-            owner.flush().expect("barrier");
+            owner.flush().await.expect("barrier");
 
             let mut started_seen = false;
             let mut deltas: Vec<(ExecOutputSource, u64, u64, String)> = Vec::new();
@@ -1335,7 +1328,7 @@ mod tests {
                 preview_start_offset: 0,
             });
             loop {
-                match recv_event(&mut rx) {
+                match recv_event(&mut rx).await {
                     SessionEvent::ExecSessionFinished { .. } => break,
                     SessionEvent::ExecSessionStarted { .. }
                     | SessionEvent::ExecSessionOutputDelta { .. } => {}
@@ -1374,7 +1367,7 @@ mod tests {
                     0,
                 );
             }
-            owner.flush().expect("barrier: 批已 flush 进日志");
+            owner.flush().await.expect("barrier: 批已 flush 进日志");
             let path_b = exec_output_log_path(owners.db(), "SES-SETTLE", exec_b).expect("path b");
             std::fs::OpenOptions::new()
                 .write(true)
@@ -1395,7 +1388,7 @@ mod tests {
                 preview_start_offset: 0,
             });
             loop {
-                match recv_event(&mut rx) {
+                match recv_event(&mut rx).await {
                     SessionEvent::ExecSessionFinished { .. } => break,
                     SessionEvent::ExecSessionStarted { .. }
                     | SessionEvent::ExecSessionOutputDelta { .. } => {}

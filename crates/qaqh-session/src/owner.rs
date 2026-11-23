@@ -1,13 +1,25 @@
 //! 会话 owner:单个会话的业务顺序与生命周期唯一决定者(架构报告一 §12.5-2)。
 //!
-//! - **所有业务写与事件广播只在 owner 泵线程发生**(spec §6.3):状态变更
+//! - **所有业务写与事件广播只在 owner 泵发生**(spec §6.3):状态变更
 //!   先提交、再发布,seq 分配单点化,不存在多线程 fetch_add 后分别广播;
 //! - 异步入口把"提交+发布"打包成请求闭包投递进泵,oneshot 等待回执;
 //! - 执行路径经 [`ToolLifecycle`] 非阻塞上报工具生命周期与结构化效果;
 //!   实时输出直接进入同一业务队列,SSE 广播有界,绝不让工具执行等慢 UI。
 //!
-//! owner 自身是一个同步泵线程:不依赖 tokio 运行时上下文,daemon、CLI、
-//! 测试同构(oneshot 回执两端均支持阻塞/异步等待)。
+//! owner 自身是**宿主 tokio runtime 上的一个任务**,不是每会话一条 OS 线程
+//! (v4.4 P1-2 / L-31)。定序纪律不变:泵仍然单线程串行消费信箱,一条消息处理
+//! 完才取下一条,"先落库、后 emit"仍是原子的;变的是载体——N 个会话不再等于
+//! N 条线程(闸门用例 `tests/owner_thread_budget.rs`)。
+//!
+//! 载体换成任务带来的口径变化(L-03 随本切片退场):**等回执的入口一律
+//! `async fn`**(`flush`/`truncate_from_turn`/`update_metadata`)。同步入口若
+//! 继续 `rx.recv()`,在 current_thread runtime 上会把唯一能驱动泵的调用方
+//! 自己钉死——那不是"慢一点",是死锁。只投递不等回执的方法(`publish`、
+//! `queue_block`、各 delta、`ToolLifecycle::*`)保持同步签名:
+//! `UnboundedSender::send` 非阻塞,泵在别处被驱动。确实处在同步上下文里的
+//! 生产调用方(`spawn_blocking` 内的会话删除/命令投递)经
+//! [`qaqh_tool_core::async_rt::block_on_host`] 桥接,在 worker 上误用会当场
+//! panic 而不是静默僵死。
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -15,8 +27,13 @@ use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, Instant};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+
+use tokio::sync::mpsc;
 
 use qaqh_ringing_contract::events::{
     ExecOutputSource, HookRunStatus, InteractionEndStatus, OutputStream, SessionEvent,
@@ -33,6 +50,8 @@ use qaqh_ringing_contract::state::{
 use qaqh_tool_core::{
     EXEC_PROGRESS_CHANNEL_CAPACITY, ExecOutputStream, ExecProgressSender, ExecProgressTotals,
 };
+
+use qaqh_tool_core::async_rt;
 
 use crate::db::{Db, DbError, store, view};
 
@@ -186,9 +205,14 @@ pub struct OwnerAttach {
     pub receiver: tokio::sync::broadcast::Receiver<SessionEventFrame>,
 }
 
-/// 泵请求:提交 + 发布打包在闭包里,由泵线程串行执行。
-/// 返回 `Err` 时回执给调用方;闭包内部必须保证"先落库、后 emit"。
-type OwnerRequest = Box<dyn FnOnce(&OwnerPump) -> Result<(), DbError> + Send>;
+/// 泵请求的 future 形态。`'static` + `Send`:请求闭包拿到的是
+/// `Arc<OwnerPump>`(泵字段本就全是 `Arc`/`Sender`),因此 future 不借调用方
+/// 栈帧,直接进信箱由泵任务串行 `.await`——不存在 `for<'a>` HRTB 地狱。
+type OwnerRequestFuture = Pin<Box<dyn Future<Output = Result<(), DbError>> + Send>>;
+
+/// 泵请求:提交 + 发布打包在异步闭包里,由泵任务串行执行。
+/// 返回 `Err` 时由泵记 error log;闭包内部必须保证"先落库、后 emit"。
+type OwnerRequest = Box<dyn FnOnce(Arc<OwnerPump>) -> OwnerRequestFuture + Send>;
 
 enum OwnerMsg {
     Request(OwnerRequest),
@@ -237,8 +261,19 @@ pub struct SessionOwner {
     db: Arc<Db>,
     events: tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: Arc<AtomicU64>,
-    lifecycle_tx: mpsc::Sender<OwnerMsg>,
+    lifecycle_tx: mpsc::UnboundedSender<OwnerMsg>,
     replay: Arc<ReplayRing>,
+    /// 泵任务的句柄:`Drop` 时 abort,会话回收即时生效(旧实现靠 sender 全
+    /// drop 后 `rx.recv()` 返回 Err 才退线程,还得等信箱排空)。
+    pump_task: tokio::task::JoinHandle<()>,
+}
+
+/// owner 掉光引用即回收泵任务。`abort` 之后 future 被丢弃,已在飞行的 DB 写
+/// 由 `qaqh-db-writer` 线程跑完(事务边界不变),只是不再 emit。
+impl Drop for SessionOwner {
+    fn drop(&mut self) {
+        self.pump_task.abort();
+    }
 }
 
 /// 泵侧合帧批条目（ADR-0030 决策 2）：`OwnerMsg::ExecSessionOutput` 拆出的载荷。
@@ -255,34 +290,39 @@ struct ExecOutputEntry {
 }
 
 /// 单一 exec 会话的连续 delta 合帧批；deadline 自首条起算。
+///
+/// deadline 用 `tokio::time::Instant`(而非 `std::time::Instant`):泵是任务,
+/// 窗口到期靠 `sleep_until` 让出 worker,而不是把线程钉在 `recv_timeout` 上。
+/// 20ms 窗口本身是 ADR-0030 决策 2 的冻结语义,换时钟类型不改语义。
 struct ExecOutputBatch {
     exec_session_id: String,
     entries: Vec<ExecOutputEntry>,
     bytes: usize,
-    deadline: Instant,
+    deadline: tokio::time::Instant,
 }
 
 impl SessionOwner {
-    /// 创建 owner 并启动业务顺序泵线程。
+    /// 创建 owner 并在**宿主 runtime** 上启动业务顺序泵任务(不派生 OS 线程)。
     pub fn new(session_id: impl Into<String>, db: Arc<Db>) -> SessionOwner {
         let session_id = session_id.into();
         let (events, _) = tokio::sync::broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let (lifecycle_tx, lifecycle_rx) = mpsc::channel();
+        // unbounded:投递侧(`publish`/`queue_block`/各 delta/`ToolLifecycle::*`)
+        // 必须是同步非阻塞的,那些签名一字不改;定序与积压上限由泵自己承担
+        //(与旧实现同构:`std::sync::mpsc::channel` 同样无界)。
+        let (lifecycle_tx, lifecycle_rx) = mpsc::unbounded_channel();
         let next_seq = Arc::new(AtomicU64::new(0));
         let replay = Arc::new(ReplayRing::default());
-        let pump = OwnerPump {
+        let pump = Arc::new(OwnerPump {
             session_id: session_id.clone(),
             db: Arc::clone(&db),
             events: events.clone(),
             next_seq: Arc::clone(&next_seq),
             replay: Arc::clone(&replay),
-        };
-        std::thread::Builder::new()
-            .name(format!("qaqh-owner-{session_id}"))
-            .spawn(move || {
-                run_pump_loop(&pump, &lifecycle_rx);
-            })
-            .expect("spawn session owner thread");
+        });
+        let pump_task = async_rt::runtime_handle().spawn(run_pump_loop(
+            Arc::clone(&pump),
+            lifecycle_rx,
+        ));
         SessionOwner {
             session_id,
             db,
@@ -290,6 +330,7 @@ impl SessionOwner {
             next_seq,
             lifecycle_tx,
             replay,
+            pump_task,
         }
     }
 
@@ -356,7 +397,7 @@ impl SessionOwner {
     /// SessionState 快照:业务表直查 + 内存水位。
     ///
     /// 定序纪律:**先取水位,再读库**。业务写路径一律"先落库、后 emit"且二者
-    /// 在泵线程原子完成,因此快照读到的效果要么已提交且水位已含其事件,
+    /// 在泵任务内原子完成,因此快照读到的效果要么已提交且水位已含其事件,
     /// 要么事件 seq ≥ 水位由客户端处理,不丢。残余重叠由客户端按
     /// block_id/id 合并吸收。反序(先读库后取水位)会在"落库与 emit 之间"
     /// 留出静默丢帧窗口——B01。
@@ -392,8 +433,10 @@ impl SessionOwner {
     /// 经此进入唯一单流定序,seq 与业务事件同源单调。
     pub fn publish(&self, event: SessionEvent) {
         self.send_request(move |pump| {
-            pump.emit(event);
-            Ok(())
+            Box::pin(async move {
+                pump.emit(event);
+                Ok(())
+            })
         });
     }
 
@@ -402,9 +445,12 @@ impl SessionOwner {
     pub async fn mark_handoff_sealed(&self) -> Result<(), DbError> {
         let session_id = self.session_id.clone();
         self.submit_request(move |pump| {
-            pump.db
-                .write_blocking(move |conn| store::mark_handoff_sealed(conn, &session_id))?;
-            Ok(())
+            Box::pin(async move {
+                pump.db
+                    .write(move |conn| store::mark_handoff_sealed(conn, &session_id))
+                    .await?;
+                Ok(())
+            })
         })
         .await
     }
@@ -415,24 +461,33 @@ impl SessionOwner {
         let session_id = self.session_id.clone();
         let input_id_for_row = input_id.clone();
         self.submit_request(move |pump| {
-            let row_turn_id = turn_id.clone();
-            pump.db.write_blocking(move |conn| {
-                store::start_turn(conn, &row_turn_id, &session_id, input_id_for_row.as_deref())
-            })?;
-            let turn = TurnId::new(turn_id.clone());
-            pump.emit(SessionEvent::TurnStarted {
-                turn_id: turn.clone(),
-                input_id: input_id.map(InputId::new),
-            });
-            pump.emit(SessionEvent::TurnPhaseChanged {
-                turn_id: turn.clone(),
-                phase: TurnPhase::Running,
-            });
-            pump.emit(SessionEvent::ActivityChanged {
-                activity: qaqh_ringing_contract::fact::ActivityState::Running,
-                current_turn_id: Some(turn),
-            });
-            Ok(())
+            Box::pin(async move {
+                let row_turn_id = turn_id.clone();
+                pump.db
+                    .write(move |conn| {
+                        store::start_turn(
+                            conn,
+                            &row_turn_id,
+                            &session_id,
+                            input_id_for_row.as_deref(),
+                        )
+                    })
+                    .await?;
+                let turn = TurnId::new(turn_id.clone());
+                pump.emit(SessionEvent::TurnStarted {
+                    turn_id: turn.clone(),
+                    input_id: input_id.map(InputId::new),
+                });
+                pump.emit(SessionEvent::TurnPhaseChanged {
+                    turn_id: turn.clone(),
+                    phase: TurnPhase::Running,
+                });
+                pump.emit(SessionEvent::ActivityChanged {
+                    activity: qaqh_ringing_contract::fact::ActivityState::Running,
+                    current_turn_id: Some(turn),
+                });
+                Ok(())
+            })
         })
         .await
     }
@@ -440,14 +495,18 @@ impl SessionOwner {
     /// 回合非终态 phase 迁移:turns.phase 落库 + TurnPhaseChanged/ActivityChanged。
     pub async fn set_turn_phase(&self, turn_id: &str, phase: TurnPhase) -> Result<(), DbError> {
         let turn_id = turn_id.to_string();
-        self.submit_request(move |pump| set_turn_phase_in_pump(pump, turn_id, phase))
+        self.submit_request(move |pump| {
+            Box::pin(async move { set_turn_phase_in_pump(&pump, turn_id, phase).await })
+        })
             .await
     }
 
     /// 同步入队回合 phase 迁移;用于 cancel 先于唤醒工具/交互等待排入 owner 泵。
     pub fn queue_turn_phase(&self, turn_id: &str, phase: TurnPhase) {
         let turn_id = turn_id.to_string();
-        self.send_request(move |pump| set_turn_phase_in_pump(pump, turn_id, phase));
+        self.send_request(move |pump| {
+            Box::pin(async move { set_turn_phase_in_pump(&pump, turn_id, phase).await })
+        });
     }
 
     /// 回合终态:TurnEnded + ActivityChanged(Idle);phase 列由 finish_turn 清空。
@@ -463,20 +522,24 @@ impl SessionOwner {
             .map_err(|error| DbError::Corrupt(format!("turn {turn_id} outcome: {error}")))?;
         let turn_id_owned = turn_id.to_string();
         self.submit_request(move |pump| {
-            let row_turn_id = turn_id_owned.clone();
-            pump.db.write_blocking(move |conn| {
-                store::finish_turn(conn, &row_turn_id, status, Some(&outcome_json))
-            })?;
-            let turn = TurnId::new(turn_id_owned);
-            pump.emit(SessionEvent::TurnEnded {
-                turn_id: turn.clone(),
-                outcome,
-            });
-            pump.emit(SessionEvent::ActivityChanged {
-                activity: qaqh_ringing_contract::fact::ActivityState::Idle,
-                current_turn_id: None,
-            });
-            Ok(())
+            Box::pin(async move {
+                let row_turn_id = turn_id_owned.clone();
+                pump.db
+                    .write(move |conn| {
+                        store::finish_turn(conn, &row_turn_id, status, Some(&outcome_json))
+                    })
+                    .await?;
+                let turn = TurnId::new(turn_id_owned);
+                pump.emit(SessionEvent::TurnEnded {
+                    turn_id: turn.clone(),
+                    outcome,
+                });
+                pump.emit(SessionEvent::ActivityChanged {
+                    activity: qaqh_ringing_contract::fact::ActivityState::Idle,
+                    current_turn_id: None,
+                });
+                Ok(())
+            })
         })
         .await
     }
@@ -484,17 +547,20 @@ impl SessionOwner {
     fn block_request(&self, entry: TimelineEntry) -> Result<OwnerRequest, DbError> {
         let block = timeline_block(&self.session_id, &entry)?;
         Ok(Box::new(move |pump| {
-            let ord = pump
-                .db
-                .write_blocking(move |conn| store::append_block(conn, &block))?;
-            // 落库序号回填进 wire entry:live timeline_appended 与 bootstrap 同携 ord,
-            // 客户端按 ord 排序而非到达序(重连丢帧后迟到的 seal 不再插到答案之后)。
-            let mut entry = entry;
-            if let TimelineEntry::AssistantBlock { ord: slot, .. } = &mut entry {
-                *slot = ord;
-            }
-            pump.emit(SessionEvent::TimelineAppended { entry });
-            Ok(())
+            Box::pin(async move {
+                let ord = pump
+                    .db
+                    .write(move |conn| store::append_block(conn, &block))
+                    .await?;
+                // 落库序号回填进 wire entry:live timeline_appended 与 bootstrap 同携 ord,
+                // 客户端按 ord 排序而非到达序(重连丢帧后迟到的 seal 不再插到答案之后)。
+                let mut entry = entry;
+                if let TimelineEntry::AssistantBlock { ord: slot, .. } = &mut entry {
+                    *slot = ord;
+                }
+                pump.emit(SessionEvent::TimelineAppended { entry });
+                Ok(())
+            })
         }))
     }
 
@@ -509,39 +575,47 @@ impl SessionOwner {
         Ok(())
     }
 
-    /// 撤回(硬截断):同步进泵,删除 `turn_id` **含自身**及其后的全部历史事实,
+    /// 撤回(硬截断):进泵串行执行,删除 `turn_id` **含自身**及其后的全部历史事实,
     /// 落库成功后追加一条 [`SessionEvent::TimelineTruncated`]。
     ///
     /// 泵串行化是这条链的定序纪律:`truncate` 与 `start_turn`/`append_block` 同队,
     /// 所以「活动回合冲突」的判据在写点判定,不需要调用方再加一道锁。冲突/找不到
     /// 时**既不写也不发**,回执原样带出错误给命令面(不静默降级成「什么都没删」)。
-    pub fn truncate_from_turn(&self, turn_id: &str) -> Result<Vec<TurnId>, DbError> {
+    ///
+    /// `async`(L-03 退场):旧实现在调用线程 `rx.recv()` 等泵 + fsync;泵成了
+    /// 任务之后,同步等就是把能驱动泵的那条线程钉死。命令面侧
+    /// (`session_loop::truncate_turn`)处在 registry 锁持有的同步段里,经
+    /// `async_rt::block_on_host` 桥接——在阻塞池上合法,在 worker 上当场 panic。
+    pub async fn truncate_from_turn(&self, turn_id: &str) -> Result<Vec<TurnId>, DbError> {
         let session_id = self.session_id.clone();
         let row_turn_id = turn_id.to_string();
         let from_turn_id = TurnId::new(turn_id.to_string());
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.send_request(move |pump| {
-            let owned = session_id.clone();
-            let row = row_turn_id.clone();
-            let result = pump
-                .db
-                .write_blocking(move |conn| store::truncate_from_turn(conn, &owned, &row));
-            match result {
-                Ok(removed) => {
-                    let removed: Vec<TurnId> = removed.into_iter().map(TurnId::new).collect();
-                    pump.emit(SessionEvent::TimelineTruncated {
-                        from_turn_id: from_turn_id.clone(),
-                        removed_turn_ids: removed.clone(),
-                    });
-                    let _ = tx.send(Ok(removed));
+            Box::pin(async move {
+                let owned = session_id.clone();
+                let row = row_turn_id.clone();
+                let result = pump
+                    .db
+                    .write(move |conn| store::truncate_from_turn(conn, &owned, &row))
+                    .await;
+                match result {
+                    Ok(removed) => {
+                        let removed: Vec<TurnId> = removed.into_iter().map(TurnId::new).collect();
+                        pump.emit(SessionEvent::TimelineTruncated {
+                            from_turn_id: from_turn_id.clone(),
+                            removed_turn_ids: removed.clone(),
+                        });
+                        let _ = tx.send(Ok(removed));
+                    }
+                    Err(error) => {
+                        let _ = tx.send(Err(error));
+                    }
                 }
-                Err(error) => {
-                    let _ = tx.send(Err(error));
-                }
-            }
-            Ok(())
+                Ok(())
+            })
         });
-        rx.recv().map_err(|_| DbError::ExecutorStopped)?
+        rx.await.map_err(|_| DbError::ExecutorStopped)?
     }
 
     /// 交互升起:interaction 行 + InteractionRequested 事件。
@@ -567,10 +641,13 @@ impl SessionOwner {
             payload_json,
         };
         self.submit_request(move |pump| {
-            pump.db
-                .write_blocking(move |conn| store::create_interaction(conn, &row))?;
-            pump.emit(SessionEvent::InteractionRequested { interaction });
-            Ok(())
+            Box::pin(async move {
+                pump.db
+                    .write(move |conn| store::create_interaction(conn, &row))
+                    .await?;
+                pump.emit(SessionEvent::InteractionRequested { interaction });
+                Ok(())
+            })
         })
         .await
     }
@@ -593,19 +670,24 @@ impl SessionOwner {
         let event_interaction_id = interaction_id.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.send_request(move |pump| {
-            let row_id = id.clone();
-            let changed = pump.db.write_blocking(move |conn| {
-                store::resolve_interaction(conn, &row_id, status_db, &decision_json)
-            });
-            if let Ok(true) = &changed {
-                pump.emit(SessionEvent::InteractionResolved {
-                    interaction_id: event_interaction_id,
-                    decision,
-                    status,
-                });
-            }
-            let _ = tx.send(changed);
-            Ok(())
+            Box::pin(async move {
+                let row_id = id.clone();
+                let changed = pump
+                    .db
+                    .write(move |conn| {
+                        store::resolve_interaction(conn, &row_id, status_db, &decision_json)
+                    })
+                    .await;
+                if let Ok(true) = &changed {
+                    pump.emit(SessionEvent::InteractionResolved {
+                        interaction_id: event_interaction_id,
+                        decision,
+                        status,
+                    });
+                }
+                let _ = tx.send(changed);
+                Ok(())
+            })
         });
         rx.await
             .map_err(|_| DbError::Corrupt("owner pump dropped request".into()))?
@@ -625,13 +707,15 @@ impl SessionOwner {
         let block_id = block_id.clone();
         let text = text.to_string();
         self.send_request(move |pump| {
-            pump.emit(SessionEvent::MessageDelta {
-                turn_id,
-                block_id,
-                block_kind,
-                text,
-            });
-            Ok(())
+            Box::pin(async move {
+                pump.emit(SessionEvent::MessageDelta {
+                    turn_id,
+                    block_id,
+                    block_kind,
+                    text,
+                });
+                Ok(())
+            })
         });
     }
 
@@ -653,17 +737,19 @@ impl SessionOwner {
         let tool_name = tool_name.to_string();
         let text = text.to_string();
         self.send_request(move |pump| {
-            pump.emit(SessionEvent::ToolArgumentsDelta {
-                turn_id,
-                call_id,
-                tool_name,
-                text,
-                lines_added,
-                lines_removed,
-                target_files,
-                args_complete,
-            });
-            Ok(())
+            Box::pin(async move {
+                pump.emit(SessionEvent::ToolArgumentsDelta {
+                    turn_id,
+                    call_id,
+                    tool_name,
+                    text,
+                    lines_added,
+                    lines_removed,
+                    target_files,
+                    args_complete,
+                });
+                Ok(())
+            })
         });
     }
 
@@ -680,14 +766,16 @@ impl SessionOwner {
         let turn_id = turn_id.clone();
         let error = error.to_string();
         self.send_request(move |pump| {
-            pump.emit(SessionEvent::ProviderRetrying {
-                turn_id,
-                attempt,
-                max_attempts,
-                delay_secs,
-                error,
-            });
-            Ok(())
+            Box::pin(async move {
+                pump.emit(SessionEvent::ProviderRetrying {
+                    turn_id,
+                    attempt,
+                    max_attempts,
+                    delay_secs,
+                    error,
+                });
+                Ok(())
+            })
         });
     }
 
@@ -708,14 +796,16 @@ impl SessionOwner {
         let turn_id = turn_id.cloned();
         let call_id = call_id.cloned();
         self.send_request(move |pump| {
-            pump.emit(SessionEvent::HookStarted {
-                run_id,
-                event,
-                hook_name,
-                turn_id,
-                call_id,
-            });
-            Ok(())
+            Box::pin(async move {
+                pump.emit(SessionEvent::HookStarted {
+                    run_id,
+                    event,
+                    hook_name,
+                    turn_id,
+                    call_id,
+                });
+                Ok(())
+            })
         });
     }
 
@@ -730,13 +820,15 @@ impl SessionOwner {
         let run_id = run_id.to_string();
         let summary = summary.map(str::to_string);
         self.send_request(move |pump| {
-            pump.emit(SessionEvent::HookFinished {
-                run_id,
-                status,
-                summary,
-                duration_ms,
-            });
-            Ok(())
+            Box::pin(async move {
+                pump.emit(SessionEvent::HookFinished {
+                    run_id,
+                    status,
+                    summary,
+                    duration_ms,
+                });
+                Ok(())
+            })
         });
     }
 
@@ -744,8 +836,10 @@ impl SessionOwner {
     pub fn prompt_blocked(&self, reason: &str) {
         let reason = reason.to_string();
         self.send_request(move |pump| {
-            pump.emit(SessionEvent::PromptBlocked { reason });
-            Ok(())
+            Box::pin(async move {
+                pump.emit(SessionEvent::PromptBlocked { reason });
+                Ok(())
+            })
         });
     }
 
@@ -775,26 +869,29 @@ impl SessionOwner {
         let event_turn = turn_id.clone();
         let event_tool_name = tool_name.to_string();
         self.submit_request(move |pump| {
-            let upsert = store::ToolCallUpsert {
-                call_id: call_row,
-                session_id,
-                turn_id: Some(turn_row),
-                tool_name: tool_name_owned,
-                args_json,
-                state_json,
-                state_kind: "declared",
-            };
-            let event_args = upsert.args_json.clone();
-            let row = upsert.clone();
-            pump.db
-                .write_blocking(move |conn| store::upsert_tool_call(conn, &row))?;
-            pump.emit(SessionEvent::ToolDeclared {
-                call_id: event_call,
-                turn_id: event_turn,
-                tool_name: event_tool_name,
-                args: event_args.and_then(|text| serde_json::from_str(&text).ok()),
-            });
-            Ok(())
+            Box::pin(async move {
+                let upsert = store::ToolCallUpsert {
+                    call_id: call_row,
+                    session_id,
+                    turn_id: Some(turn_row),
+                    tool_name: tool_name_owned,
+                    args_json,
+                    state_json,
+                    state_kind: "declared",
+                };
+                let event_args = upsert.args_json.clone();
+                let row = upsert.clone();
+                pump.db
+                    .write(move |conn| store::upsert_tool_call(conn, &row))
+                    .await?;
+                pump.emit(SessionEvent::ToolDeclared {
+                    call_id: event_call,
+                    turn_id: event_turn,
+                    tool_name: event_tool_name,
+                    args: event_args.and_then(|text| serde_json::from_str(&text).ok()),
+                });
+                Ok(())
+            })
         })
         .await
     }
@@ -813,8 +910,12 @@ impl SessionOwner {
         let state_json = serde_json::to_string(&state)
             .map_err(|error| DbError::Corrupt(format!("tool call {call}: state: {error}")))?;
         self.submit_request(move |pump| {
-            pump.db.write_blocking(move |conn| {
-                store::set_tool_call_state(conn, &call, &state_json, "awaiting_interaction")
+            Box::pin(async move {
+                pump.db
+                    .write(move |conn| {
+                        store::set_tool_call_state(conn, &call, &state_json, "awaiting_interaction")
+                    })
+                    .await
             })
         })
         .await
@@ -827,67 +928,78 @@ impl SessionOwner {
         let state_json = serde_json::to_string(&ToolCallState::Declared)
             .map_err(|error| DbError::Corrupt(format!("tool call {call}: state: {error}")))?;
         self.submit_request(move |pump| {
-            pump.db.write_blocking(move |conn| {
-                store::set_tool_call_state(conn, &call, &state_json, "declared")
+            Box::pin(async move {
+                pump.db
+                    .write(move |conn| {
+                        store::set_tool_call_state(conn, &call, &state_json, "declared")
+                    })
+                    .await
             })
         })
         .await
     }
 
     /// Wait until preceding lifecycle reports have been committed and published.
-    pub fn flush(&self) -> Result<(), DbError> {
-        let (tx, rx) = mpsc::channel();
-        self.send_request(move |_| {
-            let _ = tx.send(());
-            Ok(())
-        });
-        rx.recv().map_err(|_| DbError::ExecutorStopped)
+    ///
+    /// 屏障语义逐字不变(L-03 只改投递方式,不改 ADR-0030/0017 的定序):信箱
+    /// FIFO,这条空请求被处理完时,它之前的所有消息都已「落库 + emit」完毕。
+    /// 泵成任务后 `async` 是硬要求——同步 `rx.recv()` 在 current_thread runtime
+    /// 上就是把泵钉死。
+    pub async fn flush(&self) -> Result<(), DbError> {
+        self.submit_request(move |_| Box::pin(async move { Ok(()) }))
+            .await
     }
 
     /// Commit a metadata patch on the same pump as turn and tool facts.
-    pub fn update_metadata(
+    ///
+    /// `async`:见 [`Self::flush`] 的同一条 L-03 理由。CAS 判据
+    /// (`expected_settings_revision` → `RevisionConflict`)在泵内写点执行,
+    /// 与 turn/tool 事实同队,定序不变。
+    pub async fn update_metadata(
         &self,
         patch: store::SessionColumnPatch,
     ) -> Result<u64, MetadataPatchError> {
         let session_id = self.session_id.clone();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = tokio::sync::oneshot::channel();
         self.send_request(move |pump| {
-            let expected = patch.expected_settings_revision;
-            let title = patch.title.clone();
-            let owned = session_id.clone();
-            let result = pump
-                .db
-                .write_blocking(move |conn| {
-                    let changed = store::update_session_columns(conn, &owned, &patch)?;
-                    let revision = store::session_settings_revision(conn, &owned)?;
-                    Ok::<_, DbError>((changed, revision))
-                })
-                .map_err(|error| MetadataPatchError::Storage(error.to_string()))
-                .and_then(|(changed, revision)| {
-                    let actual =
-                        revision.ok_or_else(|| MetadataPatchError::NotFound { session_id })?;
-                    if changed == 0 {
-                        if let Some(expected) = expected {
+            Box::pin(async move {
+                let expected = patch.expected_settings_revision;
+                let title = patch.title.clone();
+                let owned = session_id.clone();
+                let result = pump
+                    .db
+                    .write(move |conn| {
+                        let changed = store::update_session_columns(conn, &owned, &patch)?;
+                        let revision = store::session_settings_revision(conn, &owned)?;
+                        Ok::<_, DbError>((changed, revision))
+                    })
+                    .await
+                    .map_err(|error| MetadataPatchError::Storage(error.to_string()))
+                    .and_then(|(changed, revision)| {
+                        let actual = revision.ok_or(MetadataPatchError::NotFound { session_id })?;
+                        if changed == 0
+                            && let Some(expected) = expected
+                        {
                             return Err(MetadataPatchError::RevisionConflict { expected, actual });
                         }
-                    }
-                    Ok(actual)
-                });
-            if result.is_ok() && title.is_some() {
-                pump.emit(SessionEvent::SessionMetaChanged { title });
-            }
-            let _ = tx.send(result);
-            Ok(())
+                        Ok(actual)
+                    });
+                if result.is_ok() && title.is_some() {
+                    pump.emit(SessionEvent::SessionMetaChanged { title });
+                }
+                let _ = tx.send(result);
+                Ok(())
+            })
         });
-        rx.recv()
+        rx.await
             .map_err(|_| MetadataPatchError::Storage("owner pump stopped".into()))?
     }
 
     fn send_request(
         &self,
-        request: impl FnOnce(&OwnerPump) -> Result<(), DbError> + Send + 'static,
+        request: impl FnOnce(Arc<OwnerPump>) -> OwnerRequestFuture + Send + 'static,
     ) {
-        // 通道无界且泵线程随会话存活;发送失败意味着进程正在退出。
+        // 信箱无界且泵任务随会话存活;发送失败意味着 owner 正在回收。
         if let Err(error) = self.lifecycle_tx.send(OwnerMsg::Request(Box::new(request))) {
             log::error!("[owner] request dropped: {error}");
         }
@@ -896,15 +1008,17 @@ impl SessionOwner {
     /// 提交请求并等待回执(异步入口的唯一完成通道)。
     async fn submit_request(
         &self,
-        request: impl FnOnce(&OwnerPump) -> Result<(), DbError> + Send + 'static,
+        request: impl FnOnce(Arc<OwnerPump>) -> OwnerRequestFuture + Send + 'static,
     ) -> Result<(), DbError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self
             .lifecycle_tx
             .send(OwnerMsg::Request(Box::new(move |pump| {
-                let result = request(pump);
-                let _ = tx.send(result);
-                Ok(())
+                Box::pin(async move {
+                    let result = request(pump).await;
+                    let _ = tx.send(result);
+                    Ok(())
+                })
             })))
             .is_err()
         {
@@ -915,7 +1029,7 @@ impl SessionOwner {
     }
 }
 
-/// 序号 + 广播:单流事件出口的唯一写入点;只允许 owner 泵线程调用。
+/// 序号 + 广播:单流事件出口的唯一写入点;只允许 owner 泵任务调用。
 fn emit(
     events: &tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: &AtomicU64,
@@ -1080,7 +1194,7 @@ impl ToolRun {
     }
 }
 
-fn set_turn_phase_in_pump(
+async fn set_turn_phase_in_pump(
     pump: &OwnerPump,
     turn_id: String,
     phase: TurnPhase,
@@ -1093,7 +1207,8 @@ fn set_turn_phase_in_pump(
     let row_turn_id = turn_id.clone();
     let changed = pump
         .db
-        .write_blocking(move |conn| store::set_turn_phase(conn, &row_turn_id, phase_text))?;
+        .write(move |conn| store::set_turn_phase(conn, &row_turn_id, phase_text))
+        .await?;
     if !changed {
         return Ok(());
     }
@@ -1118,7 +1233,7 @@ fn set_turn_phase_in_pump(
 #[derive(Clone)]
 pub struct ToolLifecycle {
     session_id: String,
-    tx: mpsc::Sender<OwnerMsg>,
+    tx: mpsc::UnboundedSender<OwnerMsg>,
 }
 
 impl ToolLifecycle {
@@ -1136,30 +1251,33 @@ impl ToolLifecycle {
         let tx = self.tx.clone();
         if tx
             .send(OwnerMsg::Request(Box::new(move |pump| {
-                let turn_id = pump.active_turn_id();
-                let state = ToolCallState::Running;
-                let state_json = serde_json::to_string(&state)
-                    .map_err(|error| DbError::Corrupt(format!("tool state: {error}")))?;
-                let upsert = store::ToolCallUpsert {
-                    call_id: msg_call_id.clone(),
-                    session_id: pump.session_id.clone(),
-                    turn_id,
-                    tool_name: msg_tool_name,
-                    args_json,
-                    state_json,
-                    state_kind: "running",
-                };
-                pump.db
-                    .write_blocking(move |conn| store::upsert_tool_call(conn, &upsert))?;
-                let turn_id = pump.active_turn_id().map(TurnId::new);
-                if let Some(turn_id) = turn_id {
-                    pump.emit(SessionEvent::ToolStateChanged {
-                        call_id: ToolCallId::new(msg_call_id),
+                Box::pin(async move {
+                    let turn_id = pump.active_turn_id().await;
+                    let state = ToolCallState::Running;
+                    let state_json = serde_json::to_string(&state)
+                        .map_err(|error| DbError::Corrupt(format!("tool state: {error}")))?;
+                    let upsert = store::ToolCallUpsert {
+                        call_id: msg_call_id.clone(),
+                        session_id: pump.session_id.clone(),
                         turn_id,
-                        state: ToolCallState::Running,
-                    });
-                }
-                Ok(())
+                        tool_name: msg_tool_name,
+                        args_json,
+                        state_json,
+                        state_kind: "running",
+                    };
+                    pump.db
+                        .write(move |conn| store::upsert_tool_call(conn, &upsert))
+                        .await?;
+                    let turn_id = pump.active_turn_id().await.map(TurnId::new);
+                    if let Some(turn_id) = turn_id {
+                        pump.emit(SessionEvent::ToolStateChanged {
+                            call_id: ToolCallId::new(msg_call_id),
+                            turn_id,
+                            state: ToolCallState::Running,
+                        });
+                    }
+                    Ok(())
+                })
             })))
             .is_err()
         {
@@ -1285,7 +1403,7 @@ impl ToolLifecycle {
     }
 
     fn send(&self, msg: OwnerMsg) {
-        // 通道无界且泵线程随会话存活;发送失败意味着进程正在退出。
+        // 信箱无界且泵任务随会话存活;发送失败意味着进程正在退出。
         if let Err(error) = self.tx.send(msg) {
             log::error!("[owner] lifecycle msg dropped: {error}");
         }
@@ -1306,12 +1424,16 @@ impl OwnerPump {
         emit(&self.events, &self.next_seq, &self.replay, event);
     }
 
-    /// ADR-0030 决策 2：flush = 现单条语义原样放大到批，三步顺序不变
+    /// ADR-0030 决策 2：flush = 现单条语义原样放大到批，**三步顺序不变**
     /// （先 append 日志 → 再 update progress → 后 emit）。append 一次拼接写入；
     /// DB 写取批内末条的累计水位（单调状态，末条即全批末态）；emit 按 source
     /// run 切分，跨 run offset 连续。失败语义不变：append 失败响亮报错不阻断
     /// 实时流，DB 写不进去则整批不 emit（缺口由 settle 对账如实暴露）。
-    fn flush_exec_output(&self, batch: ExecOutputBatch) {
+    ///
+    /// 异步化只换载体,不改定序:日志 append 仍在 `spawn_blocking` 里**先**完成
+    /// 并被 `.await` 等回来,才轮到 DB 水位,再 emit——ADR-0017 决策 1 的
+    /// 「客户端见过 offset X 的 delta ⇒ 日志必可读到 X」逐步仍成立。
+    async fn flush_exec_output(&self, batch: ExecOutputBatch) {
         let ExecOutputBatch {
             exec_session_id,
             entries,
@@ -1322,8 +1444,13 @@ impl OwnerPump {
                 .iter()
                 .map(|entry| entry.text.as_str())
                 .collect::<String>();
-            if let Err(error) = append_exec_log(&path, &combined) {
-                log::error!("[owner] exec log append {exec_session_id}: {error}");
+            let log_id = exec_session_id.clone();
+            let appended = tokio::task::spawn_blocking(move || append_exec_log(&path, &combined))
+                .await
+                .map_err(|error| std::io::Error::other(format!("exec log task join: {error}")))
+                .and_then(|result| result);
+            if let Err(error) = appended {
+                log::error!("[owner] exec log append {log_id}: {error}");
             }
         }
         let last = entries
@@ -1335,17 +1462,20 @@ impl OwnerPump {
         let preview_start_offset = last.preview_start_offset;
         let capture_omitted_bytes = last.capture_omitted_bytes;
         let stream_dropped_bytes = last.stream_dropped_bytes;
-        let updated = self.db.write_blocking(move |conn| {
-            store::update_exec_session_progress(
-                conn,
-                &row_id,
-                next_offset,
-                &preview,
-                preview_start_offset,
-                capture_omitted_bytes,
-                stream_dropped_bytes,
-            )
-        });
+        let updated = self
+            .db
+            .write(move |conn| {
+                store::update_exec_session_progress(
+                    conn,
+                    &row_id,
+                    next_offset,
+                    &preview,
+                    preview_start_offset,
+                    capture_omitted_bytes,
+                    stream_dropped_bytes,
+                )
+            })
+            .await;
         match updated {
             Ok(true) => {}
             Ok(false) => return,
@@ -1380,11 +1510,12 @@ impl OwnerPump {
     }
 
     /// 活跃回合:工具行落库时的回合归属。
-    fn active_turn_id(&self) -> Option<String> {
+    async fn active_turn_id(&self) -> Option<String> {
         let session_id = self.session_id.clone();
         match self
             .db
-            .read_blocking(move |conn| store::active_turn_id(conn, &session_id))
+            .read(move |conn| store::active_turn_id(conn, &session_id))
+            .await
         {
             Ok(turn_id) => turn_id,
             Err(error) => {
@@ -1394,10 +1525,13 @@ impl OwnerPump {
         }
     }
 
-    fn process(&self, msg: OwnerMsg) {
+    /// 泵的单条消息处理。`self: &Arc<Self>` 而不是 `&self`:
+    /// `OwnerMsg::Request` 要把 `Arc<OwnerPump>` 交给请求闭包,让它的 future
+    /// 是 `'static`(见 [`OwnerRequest`])。其余分支照旧走 `&self` 解引用。
+    async fn process(self: &Arc<Self>, msg: OwnerMsg) {
         match msg {
             OwnerMsg::Request(request) => {
-                if let Err(error) = request(self) {
+                if let Err(error) = request(Arc::clone(self)).await {
                     log::error!("[owner] request failed: {error}");
                 }
             }
@@ -1416,7 +1550,7 @@ impl OwnerPump {
                 });
             }
             OwnerMsg::Settle(settlement) => {
-                let turn_id = self.active_turn_id();
+                let turn_id = self.active_turn_id().await;
                 let who = format!("tool {}", settlement.call_id);
                 let state = ToolCallState::Finished {
                     outcome: settlement.outcome.clone(),
@@ -1474,7 +1608,7 @@ impl OwnerPump {
                 };
                 let content_write = externalized.clone();
                 let content_session_id = self.session_id.clone();
-                if let Err(error) = self.db.write_blocking(move |conn| {
+                if let Err(error) = self.db.write(move |conn| {
                     if let Some((content_id, text)) = &content_write {
                         store::put_session_content(
                             conn,
@@ -1486,7 +1620,9 @@ impl OwnerPump {
                         )?;
                     }
                     store::finish_tool_call(conn, &finish)
-                }) {
+                })
+                .await
+                {
                     log::error!(
                         "[owner] tool {} finish not recorded: {error}",
                         settlement.call_id
@@ -1515,9 +1651,13 @@ impl OwnerPump {
             }
             OwnerMsg::ExecSessionUpsert(session) => {
                 let session_id = session.id.as_ref().to_string();
-                let is_new = match self.db.read_blocking(move |conn| {
-                    store::exec_session_by_id(conn, &session_id).map(|row| row.is_none())
-                }) {
+                let is_new = match self
+                    .db
+                    .read(move |conn| {
+                        store::exec_session_by_id(conn, &session_id).map(|row| row.is_none())
+                    })
+                    .await
+                {
                     Ok(is_new) => is_new,
                     Err(error) => {
                         log::error!("[owner] exec session {} lookup failed: {error}", session.id);
@@ -1527,7 +1667,8 @@ impl OwnerPump {
                 let row = exec_session_row_from_view(&self.session_id, &session);
                 if let Err(error) = self
                     .db
-                    .write_blocking(move |conn| store::upsert_exec_session(conn, &row))
+                    .write(move |conn| store::upsert_exec_session(conn, &row))
+                    .await
                 {
                     log::error!(
                         "[owner] exec session {} upsert not recorded: {error}",
@@ -1566,13 +1707,17 @@ impl OwnerPump {
                 // 回退封顶 transcript（≤1MiB，原路径）。
                 let (output_text, output_truncated, output_complete) = match logged_bytes {
                     Some(logged) => {
+                        // `Db::read`/`Db::write` 的闭包要 `'static`,所以按引用
+                        // 抓局部变量的写法一律换成先 clone 再 move 进闭包。
+                        let water_id = exec_session_id.clone();
                         let water_line = self
                             .db
-                            .read_blocking(|conn| {
-                                store::exec_session_by_id(conn, &exec_session_id).map(|row| {
+                            .read(move |conn| {
+                                store::exec_session_by_id(conn, &water_id).map(|row| {
                                     row.map(|session_row| session_row.next_offset).unwrap_or(0)
                                 })
                             })
+                            .await
                             .unwrap_or(0);
                         let gap = logged < water_line;
                         (
@@ -1589,7 +1734,7 @@ impl OwnerPump {
                 };
                 let changed = self
                     .db
-                    .write_blocking(move |conn| {
+                    .write(move |conn| {
                         store::finish_exec_session(
                             conn,
                             &settlement.exec_session_id,
@@ -1603,6 +1748,7 @@ impl OwnerPump {
                             settlement.preview_start_offset,
                         )
                     })
+                    .await
                     .map_err(|error| error.to_string())
                     .unwrap_or_else(|error| {
                         log::error!(
@@ -1615,9 +1761,11 @@ impl OwnerPump {
                     return;
                 }
                 // 终态视图从已提交行读取,不重新推断。
+                let view_id = exec_session_id.clone();
                 match self
                     .db
-                    .read_blocking(|conn| store::exec_session_by_id(conn, &exec_session_id))
+                    .read(move |conn| store::exec_session_by_id(conn, &view_id))
+                    .await
                 {
                     Ok(Some(row)) => match exec_session_view_from_row(&row) {
                         Ok(session) => self.emit(SessionEvent::ExecSessionFinished { session }),
@@ -1640,32 +1788,48 @@ impl OwnerPump {
 /// 泵主循环：串行消费信箱；同一 exec 会话的 `ExecSessionOutput` 连批合帧
 /// （ADR-0030 决策 1），其余消息一律先 flush 当前批再原样处理 ⇒ 全局处理
 /// 顺序与到达顺序一致，settle 的日志对账永远看得到已 flush 的前缀。
-fn run_pump_loop(pump: &OwnerPump, rx: &mpsc::Receiver<OwnerMsg>) {
+///
+/// **P1-2 只换载体,不动语义**（ADR-0030 决策 1/2 是冻结项）：
+/// - `rx.recv()` → `rx.recv().await`；`rx.recv_timeout(dur)` →
+///   `select!{ recv / sleep_until }`。两个版本都是「这段时间里要么收到消息,
+///   要么窗口到点」,区别仅在于旧版把 OS 线程钉在超时上,新版把任务挂到定时器上；
+/// - 判定顺序逐条照搬：**先查 deadline 是否已过（已过则先 flush 再取下一条,
+///   绝不把新消息并进过期批）** → 才进入「消息 vs 窗口」的竞争；
+/// - 两条阈值常量 `EXEC_OUTPUT_COALESCE_WINDOW`(20ms) /
+///   `EXEC_OUTPUT_COALESCE_MAX_BYTES`(256KiB) 与「同 exec_session_id 才续批、
+///   非 output 消息让位前先收尾」的分支结构一字未改。
+async fn run_pump_loop(pump: Arc<OwnerPump>, mut rx: mpsc::UnboundedReceiver<OwnerMsg>) {
     let mut batch: Option<ExecOutputBatch> = None;
     loop {
-        let msg = match &batch {
-            None => match rx.recv() {
-                Ok(msg) => msg,
-                Err(_) => return,
+        let msg = match batch.as_ref() {
+            None => match rx.recv().await {
+                Some(msg) => msg,
+                None => return,
             },
             Some(opened) => {
-                let now = Instant::now();
+                let now = tokio::time::Instant::now();
                 if now >= opened.deadline {
                     let finished = batch.take().expect("match 刚确认批存在");
-                    pump.flush_exec_output(finished);
+                    pump.flush_exec_output(finished).await;
                     continue;
                 }
-                match rx.recv_timeout(opened.deadline - now) {
-                    Ok(msg) => msg,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                // deadline 已在上面判过未过期,这里 `deadline` 恒在未来,
+                // `sleep_until` 不会出现「已过期立即就绪」抢在消息前的失真。
+                let deadline = opened.deadline;
+                tokio::select! {
+                    biased;
+                    msg = rx.recv() => match msg {
+                        Some(msg) => msg,
+                        None => {
+                            let finished = batch.take().expect("match 刚确认批存在");
+                            pump.flush_exec_output(finished).await;
+                            return;
+                        }
+                    },
+                    _ = tokio::time::sleep_until(deadline) => {
                         let finished = batch.take().expect("match 刚确认批存在");
-                        pump.flush_exec_output(finished);
+                        pump.flush_exec_output(finished).await;
                         continue;
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                        let finished = batch.take().expect("match 刚确认批存在");
-                        pump.flush_exec_output(finished);
-                        return;
                     }
                 }
             }
@@ -1698,9 +1862,9 @@ fn run_pump_loop(pump: &OwnerPump, rx: &mpsc::Receiver<OwnerMsg>) {
             ),
             other => {
                 if let Some(finished) = batch.take() {
-                    pump.flush_exec_output(finished);
+                    pump.flush_exec_output(finished).await;
                 }
-                pump.process(other);
+                pump.process(other).await;
                 continue;
             }
         };
@@ -1714,17 +1878,17 @@ fn run_pump_loop(pump: &OwnerPump, rx: &mpsc::Receiver<OwnerMsg>) {
             opened.entries.push(entry);
             if opened.bytes >= EXEC_OUTPUT_COALESCE_MAX_BYTES {
                 let finished = batch.take().expect("same 刚匹配到本批");
-                pump.flush_exec_output(finished);
+                pump.flush_exec_output(finished).await;
             }
         } else {
             if let Some(finished) = batch.take() {
-                pump.flush_exec_output(finished);
+                pump.flush_exec_output(finished).await;
             }
             batch = Some(ExecOutputBatch {
                 exec_session_id,
                 entries: vec![entry],
                 bytes,
-                deadline: Instant::now() + EXEC_OUTPUT_COALESCE_WINDOW,
+                deadline: tokio::time::Instant::now() + EXEC_OUTPUT_COALESCE_WINDOW,
             });
         }
     }
