@@ -257,8 +257,8 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         pending: pending_commands.clone(),
         service: service.clone(),
         admin_token: token.clone(),
-        devices: Arc::new(Mutex::new(
-            qaqh_ringing_runtime::DeviceRegistry::new_persistent(),
+        devices: Arc::new(qaqh_ringing_runtime::DeviceRegistry::new(
+            service.owners().db().clone(),
         )),
         pairings: Arc::new(Mutex::new(crate::axum_server::PairingTable::new())),
         tls_fingerprint: tls.as_ref().map(|material| material.fingerprint.clone()),

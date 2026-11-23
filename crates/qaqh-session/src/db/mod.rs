@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags};
 use tokio::sync::oneshot;
 
 pub mod goals;
+pub mod devices;
 pub mod quota;
 pub mod sidecar;
 pub mod schema;

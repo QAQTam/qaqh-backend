@@ -43,18 +43,25 @@ fn bearer_token(headers: &HeaderMap) -> Option<&str> {
 
 /// 单次解析 Bearer → [`Identity`]。命中 admin token 得 admin；摘要命中未吊销的
 /// 设备得 device；否则 `None`。
-pub(crate) fn resolve_identity(state: &AppState, headers: &HeaderMap) -> Option<Identity> {
+///
+/// v4.4 P1-3：注册表权威进 `paired_devices` 后本函数必须 async（DB 等待
+/// 不得占住 Tokio worker）。DB 读故障 **fail-closed**：记 error 后按未授权
+/// 处理（401），不区分「设备不存在」与「查不了」给攻击侧信息。
+pub(crate) async fn resolve_identity(state: &AppState, headers: &HeaderMap) -> Option<Identity> {
     if is_authorized(headers, &state.admin_token) {
         return Some(Identity::Admin);
     }
     let token = bearer_token(headers)?;
     let digest = device_registry::token_digest(token);
-    let mut devices = state
-        .devices
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let record = devices.lookup_by_digest(&digest)?.clone();
-    devices.touch(&record.device_id);
+    let record = match state.devices.lookup_by_digest(&digest).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return None,
+        Err(error) => {
+            log::error!("[authz] device lookup failed, failing closed: {error}");
+            return None;
+        }
+    };
+    state.devices.touch(&record.device_id).await;
     Some(Identity::Device {
         device_id: record.device_id,
         scope: record.scope,
@@ -91,7 +98,7 @@ pub(crate) async fn authenticate(
     if is_public_path(req.uri().path()) {
         return next.run(req).await;
     }
-    let Some(identity) = resolve_identity(&state, req.headers()) else {
+    let Some(identity) = resolve_identity(&state, req.headers()).await else {
         return unauthorized();
     };
     req.extensions_mut().insert(identity);

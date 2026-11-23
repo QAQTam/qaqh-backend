@@ -82,7 +82,9 @@ pub struct AppState {
     /// 设备凭证走 `DeviceRegistry`（S2），移动端永不接触本 token。
     pub admin_token: String,
     /// 已配对设备注册表（持久化，跨重启存活，可吊销）。
-    pub devices: Arc<Mutex<DeviceRegistry>>,
+    /// v4.4 P1-3：权威进 `paired_devices` 表后无内存状态，Mutex 退场
+    /// （并发裁决收敛到 SQLite 串行写执行器）。
+    pub devices: Arc<DeviceRegistry>,
     /// 短寿一次性配对令牌表（仅内存，TTL 120s）。
     pub pairings: Arc<Mutex<pairing::PairingTable>>,
     /// 服务端自签证书指纹（`sha256:<hex>`）；仅非回环 bind 启用 TLS 时非空，

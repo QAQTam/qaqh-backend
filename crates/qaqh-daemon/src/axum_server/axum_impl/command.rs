@@ -58,7 +58,7 @@ pub(crate) fn command_fingerprint(envelope: &RingingV2CommandEnvelope) -> String
 ///
 /// admin → `user`/`"user"`（保持改造前语义）；device → `api`/`device_id`
 /// （`display_name` 取注册表名，供账本可读）。`id` 由 token 反推，不采信客户端自报。
-fn identity_worker_actor(
+async fn identity_worker_actor(
     state: &AppState,
     identity: &Identity,
 ) -> Option<qaqh_ringing::WorkerActor> {
@@ -69,12 +69,19 @@ fn identity_worker_actor(
             display_name: None,
         }),
         Identity::Device { device_id, .. } => {
-            let display_name = state
+            // 展示名是旁路信息：注册表读故障只降级 display_name，不反转
+            // 已鉴权通过的命令路由（鉴权在 resolve_identity 已 fail-closed）。
+            let display_name = match state
                 .devices
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
                 .get(device_id)
-                .map(|record| record.name.clone());
+                .await
+            {
+                Ok(record) => record.map(|record| record.name),
+                Err(error) => {
+                    log::warn!("[command] device display_name lookup failed: {error}");
+                    None
+                }
+            };
             Some(qaqh_ringing::WorkerActor {
                 kind: "api".into(),
                 id: device_id.clone(),
@@ -293,7 +300,7 @@ pub(crate) async fn dispatch_session(
             // 阻塞池执行，async 侧只做稳定码与状态档映射，wire 回执形状不变。
             let service = state.service.clone();
             let hub = std::sync::Arc::clone(&state.hub);
-            let actor = identity_worker_actor(state, identity);
+            let actor = identity_worker_actor(state, identity).await;
             let engine_session_id = session_id.clone();
             let command_id = envelope.command_id.clone();
             let engine_command = envelope.command.clone();

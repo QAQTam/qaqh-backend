@@ -175,11 +175,19 @@ pub(crate) async fn handle_pair(State(state): State<AppState>, body: Bytes) -> R
     } else {
         request.platform
     };
-    let (device_id, device_token) = state
-        .devices
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .issue(&name, &platform, grant.scope);
+    // v4.4 P1-3：注册表落 `paired_devices`；写失败是硬故障（500），
+    // 不得静默发出一个没进权威表的 device_token。
+    let (device_id, device_token) = match state.devices.issue(&name, &platform, grant.scope).await {
+        Ok(pair) => pair,
+        Err(error) => {
+            log::error!("[pair] device registration failed: {error}");
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "device registration failed",
+            );
+        }
+    };
     json_response(
         StatusCode::OK,
         &RingingV2PairResponse {
@@ -200,11 +208,18 @@ pub(crate) async fn handle_devices(
     if let Err(response) = require_scope(&identity, Scope::Admin) {
         return response;
     }
-    let devices = state
-        .devices
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .list()
+    let records = match state.devices.list().await {
+        Ok(records) => records,
+        Err(error) => {
+            log::error!("[pair] device list failed: {error}");
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "device registry unavailable",
+            );
+        }
+    };
+    let devices = records
         .into_iter()
         .map(|record| RingingV2DeviceWire {
             device_id: record.device_id,
@@ -228,11 +243,17 @@ pub(crate) async fn handle_device_revoke(
     if let Err(response) = require_scope(&identity, Scope::Admin) {
         return response;
     }
-    let revoked = state
-        .devices
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .revoke(&device_id);
+    let revoked = match state.devices.revoke(&device_id).await {
+        Ok(revoked) => revoked,
+        Err(error) => {
+            log::error!("[pair] device revoke failed: {error}");
+            return api_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "device revoke failed",
+            );
+        }
+    };
     if revoked.is_none() {
         return api_error_response(
             StatusCode::NOT_FOUND,

@@ -63,6 +63,8 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
         String::from("test-epoch"),
         std::sync::Arc::clone(service.owners().db()),
     ));
+    // `service` 在结构体字面量里被 move,库句柄必须提前取。
+    let test_db = std::sync::Arc::clone(service.owners().db());
     let (shutdown, _) = tokio::sync::watch::channel(false);
     crate::axum_server::axum_impl::AppState {
         hub,
@@ -70,9 +72,7 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
         pending,
         service,
         admin_token: String::from("test-token"),
-        devices: std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_ringing_runtime::DeviceRegistry::new(),
-        )),
+        devices: std::sync::Arc::new(qaqh_ringing_runtime::DeviceRegistry::new(test_db)),
         pairings: std::sync::Arc::new(std::sync::Mutex::new(
             crate::axum_server::PairingTable::new(),
         )),

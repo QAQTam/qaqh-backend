@@ -1,14 +1,19 @@
 //! 设备注册表（移动端 M0，spec-daemon-auth-devices §5）。
 //!
-//! 持久化于 `<data_dir>/ringing-devices.json`：
-//! JSON、`.json.tmp` + rename 原子写、损坏即空启动。
+//! v4.4 P1-3（MUST 铁闸 2）：状态权威是 `qaqh.db` 的 `paired_devices` 表。
+//! 旧的 `<data_dir>/ringing-devices.json` 全量覆写与「损坏即空启动」(L-20)
+//! 一并物理删除；启动吸入只发生在版本位 11→12 的那一个事务里
+//! （`qaqh-session/src/db/sidecar.rs`）。
 //!
 //! **只存 `device_token` 的 SHA256 摘要，绝不含明文**——token 明文仅在 `/pair`
 //! 响应中出现一次，丢失即重新扫码。daemon 重启不得失效 device_token（与 admin
 //! token 每次轮换的行为显式区分）。
+//!
+//! 方法全 async：调用点在 axum 中间件/handler（Tokio worker），DB 等待不得
+//! 占住 worker。内存 `Mutex<DeviceRegistry>` 随文件权威一起退场——并发裁决
+//! 收敛到 SQLite 串行写执行器。
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +29,23 @@ pub enum Scope {
 impl Scope {
     pub fn at_least(self, min: Scope) -> bool {
         self >= min
+    }
+
+    fn as_db_str(self) -> &'static str {
+        match self {
+            Self::View => "view",
+            Self::Interact => "interact",
+            Self::Admin => "admin",
+        }
+    }
+
+    fn from_db_str(raw: &str) -> Result<Self, String> {
+        match raw {
+            "view" => Ok(Self::View),
+            "interact" => Ok(Self::Interact),
+            "admin" => Ok(Self::Admin),
+            other => Err(format!("corrupt device scope {other:?}")),
+        }
     }
 }
 
@@ -45,12 +67,31 @@ pub struct DeviceRecord {
     pub last_seen_ms: u64,
 }
 
-/// 设备注册表。`by_digest` 做鉴权热路径的 O(1) 反查。
-#[derive(Debug, Default)]
+/// touch 节流窗口：距上次命中不足 60s 不产生写（与旧内存实现同律）。
+const TOUCH_MIN_DELTA_MS: i64 = 60_000;
+
+/// 设备注册表（`paired_devices` 门面）。
 pub struct DeviceRegistry {
-    by_digest: HashMap<String, String>,
-    by_id: HashMap<String, DeviceRecord>,
-    persistence_path: Option<PathBuf>,
+    db: Arc<qaqh_session::db::Db>,
+}
+
+// `Db` 不暴露 Debug(执行器句柄无诊断价值),门面只印存在性。
+impl std::fmt::Debug for DeviceRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceRegistry").finish_non_exhaustive()
+    }
+}
+
+fn to_record(row: qaqh_session::db::devices::DeviceRow) -> Result<DeviceRecord, String> {
+    Ok(DeviceRecord {
+        device_id: row.device_id,
+        name: row.name,
+        platform: row.platform,
+        scope: Scope::from_db_str(&row.scope)?,
+        token_digest: row.token_digest,
+        created_at_ms: row.created_at_ms.max(0) as u64,
+        last_seen_ms: row.last_seen_ms.max(0) as u64,
+    })
 }
 
 fn now_ms() -> u64 {
@@ -78,123 +119,100 @@ pub fn token_digest(token: &str) -> String {
 }
 
 impl DeviceRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 从 `<data_dir>/ringing-devices.json` 载入。文件缺失或损坏即空启动。
-    pub fn new_persistent() -> Self {
-        let path = qaqh_types::platform::data_dir().join("ringing-devices.json");
-        let mut registry = Self {
-            persistence_path: Some(path.clone()),
-            ..Self::new()
-        };
-        registry.reload(&path);
-        registry
-    }
-
-    fn reload(&mut self, path: &Path) {
-        let Ok(bytes) = std::fs::read(path) else {
-            return;
-        };
-        match serde_json::from_slice::<Vec<DeviceRecord>>(&bytes) {
-            Ok(records) => {
-                for record in records {
-                    self.by_digest
-                        .insert(record.token_digest.clone(), record.device_id.clone());
-                    self.by_id.insert(record.device_id.clone(), record);
-                }
-            }
-            Err(_) => log::warn!(
-                "[ringing] device registry is unreadable; starting empty ({})",
-                path.display()
-            ),
-        }
-    }
-
-    fn persist(&self) {
-        let Some(path) = &self.persistence_path else {
-            return;
-        };
-        let mut records: Vec<&DeviceRecord> = self.by_id.values().collect();
-        records.sort_by(|a, b| a.device_id.cmp(&b.device_id));
-        let Ok(bytes) = serde_json::to_vec(&records) else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
-            let _ = std::fs::remove_file(&tmp);
-        }
+    pub fn new(db: Arc<qaqh_session::db::Db>) -> Self {
+        Self { db }
     }
 
     /// 签发新设备：返回 `(device_id, device_token 明文 /*仅此一次*/)`。
-    pub fn issue(&mut self, name: &str, platform: &str, scope: Scope) -> (String, String) {
+    /// 落库失败即 `Err`——不得静默返回一个没进权威表的设备。
+    pub async fn issue(
+        &self,
+        name: &str,
+        platform: &str,
+        scope: Scope,
+    ) -> Result<(String, String), String> {
         let device_id = new_device_id();
         let token = new_device_token();
         let now = now_ms();
-        let record = DeviceRecord {
+        let row = qaqh_session::db::devices::DeviceRow {
             device_id: device_id.clone(),
             name: name.to_string(),
             platform: platform.to_string(),
-            scope,
+            scope: scope.as_db_str().to_string(),
             token_digest: token_digest(&token),
-            created_at_ms: now,
-            last_seen_ms: now,
+            created_at_ms: now as i64,
+            last_seen_ms: now as i64,
         };
-        self.by_digest
-            .insert(record.token_digest.clone(), record.device_id.clone());
-        self.by_id.insert(device_id.clone(), record);
-        self.persist();
-        (device_id, token)
+        self.db
+            .write(move |conn| qaqh_session::db::devices::insert(conn, &row))
+            .await
+            .map_err(|error| format!("device issue persist: {error}"))?;
+        Ok((device_id, token))
     }
 
     /// 鉴权热路径：由 `SHA256(token)` 摘要反查设备。
-    pub fn lookup_by_digest(&self, digest: &str) -> Option<&DeviceRecord> {
-        self.by_digest
-            .get(digest)
-            .and_then(|device_id| self.by_id.get(device_id))
+    /// DB/数据损坏返回 `Err`——鉴权侧必须 fail-closed(401)，不得当作
+    /// 「无此设备」继续走后续逻辑，更不得回退旧文件。
+    pub async fn lookup_by_digest(&self, digest: &str) -> Result<Option<DeviceRecord>, String> {
+        let digest = digest.to_string();
+        let row = self
+            .db
+            .read(move |conn| qaqh_session::db::devices::get_by_digest(conn, &digest))
+            .await
+            .map_err(|error| format!("device lookup: {error}"))?;
+        row.map(to_record).transpose()
     }
 
-    pub fn get(&self, device_id: &str) -> Option<&DeviceRecord> {
-        self.by_id.get(device_id)
+    pub async fn get(&self, device_id: &str) -> Result<Option<DeviceRecord>, String> {
+        let device_id = device_id.to_string();
+        let row = self
+            .db
+            .read(move |conn| qaqh_session::db::devices::get_by_id(conn, &device_id))
+            .await
+            .map_err(|error| format!("device get: {error}"))?;
+        row.map(to_record).transpose()
     }
 
     /// 吊销：删注册表项。返回被吊销设备的 `device_id`（存在时），供 lease 联动失效。
-    pub fn revoke(&mut self, device_id: &str) -> Option<String> {
-        let record = self.by_id.remove(device_id)?;
-        self.by_digest.remove(&record.token_digest);
-        self.persist();
-        Some(record.device_id)
+    pub async fn revoke(&self, device_id: &str) -> Result<Option<String>, String> {
+        let device_id = device_id.to_string();
+        let removed = self
+            .db
+            .write(move |conn| qaqh_session::db::devices::delete(conn, &device_id))
+            .await
+            .map_err(|error| format!("device revoke: {error}"))?;
+        Ok(removed.map(|row| row.device_id))
     }
 
-    /// 惰性更新 `last_seen_ms`（鉴权命中时调用）。仅在明显变旧时落盘以省 IO。
-    pub fn touch(&mut self, device_id: &str) {
-        let Some(record) = self.by_id.get_mut(device_id) else {
-            return;
-        };
-        let now = now_ms();
-        if now.saturating_sub(record.last_seen_ms) < 60_000 {
-            record.last_seen_ms = now;
-            return;
+    /// 惰性更新 `last_seen_ms`（鉴权命中时调用）。60s 节流窗口内不产生写。
+    pub async fn touch(&self, device_id: &str) {
+        let device_id = device_id.to_string();
+        let result = self
+            .db
+            .write(move |conn| {
+                qaqh_session::db::devices::touch(conn, &device_id, now_ms() as i64, TOUCH_MIN_DELTA_MS)
+            })
+            .await;
+        if let Err(error) = result {
+            // last_seen 是展示字段：写失败不反转鉴权结果，但必须留痕。
+            log::warn!("[ringing] device touch failed: {error}");
         }
-        record.last_seen_ms = now;
-        self.persist();
     }
 
-    pub fn list(&self) -> Vec<DeviceRecord> {
-        let mut records: Vec<DeviceRecord> = self.by_id.values().cloned().collect();
-        records.sort_by(|a, b| a.created_at_ms.cmp(&b.created_at_ms));
-        records
+    pub async fn list(&self) -> Result<Vec<DeviceRecord>, String> {
+        let rows = self
+            .db
+            .read(|conn| qaqh_session::db::devices::list(conn))
+            .await
+            .map_err(|error| format!("device list: {error}"))?;
+        rows.into_iter().map(to_record).collect()
     }
 
-    pub fn len(&self) -> usize {
-        self.by_id.len()
+    pub async fn len(&self) -> Result<usize, String> {
+        Ok(self.list().await?.len())
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.by_id.is_empty()
+    pub async fn is_empty(&self) -> Result<bool, String> {
+        Ok(self.len().await? == 0)
     }
 }
