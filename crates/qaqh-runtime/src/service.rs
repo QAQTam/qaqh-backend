@@ -457,11 +457,15 @@ impl QaqhService {
                 .map_err(|error| error.to_string())?;
             for id in &tree {
                 registry.exec_sessions().shutdown_session(id)?;
-                service
-                    .owners
-                    .get_or_create(id)
-                    .flush()
-                    .map_err(|error| error.to_string())?;
+                // 屏障语义不变:行删掉之前必须把该会话泵里排到的写全部落库+emit。
+                // `flush` 改 async(P1-2/L-03),而这里整段本就跑在 spawn_blocking
+                // 闭包里并持着 registry 的 std MutexGuard——不能跨 await,故用
+                // 项目唯一的同步→异步桥 `async_rt::block_on_host`,阻塞池线程上
+                // 驱动宿主 runtime 是合法的(P1-1 已用常驻用例钉死这一事实)。
+                qaqh_workspace::async_rt::block_on_host(
+                    service.owners.get_or_create(id).flush(),
+                )
+                .map_err(|error| error.to_string())?;
             }
             let ids = service
                 .owners

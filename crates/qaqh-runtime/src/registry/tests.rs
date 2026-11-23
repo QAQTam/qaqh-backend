@@ -75,6 +75,10 @@ async fn spawn_failure_preserves_the_session_baseline() {
             }),
             ..Default::default()
         })
+        // P1-2:`update_metadata` 改 async。本用例是 `#[tokio::test]`
+        // (current_thread)——泵任务与调用方共用这一条线程,同步等回执必死锁,
+        // await 才是正确形态;断言与 fixture 意图不变。
+        .await
         .expect("invalid selection fixture");
     let mut registry = AgentRegistry::new(owners);
     for _ in 0..2 {
