@@ -11,6 +11,16 @@
 > 影响且被 ADR-0028 明文继承**：shell 字节永不进 `SessionEventFrame`，会话 SSE 单流单
 > 游标一律不动，exec 只读终端继续走本 ADR 的区间读。原文按 ADR 不可变纪律保留。
 
+> **状态更新 2026-11-24（文件位置勘误，不改决策）**：决策正文引用的
+> `qaqh-session/src/manager.rs` 与 `SessionManager::delete` 已随 **v4.4 P1-3**（PR #35）
+> 物理删除——`SessionManager` 职责并入 `OwnerDirectory`：会话身份生成
+> `OwnerDirectory::allocate_session()`（`ses_<ULID>`），整目录清理
+> `delete_session_resources()`（路径校验逐字保留）。本 ADR 决策 2 的清理语义
+> （「exec 输出日志随会话删除整目录清理、不随内存回收消失」）**不变**，落点改经
+> `delete_session_tree`/`delete_session_resources`；闲置卸载另走
+> `take_session`（PR #37），**只摘 owner 句柄、不碰会话目录与业务行**，与该条
+> 「日志不随 10 分钟内存回收消失」的裁定一致。
+
 > 前端（`../qaqh-electron`）已移除 exec 工具卡片渲染，改以只读终端面板管理每个执行会话，
 > 期望**完整输出**而非尾窗。本 ADR 在不改动模型侧、不改动事件词表、不引入第二传输的前提下，
 > 补齐后端持久化与读取面，并给出前端对齐工作项。引用本 ADR 时注意状态：**提议中 ≠ 已实施**。
