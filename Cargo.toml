@@ -24,10 +24,6 @@ members = [
     "crates/qaqh-pty",
     "crates/qaqh-sandbox",
     "crates/qaqh-tool-core",
-    "crates/qaqh-ptc-core",
-    "crates/qaqh-ptc-bun",
-    "crates/qaqh-ptc-sdk",
-    "crates/qaqh-ptc-tools",
     "crates/qaqh-workspace",
     "crates/qaqh-gitx",
     "crates/qaqh-session",
@@ -47,8 +43,15 @@ members = [
 ]
 
 # 未接线 crate：功能源码保留，但不参与构建。
-# qaqh-import = 外部 transcript 导入（全仓 0 调用者）；接线时移回 members。
-exclude = ["crates/qaqh-import"]
+# qaqh-import = 外部 transcript 导入（全仓 0 调用者）；
+# qaqh-ptc-* = P0-4 移出 workspace（全仓 0 外部调用者，不陪葬构建）；接线时移回 members。
+exclude = [
+    "crates/qaqh-import",
+    "crates/qaqh-ptc-core",
+    "crates/qaqh-ptc-bun",
+    "crates/qaqh-ptc-sdk",
+    "crates/qaqh-ptc-tools",
+]
 
 [workspace.dependencies]
 mutil-ai = { version = "0.7.0", path = "../mutil-ai" }
