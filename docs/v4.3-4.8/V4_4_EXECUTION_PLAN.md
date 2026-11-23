@@ -149,3 +149,31 @@ flowchart TD
    - `sbx-win --test registry`（`reg.exe` `0xC0000142`）与 `hardening::sddl_snapshot_roundtrip_restores_dacl`（`D:AI` 继承标志）。
 5. **PR 四联单收口**：按 `MUST.md` §三创建 PR（若 `gh pr create` 遇 GitHub GraphQL `unexpected EOF` 可改用 `gh api` REST 或重试），贴齐反证输出与 `0 wire drift` 证明；合并后同步 `D:\Projects\qaqh-backend`（`git pull --ff-only origin main`）并 `git worktree remove` 清理临时工作树。
 ```
+
+---
+
+## 六、结项状态回写（v4.4 P1，2026-11-24，main=`ff532ac0`）
+
+| 切片 | PR | 状态 |
+|---|---|---|
+| docs 计划 | #29 | 已合入 |
+| P1-0a | #31 | 已合入（控制面 spawn_blocking 收口） |
+| P1-0b | #31/#30 链 | 已合入（`list_sessions`/`session.meta` 锁边界收紧，#28 收口 `service_api.rs`） |
+| P1-0c | #32 | 已合入（L-07/L-08/L-09 立斩；三退出路径接线 mcp+lsp 收尾） |
+| P1-1 | #33 | 已合入（宿主 Handle 统一 `async_rt.rs`；250ms 轮询桥物理删除；L-22 随之消除） |
+| P1-2 | #34 + **#37 补交** | 已合入（owner 泵 Actor 化；**验收「`unload_idle_sessions` 后任务句柄立即 drop 回收」当初缺失，由 #37 以 `OwnerDirectory::take_session` + `AgentRegistry::unload_idle_sessions` 接线补齐，回归 `evicted_owners_reclaim_pump_tasks`（strong_count 主证 + alive 任务数观察面，3 连跑稳定）**） |
+| P1-3 | #35 | 已合入（schema v12 + 四账本吸入；`SessionManager` 物理删除；audit v1/v2 与 `JOURNAL_IO` 按所有者裁定**不收编**，三段理由在 PR 正文） |
+| P1-4 | #36 + **#37 补交** | 已合入（结果侧运行时往返删除；#36 存在 `fs_git.rs` 漏提交（`git restore` 整文件回退未重放），**#37 已补交并含反证记录**；`plan.read` 平行结构删除、绑契约 DTO `PlanReadItem`） |
+
+**P1-0d（可选切片）处置结论（所有者裁定，防静默遗忘）**：
+- `L-21`（RetryHub.drain 持锁回调引信）、`L-23`（lsp conns→state 嵌套边）、`L-15`/`L-16`（锁外预备）、`L-13`（audit recover_state 锁内文件读）：**未做，顺延 v4.5**（P2 批次打包）。
+- `L-27`：并入 `P2-2⑥`（tasklist→OpenProcess），随 v4.5 处置。
+- `L-29`：`trust_folder` 写盘未套 blocking pool，顺延 v4.5（原「P1-2 顺手」未兑现，如实登记）。
+
+**v4.5 登记项（本轮新增，非既有）**：
+1. `todo.status`/`todo.list` 结果绑契约 DTO：需先对齐 `TodoStatusSnapshot` 的 serde 属性（现手拼 `json!` 在缺失值时输出 null 键，DTO `skip_serializing_if` 省略该键——直接绑定 = wire 变化，铁闸 1 禁止）；连带 `validate_typed_params` 导出面一起评估。
+2. `unload_idle_sessions` 全链路（真 `spawn_new` loop）集成测试——全仓无 spawn_new 成功路径 fixture，属测试基建任务。
+3. `TodoHost` 的 `OnceLock<Arc<dyn Host>>` 槽列入 LOCK_AUDIT §P2-1（v4.5）消除清单（与 GoalHost/SubagentHost/GitxHost 同批）。
+4. `audit v1/v2`、`JOURNAL_IO` 野生账本的最终归属（收编 `qaqh.db` 或保留显式单写者）待 v4.5 决策。
+
+**版本位**：按所有者裁定「版本号/tag 一律不管，直接以 v4.8 发稳定版」，`Cargo.toml` 保持 `4.2.0` 不回写。

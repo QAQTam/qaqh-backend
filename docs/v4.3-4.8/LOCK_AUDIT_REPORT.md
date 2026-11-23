@@ -333,4 +333,24 @@ lsp：conns → conn.state（evict_recycled_conns, manager.rs:343）唯一嵌套
 
 ---
 
+---
+
+## v4.4 P1 收口处置（2026-11-24 回写）
+
+- **已消除**：`TODO_LOCK`（#35）、quota 无超时 file.lock/全量 replay/逐条 fsync（#35）、
+  devices/receipts 全量覆写账本（#35）、`SessionManager` 野生文件句柄（#35）、
+  L-07/L-08/L-09（#32）、L-22（#33）、L-01 复合停摆控制面路径（#30/#31）、
+  per-session OS 线程（#34）、结果侧二次 JSON 往返（#36/#37）。
+- **`OnceLock<Arc<dyn Host>>` 槽（§P2-1）**：v4.4 按既有先例新增 **TodoHost** 同款槽
+  （#35，端口化接 SQLite 的定案，理由见 PR 正文）——P2-1 消除清单现为
+  GoalHost/SubagentHost/GitxHost/**TodoHost** 四件套，v4.5 一并处置。
+- **`unload_idle_sessions` 句柄回收**：铁闸 3 验收由 #37 补交
+  （`OwnerDirectory::take_session` 接线 + 回归测试）；`take_session` 只摘目录条目，
+  不触碰 audit/journal 面。
+- **未动项**（顺延 v4.5，逐项处置见 `V4_4_EXECUTION_PLAN.md` §六）：
+  L-13/L-15/L-16/L-21/L-23/L-27/L-29；`audit v1/v2` 与 `JOURNAL_IO` 按所有者裁定
+  未在 P1-3 收编。
+
+---
+
 *报告完。原始分组证据：`.qaqh/audit-parts/`（5 份，含逐锁加锁点全清单与 codegraph 验证记录）。*
