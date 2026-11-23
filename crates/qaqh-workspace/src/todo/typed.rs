@@ -18,11 +18,10 @@ use crate::tool_api::{
     ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
-use super::model::{TODO_LOCK, TodoItem, TodoStatus};
+use super::host::require_host;
+use super::model::{TodoItem, TodoStatus};
 use super::parse::{parse_todo_text, render_todo_text};
-use super::store::{
-    count_status, normalize_current_id, read_store_for, status_name, write_store_for,
-};
+use super::store::{count_status, normalize_current_id, status_name};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -282,7 +281,13 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
             "Use {\"status\": \"pending|in_progress|completed|cancelled\"} or omit it.",
         )
     })?;
-    let store = read_store_for(session_id)?;
+    if session_id.is_empty() {
+        return Err("no active session".into());
+    }
+    let store = super::host::host()
+        .ok_or_else(|| "todo requires the daemon host (install_host)".to_string())?
+        .load_todo(session_id)?
+        .unwrap_or_else(super::host::empty_store);
     // v2 类型生成后 filter 已是 typed enum（schema enum 由类型给出），
     // 不再走字符串 parse_status。
     let filter = args.status;
@@ -312,9 +317,6 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
 
 /// `todo_write` 的 canonical mutation 路径。
 pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteOutput, String> {
-    let _guard = TODO_LOCK
-        .lock()
-        .map_err(|_| "todo lock poisoned".to_string())?;
     let args: TodoWriteArgs = serde_json::from_value(args.clone()).map_err(|error| {
         crate::json_err_string(
             "invalid_input",
@@ -322,32 +324,42 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
             "Provide the full list as plain text in `list`.",
         )
     })?;
-    let mut store = read_store_for(session_id)?;
-    let replaced = store.items.len();
-    store.items = parse_todo_text(&args.list)?;
-    // 重建即解除归档与 cleared 通知位；随后按新列表状态重新判定归档位。
-    store.archived = false;
-    store.cleared_notified = false;
-    super::store::refresh_archive_flag(&mut store);
-    normalize_current_id(&mut store);
-    write_store_for(session_id, &store)?;
+    if session_id.is_empty() {
+        return Err("no active session".into());
+    }
+    // 读-改-写整体落在宿主的单个写事务内：并发 todo_write 不互踩、
+    // 不与 update/cancel 丢更新（旧全局 TODO_LOCK 的替代判据）。
+    let value = require_host()?.mutate_todo(
+        session_id,
+        Box::new(move |store| {
+            let replaced = store.items.len();
+            store.items = parse_todo_text(&args.list)?;
+            // 重建即解除归档与 cleared 通知位；随后按新列表状态重新判定归档位。
+            store.archived = false;
+            store.cleared_notified = false;
+            super::store::refresh_archive_flag(store);
+            normalize_current_id(store);
 
-    let in_progress = count_status(&store, TodoStatus::InProgress);
-    let rebuild_note = if replaced > 0 {
-        format!(" Replaced {replaced} previous item(s).")
-    } else {
-        String::new()
-    };
-    Ok(TodoWriteOutput {
-        total: store.items.len(),
-        in_progress,
-        message: format!(
-            "Plan updated: {} item(s), {} in progress.{rebuild_note}",
-            store.items.len(),
-            in_progress
-        ),
-        items: store.items.iter().map(TodoItemView::from).collect(),
-    })
+            let in_progress = count_status(store, TodoStatus::InProgress);
+            let rebuild_note = if replaced > 0 {
+                format!(" Replaced {replaced} previous item(s).")
+            } else {
+                String::new()
+            };
+            let output = TodoWriteOutput {
+                total: store.items.len(),
+                in_progress,
+                message: format!(
+                    "Plan updated: {} item(s), {} in progress.{rebuild_note}",
+                    store.items.len(),
+                    in_progress
+                ),
+                items: store.items.iter().map(TodoItemView::from).collect(),
+            };
+            serde_json::to_value(&output).map_err(|error| format!("todo_write: {error}"))
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| format!("todo_write: {error}"))
 }
 
 /// `todo_update` / service `todo.set` 的 canonical mutation 路径。
@@ -355,9 +367,6 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
 /// 保留既有三种输入形态：单条 `{id,status,evidence?}`、`ids` 批量状态、
 /// `updates` 并行条目；工具面仍由 `TodoUpdateArgs` 限制为单条。
 pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdateOutput, String> {
-    let _guard = TODO_LOCK
-        .lock()
-        .map_err(|_| "todo lock poisoned".to_string())?;
     let args: TodoUpdateArgs = serde_json::from_value(args.clone()).map_err(|error| {
         crate::json_err_string(
             "invalid_input",
@@ -365,8 +374,8 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             "Use {\"title\", \"status\", \"evidence?\"}.",
         )
     })?;
-    let mut store = read_store_for(session_id)?;
-    let title = args.title.trim();
+    // 闭包跨线程捕获必须是 owned 数据（TodoHost::mutate_todo 的 'static 约束）。
+    let title = args.title.trim().to_string();
     if title.is_empty() {
         return Err(crate::json_err_string(
             "invalid_input",
@@ -374,33 +383,42 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
             "Titles are identities — use the exact title from the list.",
         ));
     }
-    let Some(index) = store.items.iter().position(|item| item.title == title) else {
-        let available = render_todo_text(&store);
-        return Err(crate::json_err_string(
-            "not_found",
-            format!("no todo titled `{title}`"),
-            &format!("Exact titles only. Current list:\n{available}"),
-        ));
-    };
-    store.items[index].status = TodoStatus::from(args.status);
-    if let Some(evidence) = args
-        .evidence
-        .as_deref()
-        .map(str::trim)
-        .filter(|evidence| !evidence.is_empty())
-    {
-        store.items[index].evidence = Some(evidence.to_string());
+    if session_id.is_empty() {
+        return Err("no active session".into());
     }
-    normalize_current_id(&mut store);
-    super::store::refresh_archive_flag(&mut store);
-    write_store_for(session_id, &store)?;
+    let value = require_host()?.mutate_todo(
+        session_id,
+        Box::new(move |store| {
+            let Some(index) = store.items.iter().position(|item| item.title == title) else {
+                let available = render_todo_text(store);
+                return Err(crate::json_err_string(
+                    "not_found",
+                    format!("no todo titled `{title}`"),
+                    &format!("Exact titles only. Current list:\n{available}"),
+                ));
+            };
+            store.items[index].status = TodoStatus::from(args.status);
+            if let Some(evidence) = args
+                .evidence
+                .as_deref()
+                .map(str::trim)
+                .filter(|evidence| !evidence.is_empty())
+            {
+                store.items[index].evidence = Some(evidence.to_string());
+            }
+            normalize_current_id(store);
+            super::store::refresh_archive_flag(store);
 
-    let status_name = status_name(&store.items[index].status);
-    Ok(TodoUpdateOutput {
-        item: Some(TodoItemView::from(&store.items[index])),
-        message: format!("Todo `{title}` is now {status_name}."),
-        items: store.items.iter().map(TodoItemView::from).collect(),
-    })
+            let status_name = status_name(&store.items[index].status);
+            let output = TodoUpdateOutput {
+                item: Some(TodoItemView::from(&store.items[index])),
+                message: format!("Todo `{title}` is now {status_name}."),
+                items: store.items.iter().map(TodoItemView::from).collect(),
+            };
+            serde_json::to_value(&output).map_err(|error| format!("todo_update: {error}"))
+        }),
+    )?;
+    serde_json::from_value(value).map_err(|error| format!("todo_update: {error}"))
 }
 
 /// service 查询面(`todo.list`)的纯快照入口:typed 解析后不经工具信封。

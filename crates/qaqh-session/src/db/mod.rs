@@ -15,6 +15,7 @@ pub mod sidecar;
 pub mod schema;
 pub mod store;
 pub mod team;
+pub mod todos;
 pub mod view;
 #[cfg(test)]
 mod view_tests;

@@ -89,28 +89,10 @@ fn public_schema_exposes_todo_write_update_with_no_legacy_names() {
 
 #[test]
 fn manual_status_transitions_round_trip_to_the_frontend_contract() {
-    let temp_home = std::env::temp_dir().join(format!(
-        "qaqh-todo-contract-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&temp_home).expect("create isolated home");
-    let temp_data = temp_home.join(".qaqh");
-    std::fs::create_dir_all(&temp_data).expect("create isolated data root");
-
-    // This integration test binary owns an isolated process home.
-    // `qaqh_types::platform::data_dir()` 的优先级是
-    // `QAQH_DATA_DIR` > `%USERPROFILE%`(win) / `$XDG_CONFIG_HOME` / `$HOME`(unix)，
-    // 三个变量都必须钉住——否则真实 home 的历史 todo 会造成"跑两遍就假红"。
-    // SAFETY: 测试独占进程环境；本用例前后成对设置/恢复，测试二进制内串行执行。
-    unsafe {
-        std::env::set_var("USERPROFILE", &temp_home);
-        std::env::set_var("HOME", &temp_home);
-        std::env::set_var("QAQH_DATA_DIR", &temp_data);
-    }
+    // v4.4 P1-3：todo 权威已入 DB（经 TodoHost 端口），旧「QAQH_DATA_DIR/
+    // HOME 三变量钉住隔离 todo.json」的整套环境夹具失去对象——这里装内存
+    // 宿主（session key = "todo-contract"，进程内自隔离，跑几遍都不假红）。
+    qaqh_workspace::todo::install_memory_host();
     qaqh_workspace::runtime::init_tools("todo-contract", &[], vec![]);
     // 显式上下文。刻意用最严档 read-only：todo_* 是会话内状态工具，
     // permission 层对其豁免（永不弹确认），本测试同时验证这一点。
@@ -221,11 +203,9 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["total"], 4);
     assert_eq!(status["items"][2]["status"], "cancelled");
 
-    // todo.json 格式干净（无 legacy Goal 强制归一化）。
+    // 宿主态清单干净（无 legacy Goal 强制归一化）。
     let store = qaqh_workspace::todo::load_todo_for("todo-contract").expect("load todo");
     assert_eq!(store.mode, qaqh_workspace::todo::TodoMode::Manual);
-
-    std::fs::remove_dir_all(&temp_home).expect("remove isolated home");
 }
 
 /// web_fetch 的 `output` 是真实写目标（web.rs 里无条件 `fs::write`），
