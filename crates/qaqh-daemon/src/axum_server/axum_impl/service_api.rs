@@ -134,29 +134,41 @@ pub(crate) async fn handle_service(
             Ok(owner) => owner,
             Err(response) => return response,
         };
-        let outcome: Result<serde_json::Value, String> = match method {
-            "shell.open" => serde_json::from_value::<service_methods::ShellOpenParams>(
-                params.clone(),
-            )
-            .map_err(|error| error.to_string())
-            .and_then(|args| state.service.shell_open(&owner, &args))
-            .and_then(|view| serde_json::to_value(view).map_err(|error| error.to_string())),
-            "shell.close" => {
-                serde_json::from_value::<service_methods::ShellCloseParams>(params.clone())
-                    .map_err(|error| error.to_string())
-                    .and_then(|args| state.service.shell_close(&owner, &args.shell_id))
-                    .and_then(|result| {
-                        serde_json::to_value(result).map_err(|error| error.to_string())
-                    })
-            }
-            "shell.list" => serde_json::from_value::<service_methods::ShellListParams>(
-                params.clone(),
-            )
-            .map_err(|error| error.to_string())
-            .and_then(|_| state.service.shell_list(&owner))
-            .and_then(|result| serde_json::to_value(result).map_err(|error| error.to_string())),
-            other => Err(format!("unknown shell method: {other}")),
-        };
+        let service = state.service.clone();
+        let method_owned = method.to_string();
+        let outcome: Result<serde_json::Value, String> =
+            match tokio::task::spawn_blocking(move || match method_owned.as_str() {
+                "shell.open" => {
+                    serde_json::from_value::<service_methods::ShellOpenParams>(params)
+                        .map_err(|error| error.to_string())
+                        .and_then(|args| service.shell_open(&owner, &args))
+                        .and_then(|view| {
+                            serde_json::to_value(view).map_err(|error| error.to_string())
+                        })
+                }
+                "shell.close" => {
+                    serde_json::from_value::<service_methods::ShellCloseParams>(params)
+                        .map_err(|error| error.to_string())
+                        .and_then(|args| service.shell_close(&owner, &args.shell_id))
+                        .and_then(|result| {
+                            serde_json::to_value(result).map_err(|error| error.to_string())
+                        })
+                }
+                "shell.list" => {
+                    serde_json::from_value::<service_methods::ShellListParams>(params)
+                        .map_err(|error| error.to_string())
+                        .and_then(|_| service.shell_list(&owner))
+                        .and_then(|result| {
+                            serde_json::to_value(result).map_err(|error| error.to_string())
+                        })
+                }
+                other => Err(format!("unknown shell method: {other}")),
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(join_error) => Err(format!("shell service worker failed: {join_error}")),
+            };
         return match outcome {
             Ok(value) => (
                 StatusCode::OK,
@@ -176,17 +188,33 @@ pub(crate) async fn handle_service(
                 .into_response(),
         };
     }
-    match service_methods::dispatch(&state.service, method, &params) {
-        Ok(value) => (
+    let service = state.service.clone();
+    let method_owned = method.to_string();
+    let dispatch_result = tokio::task::spawn_blocking(move || {
+        service_methods::dispatch(&service, &method_owned, &params)
+    })
+    .await;
+    match dispatch_result {
+        Ok(Ok(value)) => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/json")],
             serde_json::to_vec(&value).unwrap_or_default(),
         )
             .into_response(),
-        Err(e) => (
+        Ok(Err(e)) => (
             StatusCode::BAD_REQUEST,
             [(header::CONTENT_TYPE, "application/json")],
             serde_json::to_vec(&service_methods::error_response(info.kind, &e)).unwrap_or_default(),
+        )
+            .into_response(),
+        Err(join_error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            [(header::CONTENT_TYPE, "application/json")],
+            serde_json::to_vec(&serde_json::json!({
+                "code": "internal_error",
+                "message": format!("service worker failed: {join_error}"),
+            }))
+            .unwrap_or_default(),
         )
             .into_response(),
     }
