@@ -103,6 +103,12 @@ fn main() {
             // → 子进程组杀兜底；必须显式调用——进程 exit 路径不跑 Drop，
             // 跳过则 MCP server 子进程成孤儿。
             qaqh_mcp::shutdown_global();
+            // L-08：LSP 同一等义务，且此前**全仓零调用方**——manager 活在 static
+            // 槽里，exit 路径不跑 Drop，`shutdown_all` 永不执行 ⇒ rust-analyzer
+            // 这类独立进程组的子进程在 Unix 上成孤儿（Windows 侧由 JobObject
+            // kill-on-close 兜底）。放在 MCP 之后：lsp 的收尾里有 L-09 的限时硬顶，
+            // 不会再像旧实现那样把退出路径挂死。
+            qaqh_lsp::shutdown_global();
             if let Err(error) = result {
                 eprintln!("qaqh-daemon: {error}");
                 std::process::exit(1);
@@ -113,6 +119,11 @@ fn main() {
             // 诊断一律走 stderr/文件日志,不得污染 stdout。
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(qaqh_acp::run_stdio());
+            // L-08：acp 分支此前**两个收尾都没调**——被 Zed 拉起的桥进程退出时
+            // MCP 与 LSP 子进程全部留成孤儿。stdio 桥同样会装配会话面，
+            // 因此两家收尾都必须接上（顺序与 server/run 分支一致）。
+            qaqh_mcp::shutdown_global();
+            qaqh_lsp::shutdown_global();
             if let Err(error) = result {
                 eprintln!("qaqh-daemon: {error}");
                 std::process::exit(1);
@@ -148,6 +159,8 @@ fn main() {
             let result = runtime.block_on(server::run());
             // MCP 优雅收尾（同上）：显式 shutdown_all，防子进程孤儿。
             qaqh_mcp::shutdown_global();
+            // L-08：同上，LSP 收尾接线（旧实现零调用方）。
+            qaqh_lsp::shutdown_global();
             if let Err(error) = result {
                 eprintln!("qaqh-daemon: {error}");
                 std::process::exit(1);

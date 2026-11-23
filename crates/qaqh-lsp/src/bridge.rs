@@ -41,18 +41,6 @@ pub fn shutdown_global() {
     runtime_handle().block_on(manager.shutdown_all());
 }
 
-/// 投影预热（fire-and-forget）：装配点调用一次，后台逐 server 连接。
-///
-/// mcp prime 同款鸡生蛋修复——但 `lsp` 聚合工具 enabled 即在场，预热只为
-/// 加速首轮 definition（索引预热），不阻塞装配；未启用时 no-op。
-pub fn prime_all_async(root: String) {
-    let manager = manager_slot();
-    if !manager.config().enabled {
-        return;
-    }
-    runtime_handle().spawn(async move { manager.prime_all(&root).await });
-}
-
 /// E-5 单一 dispatcher：`lsp` 聚合工具的 fn 指针。
 pub fn dispatch(
     name: &str,

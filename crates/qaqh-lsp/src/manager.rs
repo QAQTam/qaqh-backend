@@ -247,18 +247,6 @@ impl LspManager {
             .map(|(name, _)| name.clone())
     }
 
-    /// 预热全部已声明 server（root 缺省为 daemon cwd；mcp prime 同款鸡生蛋修复）。
-    pub async fn prime_all(&self, root: &str) {
-        if !self.snapshot_cfg().enabled {
-            return;
-        }
-        for name in self.snapshot_cfg().servers.keys() {
-            if let Err(error) = self.get_or_connect(name, root).await {
-                log::warn!("[lsp] prime {name}: {error}");
-            }
-        }
-    }
-
     /// 全部已声明 server 的状态行（`lsp` 聚合工具 `list_servers` 数据源；
     /// 不触发连接——未连接的 server 显示 disconnected）。
     pub fn server_status_lines(&self) -> Vec<String> {

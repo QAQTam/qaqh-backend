@@ -545,8 +545,12 @@ where
     F: FnOnce(async_lsp::ServerSocket) -> Fut,
     Fut: std::future::Future<Output = Result<String, LspError>>,
 {
-    let _guard = conn.begin_call();
+    // L-09：`begin_call` 现在带状态闸门（关停闸 / 未连接当场拒），错误原样上抛，
+    // 由调用方按既有的 `ServerCrashed → mark_crashed()` 词表处理。
+    let _guard = conn.begin_call()?;
     let session = conn.session_snapshot().ok_or_else(|| {
+        // 闸门与取句柄是两次加锁，看门狗可能正好卡在中间回收——这里的 None 是
+        // 真实竞态，不是防御分支。
         LspError::new(
             LspErrorKind::ServerCrashed,
             "lsp server is not connected".to_owned(),

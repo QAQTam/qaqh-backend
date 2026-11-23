@@ -12,7 +12,7 @@ pub mod manager;
 pub mod projection;
 pub mod tool;
 
-pub use bridge::{dispatch, prime_all_async, shutdown_global, take_projection_batch};
+pub use bridge::{dispatch, shutdown_global, take_projection_batch};
 pub use connection::{ConnStatus, LifecycleSettings, ServerConnection};
 pub use error::{LspError, LspErrorKind};
 pub use manager::{ApplyReport, LspManager};
