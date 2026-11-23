@@ -3046,45 +3046,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "qaqh-ptc-bun"
-version = "4.2.0"
-dependencies = [
- "qaqh-ptc-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "qaqh-ptc-core"
-version = "4.2.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "qaqh-ptc-sdk"
-version = "4.2.0"
-dependencies = [
- "qaqh-ptc-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "qaqh-ptc-tools"
-version = "4.2.0"
-dependencies = [
- "qaqh-policy",
- "qaqh-ptc-core",
- "qaqh-ptc-sdk",
- "qaqh-tool-core",
- "schemars 1.2.3",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "qaqh-pty"
 version = "4.2.0"
 dependencies = [
@@ -3296,12 +3257,8 @@ version = "4.2.0"
 dependencies = [
  "anyhow",
  "chrono",
- "globset",
- "grep-regex",
- "grep-searcher",
  "hex",
  "html2text",
- "ignore",
  "image",
  "libc",
  "log",
@@ -3315,14 +3272,11 @@ dependencies = [
  "qaqh-tool-core",
  "qaqh-types",
  "regex",
- "sbx-win",
  "schemars 1.2.3",
  "serde",
  "serde_json",
  "sha2",
- "similar",
  "tempfile",
- "unicode-normalization",
  "ureq",
  "windows",
  "winresource",
