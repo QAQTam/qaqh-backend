@@ -39,13 +39,20 @@ fn setup(label: &str) -> Env {
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("USERPROFILE", tmp.path());
     }
-    qaqh_workspace::set_workspace(&workspace.to_string_lossy());
     qaqh_workspace::runtime::init_tools(label, &[], vec![]);
-    qaqh_workspace::runtime::set_context(label, 4);
     Env {
         _tmp: tmp,
         data,
         workspace,
+    }
+}
+
+fn admitted_ctx(env: &Env, session_id: &str) -> qaqh_workspace::runtime::ToolCtx {
+    qaqh_workspace::runtime::ToolCtx {
+        session_id: session_id.to_string(),
+        permission_level: 3,
+        workspace_root: Some(env.workspace.to_string_lossy().into_owned()),
+        sandbox: None,
     }
 }
 
@@ -62,7 +69,7 @@ fn call(
 fn audit_ledger_traces_calls_end_to_end() {
     let _serial = SERIAL.lock().unwrap_or_else(|p| p.into_inner());
     let env = setup("audit-ledger");
-    let ctx = qaqh_workspace::runtime::ToolCtx::admitted("audit-ledger");
+    let ctx = admitted_ctx(&env, "audit-ledger");
 
     // ① 成功写入：参数含敏感串 → 账本只存 hash，绝不落明文。
     let secret = "AUDIT_SECRET_SHOULD_NEVER_APPEAR_42";
@@ -79,7 +86,8 @@ fn audit_ledger_traces_calls_end_to_end() {
     let locked = qaqh_workspace::runtime::ToolCtx {
         session_id: "audit-ledger".to_string(),
         permission_level: 1,
-        workspace_root: None,
+        workspace_root: Some(env.workspace.to_string_lossy().into_owned()),
+        sandbox: None,
     };
     let denied = call(
         "write",

@@ -24,9 +24,6 @@
 //! `read` / `edit` 按约定暂不在此施加策略（更名完成后随工具一起优化），
 //! StandardPolicy 下与其它透传工具一样原样返回。
 
-use std::cell::RefCell;
-use std::sync::Arc;
-
 use qaqh_types::ToolResult;
 
 /// 执行会话输出的默认字符上限（StandardPolicy）。
@@ -101,40 +98,15 @@ impl ToolResultFoldPolicy for NoFoldPolicy {
     }
 }
 
-// 当前**线程**生效的折叠策略（默认 `StandardPolicy`）。
-//
-// 与 `runtime` 的 `RUNTIME_CTX` / `ACTOR_TOOL_MANAGER` / `AGENT_MODE` 同理：
-// 每个 in-process actor 跑在自己的 daemon 线程上，而工具模式是**按会话**切换
-// 的，所以折叠策略必须属于 actor 状态。若放在进程级 `static`，会话 A 切
-// minimal（联动 `NoFoldPolicy`）会连带关掉会话 B 的命令输出截断——见
-// `tests/tool_fold_scope.rs`。
-//
-// 非 actor 线程（daemon 主线程、serve、CLI）从不设置，恒为 `StandardPolicy`。
-thread_local! {
-    static CURRENT_POLICY: RefCell<Arc<dyn ToolResultFoldPolicy>> =
-        RefCell::new(Arc::new(StandardPolicy));
-}
+// P0-2：折叠策略的线程态（`CURRENT_POLICY` TLS + `set_thread_policy`/`policy`）
+// 随 in-process actor 模型一并退役——策略由调用方（`WorkspaceToolPort` /
+// `execute_authorized_with_context`）显式携带，按会话隔离不再依赖线程身份。
 
-/// 切换**当前线程**的折叠策略（如进入/退出极限模式）。
-///
-/// 只影响调用线程：actor 线程的工具工作线程经
-/// [`ToolExecutionScope::install`](crate::runtime::ToolExecutionScope::install) 继承
-/// actor 的策略。需要进程级行为的调用方不存在，也不应新增。
-pub fn set_thread_policy(policy: Arc<dyn ToolResultFoldPolicy>) {
-    CURRENT_POLICY.with(|slot| *slot.borrow_mut() = policy);
-}
-
-/// 读取当前线程的折叠策略。
-pub fn policy() -> Arc<dyn ToolResultFoldPolicy> {
-    CURRENT_POLICY.with(|slot| slot.borrow().clone())
-}
-
-/// 对工具结果应用当前策略。仅在成功/后台结果上截断；错误/部分结果原样透传。
-pub fn apply(tool_name: &str, result: &mut ToolResult) {
+/// 对工具结果应用指定策略。仅在成功/后台结果上截断；错误/部分结果原样透传。
+pub fn apply(policy: &dyn ToolResultFoldPolicy, tool_name: &str, result: &mut ToolResult) {
     if result.status.is_failure() {
         return; // 失败/部分：模型必须看到完整原因与候选
     }
-    let policy = policy();
     let Some(limit) = policy.limit_for(tool_name) else {
         return; // 透传：工具自身自限 / 24K 硬顶 / 极限模式全透传
     };
@@ -142,7 +114,7 @@ pub fn apply(tool_name: &str, result: &mut ToolResult) {
     if text.chars().count() <= limit {
         return;
     }
-    let truncated = truncate_with_marker(&*policy, tool_name, text, limit);
+    let truncated = truncate_with_marker(policy, tool_name, text, limit);
     result.set_model_projection(truncated, true);
 }
 
@@ -211,7 +183,7 @@ mod tests {
         // grep 的产物就是 path:line:content 清单——折叠会让模型拿不到清单。
         let listing = "src/a.rs:10:fn alpha() {}\nsrc/b.rs:20:fn beta() {}\n";
         let mut result = ok(listing);
-        apply("grep", &mut result);
+        apply(&StandardPolicy, "grep", &mut result);
         assert_eq!(result.model_text(), listing);
         assert!(!result.model_truncated());
     }
@@ -221,12 +193,12 @@ mod tests {
         // 更名前约定：read/edit 不在工具侧施加策略。
         let read_body = "L1: line one\nL2: line two\n";
         let mut result = ok(read_body);
-        apply("read", &mut result);
+        apply(&StandardPolicy, "read", &mut result);
         assert_eq!(result.model_text(), read_body);
 
         let edit_receipt = "[OK] edit src/lib.rs\n  replaced 1 occurrence (L1-L1)\n";
         let mut result = ok(edit_receipt);
-        apply("edit", &mut result);
+        apply(&StandardPolicy, "edit", &mut result);
         assert_eq!(result.model_text(), edit_receipt);
     }
 
@@ -238,7 +210,7 @@ mod tests {
             ("todo", "[OK] todo\n  2 items\n"),
         ] {
             let mut result = ok(body);
-            apply(name, &mut result);
+            apply(&StandardPolicy, name, &mut result);
             assert_eq!(result.model_text(), body, "{name} must pass through");
         }
     }
@@ -247,7 +219,7 @@ mod tests {
     fn exec_result_is_truncated_with_head_and_marker() {
         let body = "line of output\n".repeat(2_000); // ~34K chars > 8K cap
         let mut result = ok(&body);
-        apply("exec_command", &mut result);
+        apply(&StandardPolicy, "exec_command", &mut result);
         assert!(result.model_truncated());
         assert!(result.model_text().len() < body.len());
         assert!(result.model_text().starts_with("line of output\n"));
@@ -263,7 +235,7 @@ mod tests {
         for name in ["bash", "pwsh"] {
             let body = "x\n".repeat(6_000); // 12K chars > 8K cap
             let mut result = ok(&body);
-            apply(name, &mut result);
+            apply(&StandardPolicy, name, &mut result);
             assert!(
                 !result.model_truncated(),
                 "{name} retired: must pass through"
@@ -276,7 +248,7 @@ mod tests {
     fn short_exec_result_passes_through() {
         let body = "done in 12ms\n";
         let mut result = ok(body);
-        apply("exec_command", &mut result);
+        apply(&StandardPolicy, "exec_command", &mut result);
         assert_eq!(result.model_text(), body);
         assert!(!result.model_truncated());
     }
@@ -286,7 +258,7 @@ mod tests {
         for name in ["web_fetch", "read_image"] {
             let body = "content\n".repeat(5_000); // 40K chars > 16K cap
             let mut result = ok(&body);
-            apply(name, &mut result);
+            apply(&StandardPolicy, name, &mut result);
             assert!(result.model_truncated(), "{name} must be truncated");
             assert!(result.model_text().len() <= 16_000 + 128);
         }
@@ -299,11 +271,11 @@ mod tests {
             .repeat(200); // ~19K chars < qaqh-types 24K 硬顶
         let mut result =
             ToolResult::error_with("no_match", error.clone(), true, Some("refine old".into()));
-        apply("exec_command", &mut result);
+        apply(&StandardPolicy, "exec_command", &mut result);
         assert_eq!(result.model_text(), error);
 
         let mut partial = ToolResult::partial("x\n".repeat(5_000));
-        apply("web_fetch", &mut partial);
+        apply(&StandardPolicy, "web_fetch", &mut partial);
         assert_eq!(partial.status, ToolStatus::Partial);
         assert_eq!(partial.model_text(), "x\n".repeat(5_000));
     }
@@ -312,7 +284,7 @@ mod tests {
     fn unknown_tool_passes_through() {
         let body = "custom tool output\n";
         let mut result = ok(body);
-        apply("custom_tool", &mut result);
+        apply(&StandardPolicy, "custom_tool", &mut result);
         assert_eq!(result.model_text(), body);
     }
 }

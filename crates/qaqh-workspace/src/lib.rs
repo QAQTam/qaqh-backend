@@ -76,13 +76,12 @@ pub use manager::{
 // loop-side references stay `qaqh_workspace::X` without naming submodules.
 pub use authorization::{
     Admission, ApprovalError, AuthorizedToolCall, PermissionChallenge, ToolInvocation, admit,
-    admit_with_context, authorize_call, authorize_call_with_context, trust_folder,
+    admit_with_context, authorize_call_with_context, trust_folder,
 };
 pub use permission::{
     PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory, TrustedFolderSet,
-    classify_risk, extract_target_paths, extract_target_paths_in, is_self_administration_path,
-    normalize_lexically, patch_target_paths, path_within_dir, resolve_target_path,
-    resolve_target_path_in,
+    classify_risk, extract_target_paths_in, is_self_administration_path, normalize_lexically,
+    patch_target_paths, path_within_dir, resolve_target_path, resolve_target_path_in,
 };
 pub use safety::SafetyVerdict;
 
@@ -109,23 +108,7 @@ pub use qaqh_types::{
     ToolStatus,
 };
 
-// ── Global state ──
-
-// ── 全局状态：已随权限引擎拆至 qaqh-permission（P2 拆分，研究文档 §4-c）。
-// 进程级会话/工作区/取消状态 + actor thread-local 经下方
-// re-export 保持 `qaqh_workspace::X` 路径兼容；TEST_RUNTIME_SERIAL 仅服务
-// 门面自身测试（journal/confirm_apply/copy_range），留在此处。
-
-/// Unit tests mutate process-wide runtime state. Keep those mutations
-/// deterministic even when the Rust test harness runs modules in parallel.
-pub static TEST_RUNTIME_SERIAL: std::sync::LazyLock<std::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
-
-pub use qaqh_permission::{
-    clear_actor_context, clear_cancel, current_session, current_workspace, display_path,
-    is_actor_context, is_cancel, pop_thread_workspace, push_thread_workspace,
-    resolve_workspace_path, set_actor_context, set_cancel, set_current_session, set_workspace,
-};
+// ── P0-2：线程局部状态与 TEST_RUNTIME_SERIAL 已随 actor/ambient 视图退役 ──
 
 pub use qaqh_tool_core::{
     EXEC_PROGRESS_CHANNEL_CAPACITY, ExecOutputStream, ExecProgressEvent, ExecProgressSender,
@@ -312,29 +295,3 @@ pub fn parse_opt(args: &str, key: &str) -> Option<String> {
 
 #[cfg(test)]
 mod schema_spot_check;
-
-#[cfg(test)]
-mod actor_context_tests {
-    use super::*;
-
-    #[test]
-    fn actor_context_isolates_workspace_and_session_on_current_thread() {
-        // Enter actor context and verify thread-local takes precedence.
-        set_actor_context("/tmp/actor-ws", "actor-seed");
-        assert_eq!(current_workspace(), "/tmp/actor-ws");
-        assert_eq!(current_session().as_deref(), Some("actor-seed"));
-
-        set_workspace("/tmp/actor-ws-2");
-        set_current_session("actor-seed-2");
-        assert_eq!(current_workspace(), "/tmp/actor-ws-2");
-        assert_eq!(current_session().as_deref(), Some("actor-seed-2"));
-
-        set_cancel(true);
-        assert!(is_cancel());
-
-        clear_actor_context();
-        assert_ne!(current_workspace(), "/tmp/actor-ws-2");
-        assert_ne!(current_session().as_deref(), Some("actor-seed-2"));
-        assert!(!is_cancel());
-    }
-}

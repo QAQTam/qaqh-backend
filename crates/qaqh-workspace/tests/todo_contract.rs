@@ -112,13 +112,13 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
         std::env::set_var("QAQH_DATA_DIR", &temp_data);
     }
     qaqh_workspace::runtime::init_tools("todo-contract", &[], vec![]);
-    qaqh_workspace::runtime::set_context("todo-contract", 1);
     // 显式上下文。刻意用最严档 read-only：todo_* 是会话内状态工具，
     // permission 层对其豁免（永不弹确认），本测试同时验证这一点。
     let ctx = qaqh_workspace::runtime::ToolCtx {
         session_id: "todo-contract".into(),
         permission_level: 1,
         workspace_root: None,
+        sandbox: None,
     };
 
     // write：全量文本覆写（apply_patch 范式，一行一条）。
@@ -222,7 +222,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["items"][2]["status"], "cancelled");
 
     // todo.json 格式干净（无 legacy Goal 强制归一化）。
-    let store = qaqh_workspace::todo::load_todo().expect("load todo");
+    let store = qaqh_workspace::todo::load_todo_for("todo-contract").expect("load todo");
     assert_eq!(store.mode, qaqh_workspace::todo::TodoMode::Manual);
 
     std::fs::remove_dir_all(&temp_home).expect("remove isolated home");
@@ -237,18 +237,17 @@ fn web_fetch_output_enters_authorization_resources() {
     let workspace = dir.path().canonicalize().unwrap();
     let out = workspace.join("notes").join("page.md");
 
-    let _guard =
-        qaqh_workspace::push_thread_workspace(Some(workspace.to_string_lossy().into_owned()));
-    let paths = qaqh_workspace::permission::extract_target_paths(
+    let paths = qaqh_workspace::permission::extract_target_paths_in(
         "web_fetch",
         &serde_json::json!({"url": "https://example.com", "output": "notes/page.md"}),
+        &workspace,
     );
     // 无 output 参数的 web_fetch（只读正文）不得凭空产生写目标。
-    let read_only = qaqh_workspace::permission::extract_target_paths(
+    let read_only = qaqh_workspace::permission::extract_target_paths_in(
         "web_fetch",
         &serde_json::json!({"url": "https://example.com"}),
+        &workspace,
     );
-    qaqh_workspace::pop_thread_workspace(None);
 
     assert!(
         read_only.is_empty(),

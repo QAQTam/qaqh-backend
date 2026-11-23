@@ -416,13 +416,11 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: 
 /// Production registration uses [`ApplyPatchTool`] directly; this bridge keeps
 /// the existing in-process call shape for older tests.
 #[cfg(test)]
-pub(super) fn exec_apply_patch(args: &Value) -> crate::ToolResult {
-    exec_apply_patch_in(&crate::FileRuntime::default(), args)
-}
-
-/// 共享账本的变体（read→apply_patch→last_hash 链路用同一份 FileRuntime）。
-#[cfg(test)]
-pub(super) fn exec_apply_patch_in(files: &crate::FileRuntime, args: &Value) -> crate::ToolResult {
+pub(super) fn exec_apply_patch_in_ws(
+    files: &crate::FileRuntime,
+    workspace: &str,
+    args: &Value,
+) -> crate::ToolResult {
     use crate::file_mutate::test_tool_context_in;
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
@@ -444,13 +442,7 @@ pub(super) fn exec_apply_patch_in(files: &crate::FileRuntime, args: &Value) -> c
             .to_string(),
         );
     }
-    // Commit1 过渡：workspace 取自 set_workspace 的 TLS（与旧 ambient 形态一致）；
-    // Commit3 收尾后由测试显式传根，TLS 语义整体退役。
-    let ctx = test_tool_context_in(
-        &qaqh_permission::current_workspace(),
-        "apply-patch-compat",
-        Duration::from_secs(60),
-    );
+    let ctx = test_tool_context_in(workspace, "apply-patch-compat", Duration::from_secs(60));
     TypedToolAdapter::new(ApplyPatchTool {
         files: files.clone(),
     })
@@ -501,9 +493,7 @@ mod tests {
                 args[k] = v.clone();
             }
         }
-        // 测试直接注入 workspace（避免依赖全局 CURRENT_WORKSPACE）
-        qaqh_permission::set_workspace(&ws.to_string());
-        let result = exec_apply_patch_in(files, &args);
+        let result = exec_apply_patch_in_ws(files, ws, &args);
         if let Some(err) = &result.error {
             return serde_json::json!({
                 "status": "error",
@@ -528,17 +518,17 @@ mod tests {
     /// 旧拼写 `patch` 经 serde alias 永久兼容。两条拼写都必须能走完引擎。
     #[test]
     fn canonical_input_field_and_legacy_patch_alias_both_parse() {
-        let (dir, ws) = repo_with_commit(&[("a.txt", "one\n"), ("b.txt", "two\n")]);
-        qaqh_permission::set_workspace(&ws);
+        let (_dir, ws) = repo_with_commit(&[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        let files = crate::FileRuntime::default();
         let patch_a = "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+ONE\n*** End Patch\n";
         let patch_b = "*** Begin Patch\n*** Update File: b.txt\n@@\n-two\n+TWO\n*** End Patch\n";
-        let legacy = exec_apply_patch(&serde_json::json!({ "patch": patch_a }));
+        let legacy = exec_apply_patch_in_ws(&files, &ws, &serde_json::json!({ "patch": patch_a }));
         assert!(
             legacy.error.is_none(),
             "alias `patch` must parse: {:?}",
             legacy.error
         );
-        let canonical = exec_apply_patch(&serde_json::json!({ "input": patch_b }));
+        let canonical = exec_apply_patch_in_ws(&files, &ws, &serde_json::json!({ "input": patch_b }));
         assert!(
             canonical.error.is_none(),
             "canonical `input` must parse: {:?}",
@@ -756,8 +746,11 @@ mod tests {
 +whatever
 *** End Patch
 ";
-        qaqh_permission::set_workspace(&ws.to_string());
-        let result = exec_apply_patch(&serde_json::json!({ "patch": patch }));
+        let result = exec_apply_patch_in_ws(
+            &crate::FileRuntime::default(),
+            &ws,
+            &serde_json::json!({ "patch": patch }),
+        );
         let envelope = result.render_xml_envelope();
         assert!(
             envelope.contains("error_code=\"no_match\""),
@@ -816,8 +809,11 @@ mod tests {
             patch.push_str(&format!("*** Update File: d{i}.txt\n@@\n-v{i}\n+V{i}\n"));
         }
         patch.push_str("*** Update File: zz.txt\n@@\n-ABSENT LINE\n+whatever\n*** End Patch\n");
-        qaqh_permission::set_workspace(&ws.to_string());
-        let result = exec_apply_patch(&serde_json::json!({ "patch": patch }));
+        let result = exec_apply_patch_in_ws(
+            &crate::FileRuntime::default(),
+            &ws,
+            &serde_json::json!({ "patch": patch }),
+        );
         let envelope = result.render_xml_envelope();
         assert!(
             envelope.contains("already applied: d0.txt"),
@@ -858,8 +854,11 @@ mod tests {
     fn success_receipt_matches_codex_shape() {
         let (_dir, workspace) = repo_with_commit(&[]);
         let patch = "*** Begin Patch\n*** Add File: codex-receipt.txt\n+hello\n*** End Patch\n";
-        qaqh_permission::set_workspace(&workspace);
-        let result = exec_apply_patch(&serde_json::json!({"patch": patch}));
+        let result = exec_apply_patch_in_ws(
+            &crate::FileRuntime::default(),
+            &workspace,
+            &serde_json::json!({"patch": patch}),
+        );
         assert!(result.is_success(), "{}", result.model_text());
         assert!(
             result
@@ -873,7 +872,8 @@ mod tests {
     #[test]
     fn typed_apply_patch_registration_and_display_are_same_source() {
         let mut manager = qaqh_workspace::ToolManager::new();
-        register(&mut manager, &crate::FileRuntime::default());
+        let files = crate::FileRuntime::default();
+        register(&mut manager, &files);
         assert!(
             manager.builtin("apply_patch").is_some(),
             "apply_patch must be on the typed execution surface"
@@ -881,8 +881,11 @@ mod tests {
 
         let (_dir, workspace) = repo_with_commit(&[("a.txt", "old\n")]);
         let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch\n";
-        qaqh_permission::set_workspace(&workspace);
-        let result = exec_apply_patch(&serde_json::json!({"patch": patch}));
+        let result = exec_apply_patch_in_ws(
+            &files,
+            &workspace,
+            &serde_json::json!({"patch": patch}),
+        );
         assert!(result.is_success(), "{}", result.model_text());
         assert_eq!(result.data["files"], serde_json::json!(1));
         let display = result.display().expect("typed display");
@@ -914,8 +917,11 @@ mod tests {
     /// 在指定 workspace 里跑一次 apply/dry_run，返回原始 [`crate::ToolResult`]
     /// （`run_in` 只给 data，读不到展示面的 `diff`）。
     fn apply_result_in(workspace: &str, patch: &str, dry_run: bool) -> crate::ToolResult {
-        qaqh_permission::set_workspace(&workspace.to_string());
-        exec_apply_patch(&serde_json::json!({ "patch": patch, "dry_run": dry_run }))
+        exec_apply_patch_in_ws(
+            &crate::FileRuntime::default(),
+            workspace,
+            &serde_json::json!({ "patch": patch, "dry_run": dry_run }),
+        )
     }
 
     /// 多文件补丁一次给出**全部**文件段：裸 unified（无 `diff --git` 头），

@@ -1173,10 +1173,10 @@ impl ProcessRegistry {
     /// 每次轮询先经 `try_wait` 刷新终态：子进程退出即返回，不依赖管道 EOF
     /// （孙进程可能持有管道写端，EOF 永不出现；原实现只查 status 字段，
     /// 而 backgrounded 路径的 mark_exited 在 EOF 后才执行 → 永远 running）。
-    /// 取消检查（exec 生命周期重写阶段 2，报告 P1）：每次轮询同时检查
-    /// per-call 取消旗标与 ambient `is_cancel()`——非 exec 阻塞工具
-    /// （process wait）的飞行中取消必须立即返回，不得阻塞到 timeout。
-    /// 返回的 info 中 `wait_interrupted_by_cancel = true` 标记提前返回原因。
+    /// 取消检查（exec 生命周期重写阶段 2，报告 P1）：每次轮询检查 per-call
+    /// 取消旗标——非 exec 阻塞工具（process wait）的飞行中取消必须立即返回，
+    /// 不得阻塞到 timeout。返回的 info 中 `wait_interrupted_by_cancel = true`
+    /// 标记提前返回原因。
     pub fn wait_for(
         id: u32,
         timeout_secs: u64,
@@ -1184,9 +1184,7 @@ impl ProcessRegistry {
     ) -> Option<serde_json::Value> {
         let start = Instant::now();
         loop {
-            if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-                || crate::is_cancel()
-            {
+            if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
                 let mut info = Self::get_info(id)
                     .unwrap_or_else(|| serde_json::json!({ "id": id, "status": "missing" }));
                 if let serde_json::Value::Object(ref mut map) = info {

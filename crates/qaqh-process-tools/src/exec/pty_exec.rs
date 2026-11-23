@@ -150,7 +150,7 @@ pub(crate) fn pty_exec(
                 break;
             }
             Ok(None) => {
-                if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) || crate::is_cancel() {
+                if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
                     let _ = handle.kill_group();
                     let _ = handle.wait();
                     cancelled = true;

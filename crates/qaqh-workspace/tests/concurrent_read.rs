@@ -8,7 +8,7 @@ fn ten_parallel_reads() {
     let _ = std::fs::create_dir_all(&tmp);
     let file_path = tmp.join("test.txt");
     std::fs::write(&file_path, "0123456789").unwrap();
-    qaqh_workspace::set_workspace(&tmp.to_string_lossy());
+    let ws = tmp.to_string_lossy().to_string();
 
     // Init tool manager
     qaqh_workspace::runtime::init_tools("test", &[], vec![]);
@@ -18,16 +18,18 @@ fn ten_parallel_reads() {
 
     let (done_tx, done_rx) = mpsc::channel();
 
-    // Knife-1 step 2: runtime context is per-actor (thread-local), so each
-    // executing thread provides its own context. The concurrent tool manager
-    // reads over the shared process manager remain the point of this test.
     let mut handles = Vec::new();
     for i in 0..10 {
         let args = args.clone();
         let done_tx = done_tx.clone();
+        let ws = ws.clone();
         handles.push(std::thread::spawn(move || {
-            qaqh_workspace::runtime::set_context("test", 4);
-            let ctx = qaqh_workspace::runtime::ToolCtx::admitted("test");
+            let ctx = qaqh_workspace::runtime::ToolCtx {
+                session_id: "test".into(),
+                permission_level: 3,
+                workspace_root: Some(ws),
+                sandbox: None,
+            };
             let result = qaqh_workspace::execution::execute_with_context(
                 "read",
                 &args,

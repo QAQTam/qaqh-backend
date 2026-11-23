@@ -357,9 +357,7 @@ fn direct_exec_inner(
                 break;
             }
             None => {
-                if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-                    || crate::is_cancel()
-                {
+                if cancel.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst)) {
                     // 取消 = 杀进程树（含后代），防止管道泄漏
                     crate::process_registry::ProcessRegistry::kill(proc_id);
                     cancelled = true;

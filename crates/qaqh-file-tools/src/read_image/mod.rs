@@ -376,14 +376,10 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped) {
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
 pub(super) fn handle_read_image(args: serde_json::Value) -> crate::ToolResult {
-    use crate::file_mutate::test_tool_context_in;
+    use crate::file_mutate::test_tool_context;
     use crate::tool_api::{ErasedTool, TypedToolAdapter};
 
-    let call_ctx = test_tool_context_in(
-        &qaqh_permission::current_workspace(),
-        "read-image-compat",
-        Duration::from_secs(30),
-    );
+    let call_ctx = test_tool_context("read-image-compat", Duration::from_secs(30));
     TypedToolAdapter::new(ReadImageTool)
         .execute(call_ctx, args)
         .unwrap_or_else(|fatal| panic!("read_image tool fatal: {}", fatal.message))
@@ -395,6 +391,9 @@ pub(super) fn handle_read_image(args: serde_json::Value) -> crate::ToolResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 仅串行本模块修改 `QAQH_DATA_DIR` 环境变量的测试。
+    static IMAGE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// A minimal valid PNG (1×1 pixel, red)
     fn test_png_bytes() -> Vec<u8> {
@@ -409,7 +408,7 @@ mod tests {
 
     #[test]
     fn registry_peek_is_non_destructive() {
-        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
+        let _serial = IMAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-{}", std::process::id()));
@@ -438,7 +437,7 @@ mod tests {
     fn reset_then_replay_keeps_indices_stable() {
         // 模拟 session restore：先 reset 再按历史顺序重放注册，
         // 重复 restore 不产生重复条目、不移动索引。
-        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
+        let _serial = IMAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-reset-{}", std::process::id()));
@@ -470,7 +469,7 @@ mod tests {
     fn register_image_ref_rebuilds_peek_without_bytes() {
         // A-2 L0 resume 重建路径：ImageRef 已在场（磁盘有文件），
         // register_image_ref 零字节登记，peek 读盘还原。
-        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
+        let _serial = IMAGE_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("qaqh-read-img-ref-{}", std::process::id()));

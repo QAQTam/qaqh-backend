@@ -8,33 +8,8 @@ use crate::tool_api::{
     CancellationToken, SandboxMode, SandboxSpec, ToolCallContext, ToolCallSource,
 };
 
-// 子代理沙箱标志（per-actor）：`run_actor` subagent 分支在 actor 线程上设置。
-//
-// 沙箱语义（方案 B）：子代理**没有用户审批通道**——
-// - 文件级操作（Read/Write）且全部路径在 workspace 内 → 自动批准
-//   （等价 Level 3 的 workspace 内语义，子代理可以正常干活）；
-// - 其余（Exec / Net / 跨 workspace 路径）→ **自动拒绝**（返回
-//   `PermissionDenied` 失败，不产生 `ToolPermissionRequested` 弹窗事件，
-//   不挂起回合）。
-//
-// 同时解决"卡死"（L1-L3 下子代理审批无人响应）与"越狱"（子代理
-// 跨 workspace / exec / 网络访问）两个问题。
-//
-// thread-local：主代理与子代理并发时，子代理的沙箱不会误伤主代理的
-// 工具准入（`admit` 只在同一 actor 线程上执行）。
-thread_local! {
-    static SUBAGENT_SANDBOX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// 启用/关闭子代理沙箱（仅 actor 线程内调用）。
-pub fn set_subagent_sandbox(on: bool) {
-    SUBAGENT_SANDBOX.with(|slot| slot.set(on));
-}
-
-/// 当前线程是否处于子代理沙箱模式。
-pub fn is_subagent_sandbox() -> bool {
-    SUBAGENT_SANDBOX.with(|slot| slot.get())
-}
+// P0-2：`SUBAGENT_SANDBOX` 线程态（`set_subagent_sandbox` / `is_subagent_sandbox`）
+// 已退役——沙箱模式由调用方通过 `ToolCallContext::sandbox` 显式携带。
 
 /// 沙箱内的「跨区」判定。
 ///
@@ -318,20 +293,12 @@ fn legacy_tool_call_context(
     permission_level: u8,
     workspace_root: &Path,
 ) -> ToolCallContext {
-    let cancellation = CancellationToken::new();
-    if crate::is_cancel() {
-        cancellation.cancel();
-    }
     ToolCallContext {
         call_id: invocation.call_id.clone(),
         session_id: invocation.session_id.clone(),
         workspace_root: workspace_root.to_path_buf(),
         permission_level: crate::permission::PermissionLevel::from_u8(permission_level),
-        sandbox: if is_subagent_sandbox() {
-            SandboxMode::Subagent
-        } else {
-            SandboxMode::Main
-        },
+        sandbox: SandboxMode::Main,
         sandbox_spec: SandboxSpec::for_permission(
             workspace_root.to_path_buf(),
             crate::permission::PermissionLevel::from_u8(permission_level),
@@ -339,9 +306,9 @@ fn legacy_tool_call_context(
         )
         .with_trusted_roots(with_global_trusted(|s| s.set().clone())),
         exec_default_shell: None,
-            exec_max_output_chars: None,
+        exec_max_output_chars: None,
         timeout: Duration::ZERO,
-        cancellation,
+        cancellation: CancellationToken::new(),
         progress: None,
         exec_progress: None,
         exec_host: None,
@@ -639,49 +606,6 @@ fn exec_hits_self_administration_paths(invocation: &ToolInvocation, workspace_ro
         .any(|path| crate::permission::is_self_administration_path(&path))
 }
 
-/// Resolve the effective workspace root the way the loop's engines did
-/// (empty/"." falls back to the process cwd).
-///
-/// BUG-2026-09-12-05：读 TLS 优先的 `current_workspace()` 而非进程全局——
-/// admit 发生在 actor 线程（或恢复了 actor scope 的线程），进程全局在多
-/// actor daemon 中恒空，直接读全局会把授权基准锚到 daemon 进程 cwd，与
-/// 执行线程按会话工作区解析的资源错位（RESOURCE_MISMATCH /
-/// WORKSPACE_MISMATCH 拒工具通道）。
-fn effective_workspace_root() -> PathBuf {
-    let ws = crate::current_workspace();
-    if ws.is_empty() || ws == "." {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    } else {
-        std::path::PathBuf::from(ws)
-    }
-}
-
-/// Single admission facade (PR-1-1 / B1): the loop passes (session, call,
-/// tool, args) and nothing else. Category comes from the handler registry
-/// (single source of truth, conservative `Write` fallback), the permission
-/// level and workspace root resolve inside this crate, and the trusted
-/// folder set is the process-global singleton. The loop performs zero disk
-/// reads and owns no authorization state.
-pub fn authorize_call(
-    session_id: &str,
-    call_id: &str,
-    tool_name: &str,
-    args: &serde_json::Value,
-    permission_level: u8,
-) -> Admission {
-    let invocation = ToolInvocation {
-        session_id: session_id.to_string(),
-        call_id: call_id.to_string(),
-        tool_name: tool_name.to_string(),
-        args: args.clone(),
-        category: crate::runtime::lookup_category(tool_name)
-            .unwrap_or(crate::permission::ToolCategory::Write),
-    };
-    let ws_root = effective_workspace_root();
-    let context = legacy_tool_call_context(&invocation, permission_level, &ws_root);
-    admit_with_context(invocation, &context, &trusted_snapshot())
-}
-
 /// Single admission facade using the caller's explicit tool context.
 ///
 /// `ToolCallContext` is the source of truth for session/workspace/permission/
@@ -720,12 +644,6 @@ mod tests {
 
     #[test]
     fn approval_challenge_preserves_backend_risk_and_consequence() {
-        // 沙箱标志是 thread-local（`SUBAGENT_SANDBOX`），默认关闭，故本测试可
-        // 断言 "level 1 write 必须要求审批"（沙箱下写自动批准）；串行化与其他
-        // 运行时状态测试共用 `TEST_RUNTIME_SERIAL`。
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let workspace = std::env::temp_dir().join("qaqh-authorization-risk");
         let invocation = ToolInvocation {
             session_id: "seed-a".into(),
@@ -750,9 +668,6 @@ mod tests {
 
     #[test]
     fn exec_read_only_auto_approves_only_under_write_enforced_sandbox() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let workspace = std::env::temp_dir().join("qaqh-authorization-exec-class");
         let invocation = |command: &str, shell: Option<&str>| ToolInvocation {
             session_id: "seed-a".into(),
@@ -920,9 +835,6 @@ mod tests {
     /// 并按工作区解析，`cwd=<sessions dir>` + `cat messages.jsonl` 两头都漏。
     #[test]
     fn exec_cwd_in_session_dir_blocks_auto_approve_even_for_relative_reads() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let workspace = std::env::temp_dir().join("qaqh-authorization-exec-cwd");
         let sessions_dir = qaqh_types::platform::sessions_dir();
         let invocation = ToolInvocation {
@@ -955,9 +867,6 @@ mod tests {
     /// 走自动放行；无写强制的平台保持常规审批）。
     #[test]
     fn exec_cwd_inside_workspace_keeps_classified_auto_approve() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         if !exec_write_isolation_wired() {
             return;
         }
@@ -989,9 +898,6 @@ mod tests {
 
     #[test]
     fn sandbox_run_tier_auto_runs_exec_but_keeps_deny_net_and_session_gates() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let workspace = std::env::temp_dir().join("qaqh-authorization-sandbox-run");
         let invocation = |tool: &str,
                           category: crate::permission::ToolCategory,
@@ -1094,23 +1000,23 @@ mod tests {
 
     // ── 子代理沙箱（方案 B）──
 
-    /// 持锁 + 置位沙箱；Drop 时复位。沙箱标志是 thread-local（`SUBAGENT_SANDBOX`
-    /// 为 `Cell<bool>`，只作用于本测试线程），串行化与其他运行时状态测试共用
-    /// `TEST_RUNTIME_SERIAL`。
-    fn sandbox_guard() -> impl Drop {
-        struct Guard {
-            _serial: std::sync::MutexGuard<'static, ()>,
-        }
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                set_subagent_sandbox(false);
-            }
-        }
-        let serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        set_subagent_sandbox(true);
-        Guard { _serial: serial }
+    fn invoke_with_sandbox(
+        sandbox: SandboxMode,
+        tool: &str,
+        args: serde_json::Value,
+        ws: &std::path::Path,
+        category: crate::permission::ToolCategory,
+    ) -> Admission {
+        let invocation = ToolInvocation {
+            session_id: "sub-a".into(),
+            call_id: "call-s".into(),
+            tool_name: tool.into(),
+            args,
+            category,
+        };
+        let mut context = legacy_tool_call_context(&invocation, 1, ws);
+        context.sandbox = sandbox;
+        admit_with_context(invocation, &context, &HashSet::new())
     }
 
     fn invoke(
@@ -1119,23 +1025,11 @@ mod tests {
         ws: &std::path::Path,
         category: crate::permission::ToolCategory,
     ) -> Admission {
-        admit(
-            ToolInvocation {
-                session_id: "sub-a".into(),
-                call_id: "call-s".into(),
-                tool_name: tool.into(),
-                args,
-                category,
-            },
-            1, // 即使主代理是 read-only 档，沙箱下 workspace 内文件操作也自动批准
-            ws,
-            &HashSet::new(),
-        )
+        invoke_with_sandbox(SandboxMode::Subagent, tool, args, ws, category)
     }
 
     #[test]
     fn sandbox_auto_approves_workspace_file_ops_even_at_level_1() {
-        let _g = sandbox_guard();
         let ws = std::env::temp_dir().join("qaqh-sandbox-a");
         // workspace 内写：Level 1 本应 AskUser，沙箱下自动批准。
         let admission = invoke(
@@ -1163,7 +1057,6 @@ mod tests {
 
     #[test]
     fn sandbox_denies_cross_workspace_access() {
-        let _g = sandbox_guard();
         let ws = std::env::temp_dir().join("qaqh-sandbox-b");
         let outside = std::env::temp_dir().join("qaqh-sandbox-b-outside");
         let admission = invoke(
@@ -1192,31 +1085,12 @@ mod tests {
         );
     }
 
-    /// 设置本线程的 actor 工作区并 Drop 时清除。
-    ///
-    /// `extract_target_paths` 用 `current_workspace()` 解析相对路径；生产里由
-    /// actor 线程捕获后 install 到工具线程，测试里就地设置以对齐语义。
-    fn actor_workspace_guard(ws: &std::path::Path) -> impl Drop {
-        struct Guard;
-        impl Drop for Guard {
-            fn drop(&mut self) {
-                crate::clear_actor_context();
-            }
-        }
-        crate::set_actor_context(&ws.to_string_lossy(), "seed-sandbox");
-        Guard
-    }
-
     #[test]
     fn sandbox_approves_workspace_relative_paths() {
         // `read` 的路径契约允许工作区相对路径（`qaqh-file-tools/src/file_query.rs:20`
         // "workspace-relative or absolute"），授权侧按同一基准解析
-        // （`extract_target_paths` 末尾 `map(resolve_target_path)`）。工作区内的
-        // 相对路径必须放行；2026-10-15 读自由对齐后，读侧 `..` 逃逸不再拒
-        // （与主代理一致），写侧逃逸仍由跨区写守卫拦截。
-        let _g = sandbox_guard();
+        // （`admit_with_context` 经 `extract_target_paths_in(..., workspace_root)`）。
         let ws = std::env::temp_dir().join("qaqh-sandbox-rel");
-        let _wsg = actor_workspace_guard(&ws);
         for (tool, category) in [
             ("read", crate::permission::ToolCategory::Read),
             ("write", crate::permission::ToolCategory::Write),
@@ -1261,7 +1135,6 @@ mod tests {
         // 会话未绑定工作区（`""` / `"."`）：没有「区外」可言，文件读写放行——
         // 大多数 coding agent 允许不选目录，不设工作区也必须能用。
         // exec / 网络 / MCP 不依赖工作区，仍然一律拒。
-        let _g = sandbox_guard();
         let anywhere = std::env::temp_dir().join("qaqh-sandbox-nounset-any.txt");
         for ws in [PathBuf::from(""), PathBuf::from(".")] {
             for (tool, category) in [
@@ -1297,7 +1170,6 @@ mod tests {
     fn sandbox_denies_self_administration_files_even_when_workspace_is_unset() {
         // 放宽「未设置工作区」不能顺带打开自我提权面：配置 / 凭据在任何情况下
         // 都不给子代理读（沙箱没有审批通道，只能拒）。会话数据不在此列。
-        let _g = sandbox_guard();
         let secret = qaqh_types::platform::config_path();
         let admission = invoke(
             "read",
@@ -1315,10 +1187,6 @@ mod tests {
     fn main_agent_reads_outside_workspace_auto_approve_at_every_tier() {
         // 2026-10-05 读自由规则：读取完全不受工作区限制——主代理在 read-only /
         // workspace-write 档下读工作区外路径不再弹审批（敏感路径守卫仍在前）。
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-read-free-ws");
         let outside = std::env::temp_dir().join("qaqh-read-free-outside");
         for level in [1u8, 2, 3] {
@@ -1343,7 +1211,6 @@ mod tests {
 
     #[test]
     fn sandbox_denies_exec_and_net() {
-        let _g = sandbox_guard();
         let ws = std::env::temp_dir().join("qaqh-sandbox-c");
         for (tool, args) in [
             ("exec_command", serde_json::json!({ "cmd": "whoami" })),
@@ -1369,7 +1236,6 @@ mod tests {
     fn mcp_tools_denied_in_subagent_sandbox() {
         // S3：MCP 工具（category Exec/Net）在子代理沙箱一律拒绝——
         // D5 快路径绕过 needs_permission，沙箱拦截在此显式兑现。
-        let _g = sandbox_guard();
         let ws = std::env::temp_dir().join("qaqh-sandbox-mcp");
         for tool in ["mcp__demo__echo", "mcp__web-search__search"] {
             let admission = invoke(
@@ -1394,11 +1260,6 @@ mod tests {
         // T-8-1（安全审查 P1-1 / O-4）：D5 不再对 Exec/Net 类别无条件放行。
         // read-only / workspace-write 必须审批；skip-permissions 是显式
         // bypass，继续走 D5 快路径。
-        // 与 sandbox_guard 共用 `TEST_RUNTIME_SERIAL` 串行化。
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-mcp-d5");
         for level in [1u8, 2] {
             let admission = admit(
@@ -1439,10 +1300,6 @@ mod tests {
     #[test]
     fn mcp_read_tools_keep_d5_fast_path() {
         // 只读动态工具（mcp resources 聚合）不得被 T-8-1 收紧误伤。
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-mcp-d5-read");
         for level in [1u8, 2, 3] {
             let admission = admit(
@@ -1467,13 +1324,9 @@ mod tests {
     #[test]
     fn non_sandbox_still_requires_approval() {
         // 未启用沙箱：read-only 档写仍需审批（主代理行为不受影响）。
-        // 与 sandbox_guard 共用 `TEST_RUNTIME_SERIAL` 串行化。
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        set_subagent_sandbox(false);
         let ws = std::env::temp_dir().join("qaqh-sandbox-d");
-        let admission = invoke(
+        let admission = invoke_with_sandbox(
+            SandboxMode::Main,
             "write",
             serde_json::json!({ "path": ws.join("notes.md") }),
             &ws,

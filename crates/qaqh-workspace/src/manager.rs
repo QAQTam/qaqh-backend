@@ -747,7 +747,6 @@ impl ToolManager {
                 }
             }
             None => {
-                crate::set_cancel(true);
                 for flag in self.inflight_tasks.values() {
                     flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -995,18 +994,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_setup_preserves_the_execution_session() {
-        // 会话装配（apply_init）与运行期切换（set_allowed）都只动工具集；
-        // 执行上下文中的会话身份不受工具集变更影响。
+    fn tool_setup_preserves_registered_tools() {
         let mut mgr = ToolManager::new();
         mgr.register_probe(probe("exec"));
-        crate::set_current_session("explicit-ambient");
         mgr.apply_init(vec![]);
         mgr.set_allowed(vec!["exec".to_string()]);
-        assert_eq!(
-            crate::current_session(),
-            Some("explicit-ambient".to_string())
-        );
+        assert_eq!(mgr.filtered_defs().len(), 1);
     }
 
     #[test]
@@ -1134,87 +1127,79 @@ mod m13_tests {
         args
     }
 
-    /// 测试桥：`is_path_in_workspace` 现在吃显式 workspace，本测试沿用
-    /// `set_workspace` 装好的全局工区。
-    fn in_ws(args: &serde_json::Value, risk: ToolRisk) -> bool {
-        in_ws_cat(args, &risk, crate::permission::ToolCategory::Write)
+    fn in_ws(ws: &std::path::Path, args: &serde_json::Value, risk: ToolRisk) -> bool {
+        in_ws_cat(ws, args, &risk, crate::permission::ToolCategory::Write)
     }
 
     fn in_ws_cat(
+        ws: &std::path::Path,
         args: &serde_json::Value,
         risk: &ToolRisk,
         category: crate::permission::ToolCategory,
     ) -> bool {
-        let ws = std::path::PathBuf::from(crate::current_workspace());
-        is_path_in_workspace(args, ws.as_path(), risk, category)
+        is_path_in_workspace(args, ws, risk, category)
     }
 
     #[test]
     fn sibling_prefix_and_dotdot_cannot_pose_as_workspace() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws-proj");
         std::fs::create_dir_all(&ws).unwrap();
-        let old_ws = crate::current_workspace();
-        crate::set_workspace(ws.to_str().unwrap());
 
         // 工作区内：相对与绝对路径均通过。
-        assert!(in_ws(&ctx_with_path("src/main.rs"), ToolRisk::Write));
+        assert!(in_ws(&ws, &ctx_with_path("src/main.rs"), ToolRisk::Write));
         assert!(in_ws(
+            &ws,
             &ctx_with_path(ws.join("src/main.rs").to_str().unwrap()),
             ToolRisk::Write
         ));
         // sibling 前缀（ws-proj-backup）不再被字符串前缀误判。
         assert!(!in_ws(
+            &ws,
             &ctx_with_path(tmp.path().join("ws-proj-backup/x").to_str().unwrap()),
             ToolRisk::Write
         ));
         // `..` 逃逸被词法归一化捕获。
-        assert!(!in_ws(&ctx_with_path("../outside.txt"), ToolRisk::Write));
+        assert!(!in_ws(&ws, &ctx_with_path("../outside.txt"), ToolRisk::Write));
         assert!(!in_ws(
+            &ws,
             &ctx_with_path("a/../../outside.txt"),
             ToolRisk::Write
         ));
         // 无 path 参数：非 Destructive 工具默认放行（ask/skills 不碰文件系统）。
         assert!(in_ws_cat(
+            &ws,
             &ctx_with_args(serde_json::json!({})),
             &ToolRisk::ReadOnly,
             crate::permission::ToolCategory::Read,
         ));
-
-        crate::set_workspace(&old_ws);
     }
 
     /// P0-2：文件型 Destructive 工具（`delete`：Destructive + Write）缺 `path`
     /// 时必须 fail-closed，否则会短路 `SafetyPolicy` 的出工区阻断。
     #[test]
     fn destructive_tool_without_path_is_treated_as_outside_workspace() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws-proj");
         std::fs::create_dir_all(&ws).unwrap();
-        let old_ws = crate::current_workspace();
-        crate::set_workspace(ws.to_str().unwrap());
 
         let write_cat = crate::permission::ToolCategory::Write;
         // `delete` 形态：Destructive + Write，却没有 path。
         let no_path = ctx_with_args(serde_json::json!({}));
         assert!(
-            !in_ws_cat(&no_path, &ToolRisk::Destructive, write_cat),
+            !in_ws_cat(&ws, &no_path, &ToolRisk::Destructive, write_cat),
             "文件型 Destructive 工具缺 path 必须判为工区外（fail-closed）"
         );
         // 同样的参数形状下，非 Destructive 工具不受影响（不误伤 ask/task/skills）。
-        assert!(in_ws_cat(&no_path, &ToolRisk::Write, write_cat));
+        assert!(in_ws_cat(&ws, &no_path, &ToolRisk::Write, write_cat));
         assert!(in_ws_cat(
+            &ws,
             &no_path,
             &ToolRisk::ReadOnly,
             crate::permission::ToolCategory::Read
         ));
         assert!(in_ws_cat(
+            &ws,
             &no_path,
             &ToolRisk::Administrative,
             crate::permission::ToolCategory::Read
@@ -1223,18 +1208,20 @@ mod m13_tests {
         assert!(matches!(
             crate::safety::SafetyPolicy::evaluate(
                 ToolRisk::Destructive,
-                in_ws_cat(&no_path, &ToolRisk::Destructive, write_cat)
+                in_ws_cat(&ws, &no_path, &ToolRisk::Destructive, write_cat)
             ),
             SafetyVerdict::Block(_)
         ));
         // Destructive 工具带工区内 path 时仍放行（`delete` 的正常形态）。
         assert!(in_ws_cat(
+            &ws,
             &ctx_with_path(ws.join("trash-me.txt").to_str().unwrap()),
             &ToolRisk::Destructive,
             write_cat
         ));
         // Destructive 工具带工区外 path 时阻断。
         assert!(!in_ws_cat(
+            &ws,
             &ctx_with_path(tmp.path().join("outside.txt").to_str().unwrap()),
             &ToolRisk::Destructive,
             write_cat
@@ -1242,12 +1229,11 @@ mod m13_tests {
         // Exec/Net 型 Destructive 工具（`exec`：无 path 参数是设计使然，workdir
         // 缺省 = 工区根）保持放行——它们的围栏在权限层（classify_risk 已报 High）。
         assert!(in_ws_cat(
+            &ws,
             &ctx_with_args(serde_json::json!({ "command": "rm -rf /tmp/x" })),
             &ToolRisk::Destructive,
             crate::permission::ToolCategory::Exec
         ));
-
-        crate::set_workspace(&old_ws);
     }
 }
 
@@ -1273,14 +1259,9 @@ mod safety_e2e_tests {
 
     #[test]
     fn destructive_tool_without_path_is_blocked_by_safety_policy() {
-        let _serial = crate::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let ws = tmp.path().join("ws");
         std::fs::create_dir_all(&ws).unwrap();
-        let old_ws = crate::current_workspace();
-        crate::set_workspace(ws.to_str().unwrap());
 
         let mut mgr = ToolManager::new();
         mgr.register_probe(destructive_probe("delete"));
@@ -1332,8 +1313,6 @@ mod safety_e2e_tests {
             "{}",
             report.content
         );
-
-        crate::set_workspace(&old_ws);
     }
 }
 

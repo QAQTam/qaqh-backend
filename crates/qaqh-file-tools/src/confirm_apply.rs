@@ -271,10 +271,11 @@ pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: 
 
 /// Compatibility entry retained for existing in-process tests.
 #[cfg(test)]
-fn exec_confirm_apply(args: &Value) -> crate::ToolResult {
+fn exec_confirm_apply_in(workspace: &str, args: &Value) -> crate::ToolResult {
     use crate::tool_api::ErasedTool;
 
-    let ctx = crate::file_mutate::test_tool_context(
+    let ctx = crate::file_mutate::test_tool_context_in(
+        workspace,
         "confirm-apply-compat",
         std::time::Duration::from_secs(60),
     );
@@ -282,6 +283,11 @@ fn exec_confirm_apply(args: &Value) -> crate::ToolResult {
         .execute(ctx, args.clone())
         .unwrap_or_else(|fatal| panic!("confirm_apply tool fatal: {}", fatal.message))
         .to_tool_result()
+}
+
+#[cfg(test)]
+fn exec_confirm_apply(args: &Value) -> crate::ToolResult {
+    exec_confirm_apply_in(".", args)
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -292,14 +298,14 @@ fn exec_confirm_apply(args: &Value) -> crate::ToolResult {
 mod tests {
     use super::*;
 
-    /// 写 CURRENT_WORKSPACE 的测试必须串行（全局静态，并行测试会互相踩踏）。
-    static WS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn run_confirm(id: &str, action: &str) -> serde_json::Value {
-        let result = exec_confirm_apply(&serde_json::json!({
-            "pending_id": id,
-            "action": action,
-        }));
+    fn run_confirm_in(workspace: &str, id: &str, action: &str) -> serde_json::Value {
+        let result = exec_confirm_apply_in(
+            workspace,
+            &serde_json::json!({
+                "pending_id": id,
+                "action": action,
+            }),
+        );
         let data = result.data.clone();
         if data.as_object().is_none_or(|o| o.is_empty()) {
             // 无结构化 data → 尝试解析错误 JSON；失败则按状态兜底。
@@ -318,6 +324,10 @@ mod tests {
         } else {
             data
         }
+    }
+
+    fn run_confirm(id: &str, action: &str) -> serde_json::Value {
+        run_confirm_in(".", id, action)
     }
 
     #[test]
@@ -368,27 +378,21 @@ mod tests {
 
     #[test]
     fn apply_patch_dry_run_then_confirm() {
-        // 本测试写全局 CURRENT_WORKSPACE：仅靠模块内 WS_LOCK 不足以与
-        // 其他模块的并行测试互斥，必须按家规叠加全仓串行锁。
-        let _serial = qaqh_workspace::TEST_RUNTIME_SERIAL
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let _guard = WS_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(dir.path().join("a.txt"), "line1\nline2\n").unwrap();
         let ws = dir.path().to_string_lossy().to_string();
-        // 引擎的 workspace-bounded 检查要求绝对路径落在 cwd 内：
-        // cwd = CURRENT_WORKSPACE（并行测试可能被踩踏）→ 用 cwd 无关的
-        // 方式不可行，因此这里直接设置全局并立即 confirm（串行窗口内安全）。
         let apath = format!("{}/a.txt", ws.replace('\\', "/"));
-        qaqh_permission::set_workspace(&ws);
         let patch = format!(
             "*** Begin Patch\n*** Update File: {apath}\n@@\n-line2\n+LINE2\n*** End Patch\n"
         );
-        let dry = crate::apply_patch::exec_apply_patch(&serde_json::json!({
-            "patch": patch,
-            "dry_run": true,
-        }));
+        let dry = crate::apply_patch::exec_apply_patch_in_ws(
+            &crate::FileRuntime::default(),
+            &ws,
+            &serde_json::json!({
+                "patch": patch,
+                "dry_run": true,
+            }),
+        );
         let data = dry.data.clone();
         let pending_id = data["pending_id"].as_str().expect("pending_id").to_string();
         assert_eq!(
@@ -396,10 +400,7 @@ mod tests {
             "line1\nline2\n"
         );
 
-        // 并行测试可能覆盖 CURRENT_WORKSPACE（Linux 调度差异放大竞争）：
-        // confirm 重放前重新钉住本测试的 workspace。
-        qaqh_permission::set_workspace(&ws);
-        let out = run_confirm(&pending_id, "apply");
+        let out = run_confirm_in(&ws, &pending_id, "apply");
         assert_eq!(out["status"], "ok", "confirm patch failed: {out}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),

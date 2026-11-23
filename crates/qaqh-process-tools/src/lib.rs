@@ -21,7 +21,6 @@ pub mod process_registry;
 pub use qaqh_file_tools::file_mutate;
 pub use qaqh_file_tools::support::{json_err, json_err_string, json_ok};
 pub use qaqh_permission::permission;
-pub use qaqh_permission::{current_session, current_workspace, is_cancel, resolve_workspace_path};
 pub use qaqh_tool_core::ToolRisk;
 pub use qaqh_tool_core::tool_api;
 pub use qaqh_tool_core::{

@@ -94,6 +94,8 @@ pub struct AuditEntry {
     /// 授权结果词汇表见 [`v2::Decision`]。
     pub decision: Option<String>,
     pub decision_reason: Option<String>,
+    /// P0-2：调用方生效沙箱是否子代理沙箱（显式来自 ToolCallContext/ToolCtx，不再读 TLS）。
+    pub sandbox: bool,
     /// 操作对象（路径 + before/after 指纹）。
     pub objects: Vec<v2::AuditObject>,
 }
@@ -118,7 +120,7 @@ impl AuditEntry {
 
     /// 投影为 v2 事件体（信封由 [`v2::append_event`] 补齐）。
     fn to_v2_event(&self) -> v2::Event {
-        let sandbox = crate::authorization::is_subagent_sandbox();
+        let sandbox = self.sandbox;
         v2::Event {
             kind: self.kind,
             actor: v2::Actor {
@@ -503,6 +505,7 @@ mod tests {
             effective_name: None,
             decision: Some("auto".to_string()),
             decision_reason: None,
+            sandbox: false,
             objects: vec![v2::AuditObject {
                 kind: "file".to_string(),
                 path: "/tmp/example.txt".to_string(),
