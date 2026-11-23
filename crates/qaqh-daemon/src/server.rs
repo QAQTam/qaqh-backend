@@ -227,10 +227,11 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             lan_address.map(|a| a.port()).unwrap_or_default()
         );
     }
-    let pending_commands = Arc::new(Mutex::new(
-        qaqh_ringing_runtime::PendingCommandStore::new_persistent(),
-    ));
     let service = QaqhService::init(sessions);
+    // v4.4 P1-3：receipt 权威进 `command_receipts`，服务库先于幂等表装配。
+    let pending_commands = Arc::new(Mutex::new(
+        qaqh_ringing_runtime::PendingCommandStore::new(service.owners().db().clone()),
+    ));
     let hub = Arc::new(RingingHub::with_database(
         epoch.clone(),
         Arc::clone(service.owners().db()),

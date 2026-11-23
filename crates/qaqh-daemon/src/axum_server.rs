@@ -46,9 +46,6 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
     let leases = std::sync::Arc::new(std::sync::Mutex::new(
         qaqh_ringing_runtime::RingingLeaseStore::new(),
     ));
-    let pending = std::sync::Arc::new(std::sync::Mutex::new(
-        qaqh_ringing_runtime::PendingCommandStore::new(),
-    ));
     static TEST_SERVICE: std::sync::OnceLock<qaqh_runtime::QaqhService> =
         std::sync::OnceLock::new();
     let service = TEST_SERVICE
@@ -59,6 +56,9 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
             )))
         })
         .clone();
+    let pending = std::sync::Arc::new(std::sync::Mutex::new(
+        qaqh_ringing_runtime::PendingCommandStore::new(std::sync::Arc::clone(service.owners().db())),
+    ));
     let hub = std::sync::Arc::new(qaqh_ringing_runtime::RingingHub::with_database(
         String::from("test-epoch"),
         std::sync::Arc::clone(service.owners().db()),

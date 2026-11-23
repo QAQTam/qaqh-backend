@@ -13,6 +13,7 @@ use tokio::sync::oneshot;
 pub mod goals;
 pub mod devices;
 pub mod quota;
+pub mod receipts;
 pub mod sidecar;
 pub mod schema;
 pub mod store;
