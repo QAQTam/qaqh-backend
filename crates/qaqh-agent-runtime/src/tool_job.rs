@@ -905,6 +905,7 @@ impl WorkspaceToolPort {
                     outcome: outcome.clone(),
                     output_text: Some(exec_result.content.clone()),
                     output_truncated: false,
+                    diff_text: diff_of(&exec_result),
                     metrics: Some(metrics),
                     code_delta: code_delta_of(&exec_result),
                     effects: effect_infos(&exec_result),
@@ -926,6 +927,7 @@ impl WorkspaceToolPort {
                     outcome: ToolCallOutcome::Completed,
                     output_text: Some(exec_result.content.clone()),
                     output_truncated: false,
+                    diff_text: diff_of(&exec_result),
                     metrics: Some(metrics),
                     code_delta: code_delta_of(&exec_result),
                     effects: effect_infos(&exec_result),
@@ -974,6 +976,7 @@ impl WorkspaceToolPort {
                     },
                     output_text: Some(exec_result.content.clone()),
                     output_truncated: false,
+                    diff_text: diff_of(&exec_result),
                     metrics: Some(run_metrics(&run)),
                     code_delta: code_delta_of(&exec_result),
                     effects: effect_infos(&exec_result),
@@ -1049,6 +1052,7 @@ fn cancelled_settlement(message: &str) -> ToolSettlement {
         },
         output_text: Some(message.to_string()),
         output_truncated: false,
+        diff_text: None,
         metrics: None,
         code_delta: None,
         effects: Vec::new(),
@@ -1074,6 +1078,7 @@ fn failed_settlement(
         },
         output_text,
         output_truncated: false,
+        diff_text: None,
         metrics,
         code_delta: None,
         effects: Vec::new(),
@@ -1123,6 +1128,15 @@ fn code_delta_of(result: &qaqh_workspace::execution::ToolExecResult) -> Option<C
         files_deleted: delta.files_deleted,
         file: delta.file.clone(),
     })
+}
+
+fn diff_of(result: &qaqh_workspace::execution::ToolExecResult) -> Option<String> {
+    result
+        .result
+        .display()
+        .and_then(|display| display.diff.clone())
+        .or_else(|| result.result.diff.clone())
+        .filter(|diff| !diff.trim().is_empty())
 }
 
 #[cfg(test)]

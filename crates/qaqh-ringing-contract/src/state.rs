@@ -272,6 +272,9 @@ pub struct ToolCallView {
     pub output: Option<ContentValue>,
     #[serde(default)]
     pub output_truncated: bool,
+    /// write/edit/apply_patch/delete 等写工具的展示面 unified diff(不进模型上下文;大 diff 走 Ref 外置)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<ContentValue>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<ToolMetrics>,
     /// edit 类工具对代码的净变更统计(结构化结果,不压进正文)。

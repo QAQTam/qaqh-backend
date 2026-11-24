@@ -101,14 +101,19 @@ fn event_heap_bytes(event: &SessionEvent) -> usize {
         | SessionEvent::ToolArgumentsDelta { text, .. }
         | SessionEvent::MessageDelta { text, .. }
         | SessionEvent::ExecSessionOutputDelta { text, .. } => text.len(),
-        SessionEvent::ToolFinished { output, .. } => output
-            .as_ref()
-            .map(|value| match value {
-                ContentValue::Inline { text } => text.len(),
-                ContentValue::Ref { .. } => 64,
-                ContentValue::Unavailable(_) => 8,
-            })
-            .unwrap_or_default(),
+        SessionEvent::ToolFinished { output, diff, .. } => {
+            let content_size = |value: &Option<ContentValue>| {
+                value
+                    .as_ref()
+                    .map(|value| match value {
+                        ContentValue::Inline { text } => text.len(),
+                        ContentValue::Ref { .. } => 64,
+                        ContentValue::Unavailable(_) => 8,
+                    })
+                    .unwrap_or_default()
+            };
+            content_size(output) + content_size(diff)
+        }
         SessionEvent::ExecSessionStarted { session }
         | SessionEvent::ExecSessionStateChanged { session }
         | SessionEvent::ExecSessionFinished { session } => session.output_preview.len(),
@@ -1147,6 +1152,7 @@ pub struct ToolSettlement {
     pub outcome: ToolCallOutcome,
     pub output_text: Option<String>,
     pub output_truncated: bool,
+    pub diff_text: Option<String>,
     pub metrics: Option<ToolMetrics>,
     pub code_delta: Option<CodeDelta>,
     pub effects: Vec<ToolEffectInfo>,
@@ -1337,6 +1343,7 @@ impl ToolLifecycle {
             outcome: settlement.outcome,
             output_text: settlement.output_text,
             output_truncated: settlement.output_truncated,
+            diff_text: settlement.diff_text,
             metrics: settlement.metrics,
             code_delta: settlement.code_delta,
             effects: settlement.effects,
@@ -1358,6 +1365,7 @@ impl ToolLifecycle {
             outcome: settlement.outcome,
             output_text: settlement.output_text,
             output_truncated: settlement.output_truncated,
+            diff_text: settlement.diff_text,
             metrics: settlement.metrics,
             code_delta: settlement.code_delta,
             effects: settlement.effects,
@@ -1581,6 +1589,18 @@ impl OwnerPump {
                     Some((content_id, _)) => (None, Some(content_id.clone())),
                     None => (settlement.output_text.clone(), None),
                 };
+                let externalized_diff: Option<(String, String)> = settlement
+                    .diff_text
+                    .as_ref()
+                    .filter(|text| text.len() > TOOL_OUTPUT_INLINE_MAX_BYTES)
+                    .map(|text| {
+                        use sha2::Digest as _;
+                        (hex::encode(sha2::Sha256::digest(text.as_bytes())), text.clone())
+                    });
+                let (diff_text, diff_ref) = match &externalized_diff {
+                    Some((content_id, _)) => (None, Some(content_id.clone())),
+                    None => (settlement.diff_text.clone(), None),
+                };
                 let finish = store::ToolCallFinish {
                     call_id: settlement.call_id.clone(),
                     session_id: self.session_id.clone(),
@@ -1594,6 +1614,8 @@ impl OwnerPump {
                     output_text,
                     output_ref,
                     output_truncated: settlement.output_truncated,
+                    diff_text,
+                    diff_ref,
                     meta_json: settlement
                         .metrics
                         .as_ref()
@@ -1607,6 +1629,7 @@ impl OwnerPump {
                         .and_then(|d| serialize_typed(&who, "code_delta", d)),
                 };
                 let content_write = externalized.clone();
+                let diff_write = externalized_diff.clone();
                 let content_session_id = self.session_id.clone();
                 if let Err(error) = self.db.write(move |conn| {
                     if let Some((content_id, text)) = &content_write {
@@ -1615,6 +1638,16 @@ impl OwnerPump {
                             &content_session_id,
                             content_id,
                             "text/plain; charset=utf-8",
+                            text.as_bytes(),
+                            false,
+                        )?;
+                    }
+                    if let Some((content_id, text)) = &diff_write {
+                        store::put_session_content(
+                            conn,
+                            &content_session_id,
+                            content_id,
+                            "text/x-diff; charset=utf-8",
                             text.as_bytes(),
                             false,
                         )?;
@@ -1644,6 +1677,16 @@ impl OwnerPump {
                             .map(|text| ContentValue::Inline { text }),
                     },
                     output_truncated: settlement.output_truncated,
+                    diff: match &externalized_diff {
+                        Some((content_id, _)) => Some(ContentValue::Ref {
+                            content_ref: ContentRef::new(ContentHash::new(
+                                store::canonical_content_ref(content_id),
+                            )),
+                        }),
+                        None => settlement
+                            .diff_text
+                            .map(|text| ContentValue::Inline { text }),
+                    },
                     metrics: settlement.metrics,
                     code_delta: settlement.code_delta,
                     effects: settlement.effects,

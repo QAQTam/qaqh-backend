@@ -286,6 +286,7 @@ mod tests {
                     outcome: ToolCallOutcome::Completed,
                     output_text: Some("file-a\nfile-b\n".into()),
                     output_truncated: false,
+                    diff_text: None,
                     metrics: Some(metrics),
                     code_delta: Some(CodeDelta {
                         lines_added: 3,
@@ -473,6 +474,7 @@ mod tests {
                     outcome: ToolCallOutcome::Completed,
                     output_text: Some(big.clone()),
                     output_truncated: false,
+                    diff_text: None,
                     metrics: None,
                     code_delta: None,
                     effects: vec![],
@@ -519,6 +521,121 @@ mod tests {
                 matches!(tool.output, Some(ContentValue::Ref { .. })),
                 "快照视图同样投影 Ref,不留 inline 副本"
             );
+        });
+    }
+
+    #[test]
+    fn tool_diff_roundtrips_inline_and_externalized_refs() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (_dir, owners) = test_owner_dir();
+            let owner = owners
+                .create_session(store::NewSession {
+                    session_id: "SES-DIFF".into(),
+                    parent_session_id: None,
+                    title: String::new(),
+                    title_source: None,
+                    cwd: None,
+                    model: None,
+                    tool_mode: None,
+                    model_selection: None,
+                    custom_tools: None,
+                    frozen_annotation: None,
+                    ephemeral: false,
+                })
+                .await
+                .expect("create session");
+            let mut rx = owner.subscribe();
+            let lifecycle = owner.lifecycle();
+
+            let small_diff = "--- a/foo.rs\n+++ b/foo.rs\n@@ -1 +1 @@\n-a\n+b\n".to_string();
+            let run1 = lifecycle.started("C-INLINE", "edit", None);
+            lifecycle.finished(
+                run1,
+                ToolSettlement {
+                    call_id: "C-INLINE".into(),
+                    tool_name: "edit".into(),
+                    outcome: ToolCallOutcome::Completed,
+                    output_text: Some("[OK] edit foo.rs".into()),
+                    output_truncated: false,
+                    diff_text: Some(small_diff.clone()),
+                    metrics: None,
+                    code_delta: None,
+                    effects: vec![],
+                },
+            );
+
+            let big_diff = format!(
+                "--- a/big.rs\n+++ b/big.rs\n@@ -1,1 +1,1 @@\n+{}\n",
+                "d".repeat(40 * 1024)
+            );
+            let run2 = lifecycle.started("C-BIG", "apply_patch", None);
+            lifecycle.finished(
+                run2,
+                ToolSettlement {
+                    call_id: "C-BIG".into(),
+                    tool_name: "apply_patch".into(),
+                    outcome: ToolCallOutcome::Completed,
+                    output_text: Some("Success".into()),
+                    output_truncated: false,
+                    diff_text: Some(big_diff.clone()),
+                    metrics: None,
+                    code_delta: None,
+                    effects: vec![],
+                },
+            );
+
+            let mut got_inline = false;
+            let mut big_ref_id = None;
+            while !(got_inline && big_ref_id.is_some()) {
+                if let SessionEvent::ToolFinished { call_id, diff, .. } = recv_event(&mut rx).await
+                {
+                    if call_id.as_ref() == "C-INLINE" {
+                        assert_eq!(diff, Some(ContentValue::Inline { text: small_diff.clone() }));
+                        got_inline = true;
+                    } else if call_id.as_ref() == "C-BIG" {
+                        if let Some(ContentValue::Ref { content_ref }) = diff {
+                            big_ref_id = Some(
+                                content_ref
+                                    .hash()
+                                    .as_str()
+                                    .trim_start_matches("sha256:")
+                                    .to_string(),
+                            );
+                        } else {
+                            panic!("大 diff 必须外置为 Ref,实际 {diff:?}");
+                        }
+                    }
+                }
+            }
+
+            let content_id = big_ref_id.expect("big diff ref");
+            let entry = owners
+                .db()
+                .read_blocking(|conn| store::get_session_content(conn, "SES-DIFF", &content_id))
+                .expect("read externalized diff");
+            let (_, bytes, _) = entry.expect("externalized diff stored in session_contents");
+            assert_eq!(bytes, big_diff.as_bytes());
+
+            let state = owner.snapshot().await.expect("snapshot");
+            let inline_tool = state
+                .tools
+                .iter()
+                .find(|t| t.call_id.as_ref() == "C-INLINE")
+                .expect("inline tool");
+            assert_eq!(
+                inline_tool.diff,
+                Some(ContentValue::Inline { text: small_diff })
+            );
+            let big_tool = state
+                .tools
+                .iter()
+                .find(|t| t.call_id.as_ref() == "C-BIG")
+                .expect("big tool");
+            assert!(matches!(big_tool.diff, Some(ContentValue::Ref { .. })));
         });
     }
 

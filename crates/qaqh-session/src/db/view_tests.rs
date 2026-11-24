@@ -214,6 +214,8 @@ mod tests {
                         output_text: Some("file-a\nfile-b".into()),
                         output_ref: None,
                         output_truncated: false,
+                        diff_text: None,
+                        diff_ref: None,
                         meta_json: None,
                         effects_json: None,
                         code_delta_json: None,
@@ -355,6 +357,8 @@ mod tests {
                         output_text: None,
                         output_ref: None,
                         output_truncated: false,
+                        diff_text: None,
+                        diff_ref: None,
                         meta_json: None,
                         effects_json: Some(
                             serde_json::to_string(&vec![ToolEffectInfo::SubagentSpawned {

@@ -1043,6 +1043,8 @@ pub struct ToolCallFinish {
     pub output_text: Option<String>,
     pub output_ref: Option<String>,
     pub output_truncated: bool,
+    pub diff_text: Option<String>,
+    pub diff_ref: Option<String>,
     /// 契约 `ToolMetrics` 的 serde 形式。
     pub meta_json: Option<String>,
     /// 契约 `ToolEffectInfo[]` 的 serde 形式(owner 消费的结构化效果)。
@@ -1056,8 +1058,9 @@ pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusql
         "INSERT INTO tool_calls
             (call_id, session_id, turn_id, tool_name, state_json, state_kind,
              exec_session_id, output_text, output_ref, output_truncated,
-             meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, 'finished', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+             diff_text, diff_ref, meta_json, effects_json, code_delta_json,
+             started_at_ms, finished_at_ms)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'finished', ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(call_id) DO UPDATE SET
             state_json = excluded.state_json,
             state_kind = 'finished',
@@ -1065,6 +1068,8 @@ pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusql
             output_text = excluded.output_text,
             output_ref = excluded.output_ref,
             output_truncated = excluded.output_truncated,
+            diff_text = excluded.diff_text,
+            diff_ref = excluded.diff_ref,
             meta_json = excluded.meta_json,
             effects_json = excluded.effects_json,
             code_delta_json = excluded.code_delta_json,
@@ -1079,6 +1084,8 @@ pub fn finish_tool_call(conn: &mut Connection, finish: &ToolCallFinish) -> rusql
             finish.output_text,
             finish.output_ref,
             i64::from(finish.output_truncated),
+            finish.diff_text,
+            finish.diff_ref,
             finish.meta_json,
             finish.effects_json,
             finish.code_delta_json,
@@ -1133,7 +1140,8 @@ pub fn tool_calls_for_turn(
     let mut stmt = conn.prepare(
         "SELECT call_id, turn_id, tool_name, args_json, state_json, state_kind,
                 exec_session_id, output_text, output_ref, output_truncated,
-                meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms
+                diff_text, diff_ref, meta_json, effects_json, code_delta_json,
+                started_at_ms, finished_at_ms
          FROM tool_calls
          WHERE session_id = ?1 AND turn_id = ?2
          ORDER BY COALESCE(started_at_ms, 0), rowid",
@@ -1150,11 +1158,13 @@ pub fn tool_calls_for_turn(
             output_text: row.get(7)?,
             output_ref: row.get(8)?,
             output_truncated: row.get::<_, i64>(9)? != 0,
-            meta_json: row.get(10)?,
-            effects_json: row.get(11)?,
-            code_delta_json: row.get(12)?,
-            started_at_ms: row.get(13)?,
-            finished_at_ms: row.get(14)?,
+            diff_text: row.get(10)?,
+            diff_ref: row.get(11)?,
+            meta_json: row.get(12)?,
+            effects_json: row.get(13)?,
+            code_delta_json: row.get(14)?,
+            started_at_ms: row.get(15)?,
+            finished_at_ms: row.get(16)?,
         })
     })?;
     rows.collect()
@@ -1168,7 +1178,8 @@ fn read_tool_calls_where(
     let sql = format!(
         "SELECT call_id, turn_id, tool_name, args_json, state_json, state_kind,
                 exec_session_id, output_text, output_ref, output_truncated,
-                meta_json, effects_json, code_delta_json, started_at_ms, finished_at_ms
+                diff_text, diff_ref, meta_json, effects_json, code_delta_json,
+                started_at_ms, finished_at_ms
          FROM tool_calls WHERE session_id = ?1 {suffix}"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -1184,11 +1195,13 @@ fn read_tool_calls_where(
             output_text: row.get(7)?,
             output_ref: row.get(8)?,
             output_truncated: row.get::<_, i64>(9)? != 0,
-            meta_json: row.get(10)?,
-            effects_json: row.get(11)?,
-            code_delta_json: row.get(12)?,
-            started_at_ms: row.get(13)?,
-            finished_at_ms: row.get(14)?,
+            diff_text: row.get(10)?,
+            diff_ref: row.get(11)?,
+            meta_json: row.get(12)?,
+            effects_json: row.get(13)?,
+            code_delta_json: row.get(14)?,
+            started_at_ms: row.get(15)?,
+            finished_at_ms: row.get(16)?,
         })
     })?;
     rows.collect()
@@ -1207,6 +1220,8 @@ pub struct ToolCallRow {
     pub output_text: Option<String>,
     pub output_ref: Option<String>,
     pub output_truncated: bool,
+    pub diff_text: Option<String>,
+    pub diff_ref: Option<String>,
     pub meta_json: Option<String>,
     pub effects_json: Option<String>,
     pub code_delta_json: Option<String>,

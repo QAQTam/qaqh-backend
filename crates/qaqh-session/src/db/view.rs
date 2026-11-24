@@ -600,6 +600,20 @@ fn tool_call_view(call: ToolCallRow) -> Result<ToolCallView, DbError> {
                 )
             }),
         output_truncated: call.output_truncated,
+        diff: call
+            .diff_text
+            .map(|text| qaqh_ringing_contract::fact::ContentValue::Inline { text })
+            .or_else(|| {
+                call.diff_ref.map(
+                    |content_id| qaqh_ringing_contract::fact::ContentValue::Ref {
+                        content_ref: qaqh_ringing_contract::fact::ContentRef::new(
+                            qaqh_ringing_contract::fact::ContentHash::new(
+                                store::canonical_content_ref(&content_id),
+                            ),
+                        ),
+                    },
+                )
+            }),
         metrics,
         code_delta,
         effects,

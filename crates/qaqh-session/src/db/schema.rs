@@ -20,7 +20,7 @@ use super::DbError;
 use super::sidecar::{self, IngestionReport};
 use super::store::now_ms;
 
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// 允许就地升级的最低存量版本;更低的库直接报错。
 const MIN_SUPPORTED_SCHEMA: u32 = 5;
@@ -97,6 +97,8 @@ CREATE TABLE tool_calls (
     output_text      TEXT,
     output_ref       TEXT,
     output_truncated INTEGER NOT NULL DEFAULT 0,
+    diff_text        TEXT,
+    diff_ref         TEXT,
     meta_json        TEXT,
     effects_json     TEXT,
     code_delta_json  TEXT,
@@ -406,6 +408,7 @@ fn run_upgrade_step(
             upgrade_11_to_12(tx)?;
             sidecar::ingest_legacy_sidecar_files(tx, data_dir)
         }
+        12 => upgrade_12_to_13(tx).map(|()| IngestionReport::default()),
         other => Err(DbError::SchemaTooOld {
             found: other,
             supported: SCHEMA_VERSION,
@@ -446,6 +449,25 @@ fn repair_skipped_v11(tx: &Transaction<'_>) -> Result<(), DbError> {
 fn upgrade_11_to_12(tx: &Transaction<'_>) -> Result<(), DbError> {
     tx.execute_batch(DDL_SIDECAR_V12)
         .map_err(|error| DbError::Corrupt(format!("upgrade 11→12 ddl: {error}")))?;
+    Ok(())
+}
+
+/// schema 12 → 13:tool_calls 补齐写工具展示面 unified diff(`diff_text` / `diff_ref`)。
+/// 纯增量加列,按 pragma 幂等探测,不改存量行。
+fn upgrade_12_to_13(tx: &Transaction<'_>) -> Result<(), DbError> {
+    for column in ["diff_text", "diff_ref"] {
+        let present: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('tool_calls') WHERE name = ?1",
+                [column],
+                |row| row.get(0),
+            )
+            .map_err(|error| DbError::Corrupt(format!("upgrade 12→13 inspect {column}: {error}")))?;
+        if present == 0 {
+            tx.execute_batch(&format!("ALTER TABLE tool_calls ADD COLUMN {column} TEXT;"))
+                .map_err(|error| DbError::Corrupt(format!("upgrade 12→13 ddl {column}: {error}")))?;
+        }
+    }
     Ok(())
 }
 

@@ -47,3 +47,6 @@ __pycache__/
 
 # 冒烟探针的运行日志（非源码，脚本与结果留 probes/ 子目录）
 probes/*.log
+# 根目录散落的探针/构建日志残留（非源码，正式日志归 probes/）
+/mt.log
+/probe_allowed.txt

@@ -152,6 +152,9 @@ pub enum SessionEvent {
         exec_session_id: Option<ExecSessionId>,
         output: Option<ContentValue>,
         output_truncated: bool,
+        /// write/edit/apply_patch/delete 等写工具的展示面 unified diff(大 diff 走 Ref 外置)。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diff: Option<ContentValue>,
         metrics: Option<ToolMetrics>,
         /// edit 类工具的结构化结果。
         #[serde(default, skip_serializing_if = "Option::is_none")]

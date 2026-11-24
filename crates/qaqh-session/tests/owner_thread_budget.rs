@@ -357,6 +357,7 @@ async fn pump_db_wait_yields_the_host_worker() {
             outcome: ToolCallOutcome::Completed,
             output_text: None,
             output_truncated: false,
+            diff_text: None,
             metrics: None,
             code_delta: None,
             effects: vec![],
