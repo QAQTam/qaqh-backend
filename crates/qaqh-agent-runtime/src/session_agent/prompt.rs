@@ -17,6 +17,13 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
          Work through the available tools. Prefer small, verifiable steps; report \
          what you actually observed and never claim work you did not perform.\n",
     );
+    prompt.push_str(
+        "\n[Output formatting]\n\
+         When referencing files or URLs in your reply, use standard Markdown links:\n\
+         - Workspace files: `[basename](relative/path)` or `[basename](relative/path#L10-L20)` using forward slashes.\n\
+         - Files outside the workspace: `[basename](file:///absolute/path)` (forward slashes).\n\
+         - Web pages / repositories: standard Markdown link or bare `https://...` URL.\n",
+    );
     prompt.push_str(&format!("\n[Environment]\nworkspace: {}\n", cwd.display()));
     // widgets_dir 以正斜杠形态注入（Windows 亦然）：marker 的 JSON payload 里
     // 路径零反斜杠转义，模型可原样复制（widget-directive §5 合规最大故障源）。
@@ -151,5 +158,27 @@ mod tests {
                 .to_string()
         };
         assert_eq!(extract(&with_tools), extract(&other));
+    }
+
+    #[test]
+    fn output_formatting_section_is_present_and_static() {
+        let cwd = std::env::temp_dir();
+        let spec = ProviderRequestSpec::new(
+            qaqh_gate::ProviderConfig::responses("https://example.com", "", "m", None),
+            1024,
+        );
+        let p1 = system_prompt(&spec, &cwd, "s1");
+        let p2 = system_prompt(&spec, &cwd, "s2");
+        assert!(p1.contains("[Output formatting]"));
+        assert!(p1.contains("file:///absolute/path"));
+        let extract = |prompt: &str| {
+            prompt
+                .split("[Output formatting]")
+                .nth(1)
+                .and_then(|rest| rest.split("\n\n").next())
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(extract(&p1), extract(&p2));
     }
 }
