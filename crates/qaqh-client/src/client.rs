@@ -696,10 +696,8 @@ impl Client {
         let bytes = self.download_content_by_id(content_id).await?;
         let digest = {
             use sha2::Digest;
-            let hash = sha2::Sha256::digest(&bytes);
-            hash.iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
+            // v4.5 P2-2a（plan §三.4-2）：`hex::encode` 取代逐字节 format 循环。
+            hex::encode(sha2::Sha256::digest(&bytes))
         };
         let expected_digest = content_id.strip_prefix("sha256:").unwrap_or(content_id);
         if !digest.eq_ignore_ascii_case(expected_digest) {

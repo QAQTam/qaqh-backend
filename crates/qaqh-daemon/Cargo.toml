@@ -33,7 +33,9 @@ tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-threa
 axum = { version = "0.8", features = ["ws"] }
 # shell ws 数据面的 `stdin{bytes}` 是 base64（ADR-0028 §D3 约束 3：上行只有 text 一种
 # 形状）。版本与 qaqh-file-tools 已声明的 0.23 同一条，不新增版本。
-base64 = "0.23"
+base64 = { workspace = true }
+hex = { workspace = true }
+tempfile = { workspace = true }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.7", features = ["trace", "fs", "limit", "cors", "set-header", "util"] }
 tokio-stream = "0.1"
@@ -50,7 +52,6 @@ winresource = "0.1"
 # 越权矩阵用例需要 `qaqh_siwc::methods::ALL`（方法清单真源）与临时目录的管理器；
 # 运行期依赖由 qaqh-runtime 传递，故只登记在 dev。
 qaqh-siwc = { path = "../qaqh-siwc" }
-tempfile = "3"
 # v2_storm_tests 需要逐帧 poll SSE 响应体（回放尾的"部分读取+截止"语义）。
 http-body-util = "0.1"
 # shell_ws_tests 要一条**真**的 ws 握手：`oneshot` 伪造不出升级后的双向字节通道。

@@ -91,7 +91,9 @@ pub fn random_suffix() -> String {
     unsafe {
         let _ = ProcessPrng(&mut buf);
     }
-    format!("{:02x}{:02x}{:02x}{:02x}", buf[0], buf[1], buf[2], buf[3])
+    // v4.5 P2-2a（plan §三.4-2）：`hex::encode` 等价取代逐字节 `{:02x}` 拼接
+    // （同为 8 位小写 hex）。
+    hex::encode(buf)
 }
 
 /// capability 名称 → 二进制 SID(policy.capabilities 的解析点)。

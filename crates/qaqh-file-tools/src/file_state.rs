@@ -296,9 +296,11 @@ impl FileRuntime {
 
 /// Windows 上 `canonicalize` 返回 `\\?\C:\…` verbatim 前缀路径；剥掉以与
 /// read/write 既有键形态一致（见 `copy_range.rs` 的 BUG-2026-09-13-16 注）。
+/// v4.5 P2-2a（plan §三.4-4）：剥前缀判定收编 `dunce` 单源。
 fn strip_verbatim(path: &Path) -> String {
-    let s = path.to_string_lossy();
-    s.strip_prefix(r"\\?\").unwrap_or(&s).to_string()
+    qaqh_types::platform::strip_verbatim(path)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// 账本键的唯一派生（T-8-3② / 安全审查 P1-3）。

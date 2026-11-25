@@ -30,9 +30,20 @@ pub fn store_image_b64(b64: &str, mime_type: &str) -> Result<String, String> {
     fs::create_dir_all(&dir).map_err(|e| format!("image store mkdir: {e}"))?;
     let path = dir.join(format!("{sha}.{}", ext_for_mime(mime_type)));
     if !path.exists() {
-        let tmp = dir.join(format!(".{sha}.tmp"));
-        fs::write(&tmp, b64).map_err(|e| format!("image store write: {e}"))?;
-        fs::rename(&tmp, &path).map_err(|e| format!("image store rename: {e}"))?;
+        // v4.5 P2-2a（plan §三.4-3 同步清扫）：`.{sha}.tmp` 定名在同内容并发
+        // 落盘时会互相踩（两个写者共享同一临时名）——改 `NamedTempFile`：
+        // 同目录唯一临时名 + sync + persist 原子替换。
+        let mut temp = tempfile::NamedTempFile::new_in(&dir)
+            .map_err(|e| format!("image store write: {e}"))?;
+        std::io::Write::write_all(&mut temp, b64.as_bytes())
+            .map_err(|e| format!("image store write: {e}"))?;
+        std::io::Write::flush(&mut temp).map_err(|e| format!("image store write: {e}"))?;
+        temp.as_file()
+            .sync_all()
+            .map_err(|e| format!("image store sync: {e}"))?;
+        temp.persist(path.clone())
+            .map(|_| ())
+            .map_err(|e| format!("image store rename: {}", e.error))?;
     }
     Ok(sha)
 }
@@ -56,15 +67,13 @@ pub fn ext_for_mime(mime_type: &str) -> &'static str {
 }
 
 /// Return the SHA-256 hex form used by content references.
+///
+/// 全仓 sha256→hex 的**唯一**公共原语（ringing-runtime / daemon / agent-runtime
+/// 均复用本函数）。逐字节 `format!("{b:02x}")` 拼接循环自 v4.5 P2-2a 起由
+/// `hex::encode` 取代（plan §三.4-2）。
 pub fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher
-        .finalize()
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    hex::encode(Sha256::digest(data))
 }
 
 #[cfg(test)]

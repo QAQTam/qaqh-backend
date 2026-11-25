@@ -244,9 +244,12 @@ impl ConfigStore {
 
     /// 原子写入给定的 TOML 文本（首启预设模板用；与 [`Self::save`] 同一
     /// temp-file + rename 语义）。
+    ///
+    /// v4.5 P2-2a（plan §三.4-3 同步清扫）：定名 `.toml.tmp` 手写原子写改
+    /// `tempfile::NamedTempFile`（同目录唯一临时名 + sync + persist 原子替换）。
     pub fn write_content(&self, content: &str) -> bool {
-        let tmp = self.path.with_extension("toml.tmp");
-        if let Some(parent) = self.path.parent()
+        let parent = self.path.parent().unwrap_or(std::path::Path::new("."));
+        if !parent.as_os_str().is_empty()
             && let Err(e) = std::fs::create_dir_all(parent)
         {
             eprintln!(
@@ -255,15 +258,30 @@ impl ConfigStore {
             );
             return false;
         }
-        if let Err(e) = std::fs::write(&tmp, &content) {
-            eprintln!("ConfigStore: write({}) failed: {e}", tmp.display());
+        let mut temp = match tempfile::NamedTempFile::new_in(parent) {
+            Ok(temp) => temp,
+            Err(e) => {
+                eprintln!("ConfigStore: write({}) failed: {e}", self.path.display());
+                return false;
+            }
+        };
+        let written = (|| -> std::io::Result<()> {
+            std::io::Write::write_all(&mut temp, content.as_bytes())?;
+            std::io::Write::flush(&mut temp)?;
+            temp.as_file().sync_all()
+        })();
+        if let Err(e) = written {
+            eprintln!(
+                "ConfigStore: write({}) failed: {e}",
+                temp.path().display()
+            );
             return false;
         }
-        if let Err(e) = std::fs::rename(&tmp, &self.path) {
+        if let Err(e) = temp.persist(self.path.clone()) {
             eprintln!(
-                "ConfigStore: rename({} -> {}) failed: {e}",
-                tmp.display(),
-                self.path.display()
+                "ConfigStore: rename(temp -> {}) failed: {}",
+                self.path.display(),
+                e.error
             );
             return false;
         }

@@ -16,8 +16,9 @@ anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 sha2 = "0.11"
 similar = { version = "3.1", features = ["text"] }
-hex = "0.4"
-base64 = "0.23"
+hex = { workspace = true }
+base64 = { workspace = true }
+tempfile = { workspace = true }
 globset = "0.4.20"
 ignore = "0.4.33"
 grep-regex = "0.1"
@@ -27,10 +28,6 @@ log = "0.4"
 [lints]
 workspace = true
 
-[target.'cfg(windows)'.dependencies]
-# atomic_write 的 MoveFileExW 原子替换路径（随 file_shared 并入）。
-windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
-
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 git2 = { version = "0.21", features = ["vendored-libgit2"] }

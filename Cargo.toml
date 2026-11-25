@@ -57,6 +57,17 @@ mutil-ai = { version = "0.8.0", path = "crates/mutil-ai" }
 # 继承本行，见 ADR-0025。reqwest 0.13 / process-wrap 10 与之对齐。
 rmcp = { version = "=3.10.0", default-features = false, features = ["client", "transport-child-process"] }
 
+# v4.5 P2-2a：基础轮子统一声明单源（plan §三.4）。全仓手写 Base64 / hex /
+# 固定 .tmp 原子写 / verbatim 剥前缀 / civil_from_days / 伪 ULID 一律退役到
+# 这些成熟实现；版本用 ^ 区间即可（无 rmcp 那样的精确锁需求，接口面小）。
+base64 = "0.23"
+hex = "0.4"
+tempfile = "3"
+dunce = "1"
+path-clean = "1"
+chrono = { version = "0.4", features = ["clock"] }
+ulid = "3"
+
 [workspace.package]
 version = "4.2.0"
 edition = "2024"

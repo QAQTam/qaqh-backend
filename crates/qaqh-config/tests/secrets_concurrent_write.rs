@@ -15,9 +15,10 @@
 //!
 //! ## 修复预期
 //!
-//! 1. tmp 名带 `pid` + `nonce`（参照 `qaqh-workspace::file_shared::atomic_write`），
-//!    跨进程互不覆盖；
-//! 2. `sync_all` 后再 rename（与会话/工作区原子写同款），tmp 不残留；
+//! 1. tmp 名逐次唯一，跨进程互不覆盖（v4.5 P2-2a 起由 `tempfile::NamedTempFile`
+//!    的 `O_CREAT|O_EXCL` 随机后缀保证——原手写 pid+nonce 计数器已物理删除）；
+//! 2. `sync_all` 后再原子替换（`NamedTempFile::persist`；Windows 内部即
+//!    `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`），tmp 不残留；
 //! 3. read-modify-write 全程持**跨进程 OS 文件锁**（`std::fs::File::lock`；
 //!    Windows `LockFileEx` / Unix `flock`），并发事务串行化 → 无更新丢失。
 //!
@@ -25,7 +26,7 @@
 //!
 //! | 用例 | 覆盖 |
 //! |---|---|
-//! | `tmp_file_name_is_per_process_and_unique` | ① tmp 名含 pid+nonce 且逐次不同 |
+//! | `atomic_write_leaves_no_temp_and_targets_same_dir` | ② 原子落盘无 `.tmp` 残留、覆盖写正确（P2-2a tempfile 化后断言不变量） |
 //! | `concurrent_writers_never_lose_keys_in_process` | ③ 线程级并发 + 独立锁文件（模拟另一进程）：键零丢失 |
 //! | `concurrent_process_writers_never_lose_keys` | ②③ 真·双/多进程（子进程调用 `cfgset` 示例）：键零丢失 |
 //!
@@ -57,44 +58,41 @@ fn read_raw(path: &Path) -> String {
     std::fs::read_to_string(path).unwrap_or_default()
 }
 
-// ── 1. tmp 名形态：带 pid + nonce，且逐次独立 ──
-
+// ── 1. 原子落盘语义：临时文件不残留、与目标同目录、写后不留固定 .tmp ──
+//
+// v4.5 P2-2a 起，secrets 的原子写由 `tempfile::NamedTempFile::new_in(parent)`
+// + `persist` 承担（plan §三.4-3：手写 nonce 计数器与 `MoveFileExW` FFI 物理
+// 删除）。原用例断言的是"手写 tmp 名带 pid + nonce"这一内部实现细节；现改断言
+// **不变量本身**：写入完成后目录里只剩目标文件、不得残留任何 `.tmp`，且目标
+// 内容正确——这才是 BUG-2026-09-13-11（固定 tmp 名跨进程互覆）真正要守的东西。
+// NamedTempFile 用 `O_CREAT|O_EXCL` 在目标同目录创建唯一临时名，天然满足
+// "逐次唯一 + 同卷 + 失败即 drop 清理"，无需再暴露内部 tmp 路径。
 #[test]
-fn tmp_file_name_is_per_process_and_unique() {
+fn atomic_write_leaves_no_temp_and_targets_same_dir() {
     let dir = temp_root("tmpname");
     let secrets_path = dir.join("secrets.toml");
     let store = SecretStore::new(secrets_path.clone());
 
-    let first = store.temp_path_for_test();
-    let second = store.temp_path_for_test();
-    assert_ne!(
-        first, second,
-        "tmp 名必须逐次唯一（nonce），避免跨进程互相覆盖"
-    );
-
-    let name = first.file_name().unwrap().to_string_lossy().to_string();
-    assert_ne!(name, "secrets.toml.tmp", "不得再使用固定 tmp 名");
-    assert!(
-        name.contains(&std::process::id().to_string()),
-        "tmp 名应带 pid（诊断跨进程并发）：{name}"
-    );
-    assert_eq!(
-        first.parent(),
-        Some(dir.as_path()),
-        "tmp 与目标同目录（rename 必须同卷）"
-    );
-
-    // 写路径不得残留 tmp 文件。
+    // 首次落盘：不得残留任何临时文件（NamedTempFile persist 后原名消失）。
     store.set(SecretSlot::Main, "sk-main").expect("set");
-    assert!(!first.exists() && !second.exists(), "tmp 必须被清理");
-
     let leftovers: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().to_string())
-        .filter(|name| name.ends_with(".tmp"))
+        .filter(|name| name.ends_with(".tmp") || name.starts_with(".tmp"))
         .collect();
     assert!(leftovers.is_empty(), "残留 tmp：{leftovers:?}");
+
+    // 覆盖写：目标仍在、内容正确、依旧无残留。
+    store.set(SecretSlot::Main, "sk-second").expect("re-set");
+    assert_eq!(store.load(SecretSlot::Main).as_deref(), Some("sk-second"));
+    let leftovers: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .filter(|name| name.ends_with(".tmp") || name.starts_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "覆盖写残留 tmp：{leftovers:?}");
 
     let _ = std::fs::remove_dir_all(&dir);
 }

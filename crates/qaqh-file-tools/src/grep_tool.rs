@@ -358,11 +358,9 @@ impl TypedTool for GrepTool {
         } else {
             ctx.workspace_root.clone()
         };
-        let strip_verbatim = |path: &std::path::Path| -> PathBuf {
-            let string = path.to_string_lossy();
-            let string = string.strip_prefix(r"\\?\").unwrap_or(&string);
-            PathBuf::from(string)
-        };
+        // v4.5 P2-2a（plan §三.4-4）：朴素 `strip_prefix(r"\\?\")` 退役，
+        // 交 `dunce` 单源判定（见 `qaqh_types::platform::strip_verbatim`）。
+        let strip_verbatim = qaqh_types::platform::strip_verbatim;
         let ws_abs = ws_path.canonicalize().unwrap_or_else(|_| ws_path.clone());
         let ws_abs = strip_verbatim(&ws_abs);
 

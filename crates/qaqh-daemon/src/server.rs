@@ -424,10 +424,8 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
 }
 
 pub fn random_hex() -> String {
-    rand::random::<[u8; 32]>()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    // v4.5 P2-2a（plan §三.4-2）：`hex::encode` 取代逐字节 format 循环。
+    hex::encode(rand::random::<[u8; 32]>())
 }
 
 /// Install SIGINT/SIGTERM handlers that forward into the graceful-shutdown
@@ -492,20 +490,16 @@ fn acquire_single_instance() -> Result<File, String> {
 }
 fn write_discovery(discovery: &DaemonDiscovery) -> Result<(), String> {
     let target = qaqh_types::platform::daemon_discovery_path();
-    let temp = target.with_extension("json.tmp");
-    let mut file = File::create(&temp).map_err(stringify)?;
-    serde_json::to_writer_pretty(&mut file, discovery).map_err(stringify)?;
-    file.flush().map_err(stringify)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
-            .map_err(stringify)?;
-    }
-    if target.exists() {
-        std::fs::remove_file(&target).map_err(stringify)?;
-    }
-    std::fs::rename(temp, &target).map_err(stringify)?;
+    // v4.5 P2-2a（plan §三.4-3 同步清扫）：定名 `daemon.json.tmp` + 「先删目标
+    // 再 rename」的手写原子写退役，改 `tempfile::NamedTempFile`——同目录唯一
+    // 临时名（Unix 直接 0600），`persist` 内部即原子替换（Windows 带
+    // MOVEFILE_REPLACE_EXISTING，无需预删）。
+    let parent = target.parent().unwrap_or(std::path::Path::new("."));
+    let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(stringify)?;
+    serde_json::to_writer_pretty(&mut temp, discovery).map_err(stringify)?;
+    std::io::Write::flush(&mut temp).map_err(stringify)?;
+    temp.as_file().sync_all().map_err(stringify)?;
+    temp.persist(target.clone()).map_err(|e| stringify(e.error))?;
     restrict_discovery_permissions(&target)
 }
 

@@ -15,6 +15,7 @@ qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-pty = { path = "../qaqh-pty" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+base64 = { workspace = true }
 schemars = "1"
 anyhow = "1"
 log = "0.4"

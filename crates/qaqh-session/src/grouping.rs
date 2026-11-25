@@ -8,11 +8,11 @@ pub fn canonical_cwd(path: &Path) -> String {
     {
         match std::fs::canonicalize(path) {
             Ok(path) => {
-                let mut value = path.to_string_lossy().replace('/', "\\");
-                if let Some(stripped) = value.strip_prefix("\\\\?\\") {
-                    value = stripped.to_string();
-                }
-                value
+                // v4.5 P2-2a（plan §三.4-4）：朴素 `strip_prefix("\\\\?\\")`
+                // 退役，剥 verbatim 交 `dunce` 单源；`\\?\UNC\…` 不再被剥成
+                // 去根的坏相对路径。
+                let value = qaqh_types::platform::strip_verbatim(&path);
+                value.to_string_lossy().replace('/', "\\")
             }
             Err(_) => path.to_string_lossy().replace('/', "\\"),
         }

@@ -1179,17 +1179,12 @@ pub(crate) fn session_canonical_cwd(
 /// used as the sandbox writable root; keeping the verbatim prefix would change
 /// the path shape the user picked for no benefit.
 pub(crate) fn normalize_workspace_path(path: std::path::PathBuf) -> std::path::PathBuf {
-    #[cfg(windows)]
-    {
-        let text = path.to_string_lossy();
-        if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-            return std::path::PathBuf::from(format!(r"\\{rest}"));
-        }
-        if let Some(rest) = text.strip_prefix(r"\\?\") {
-            return std::path::PathBuf::from(rest.to_string());
-        }
-    }
-    path
+    // v4.5 P2-2a（plan §三.4-4）：手写的两级 strip_prefix 收编到 types 单源——
+    // `dunce::simplified` 负责可安全降级的 `\\?\C:\` 盘符根形态（保留名/`.`/
+    // `..`/超长一律不剥，fail-closed），`unc_to_legacy` 保留既有
+    // `\\?\UNC\server\share` → `\\server\share` 口径（dunce 刻意不做该转换）。
+    // 两函数在非 Windows 平台均为透传/字符串级，去掉 cfg 分支后语义不变。
+    qaqh_types::platform::unc_to_legacy(&qaqh_types::platform::strip_verbatim(&path))
 }
 
 pub(crate) mod command;

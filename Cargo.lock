@@ -2390,6 +2390,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
+name = "path-clean"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17359afc20d7ab31fdb42bb844c8b3bb1dabd7dcf7e68428492da7f16966fcef"
+
+[[package]]
 name = "pem"
 version = "4.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2619,6 +2625,7 @@ dependencies = [
 name = "qaqh-agent-runtime"
 version = "4.2.0"
 dependencies = [
+ "chrono",
  "log",
  "qaqh-config",
  "qaqh-dsaccount",
@@ -2637,7 +2644,6 @@ dependencies = [
  "qaqh-workspace",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "thiserror 2.0.21",
  "tiny_http",
@@ -2651,6 +2657,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "futures-util",
+ "hex",
  "log",
  "qaqh-ringing",
  "qaqh-ringing-contract",
@@ -2672,6 +2679,7 @@ dependencies = [
 name = "qaqh-config"
 version = "4.2.0"
 dependencies = [
+ "base64 0.23.1",
  "log",
  "qaqh-hooks",
  "qaqh-profile",
@@ -2715,6 +2723,7 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "futures-util",
+ "hex",
  "http-body-util",
  "log",
  "qaqh-acp",
@@ -2804,7 +2813,6 @@ dependencies = [
  "sha2",
  "similar",
  "tempfile",
- "windows",
 ]
 
 [[package]]
@@ -2858,12 +2866,15 @@ dependencies = [
 name = "qaqh-hooks"
 version = "4.2.0"
 dependencies = [
+ "chrono",
+ "hex",
  "log",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "tokio",
 ]
 
@@ -2912,6 +2923,7 @@ name = "qaqh-oauth-core"
 version = "4.2.0"
 dependencies = [
  "aws-lc-rs",
+ "base64 0.23.1",
  "log",
  "serde_json",
  "subtle",
@@ -2926,6 +2938,7 @@ name = "qaqh-permission"
 version = "4.2.0"
 dependencies = [
  "log",
+ "path-clean",
  "qaqh-sandbox",
  "qaqh-skills",
  "qaqh-types",
@@ -2938,6 +2951,7 @@ name = "qaqh-process-tools"
 version = "4.2.0"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "libc",
  "log",
  "qaqh-file-tools",
@@ -3002,7 +3016,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.21",
  "ts-rs",
- "uuid",
+ "ulid",
 ]
 
 [[package]]
@@ -3162,10 +3176,14 @@ dependencies = [
 name = "qaqh-types"
 version = "4.2.0"
 dependencies = [
+ "chrono",
+ "dunce",
+ "hex",
  "qaqh-hooks",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
  "toml",
  "ts-rs",
 ]
@@ -3196,7 +3214,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "ureq",
- "windows",
  "winresource",
 ]
 
@@ -3685,6 +3702,7 @@ dependencies = [
 name = "sbx-win"
 version = "0.1.0"
 dependencies = [
+ "hex",
  "serde",
  "serde_json",
  "windows",
@@ -4653,6 +4671,16 @@ name = "typenum"
 version = "1.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
+
+[[package]]
+name = "ulid"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "947dde63b6d514cc5e044edad4e0ca7261afd1099d16c83d942cb2b2f348689c"
+dependencies = [
+ "rand 0.10.3",
+ "web-time",
+]
 
 [[package]]
 name = "unicase"

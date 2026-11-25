@@ -50,57 +50,26 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-const B64URL_ALPHABET: &[u8; 64] =
-    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-
 /// base64url 编码（RFC 4648 §5，无 padding）。
+///
+/// v4.5 P2-2a（plan §三.4-1）：编码/解码本体移交 `base64` crate（0.23，
+/// 与 daemon/file-tools/client 同版），原手写 RFC 4648 §5 位循环物理删除。
 pub fn base64url_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(B64URL_ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(B64URL_ALPHABET[((b0 & 0x03) << 4 | b1 >> 4) as usize] as char);
-        if chunk.len() > 1 {
-            out.push(B64URL_ALPHABET[((b1 & 0x0F) << 2 | b2 >> 6) as usize] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(B64URL_ALPHABET[(b2 & 0x3F) as usize] as char);
-        }
-    }
-    out
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// base64url 解码：接受无 padding 与 `=` padding，拒绝非法字符与 `len % 4 == 1`。
+/// base64url 解码：接受无 padding 与 `=` padding，并容忍个别 IdP 在 JWK
+/// (`n`/`e`) 里混用的标准字母表 `+` `/`（先做别名归一）；拒绝非法字符与
+/// `len % 4 == 1`（与退役前契约逐字一致，siwc/dsaccount 的 wire 测试为证）。
 pub fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
-    let mut acc: u32 = 0;
-    let mut bits = 0u32;
-    let mut out = Vec::with_capacity(input.len() / 4 * 3 + 3);
-    for ch in input.bytes() {
-        if ch == b'=' {
-            continue;
-        }
-        let value = match ch {
-            b'A'..=b'Z' => ch - b'A',
-            b'a'..=b'z' => ch - b'a' + 26,
-            b'0'..=b'9' => ch - b'0' + 52,
-            b'-' | b'+' => 62,
-            b'_' | b'/' => 63,
-            _ => return Err(format!("base64url 非法字符: {:?}", ch as char)),
-        } as u32;
-        acc = (acc << 6) | value;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    match bits {
-        0 | 2 | 4 => Ok(out),
-        // 6 个剩余位意味着长度 %4 == 1：编码不可能产生。
-        _ => Err("base64url 长度非法".to_string()),
-    }
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_PAD_INDIFFERENT};
+    // look-alike 归一（`+`→`-`、`/`→`_`）是字母表别名映射，不是 base64
+    // 解码轮子——解码算法本体全部在 `base64` crate。
+    let normalized = input.replace('+', "-").replace('/', "_");
+    URL_SAFE_PAD_INDIFFERENT
+        .decode(normalized.as_bytes())
+        .map_err(|e| format!("base64url 解码失败: {e}"))
 }
 
 /// `code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))`（RFC 7636 §4.2，S256）。
