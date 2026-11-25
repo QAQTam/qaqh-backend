@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{DsCode, DsError};
-use crate::util::now_ms;
+use qaqh_oauth_core::util::now_ms;
 
 /// 存储格式版本（未来的迁移入口）。
 pub const STORE_VERSION: u32 = 1;
@@ -184,35 +184,22 @@ impl AccountStore {
     fn write(&self, file: &StoreFile) -> Result<(), DsError> {
         let text = serde_json::to_string_pretty(file)
             .map_err(|error| DsError::new(DsCode::Storage, format!("凭据序列化失败: {error}")))?;
-        if let Some(parent) = self.path.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|error| {
-                DsError::new(DsCode::Storage, format!("创建配置目录失败: {error}"))
-            })?;
-        }
-        let temp = self.path.with_extension("json.tmp");
-        std::fs::write(&temp, text.as_bytes())
-            .map_err(|error| DsError::new(DsCode::Storage, format!("写入凭据失败: {error}")))?;
-        restrict_permissions(&temp);
-        // `fs::rename` 在 Windows 与 Unix 都是**替换式**的原子改名。
-        std::fs::rename(&temp, &self.path).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            DsError::new(DsCode::Storage, format!("替换凭据文件失败: {error}"))
+        // 机械层（`.json.tmp` + rename、尽力 0600、失败清临时文件）在 core；
+        // 此处只挂 DsCode::Storage 与旧文案。
+        qaqh_oauth_core::store::atomic_write_json(&self.path, &text).map_err(|failure| {
+            let message = match failure {
+                qaqh_oauth_core::store::StoreFailure::CreateDir { reason, .. } => {
+                    format!("创建配置目录失败: {reason}")
+                }
+                qaqh_oauth_core::store::StoreFailure::WriteTemp { reason, .. } => {
+                    format!("写入凭据失败: {reason}")
+                }
+                qaqh_oauth_core::store::StoreFailure::Rename { reason, .. } => {
+                    format!("替换凭据文件失败: {reason}")
+                }
+            };
+            DsError::new(DsCode::Storage, message)
         })
-    }
-}
-
-/// 尽力收紧权限（Unix 0600；Windows 上真正的保护是 DPAPI 密文本身）。
-fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = path;
     }
 }
 

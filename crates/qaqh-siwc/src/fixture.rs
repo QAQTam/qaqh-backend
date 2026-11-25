@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 
-use crate::util::base64url_decode;
-use crate::util::base64url_encode;
+use qaqh_oauth_core::util::base64url_decode;
+use qaqh_oauth_core::util::base64url_encode;
 
 /// 测试私钥（PKCS#8, RSA-2048）。**仅供测试。**
 const TEST_PKCS8_B64: &str = "\

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{SiwcCode, SiwcError};
-use crate::util::now_ms;
+use qaqh_oauth_core::util::now_ms;
 
 const FILE_NAME: &str = "chatgpt-auth.json";
 const STORE_VERSION: u32 = 1;
@@ -315,44 +315,23 @@ impl CredentialStore {
     }
 }
 
-/// `.tmp` + rename 原子写（Windows 的 rename 不覆盖既有文件，故先删）。
+/// 原子落盘的 siwc 外壳：机械层在 `qaqh-oauth-core`，此处只挂产品错误码与旧文案。
 pub(crate) fn write_json_atomic(path: &Path, text: &str) -> Result<(), SiwcError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            SiwcError::new(
-                SiwcCode::StoreFailure,
-                format!("创建目录失败 {}: {e}", parent.display()),
-            )
-        })?;
-    }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| {
-        SiwcError::new(
-            SiwcCode::StoreFailure,
-            format!("写临时文件失败 {}: {e}", tmp.display()),
-        )
-    })?;
-    restrict_permissions(&tmp);
-    #[cfg(windows)]
-    {
-        let _ = std::fs::remove_file(path);
-    }
-    std::fs::rename(&tmp, path).map_err(|e| {
-        SiwcError::new(
-            SiwcCode::StoreFailure,
-            format!("落盘失败 {}: {e}", path.display()),
-        )
+    qaqh_oauth_core::store::atomic_write_json(path, text).map_err(|failure| {
+        let message = match failure {
+            qaqh_oauth_core::store::StoreFailure::CreateDir { parent, reason } => {
+                format!("创建目录失败 {parent}: {reason}")
+            }
+            qaqh_oauth_core::store::StoreFailure::WriteTemp { temp, reason } => {
+                format!("写临时文件失败 {temp}: {reason}")
+            }
+            qaqh_oauth_core::store::StoreFailure::Rename { path, reason } => {
+                format!("落盘失败 {path}: {reason}")
+            }
+        };
+        SiwcError::new(SiwcCode::StoreFailure, message)
     })
 }
-
-#[cfg(unix)]
-fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-}
-
-#[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {}
 
 #[cfg(test)]
 mod tests {

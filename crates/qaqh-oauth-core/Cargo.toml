@@ -1,0 +1,27 @@
+[package]
+name = "qaqh-oauth-core"
+description = "siwc/dsaccount 共用的 OAuth 原生应用基础设施：回环回调监听、PKCE/随机量/base64url、ureq 超时封装、原子凭据落盘"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# 随机量与 sha256 走 aws-lc-rs：与 qaqh-siwc/qaqh-dsaccount、daemon 服务端 TLS
+# 同一栈（ADR-0039）。
+aws-lc-rs = "1"
+# 常数时间比较（state 校验）：LTO 下手写 XOR 循环随时被丢常数时间特性。
+subtle = "2"
+# attempt_id / host id 的 UUIDv4。
+uuid = { version = "1", features = ["v4"] }
+serde_json = "1"
+# 回调查询串解析（手写百分号编码是安全 bug 高发区）。
+url = "2"
+# 同步 HTTP：OAuth 流程与回环监听跑在专用 std 线程上，不进 tokio。
+ureq = { version = "3", features = ["json"] }
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

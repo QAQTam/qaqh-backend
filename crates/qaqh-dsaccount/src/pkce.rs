@@ -1,12 +1,10 @@
 //! PKCE（RFC 7636，S256）与 `state` 的一次性事务量。
 //!
-//! 两个值都由 [`crate::util::random_transaction_value`] 生成（32 字节熵）。
+//! 两个值都由 [`qaqh_oauth_core::util::random_transaction_value`] 生成（32 字节熵）。
 //! `code_verifier` **不出进程**：它只出现在换码与取消两个请求体里，从不进 UI
 //! 投影、不进日志。
 
-use aws_lc_rs::digest::{SHA256, digest};
-
-use crate::util::{base64url_encode, constant_time_eq, random_transaction_value};
+use qaqh_oauth_core::util::{constant_time_eq, pkce_challenge, random_transaction_value};
 
 /// 一次授权尝试需要的两个秘密值。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,7 +19,7 @@ impl Pkce {
     pub fn new() -> Self {
         let verifier = random_transaction_value();
         Self {
-            challenge: challenge_for(&verifier),
+            challenge: pkce_challenge(&verifier),
             verifier,
             state: random_transaction_value(),
         }
@@ -55,11 +53,6 @@ impl Default for Pkce {
     }
 }
 
-/// `code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))`。
-pub fn challenge_for(verifier: &str) -> String {
-    base64url_encode(digest(&SHA256, verifier.as_bytes()).as_ref())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,7 +61,7 @@ mod tests {
     fn challenge_is_the_sha256_of_the_verifier() {
         // RFC 7636 附录 B 的示例对：verifier 的 S256 challenge。
         assert_eq!(
-            challenge_for("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+            pkce_challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
     }

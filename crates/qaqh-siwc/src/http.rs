@@ -1,14 +1,16 @@
-//! HTTP 薄封装（ureq，同步）。
+//! 同步 HTTP 的 **siwc 产品层**（v4.5 P2-1b）。
+//!
+//! ureq 超时封装（`timeout_global` + `http_status_as_error(false)`、body 读取、
+//! request id 提取）已抽进 [`qaqh_oauth_core::http`]（与 `qaqh-dsaccount` 的
+//! 同构拷贝合一）；本层只剩 siwc 的产品语义：`Bearer` 注入、错误码映射
+//! （一切传输失败记 `Transport`）与 provider 错误形状解读（`error.code` /
+//! `error.message` / `detail`——直连路由可能返回 `{"detail":...}`）。
 //!
 //! 为什么同步：OAuth 流程与回环监听跑在**专用 std 线程**上，不进 tokio。
-//! 这既避开「tokio worker 被阻塞」，也避开「runtime 内建 runtime」的事故面。
-//!
-//! 关键选择：`http_status_as_error(false)`。文档要求保留真实 HTTP 状态、
-//! 响应体形状、`error.code` 与 request id —— 4xx/5xx 必须能读到 body，
-//! 否则限流/不适用这些**产品状态**会被压成一句「HTTP 错误」。
 
 use std::time::Duration;
 
+use qaqh_oauth_core::http::{HttpAgent, HttpFailureKind, RawResponse};
 use serde_json::Value;
 
 use crate::error::{SiwcCode, SiwcError};
@@ -22,6 +24,14 @@ pub struct HttpResponse {
 }
 
 impl HttpResponse {
+    fn from_raw(raw: RawResponse) -> Self {
+        Self {
+            status: raw.status,
+            body: raw.body,
+            request_id: raw.request_id,
+        }
+    }
+
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
     }
@@ -66,71 +76,49 @@ impl HttpResponse {
     }
 }
 
-/// 带超时的同步 HTTP 客户端。
+/// 带超时的同步 HTTP 客户端（核心层薄产品壳：Bearer 注入 + 错误码映射）。
 #[derive(Debug, Clone)]
 pub struct Http {
-    agent: ureq::Agent,
+    agent: HttpAgent,
 }
 
 impl Http {
     pub fn new(timeout: Duration) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .http_status_as_error(false)
-            .user_agent(concat!("qaqh-siwc/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
-        Self { agent }
+        Self {
+            agent: HttpAgent::new(
+                timeout,
+                concat!("qaqh-siwc/", env!("CARGO_PKG_VERSION")),
+                false,
+            ),
+        }
     }
 
     pub fn get(&self, url: &str, bearer: Option<&str>) -> Result<HttpResponse, SiwcError> {
-        let mut request = self.agent.get(url).header("accept", "application/json");
-        if let Some(token) = bearer {
-            request = request.header("authorization", format!("Bearer {token}"));
+        let bearer_header = format!("Bearer {}", bearer.unwrap_or_default());
+        let mut headers: Vec<(&str, &str)> = Vec::new();
+        if bearer.is_some() {
+            headers.push(("authorization", bearer_header.as_str()));
         }
-        self.finish(request.call())
+        self.map(self.agent.get(url, &headers))
     }
 
     /// form-urlencoded POST（OAuth token / revocation 端点的唯一形态）。
     pub fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<HttpResponse, SiwcError> {
-        let request = self
-            .agent
-            .post(url)
-            .header("accept", "application/json")
-            .header("content-type", "application/x-www-form-urlencoded");
-        self.finish(request.send_form(form.iter().copied()))
+        self.map(self.agent.post_form(url, form))
     }
 
-    fn finish(
+    fn map(
         &self,
-        result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
+        result: Result<RawResponse, qaqh_oauth_core::http::HttpFailure>,
     ) -> Result<HttpResponse, SiwcError> {
-        match result {
-            Ok(mut response) => {
-                let status = response.status().as_u16();
-                let request_id = ["x-request-id", "openai-request-id"]
-                    .iter()
-                    .find_map(|name| {
-                        response
-                            .headers()
-                            .get(*name)
-                            .and_then(|v| v.to_str().ok())
-                            .map(str::to_owned)
-                    });
-                let body = response.body_mut().read_to_string().map_err(|e| {
-                    SiwcError::new(SiwcCode::Transport, format!("读取响应失败: {e}"))
-                })?;
-                Ok(HttpResponse {
-                    status,
-                    body,
-                    request_id,
-                })
-            }
-            Err(error) => Err(SiwcError::new(
-                SiwcCode::Transport,
-                format!("请求失败: {error}"),
-            )),
-        }
+        result
+            .map(HttpResponse::from_raw)
+            .map_err(|failure| match failure.kind {
+                HttpFailureKind::Transport | HttpFailureKind::BodyRead => {
+                    // 传输层与读体失败都是**可用性**问题（旧拷贝同为 Transport）。
+                    SiwcError::new(SiwcCode::Transport, failure.message)
+                }
+            })
     }
 }
 

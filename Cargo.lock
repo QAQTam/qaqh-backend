@@ -2755,18 +2755,15 @@ dependencies = [
 name = "qaqh-dsaccount"
 version = "4.2.0"
 dependencies = [
- "aws-lc-rs",
  "log",
  "qaqh-config",
+ "qaqh-oauth-core",
  "qaqh-types",
  "serde",
  "serde_json",
- "subtle",
  "tempfile",
  "ts-rs",
- "ureq",
  "url",
- "uuid",
 ]
 
 [[package]]
@@ -2908,6 +2905,20 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "ts-rs",
+]
+
+[[package]]
+name = "qaqh-oauth-core"
+version = "4.2.0"
+dependencies = [
+ "aws-lc-rs",
+ "log",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "ureq",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -3097,15 +3108,13 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "qaqh-config",
+ "qaqh-oauth-core",
  "qaqh-types",
  "serde",
  "serde_json",
- "subtle",
  "tempfile",
  "ts-rs",
- "ureq",
  "url",
- "uuid",
 ]
 
 [[package]]

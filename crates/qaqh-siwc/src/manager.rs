@@ -30,7 +30,7 @@ use crate::models::{self, ModelInfo};
 use crate::oauth::{self, AuthorizeParams, TokenResponse};
 use crate::protocol::{self, Discovery};
 use crate::store::{CredentialStore, PendingRegistration, ProfileStatus, StoredProfile, TokenSet};
-use crate::util::{now_ms, random_transaction_value};
+use qaqh_oauth_core::util::{now_ms, random_transaction_value};
 
 /// discovery / JWKS 的缓存时长（都对**可用性**敏感，不对正确性敏感：
 /// 未知 kid 会强制重取，见 [`SiwcManager::verify_identity`]）。
@@ -340,7 +340,7 @@ impl SiwcManager {
         let state_value = random_transaction_value();
         let nonce = random_transaction_value();
         let verifier = random_transaction_value();
-        let challenge = oauth::pkce_challenge(&verifier);
+        let challenge = qaqh_oauth_core::util::pkce_challenge(&verifier);
 
         let discovery = self.discovery()?;
         let authorize_url = oauth::authorize_url(

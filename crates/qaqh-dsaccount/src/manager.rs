@@ -26,7 +26,7 @@ use crate::loopback::CallbackListener;
 use crate::pkce::Pkce;
 use crate::protocol::Locale;
 use crate::store::{AccountStore, StoredAccount};
-use crate::util::{now_ms, random_uuid_v4};
+use qaqh_oauth_core::util::{now_ms, random_uuid_v4};
 
 /// 登录尝试的对外状态。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

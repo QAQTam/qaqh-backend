@@ -10,24 +10,18 @@ license.workspace = true
 qaqh-config = { path = "../qaqh-config" }
 # `platform::data_dir()` 与 `sha256_hex`。
 qaqh-types = { path = "../qaqh-types" }
+# OAuth 原生应用机械层（回环监听/PKCE 随机量/base64url/ureq 超时/
+# 原子落盘）——与 qaqh-dsaccount 的公共归宿，v4.5 P2-1b（MUST 复制粘贴清剿）。
+qaqh-oauth-core = { path = "../qaqh-oauth-core" }
 log = "0.4"
-# PKCE sha256 / JWKS RSA 验签 / 随机量走 aws-lc-rs：与 daemon 服务端 TLS 同一栈
-# （ADR-0039）。OHOS 不消费本 crate，无 ring 保留诉求。
+# JWKS RSA 验签走 aws-lc-rs：与 daemon 服务端 TLS 同一栈（ADR-0039）。
+# OHOS 不消费本 crate，无 ring 保留诉求。
 aws-lc-rs = "1"
-# 常数时间比较（state/verifier 校验）：LTO 下手写 XOR 循环随时被优化掉常数
-# 时间特性，subtle 是唯一可信实现。
-subtle = "2"
-# host id 的 UUIDv4（P0-3：手写「时间戳+PID」兜底退役）。
-uuid = { version = "1", features = ["v4"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 # URL 构造/查询解析：授权 URL 的参数编码与回环回调的查询串都交给它，
 # 手写百分号编码是安全 bug 的高发区（回调 URI 必须与 token 交换逐字一致）。
 url = "2"
-# 同步 HTTP：本 crate 的回环监听与 OAuth 流程跑在**专用 std 线程**上，
-# 不用 tokio（避免「阻塞 tokio worker」与「runtime 内建 runtime」两类事故）。
-ureq = { version = "3", features = ["json"] }
-
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }
 
 [features]
