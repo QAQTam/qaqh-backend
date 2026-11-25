@@ -2198,15 +2198,19 @@ checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
 
 [[package]]
 name = "mutil-ai"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "bytes",
  "futures-core",
+ "futures-executor",
+ "futures-util",
  "httpdate",
+ "libc",
  "reqwest",
  "serde",
  "serde_json",
+ "sse-stream 0.3.0",
  "thiserror 2.0.21",
  "time",
  "tokio",
@@ -3578,7 +3582,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "sse-stream",
+ "sse-stream 0.2.6",
  "thiserror 2.0.21",
  "tokio",
  "tokio-stream",
@@ -4195,6 +4199,21 @@ dependencies = [
  "http-body",
  "http-body-util",
  "pin-project-lite",
+]
+
+[[package]]
+name = "sse-stream"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d385160fc0fba84f7b9cc8ef3263e410d0e3ca7ab4927f1356df33145ace69a4"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "http-body-util",
+ "memchr",
+ "pin-project-lite",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

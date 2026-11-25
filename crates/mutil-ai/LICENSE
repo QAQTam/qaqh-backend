@@ -1,0 +1,11 @@
+mutil-ai is licensed under either of the following, at your option:
+
+  - MIT License (see LICENSE-MIT)
+  - Apache License, Version 2.0 (see LICENSE-APACHE)
+
+SPDX-License-Identifier: MIT OR Apache-2.0
+
+These licenses apply to this project's code and documentation. Third-party
+dependencies retain their own licenses. Access to model-provider services is
+governed separately by each provider's applicable terms; this license does not
+grant service access or imply provider endorsement.

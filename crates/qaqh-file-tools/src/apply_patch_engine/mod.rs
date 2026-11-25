@@ -48,10 +48,11 @@ pub enum EngineError {
         path: String,
         target: String,
     },
-    /// 多个 hunk 解析后指向同一文件（如 `a.txt` 与 `./a.txt`）：落盘前拒绝
-    /// （上游 a1c88e865，#37867）。
+    /// 多个 hunk 解析后指向同一文件（如 `a.txt` 与 `./a.txt`，或 Delete+Add）：
+    /// 落盘前拒绝（上游 a1c88e865，#37867）。
     DuplicatePath {
         path: String,
+        detail: String,
     },
     /// `*** Add File:` targeted a path that already exists. Dry-run reports this
     /// instead of a plain `[DRY RUN] … ok`; a real apply keeps the upstream
@@ -74,7 +75,7 @@ pub enum EngineError {
 impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            EngineError::Parse(e) => write!(f, "invalid patch: {e}"),
+            EngineError::Parse(e) => write!(f, "{e}"),
             EngineError::Io { context, source } => write!(f, "{context}: {source}"),
             EngineError::Compute(msg) => write!(f, "{msg}"),
             EngineError::EmptyPatch => write!(f, "no changes to apply"),
@@ -85,9 +86,9 @@ impl fmt::Display for EngineError {
                 f,
                 "refusing to patch '{path}': it is a symbolic link to '{target}'; use the target path directly"
             ),
-            EngineError::DuplicatePath { path } => write!(
+            EngineError::DuplicatePath { path, detail } => write!(
                 f,
-                "multiple operations target the same resolved path: {path}; merge them into a single hunk or use distinct paths"
+                "multiple operations target the same resolved path: {path}; {detail}"
             ),
             EngineError::WouldOverwrite { path } => {
                 write!(f, "Add File target already exists: {path}")
@@ -173,6 +174,8 @@ pub struct FileDelta {
 pub struct ApplyOutcome {
     pub affected: AffectedPaths,
     pub deltas: Vec<FileDelta>,
+    /// Non-fatal warnings when a chunk matched multiple locations (applied to first).
+    pub ambiguity_warnings: Vec<String>,
 }
 
 /// Resolve a hunk path against the workspace root. Relative paths are joined to
@@ -245,173 +248,97 @@ pub(crate) fn resolve_workspace_path(cwd: &Path, path: &Path) -> Result<PathBuf,
     Ok(abs)
 }
 
-/// Apply a `*** Begin Patch` patch to the workspace rooted at `cwd`.
-pub fn apply_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, EngineError> {
-    let hunks = parse_patch(patch)?.hunks;
-    if hunks.is_empty() {
-        return Err(EngineError::EmptyPatch);
-    }
-    // 上游 a1c88e865（#37867）：拒绝解析后指向同一文件的多个 hunk
-    // （如 `duplicate.txt` 与 `./duplicate.txt`）。逐 hunk 顺序套用下，
-    // 第二个 Update 的上下文匹配会基于第一个改完的内容，语义混沌；
-    // 在任何落盘前拒绝，保持引擎的 all-or-nothing 判定面。
-    // Windows 路径大小写不敏感 → 键做大小写折叠。
-    {
-        let mut seen = std::collections::HashSet::new();
-        for hunk in &hunks {
-            let resolved = resolve_workspace_path(cwd, hunk.path())?;
-            let key = resolved.to_string_lossy().to_lowercase();
-            if !seen.insert(key) {
-                return Err(EngineError::DuplicatePath {
-                    path: resolved.to_string_lossy().to_string(),
-                });
-            }
-        }
-    }
-    let mut outcome = ApplyOutcome::default();
-    for (idx, hunk) in hunks.iter().enumerate() {
-        if let Err(err) = apply_hunk(hunk, cwd, &mut outcome) {
-            // Hunks are written one at a time (non-atomic, inherited from
-            // upstream): everything already in `outcome` is on disk. Report it
-            // with the error instead of letting the caller claim otherwise.
-            let applied = outcome.deltas.iter().map(|d| d.path.clone()).collect();
-            let not_applied = hunks[idx..]
-                .iter()
-                .map(|h| h.path().to_string_lossy().to_string())
-                .collect();
-            return Err(err.with_partial(applied, not_applied));
-        }
-    }
-    Ok(outcome)
+enum PreparedHunk {
+    Add {
+        affected_path: String,
+        resolved: PathBuf,
+        old: Option<String>,
+        contents: String,
+    },
+    Delete {
+        affected_path: String,
+        resolved: PathBuf,
+        old: Option<String>,
+    },
+    Update {
+        affected_path: String,
+        src_resolved: PathBuf,
+        dest_resolved: Option<PathBuf>,
+        original_contents: String,
+        new_contents: String,
+    },
 }
 
-/// Apply a single hunk to disk, appending its delta to `outcome`.
-fn apply_hunk(hunk: &Hunk, cwd: &Path, outcome: &mut ApplyOutcome) -> Result<(), EngineError> {
-    let affected_path = hunk.path().to_string_lossy().to_string();
-    let resolved = resolve_workspace_path(cwd, hunk.path())?;
+impl PreparedHunk {
+    fn affected_path(&self) -> &str {
+        match self {
+            PreparedHunk::Add { affected_path, .. }
+            | PreparedHunk::Delete { affected_path, .. }
+            | PreparedHunk::Update { affected_path, .. } => affected_path,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HunkOpKind {
+    Add,
+    Delete,
+    Update,
+}
+
+fn hunk_op_kind(hunk: &Hunk) -> HunkOpKind {
     match hunk {
-        Hunk::AddFile { contents, .. } => {
-            // `*** Add File:` keeps upstream's overwrite semantics (fixture
-            // 011_add_overwrites_existing_file), but the replaced contents must
-            // be captured — upstream reads them into `overwritten_content`
-            // (codex-rs/apply-patch/src/lib.rs:508-533) so the delta carries
-            // rollback material. This port dropped that into `old: None`, which
-            // made the overwrite silent (BUG-2026-09-16-10).
-            let old = existing_file_contents(&resolved);
-            write_file_with_missing_parent_retry(&resolved, contents.as_bytes())?;
-            outcome.affected.added.push(affected_path.clone());
-            outcome.deltas.push(FileDelta {
-                path: affected_path,
-                resolved_path: resolved.to_string_lossy().to_string(),
-                old,
-                new: Some(contents.clone()),
-            });
-        }
-        Hunk::DeleteFile { .. } => {
-            let old = std::fs::read_to_string(&resolved).ok();
-            let meta = std::fs::metadata(&resolved).map_err(|e| EngineError::Io {
-                context: format!("Failed to delete file {}", resolved.to_string_lossy()),
-                source: e,
-            })?;
-            if meta.is_dir() {
-                return Err(EngineError::Io {
-                    context: format!(
-                        "Failed to delete file {}: path is a directory",
-                        resolved.to_string_lossy()
-                    ),
-                    source: std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "path is a directory",
-                    ),
-                });
-            }
-            std::fs::remove_file(&resolved).map_err(|e| EngineError::Io {
-                context: format!("Failed to delete file {}", resolved.to_string_lossy()),
-                source: e,
-            })?;
-            outcome.affected.deleted.push(affected_path.clone());
-            outcome.deltas.push(FileDelta {
-                path: affected_path,
-                resolved_path: resolved.to_string_lossy().to_string(),
-                old,
-                new: None,
-            });
-        }
-        Hunk::UpdateFile {
-            path: src_path,
-            move_path,
-            chunks,
-        } => {
-            let resolved = resolve_workspace_path(cwd, src_path)?;
-            let applied =
-                derive_new_contents_from_chunks(&resolved, chunks).map_err(|e| match e {
-                    EngineError::Compute(msg) => EngineError::Compute(format!(
-                        "Failed to update file {}: {msg}",
-                        resolved.to_string_lossy()
-                    )),
-                    other => other,
-                })?;
-            if let Some(dest) = move_path {
-                let dest_resolved = resolve_workspace_path(cwd, dest)?;
-                write_file_with_missing_parent_retry(
-                    &dest_resolved,
-                    applied.new_contents.as_bytes(),
-                )?;
-                let meta = std::fs::metadata(&resolved).map_err(|e| EngineError::Io {
-                    context: format!("Failed to remove original {}", resolved.to_string_lossy()),
-                    source: e,
-                })?;
-                if meta.is_dir() {
-                    return Err(EngineError::Io {
-                        context: format!(
-                            "Failed to remove original {}: path is a directory",
-                            resolved.to_string_lossy()
-                        ),
-                        source: std::io::Error::new(
-                            std::io::ErrorKind::InvalidInput,
-                            "path is a directory",
-                        ),
-                    });
+        Hunk::AddFile { .. } => HunkOpKind::Add,
+        Hunk::DeleteFile { .. } => HunkOpKind::Delete,
+        Hunk::UpdateFile { .. } => HunkOpKind::Update,
+    }
+}
+
+fn check_duplicate_paths(hunks: &[Hunk], cwd: &Path) -> Result<(), EngineError> {
+    // 上游 a1c88e865（#37867）：拒绝解析后指向同一文件的多个 hunk
+    // （如 `duplicate.txt` 与 `./duplicate.txt`，或 Delete+Add 同路径）。
+    // Windows 路径大小写不敏感 → 键做大小写折叠。
+    let mut seen: std::collections::HashMap<String, HunkOpKind> = std::collections::HashMap::new();
+    for hunk in hunks {
+        let resolved = resolve_workspace_path(cwd, hunk.path())?;
+        let key = resolved.to_string_lossy().to_lowercase();
+        let op = hunk_op_kind(hunk);
+        if let Some(prev) = seen.insert(key, op) {
+            let detail = match (prev, op) {
+                (HunkOpKind::Delete, HunkOpKind::Add) | (HunkOpKind::Add, HunkOpKind::Delete) => {
+                    "do not combine '*** Delete File:' and '*** Add File:' on the same file; to rewrite an existing file wholesale use the 'write' tool or a single '*** Add File:' / '*** Update File:' hunk".to_string()
                 }
-                std::fs::remove_file(&resolved).map_err(|e| EngineError::Io {
-                    context: format!("Failed to remove original {}", resolved.to_string_lossy()),
-                    source: e,
-                })?;
-            } else {
-                std::fs::write(&resolved, applied.new_contents.as_bytes()).map_err(|e| {
-                    EngineError::Io {
-                        context: format!("Failed to write file {}", resolved.to_string_lossy()),
-                        source: e,
-                    }
-                })?;
-            }
-            outcome.affected.modified.push(affected_path.clone());
-            outcome.deltas.push(FileDelta {
-                path: affected_path,
-                resolved_path: resolved.to_string_lossy().to_string(),
-                old: Some(applied.original_contents),
-                new: Some(applied.new_contents),
+                (HunkOpKind::Update, HunkOpKind::Update) => {
+                    "combine all edits to the same file under a single '*** Update File:' header using multiple '@@' chunks".to_string()
+                }
+                _ => {
+                    "merge them into a single hunk or target distinct paths".to_string()
+                }
+            };
+            return Err(EngineError::DuplicatePath {
+                path: resolved.to_string_lossy().to_string(),
+                detail,
             });
         }
     }
     Ok(())
 }
 
-/// Dry-run: parse and fully compute every hunk against the current file state,
-/// but write nothing. It surfaces the failures of a read-only pre-check, but
-/// cannot foresee failures that depend on earlier hunks having been written
-/// (e.g. delete then update the same file), so a real apply may still differ.
-pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, EngineError> {
-    let hunks = parse_patch(patch)?.hunks;
-    if hunks.is_empty() {
-        return Err(EngineError::EmptyPatch);
-    }
-    let mut outcome = ApplyOutcome::default();
-    for hunk in &hunks {
+/// Phase 1（纯读 + 全量内存计算）：校验全部路径、检查目录/覆盖约束、计算所有
+/// UpdateFile 的新内容。任一 hunk 失败时 0 文件落盘（真原子预检）。
+fn prepare_hunks(
+    hunks: &[Hunk],
+    cwd: &Path,
+    dry_run: bool,
+) -> Result<(Vec<PreparedHunk>, Vec<String>), EngineError> {
+    check_duplicate_paths(hunks, cwd)?;
+    let mut prepared = Vec::with_capacity(hunks.len());
+    let mut warnings = Vec::new();
+    for hunk in hunks {
         let affected_path = hunk.path().to_string_lossy().to_string();
-        let resolved = resolve_workspace_path(cwd, hunk.path())?;
         match hunk {
-            Hunk::AddFile { contents, .. } => {
+            Hunk::AddFile { path, contents } => {
+                let resolved = resolve_workspace_path(cwd, path)?;
                 if std::fs::metadata(&resolved).is_ok_and(|m| m.is_dir()) {
                     return Err(EngineError::Io {
                         context: format!(
@@ -424,23 +351,21 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                         ),
                     });
                 }
-                // Dry-run must not report a plain `[DRY RUN] … ok` for a patch
-                // that would replace an existing file wholesale
-                // (BUG-2026-09-16-10).
-                if std::fs::metadata(&resolved).is_ok() {
+                if dry_run && std::fs::metadata(&resolved).is_ok() {
                     return Err(EngineError::WouldOverwrite {
                         path: resolved.to_string_lossy().to_string(),
                     });
                 }
-                outcome.affected.added.push(affected_path.clone());
-                outcome.deltas.push(FileDelta {
-                    path: affected_path,
-                    resolved_path: resolved.to_string_lossy().to_string(),
-                    old: None,
-                    new: Some(contents.clone()),
+                let old = existing_file_contents(&resolved);
+                prepared.push(PreparedHunk::Add {
+                    affected_path,
+                    resolved,
+                    old,
+                    contents: contents.clone(),
                 });
             }
-            Hunk::DeleteFile { .. } => {
+            Hunk::DeleteFile { path } => {
+                let resolved = resolve_workspace_path(cwd, path)?;
                 let old = std::fs::read_to_string(&resolved).ok();
                 let meta = std::fs::metadata(&resolved).map_err(|e| EngineError::Io {
                     context: format!("Failed to delete file {}", resolved.to_string_lossy()),
@@ -458,6 +383,182 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                         ),
                     });
                 }
+                prepared.push(PreparedHunk::Delete {
+                    affected_path,
+                    resolved,
+                    old,
+                });
+            }
+            Hunk::UpdateFile {
+                path: src_path,
+                move_path,
+                chunks,
+            } => {
+                let src_resolved = resolve_workspace_path(cwd, src_path)?;
+                let dest_resolved = match move_path {
+                    Some(dest) => Some(resolve_workspace_path(cwd, dest)?),
+                    None => None,
+                };
+                let applied =
+                    derive_new_contents_from_chunks(&src_resolved, chunks).map_err(|e| match e {
+                        EngineError::Compute(msg) => EngineError::Compute(format!(
+                            "Failed to update file {}: {msg}",
+                            src_resolved.to_string_lossy()
+                        )),
+                        other => other,
+                    })?;
+                warnings.extend(applied.ambiguity_warnings);
+                prepared.push(PreparedHunk::Update {
+                    affected_path,
+                    src_resolved,
+                    dest_resolved,
+                    original_contents: applied.original_contents,
+                    new_contents: applied.new_contents,
+                });
+            }
+        }
+    }
+    Ok((prepared, warnings))
+}
+
+/// Apply a `*** Begin Patch` patch to the workspace rooted at `cwd`.
+///
+/// 全量预检后再写盘：所有 hunk 先在内存中完成解析、路径校验与内容匹配计算，
+/// 全部通过才统一落盘——任何 `no_match` / `duplicate_path` 失败均保证 0 副作用。
+pub fn apply_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, EngineError> {
+    let hunks = parse_patch(patch)?.hunks;
+    if hunks.is_empty() {
+        return Err(EngineError::EmptyPatch);
+    }
+    let (prepared, ambiguity_warnings) = prepare_hunks(&hunks, cwd, false)?;
+    let mut outcome = ApplyOutcome {
+        ambiguity_warnings,
+        ..ApplyOutcome::default()
+    };
+    for (idx, item) in prepared.iter().enumerate() {
+        if let Err(err) = commit_prepared_hunk(item, &mut outcome) {
+            let applied = outcome.deltas.iter().map(|d| d.path.clone()).collect();
+            let not_applied = prepared[idx..]
+                .iter()
+                .map(|h| h.affected_path().to_string())
+                .collect();
+            return Err(err.with_partial(applied, not_applied));
+        }
+    }
+    Ok(outcome)
+}
+
+fn commit_prepared_hunk(
+    item: &PreparedHunk,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), EngineError> {
+    match item {
+        PreparedHunk::Add {
+            affected_path,
+            resolved,
+            old,
+            contents,
+        } => {
+            write_file_with_missing_parent_retry(resolved, contents.as_bytes())?;
+            outcome.affected.added.push(affected_path.clone());
+            outcome.deltas.push(FileDelta {
+                path: affected_path.clone(),
+                resolved_path: resolved.to_string_lossy().to_string(),
+                old: old.clone(),
+                new: Some(contents.clone()),
+            });
+        }
+        PreparedHunk::Delete {
+            affected_path,
+            resolved,
+            old,
+        } => {
+            std::fs::remove_file(resolved).map_err(|e| EngineError::Io {
+                context: format!("Failed to delete file {}", resolved.to_string_lossy()),
+                source: e,
+            })?;
+            outcome.affected.deleted.push(affected_path.clone());
+            outcome.deltas.push(FileDelta {
+                path: affected_path.clone(),
+                resolved_path: resolved.to_string_lossy().to_string(),
+                old: old.clone(),
+                new: None,
+            });
+        }
+        PreparedHunk::Update {
+            affected_path,
+            src_resolved,
+            dest_resolved,
+            original_contents,
+            new_contents,
+        } => {
+            let final_resolved = if let Some(dest) = dest_resolved {
+                write_file_with_missing_parent_retry(dest, new_contents.as_bytes())?;
+                std::fs::remove_file(src_resolved).map_err(|e| EngineError::Io {
+                    context: format!(
+                        "Failed to remove original {}",
+                        src_resolved.to_string_lossy()
+                    ),
+                    source: e,
+                })?;
+                dest
+            } else {
+                std::fs::write(src_resolved, new_contents.as_bytes()).map_err(|e| {
+                    EngineError::Io {
+                        context: format!(
+                            "Failed to write file {}",
+                            src_resolved.to_string_lossy()
+                        ),
+                        source: e,
+                    }
+                })?;
+                src_resolved
+            };
+            outcome.affected.modified.push(affected_path.clone());
+            outcome.deltas.push(FileDelta {
+                path: affected_path.clone(),
+                resolved_path: final_resolved.to_string_lossy().to_string(),
+                old: Some(original_contents.clone()),
+                new: Some(new_contents.clone()),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Dry-run: parse and fully compute every hunk against the current file state,
+/// writing nothing. Shares the exact same `prepare_hunks` pipeline as real apply.
+pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, EngineError> {
+    let hunks = parse_patch(patch)?.hunks;
+    if hunks.is_empty() {
+        return Err(EngineError::EmptyPatch);
+    }
+    let (prepared, ambiguity_warnings) = prepare_hunks(&hunks, cwd, true)?;
+    let mut outcome = ApplyOutcome {
+        ambiguity_warnings,
+        ..ApplyOutcome::default()
+    };
+    for item in prepared {
+        match item {
+            PreparedHunk::Add {
+                affected_path,
+                resolved,
+                contents,
+                ..
+            } => {
+                outcome.affected.added.push(affected_path.clone());
+                outcome.deltas.push(FileDelta {
+                    path: affected_path,
+                    resolved_path: resolved.to_string_lossy().to_string(),
+                    old: None,
+                    new: Some(contents),
+                });
+            }
+            PreparedHunk::Delete {
+                affected_path,
+                resolved,
+                old,
+            } => {
                 outcome.affected.deleted.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
@@ -466,23 +567,20 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
                     new: None,
                 });
             }
-            Hunk::UpdateFile { chunks, .. } => {
-                // Full compute (read + match + rebuild) — same failure surface
-                // as a real apply, minus the write.
-                let applied =
-                    derive_new_contents_from_chunks(&resolved, chunks).map_err(|e| match e {
-                        EngineError::Compute(msg) => EngineError::Compute(format!(
-                            "Failed to update file {}: {msg}",
-                            resolved.to_string_lossy()
-                        )),
-                        other => other,
-                    })?;
+            PreparedHunk::Update {
+                affected_path,
+                src_resolved,
+                dest_resolved,
+                original_contents,
+                new_contents,
+            } => {
+                let final_resolved = dest_resolved.as_ref().unwrap_or(&src_resolved);
                 outcome.affected.modified.push(affected_path.clone());
                 outcome.deltas.push(FileDelta {
                     path: affected_path,
-                    resolved_path: resolved.to_string_lossy().to_string(),
-                    old: Some(applied.original_contents),
-                    new: Some(applied.new_contents),
+                    resolved_path: final_resolved.to_string_lossy().to_string(),
+                    old: Some(original_contents),
+                    new: Some(new_contents),
                 });
             }
         }
@@ -764,9 +862,9 @@ mod tests {
         );
     }
 
-    /// T-3-2：失败发生在第 2 个 hunk 时，错误必须携带「已生效 / 未生效」。
+    /// 全量预检原子性：第 2 个 hunk `no_match` 时，第 1 个 hunk 绝不落盘（0 副作用）。
     #[test]
-    fn partial_failure_carries_applied_paths() {
+    fn no_match_on_later_hunk_leaves_earlier_files_untouched() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
         std::fs::write(dir.path().join("b.txt"), "beta\n").unwrap();
@@ -783,21 +881,18 @@ mod tests {
 *** End Patch
 ";
         let err = apply_patch_engine(patch, dir.path()).unwrap_err();
-        match err {
-            EngineError::Partial {
-                applied,
-                not_applied,
-                ..
-            } => {
-                assert_eq!(applied, vec!["a.txt".to_string()]);
-                assert_eq!(not_applied, vec!["b.txt".to_string()]);
-            }
-            other => panic!("expected Partial, got {other:?}"),
-        }
-        // 1 号 hunk 确实已落盘（非原子，与上游一致）
+        assert!(
+            matches!(err, EngineError::Compute(_)),
+            "expected plain Compute (zero partial writes), got {err:?}"
+        );
+        // 1 号 hunk 未落盘（全量预检真原子）
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "ALPHA\n"
+            "alpha\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "beta\n"
         );
     }
 
@@ -855,8 +950,9 @@ mod tests {
         let patch = "*** Begin Patch\n*** Update File: duplicate.txt\n@@\n-before\n+first\n*** Update File: ./duplicate.txt\n@@\n-before\n+second\n*** End Patch\n";
         let err = apply_patch_engine(patch, dir.path()).unwrap_err();
         match err {
-            EngineError::DuplicatePath { path } => {
+            EngineError::DuplicatePath { path, detail } => {
                 assert!(path.contains("duplicate.txt"), "path: {path}");
+                assert!(detail.contains("@@"), "detail: {detail}");
             }
             other => panic!("expected DuplicatePath, got {other:?}"),
         }
@@ -865,5 +961,70 @@ mod tests {
             std::fs::read_to_string(dir.path().join("duplicate.txt")).unwrap(),
             "before\n"
         );
+    }
+
+    #[test]
+    fn compute_and_parse_errors_report_actionable_diagnostics() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("app.rs"),
+            "fn first() {\n    let alpha = 1;\n}\nfn second() {\n    let beta = 2;\n}\n",
+        )
+        .unwrap();
+
+        // 1. no_match 带 closest match diff
+        let bad_line = "*** Begin Patch\n*** Update File: app.rs\n@@\n-    let alpha = 999;\n+    let alpha = 2;\n*** End Patch\n";
+        let err = apply_patch_engine(bad_line, dir.path()).unwrap_err().to_string();
+        assert!(err.contains("closest match:"), "missing closest match: {err}");
+        assert!(err.contains("+    let alpha = 1;"), "missing actual line in diff: {err}");
+
+        // 2. chunk 顺序倒置检测
+        let out_of_order = "*** Begin Patch\n*** Update File: app.rs\n@@\n-    let beta = 2;\n+    let beta = 3;\n@@\n-    let alpha = 1;\n+    let alpha = 2;\n*** End Patch\n";
+        let err = apply_patch_engine(out_of_order, dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("chunk 2/2") && err.contains("top-to-bottom file order"),
+            "should diagnose out-of-order chunk: {err}"
+        );
+
+        // 3. unified diff 行号头误用
+        let unified_hdr = "*** Begin Patch\n*** Update File: app.rs\n@@ -1,3 +1,3 @@\n-fn first() {\n+fn first_v2() {\n*** End Patch\n";
+        let err = apply_patch_engine(unified_hdr, dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("Unified diff line-number header"),
+            "should diagnose unified diff header: {err}"
+        );
+
+        // 4. Add File 漏 '+' 前缀
+        let missing_plus = "*** Begin Patch\n*** Add File: fresh.rs\nfn oops() {}\n*** End Patch\n";
+        let err = apply_patch_engine(missing_plus, dir.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("must start with '+'"),
+            "should diagnose missing '+' in Add File: {err}"
+        );
+
+        // 5. Markdown 代码块包裹 / git diff / 漏前导空格 / 连续空 @@ / Delete+Add 细分
+        let fenced = "```diff\n*** Begin Patch\n*** Update File: app.rs\n@@\n-x\n+y\n*** End Patch\n```\n";
+        let err = apply_patch_engine(fenced, dir.path()).unwrap_err().to_string();
+        assert!(err.contains("Markdown code fences"), "fenced: {err}");
+        assert!(!err.contains("invalid patch: invalid patch:"), "no double prefix: {err}");
+
+        let unprefixed = "*** Begin Patch\n*** Update File: app.rs\n@@\n fn first() {\n-    let alpha = 1;\n+    let alpha = 2;\n}\n*** End Patch\n";
+        let err = apply_patch_engine(unprefixed, dir.path()).unwrap_err().to_string();
+        assert!(err.contains("must start with a single space"), "unprefixed: {err}");
+
+        let dup_at = "*** Begin Patch\n*** Update File: app.rs\n@@\n@@\n-    let alpha = 1;\n+    let alpha = 2;\n*** End Patch\n";
+        let err = apply_patch_engine(dup_at, dir.path()).unwrap_err().to_string();
+        assert!(err.contains("Previous '@@' chunk is empty"), "dup_at: {err}");
+
+        let del_add = "*** Begin Patch\n*** Delete File: app.rs\n*** Add File: app.rs\n+new\n*** End Patch\n";
+        let err = apply_patch_engine(del_add, dir.path()).unwrap_err().to_string();
+        assert!(err.contains("use the 'write' tool"), "del_add: {err}");
+
+        // 6. 多处命中告警（仍按首命中生效，但不静默）
+        std::fs::write(dir.path().join("dup.rs"), "let x = 1;\nlet y = 2;\nlet x = 1;\n").unwrap();
+        let amb = "*** Begin Patch\n*** Update File: dup.rs\n@@\n-let x = 1;\n+let x = 9;\n*** End Patch\n";
+        let out = apply_patch_engine(amb, dir.path()).expect("applies to first match");
+        assert_eq!(out.ambiguity_warnings.len(), 1, "warnings: {:?}", out.ambiguity_warnings);
+        assert!(out.ambiguity_warnings[0].contains("first at L1") && out.ambiguity_warnings[0].contains("another at L3"));
     }
 }

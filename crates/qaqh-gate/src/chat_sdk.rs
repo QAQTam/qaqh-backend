@@ -73,6 +73,7 @@ pub(crate) fn project_chat_messages(
     let stale_boundary = super::sdk_common::stale_image_boundary(&messages);
     let mut out: Vec<WireMessage> = Vec::new();
     let mut pending_media: Vec<WireMessage> = Vec::new();
+    let mut synthetic_thinking_out_indices: Vec<usize> = Vec::new();
     let mut img_idx = image_index_base;
 
     // WIRE-LOSS 断言基线：store 视图里带可见文本的 assistant 消息（提前
@@ -174,16 +175,21 @@ pub(crate) fn project_chat_messages(
                     }
                 }
                 let mut parts: Vec<Part> = Vec::new();
+                let mut synthetic_thinking = false;
                 if !content.is_empty() {
                     parts.push(Part::text(content));
                 } else if calls.is_empty() && !reasoning.is_empty() {
                     parts.push(Part::text("[Thinking complete]"));
+                    synthetic_thinking = true;
                 }
                 if provider.supports_reasoning_content && !reasoning.is_empty() {
                     parts.push(Part::Reasoning(WireReasoning::text(reasoning)));
                 }
                 parts.extend(calls.into_iter().map(Part::ToolCall));
                 if !parts.is_empty() {
+                    if synthetic_thinking {
+                        synthetic_thinking_out_indices.push(out.len());
+                    }
                     out.push(WireMessage::new(Role::Assistant, parts));
                 }
             }
@@ -250,20 +256,27 @@ pub(crate) fn project_chat_messages(
         }
     }
 
-    // WIRE-LOSS 校验：投影后逐条比对（expected 在函数头已取快照）。
-    let mut produced = out.iter().filter(|w| w.role == Role::Assistant);
+    // WIRE-LOSS 校验：投影后逐条比对（与 expected 同口径——只取带非空可见文本且
+    // 非合成 `[Thinking complete]` 占位的 assistant 消息，避免纯 tool_call 消息
+    // 导致整条列表错位假阳性）。
+    let mut produced = out.iter().enumerate().filter_map(|(out_idx, w)| {
+        if w.role != Role::Assistant || synthetic_thinking_out_indices.contains(&out_idx) {
+            return None;
+        }
+        let wire_text: String = w
+            .parts
+            .iter()
+            .filter_map(|p| match p {
+                Part::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        (!wire_text.is_empty()).then_some(wire_text)
+    });
     for (input_idx, text) in &expected {
         match produced.next() {
-            Some(wire) => {
-                let wire_text: String = wire
-                    .parts
-                    .iter()
-                    .filter_map(|p| match p {
-                        Part::Text { text, .. } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("");
+            Some(wire_text) => {
                 if wire_text != *text {
                     log::error!(
                         "[WIRE-LOSS] assistant 文本在投影后变化（输入消息 #{input_idx}，\

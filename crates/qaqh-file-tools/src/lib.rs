@@ -30,6 +30,7 @@ pub mod file_shared;
 pub mod file_state;
 pub mod grep_tool;
 pub mod journal;
+pub(crate) mod match_diag;
 pub mod pending;
 pub mod read_image;
 pub mod support;

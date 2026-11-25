@@ -212,6 +212,16 @@ fn check_start_and_end_lines_strict(
         (Some(first), Some(last)) if first == BEGIN_PATCH_MARKER && last == END_PATCH_MARKER => {
             Ok(())
         }
+        (Some(first), _) if first.starts_with("```") => Err(ParseError::InvalidPatchError(
+            String::from(
+                "Do not wrap the patch in Markdown code fences (```); the first line must be '*** Begin Patch'",
+            ),
+        )),
+        (Some(first), _) if first.starts_with("diff --git ") || first.starts_with("--- ") => {
+            Err(ParseError::InvalidPatchError(String::from(
+                "Standard unified/git diff format is not supported; use Codex patch format starting with '*** Begin Patch' and '*** Update File: <path>'",
+            )))
+        }
         (Some(first), _) if first != BEGIN_PATCH_MARKER => Err(ParseError::InvalidPatchError(
             String::from("The first line of the patch must be '*** Begin Patch'"),
         )),

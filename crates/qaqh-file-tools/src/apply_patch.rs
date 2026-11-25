@@ -317,6 +317,9 @@ impl TypedTool for ApplyPatchTool {
                     overwritten.join(", ")
                 ));
             }
+            for warn in &outcome.ambiguity_warnings {
+                text.push_str(&format!("WARNING: {warn}\n"));
+            }
             text
         };
         let pending_id = if dry_run {
@@ -399,10 +402,11 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
     }
 }
 
-/// 工具描述。**必须**保留「重复上下文取首个命中」的警示：匹配器不做歧义
-/// 拒绝（`seek_sequence` exact 循环直接返回首个 `i`，与上游 codex 一致），
-/// 上下文不够时被改的是第一处而结果仍是 `[OK]`（BUG-2026-09-16-11）。
-pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch (*** Begin Patch). Matching takes the FIRST hit; \
+/// 工具描述。**必须**保留「重复上下文取首个命中」的警示：匹配器按首命中应用
+/// （并在出现多处匹配时附带告警），上下文不够时提醒模型用额外行或 `@@ <context line>` 锚定。
+pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch ('*** Begin Patch' ... '*** End Patch'; headers '*** Update File:'/'*** Add File:'/'*** Delete File:'; lines prefixed with ' '/'+'/'-'). \
+     Put file paths directly in headers (use absolute paths when editing outside workspace; no workdir param). \
+     All hunks are pre-checked before writing (zero partial writes on no_match). Matching takes the FIRST hit; \
      disambiguate repeated context with extra lines or '@@ <context line>'. dry_run previews.";
 
 pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
@@ -729,10 +733,10 @@ mod tests {
     // 通道事实：模型读 `render_xml_envelope()`（body = `model.text` = `message`），
     // `error.hint` 只服务展示面且被 512 截断。断言因此打在 envelope 上。
 
-    /// 1 号 hunk 合法、2 号上下文不存在 → **模型可见文本**必须列出已生效文件，
-    /// 且不得再出现「no partial application happened」这类与事实相反的断言。
+    /// 1 号 hunk 合法、2 号上下文不存在 → 全量预检真原子：1 号 hunk 不得落盘，
+    /// 模型只需修正失败 hunk 后直接重发。
     #[test]
-    fn failed_hunk_reports_partial_application_to_the_model() {
+    fn failed_hunk_aborts_atomically_without_writing_earlier_files() {
         let (dir, ws) = repo_with_commit(&[("a.txt", "alpha\n"), ("b.txt", "beta\n")]);
         let patch = "\
 *** Begin Patch
@@ -757,32 +761,13 @@ mod tests {
             "got: {envelope}"
         );
         assert!(
-            envelope.contains("already applied: a.txt"),
-            "model must see the already-applied file: {envelope}"
+            !envelope.contains("already applied:"),
+            "atomic precheck must not report partial writes on no_match: {envelope}"
         );
-        assert!(
-            envelope.contains("not applied: b.txt"),
-            "model must see the not-applied file: {envelope}"
-        );
-        assert!(
-            !envelope.contains("no partial application"),
-            "stale claim must be gone: {envelope}"
-        );
-        // 展示面 hint 不再塞清单，必须留在 512 预算内（否则尾部被截断）
-        let hint = result
-            .error
-            .as_ref()
-            .and_then(|e| e.hint.clone())
-            .unwrap_or_default();
-        assert!(
-            hint.chars().count() <= qaqh_types::TOOL_SUMMARY_MAX_CHARS,
-            "hint must stay within budget, got {} chars: {hint}",
-            hint.chars().count()
-        );
-        // 1 号 hunk 确实已落盘（证明文案说的「非原子」为真）
+        // 1 号 hunk 未落盘（真原子预检）
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "ALPHA\n"
+            "alpha\n"
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
@@ -790,11 +775,9 @@ mod tests {
         );
     }
 
-    /// 批量补丁的**尾部**必须活下来：20 个文件已生效、第 21 个失败时，
-    /// 模型可见文本里要同时出现首个、最后一个已生效路径与失败路径。
-    /// （展示面 hint 有 512 硬上限，清单放那里必然被截断——本用例即该回归锁。）
+    /// 21 文件批量补丁中最后一个 `no_match`：前 20 个文件全部原样保留，0 副作用。
     #[test]
-    fn partial_failure_lists_survive_for_many_files() {
+    fn multi_file_no_match_leaves_all_earlier_files_untouched() {
         let mut files: Vec<(String, String)> = (0..20)
             .map(|i| (format!("d{i}.txt"), format!("v{i}\n")))
             .collect();
@@ -803,7 +786,7 @@ mod tests {
             .iter()
             .map(|(n, c)| (n.as_str(), c.as_str()))
             .collect();
-        let (_dir, ws) = repo_with_commit(&owned);
+        let (dir, ws) = repo_with_commit(&owned);
         let mut patch = String::from("*** Begin Patch\n");
         for i in 0..20 {
             patch.push_str(&format!("*** Update File: d{i}.txt\n@@\n-v{i}\n+V{i}\n"));
@@ -815,17 +798,15 @@ mod tests {
             &serde_json::json!({ "patch": patch }),
         );
         let envelope = result.render_xml_envelope();
-        assert!(
-            envelope.contains("already applied: d0.txt"),
-            "head of the list must survive: {envelope}"
+        assert!(envelope.contains("error_code=\"no_match\""), "got: {envelope}");
+        assert!(envelope.contains("zz.txt"), "failed path must appear: {envelope}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("d0.txt")).unwrap(),
+            "v0\n"
         );
-        assert!(
-            envelope.contains("d19.txt"),
-            "tail of the list must survive: {envelope}"
-        );
-        assert!(
-            envelope.contains("not applied: zz.txt"),
-            "the actually-failed path must survive: {envelope}"
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("d19.txt")).unwrap(),
+            "v19\n"
         );
     }
 

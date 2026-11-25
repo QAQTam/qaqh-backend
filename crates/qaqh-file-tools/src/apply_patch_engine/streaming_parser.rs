@@ -115,6 +115,26 @@ enum StreamingParserMode {
 /// 没有这道守卫时 `*** Add File: *** End Patch` 会把 marker 行当成文件名，
 /// 引擎返回 `Ok` 并**真的建出一个叫 `*** End Patch` 的文件**（N-4①，2026-09-17
 /// PR #87 评审附带观察；同族的 Delete/Move to 一并覆盖）。
+/// 识别标准 unified diff 的行号头（如 `-10,5 +10,6 @@` 或 `-1 +1 @@ fn foo()`），
+/// 避免模型串台写出 unified diff 时被静默当成字面 `@@ <context>` 行去文件里搜。
+fn is_unified_diff_hunk_header(change_context: &str) -> bool {
+    let rest = match change_context.strip_prefix('-') {
+        Some(r) => r,
+        None => return false,
+    };
+    let Some((old_span, after_old)) = rest.split_once(" +") else {
+        return false;
+    };
+    let Some((new_span, _)) = after_old.split_once(" @@") else {
+        return false;
+    };
+    let is_span = |s: &str| {
+        !s.is_empty()
+            && s.split(',').all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+    };
+    is_span(old_span) && is_span(new_span)
+}
+
 fn validate_hunk_path(path: &str, line_number: usize) -> Result<(), ParseError> {
     if path.is_empty() || path.starts_with("***") {
         return Err(InvalidHunkError {
@@ -361,7 +381,7 @@ impl StreamingPatchParser {
                 }
                 Err(InvalidHunkError {
                     message: format!(
-                        "'{trimmed}' is not a valid hunk header. Valid hunk headers: '*** Add File: {{path}}', '*** Delete File: {{path}}', '*** Update File: {{path}}'"
+                        "Unexpected line in '*** Add File:' hunk: '{trimmed}'. Every content line in an Add File hunk must start with '+' (or start a new '*** ...' header / '*** End Patch')"
                     ),
                     line_number: self.line_number,
                 })
@@ -421,7 +441,7 @@ impl StreamingPatchParser {
                     {
                         return Err(InvalidHunkError {
                             message: format!(
-                                "Unexpected line found in update hunk: '{line}'. Every line should start with ' ' (context line), '+' (added line), or '-' (removed line)"
+                                "Previous '@@' chunk is empty before '{line}'; remove the redundant '@@' or add context/change lines (' ', '+', '-') before starting a new chunk"
                             ),
                             line_number: self.line_number,
                         });
@@ -434,6 +454,14 @@ impl StreamingPatchParser {
                     }
 
                     if let Some(change_context) = update_line.strip_prefix(CHANGE_CONTEXT_MARKER) {
+                        if is_unified_diff_hunk_header(change_context) {
+                            return Err(InvalidHunkError {
+                                message: format!(
+                                    "Unified diff line-number header '@@ {change_context}' is not valid in Codex patch format; use bare '@@' or '@@ <context line from file>' instead"
+                                ),
+                                line_number: self.line_number,
+                            });
+                        }
                         chunks.push(UpdateFileChunk {
                             change_context: Some(change_context.to_string()),
                             ..UpdateFileChunk::default()
@@ -513,7 +541,7 @@ impl StreamingPatchParser {
                     }) {
                         return Err(InvalidHunkError {
                             message: format!(
-                                "Expected update hunk to start with a @@ context marker, got: '{line}'"
+                                "Unexpected line '{line}' in update hunk — context lines must start with a single space ' ' (e.g. ' {line}'), added lines with '+', removed lines with '-', or start a new chunk with '@@'"
                             ),
                             line_number: self.line_number,
                         });
@@ -521,7 +549,7 @@ impl StreamingPatchParser {
                 }
                 Err(InvalidHunkError {
                     message: format!(
-                        "Unexpected line found in update hunk: '{line}'. Every line should start with ' ' (context line), '+' (added line), or '-' (removed line)"
+                        "Unexpected line '{line}' in update hunk — every line must start with ' ' (context, e.g. ' {line}'), '+' (added), or '-' (removed)"
                     ),
                     line_number: self.line_number,
                 })

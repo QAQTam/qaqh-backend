@@ -8,10 +8,14 @@ use crate::apply_patch_engine::UpdateFileChunk;
 use crate::apply_patch_engine::seek_sequence::seek_sequence;
 use crate::apply_patch_engine::text_file::Replacement;
 use crate::apply_patch_engine::text_file::SourceFile;
+use crate::match_diag::{
+    MIN_DIAGNOSTIC_SIMILARITY, nearest_match_in_lines, render_diff_block,
+};
 
 pub struct AppliedPatch {
     pub original_contents: String,
     pub new_contents: String,
+    pub ambiguity_warnings: Vec<String>,
 }
 
 /// Compute the new file contents after applying the chunks, reading the
@@ -31,12 +35,14 @@ pub fn derive_new_contents_from_chunks(
     // apply_patch 归一成 LF——物理保真归本引擎，LF 视范归 read/hash）。
     let mut source_file = SourceFile::parse(&original_contents);
     let original_lines = source_file.line_texts();
-    let replacements = compute_replacements(&original_lines, &path_text, chunks)?;
+    let (replacements, ambiguity_warnings) =
+        compute_replacements(&original_lines, &path_text, chunks)?;
     source_file.apply_replacements(&replacements);
     let new_contents = source_file.into_contents();
     Ok(AppliedPatch {
         original_contents,
         new_contents,
+        ambiguity_warnings,
     })
 }
 
@@ -47,11 +53,14 @@ fn compute_replacements(
     original_lines: &[String],
     path: &str,
     chunks: &[UpdateFileChunk],
-) -> Result<Vec<Replacement>, EngineError> {
+) -> Result<(Vec<Replacement>, Vec<String>), EngineError> {
     let mut replacements: Vec<Replacement> = Vec::new();
+    let mut ambiguity_warnings: Vec<String> = Vec::new();
     let mut line_index: usize = 0;
 
-    for chunk in chunks {
+    let total_chunks = chunks.len();
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        let chunk_num = chunk_idx + 1;
         // If a chunk has a `change_context`, we use seek_sequence to find it, then
         // adjust our `line_index` to continue from there.
         if let Some(ctx_line) = &chunk.change_context {
@@ -63,8 +72,13 @@ fn compute_replacements(
             ) {
                 line_index = idx + 1;
             } else {
-                return Err(EngineError::Compute(format!(
-                    "Failed to find context '{ctx_line}' in {path}"
+                return Err(EngineError::Compute(diagnose_missing_context(
+                    original_lines,
+                    path,
+                    chunk_num,
+                    total_chunks,
+                    line_index,
+                    ctx_line,
                 )));
             }
         }
@@ -106,6 +120,20 @@ fn compute_replacements(
         }
 
         if let Some(start_idx) = found {
+            // 若非 EOF 锚定且后文存在第二处匹配，记录告警（仍按首命中应用，不静默隐瞒）。
+            if !chunk.is_end_of_file
+                && !pattern.is_empty()
+                && let Some(second_idx) =
+                    seek_sequence(original_lines, pattern, start_idx + 1, false)
+            {
+                let label = format_chunk_label(chunk_num, total_chunks);
+                ambiguity_warnings.push(format!(
+                    "{path}{label}: matched multiple locations (first at L{}, another at L{}); applied to L{} — add more context or '@@ <anchor>' if another occurrence was intended",
+                    start_idx + 1,
+                    second_idx + 1,
+                    start_idx + 1,
+                ));
+            }
             // Context lines occur in both sides of a patch chunk. Keep those
             // original lines in place so their exact contents and terminators
             // survive, especially when the file has mixed line endings
@@ -137,15 +165,112 @@ fn compute_replacements(
             }
             line_index = start_idx + pattern.len();
         } else {
-            return Err(EngineError::Compute(format!(
-                "Failed to find expected lines in {}:\n{}",
+            return Err(EngineError::Compute(diagnose_missing_lines(
+                original_lines,
                 path,
-                chunk.old_lines.join("\n"),
+                chunk_num,
+                total_chunks,
+                line_index,
+                chunk,
+                pattern,
             )));
         }
     }
 
     replacements.sort_by_key(|(index, _, _)| *index);
 
-    Ok(replacements)
+    Ok((replacements, ambiguity_warnings))
+}
+
+fn format_chunk_label(chunk_num: usize, total_chunks: usize) -> String {
+    if total_chunks > 1 {
+        format!(" (chunk {chunk_num}/{total_chunks})")
+    } else {
+        String::new()
+    }
+}
+
+fn diagnose_missing_context(
+    original_lines: &[String],
+    path: &str,
+    chunk_num: usize,
+    total_chunks: usize,
+    line_index: usize,
+    ctx_line: &str,
+) -> String {
+    let label = format_chunk_label(chunk_num, total_chunks);
+    if line_index > 0
+        && let Some(earlier) = seek_sequence(
+            &original_lines[..line_index],
+            &[ctx_line.to_string()],
+            0,
+            false,
+        )
+    {
+        return format!(
+            "Failed to find context '{ctx_line}' in {path}{label}: matched earlier at L{}, but previous chunk already advanced cursor to L{} (chunks must appear in top-to-bottom file order)",
+            earlier + 1,
+            line_index + 1,
+        );
+    }
+    let file_refs: Vec<&str> = original_lines.iter().map(String::as_str).collect();
+    let mut msg = format!("Failed to find context '{ctx_line}' in {path}{label}\n");
+    if let Some(nearest) =
+        nearest_match_in_lines(&file_refs, &[ctx_line], MIN_DIAGNOSTIC_SIMILARITY)
+    {
+        msg.push_str(&render_diff_block("@@ context", ctx_line, &nearest, "  "));
+    } else {
+        msg.push_str("  no similar line found in file; re-read the file with read.\n");
+    }
+    msg.trim_end().to_string()
+}
+
+fn diagnose_missing_lines(
+    original_lines: &[String],
+    path: &str,
+    chunk_num: usize,
+    total_chunks: usize,
+    line_index: usize,
+    chunk: &UpdateFileChunk,
+    pattern: &[String],
+) -> String {
+    let label = format_chunk_label(chunk_num, total_chunks);
+    if line_index > 0
+        && let Some(earlier) = seek_sequence(&original_lines[..line_index], pattern, 0, false)
+    {
+        if let Some(ctx) = &chunk.change_context {
+            return format!(
+                "Failed to find expected lines in {path}{label}: matched earlier at L{}, before the '@@ {ctx}' anchor at L{}",
+                earlier + 1,
+                line_index,
+            );
+        }
+        return format!(
+            "Failed to find expected lines in {path}{label}: matched earlier at L{}, but previous chunk already advanced cursor to L{} (chunks must appear in top-to-bottom file order)",
+            earlier + 1,
+            line_index + 1,
+        );
+    }
+    if chunk.is_end_of_file
+        && let Some(mid) = seek_sequence(original_lines, pattern, line_index, false)
+    {
+        return format!(
+            "Failed to find expected lines at EOF in {path}{label}: matched at L{}, not at end of file (remove '*** End of File' if editing mid-file)",
+            mid + 1,
+        );
+    }
+
+    let file_refs: Vec<&str> = original_lines.iter().map(String::as_str).collect();
+    let pat_refs: Vec<&str> = pattern.iter().map(String::as_str).collect();
+    let expected = chunk.old_lines.join("\n");
+    if let Some(nearest) = nearest_match_in_lines(&file_refs, &pat_refs, MIN_DIAGNOSTIC_SIMILARITY)
+    {
+        let mut msg = format!("Failed to find expected lines in {path}{label}:\n");
+        msg.push_str(&render_diff_block("patch expected", &expected, &nearest, "  "));
+        msg.trim_end().to_string()
+    } else {
+        format!(
+            "Failed to find expected lines in {path}{label} (no similar region found):\n{expected}",
+        )
+    }
 }

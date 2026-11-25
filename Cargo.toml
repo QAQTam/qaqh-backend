@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/mutil-ai",
     "crates/qaqh-gate",
     "crates/qaqh-config-api",
     "crates/qaqh-config",
@@ -54,7 +55,7 @@ exclude = [
 ]
 
 [workspace.dependencies]
-mutil-ai = { version = "0.7.0", path = "../mutil-ai" }
+mutil-ai = { version = "0.8.0", path = "crates/mutil-ai" }
 # 精确锁（不用 ^）：避免 cargo update 把 SDK 漂到未验证的版本。3.10.0 为
 # crates.io 最新稳定（2026-11-12）；qaqh-mcp 生产/dev、qaqh-runtime dev 全部
 # 继承本行，见 ADR-0025。reqwest 0.13 / process-wrap 10 与之对齐。

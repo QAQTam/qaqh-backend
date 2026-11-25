@@ -24,13 +24,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: qaqh-backend
-      # Sibling path dependency (../mutil-ai), pinned to the tested 0.7.0
-      # stream/custom-tool fixes used by the desktop build.
-      - uses: actions/checkout@v4
-        with:
-          repository: qaqtam/mutil-ai
-          ref: b37ca25f23350a8c6cb78bc69fda023f2cb809aa
-          path: mutil-ai
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:

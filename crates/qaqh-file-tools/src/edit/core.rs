@@ -4,7 +4,9 @@
 //! 相似度只用于**失败诊断**（找最接近的区域生成 diff），绝不参与采纳。
 
 use crate::file_shared::LineIndex;
-use similar::TextDiff;
+pub(crate) use crate::match_diag::{
+    MIN_DIAGNOSTIC_SIMILARITY, NearestMatch, nearest_match_in_text, render_diff_block,
+};
 
 /// 单次替换的产物。
 #[derive(Debug)]
@@ -36,15 +38,6 @@ pub(crate) enum ReplaceError {
 pub(crate) struct Occurrence {
     pub(crate) line: usize,
     pub(crate) context: String,
-}
-
-/// 最接近 `old_string` 的文件区域（仅用于失败诊断）。
-#[derive(Debug)]
-pub(crate) struct NearestMatch {
-    pub(crate) start_line: usize,
-    pub(crate) end_line: usize,
-    pub(crate) text: String,
-    pub(crate) score: f32,
 }
 
 /// 找出 `needle` 在 `haystack` 中的所有起始字节位置（含重叠命中）。
@@ -168,78 +161,17 @@ fn occurrence(content: &str, pos: usize, old: &str) -> Occurrence {
     Occurrence { line, context }
 }
 
-/// 最近似区域：多行 old 用行窗口滑动；单行 old 额外与每一行整体比较（片段友好）。
+/// 最近似区域：委托共享诊断模块（带最低相似度门槛与大文件粗筛）。
 pub(crate) fn nearest_match(content: &str, old: &str) -> Option<NearestMatch> {
-    let index = LineIndex::new(content);
-    let file_lines = index.lines();
-    let mut pat: Vec<&str> = old.split('\n').collect();
-    while pat.last() == Some(&"") {
-        pat.pop();
-    }
-    if pat.is_empty() {
-        return None;
-    }
-    let old_text = pat.join("\n");
-    let p = pat.len();
-    let mut best: Option<(f32, usize, usize)> = None;
-    let min_win = p.saturating_sub(2).max(1);
-    let max_win = (p + 2).min(file_lines.len());
-    if min_win <= max_win {
-        for win in min_win..=max_win {
-            for s in 0..=file_lines.len() - win {
-                let text = file_lines[s..s + win].join("\n");
-                let score = ratio(&old_text, &text);
-                if best.is_none_or(|(bs, _, _)| score > bs) {
-                    best = Some((score, s, win));
-                }
-            }
-        }
-    }
-    if p == 1 {
-        for (i, line) in file_lines.iter().enumerate() {
-            let score = ratio(&old_text, line);
-            if best.is_none_or(|(bs, _, _)| score > bs) {
-                best = Some((score, i, 1));
-            }
-        }
-    }
-    best.map(|(score, s, win)| NearestMatch {
-        start_line: s + 1,
-        end_line: s + win,
-        text: file_lines[s..s + win].join("\n"),
-        score,
-    })
+    nearest_match_in_text(content, old, MIN_DIAGNOSTIC_SIMILARITY)
 }
 
-fn ratio(a: &str, b: &str) -> f32 {
-    TextDiff::from_chars(a, b).ratio()
-}
-
-/// `NOT_FOUND` 的模型可见正文：错误说明 + 最近似位置 + old_string→实际内容的 unified diff。
+/// `NOT_FOUND` 的模型可见正文：错误说明 + 最近似位置 + 可选空白差异注记 + old_string→实际内容的 unified diff。
 pub(crate) fn render_not_found(path: &str, old: &str, nearest: Option<&NearestMatch>) -> String {
     let mut out =
         format!("[ERROR] edit {path}\n  not_found: old_string was not found in the file.\n");
     if let Some(n) = nearest {
-        out.push_str(&format!(
-            "  closest match: L{}-L{} (similarity {:.2})\n",
-            n.start_line, n.end_line, n.score
-        ));
-        out.push_str("  diff (your old_string → actual file content):\n");
-        let before = truncate_for_diff(old);
-        let after = truncate_for_diff(&n.text);
-        let diff = TextDiff::from_lines(before.as_ref(), after.as_ref())
-            .unified_diff()
-            .context_radius(3)
-            .header(
-                "old_string",
-                &format!("file:L{}-L{}", n.start_line, n.end_line),
-            )
-            .to_string();
-        for line in diff.lines() {
-            out.push_str("    ");
-            out.push_str(line);
-            out.push('\n');
-        }
+        out.push_str(&render_diff_block("old_string", old, n, "  "));
     } else {
         out.push_str("  no similar region found; re-read the file with read.\n");
     }
@@ -290,17 +222,4 @@ pub(crate) fn render_success_snippet(edited: &str, start_line: usize, new_lf: &s
         .map(|i| format!("L{}: {}", i + 1, lines[i]))
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-fn truncate_for_diff(text: &str) -> std::borrow::Cow<'_, str> {
-    const MAX: usize = 2000;
-    if text.len() <= MAX {
-        std::borrow::Cow::Borrowed(text)
-    } else {
-        let cut = text.floor_char_boundary(MAX);
-        std::borrow::Cow::Owned(format!(
-            "{}…[truncated]",
-            text.get(..cut).unwrap_or_default()
-        ))
-    }
 }

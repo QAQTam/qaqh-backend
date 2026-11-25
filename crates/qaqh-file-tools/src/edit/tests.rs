@@ -571,3 +571,27 @@ fn typed_edit_registration_and_display_are_same_source() {
         "edit display summary must be path metadata, not the [OK] output first line"
     );
 }
+
+#[test]
+fn not_found_diagnoses_whitespace_only_and_suppresses_low_similarity_noise() {
+    let dir = tempfile::tempdir().unwrap();
+    // 仅缩进（Tab vs 空格）不同 → 显式注记
+    let ws_path = write_file(&dir, "ws.rs", "fn main() {\n\tlet x = 1;\n}\n");
+    let res = call(&ws_path, "    let x = 1;", "    let x = 2;");
+    assert_eq!(code(&res), "not_found");
+    assert!(
+        res.model_text().contains("tabs vs spaces"),
+        "should flag tab/space mismatch: {}",
+        res.model_text()
+    );
+
+    // 完全无关的内容 → 不输出低分噪音 diff
+    let noise_path = write_file(&dir, "noise.rs", "fn alpha() { println!(\"hello\"); }\n");
+    let res = call(&noise_path, "zzzzzzzzzzzzzzzzzzzz", "y");
+    assert_eq!(code(&res), "not_found");
+    assert!(
+        res.model_text().contains("no similar region found"),
+        "low similarity must not emit noisy diff: {}",
+        res.model_text()
+    );
+}

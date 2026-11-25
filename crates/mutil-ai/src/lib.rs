@@ -1,0 +1,84 @@
+//! A small, provider-neutral AI SDK designed for learning.
+//!
+//! The important idea in this crate is the split between:
+//!
+//! 1. an **internal message model** that can represent messy agent histories;
+//! 2. a **normalization layer** that turns that model into a clean, strict
+//!    provider-facing conversation;
+//! 3. provider adapters that only serialize the normalized form.
+//!
+//! This keeps role conversion and tool-call repair in one place.
+//!
+//! The crate intentionally stops at the model request/response boundary.
+//! Conversation loops, tool execution, permissions, and agent scheduling belong
+//! to the downstream application. See `examples/minimal_agent.rs` for a small
+//! runtime built only from the public API.
+
+mod adapter;
+mod audit;
+#[cfg(feature = "blocking")]
+mod blocking;
+mod cancel;
+mod error;
+mod headers;
+pub mod lenient;
+mod native_tool_stream;
+mod normalize;
+mod profile;
+mod report;
+mod retry;
+mod security;
+mod sse;
+mod stream;
+mod transform;
+mod types;
+
+pub use adapter::{
+    Anthropic, AnthropicMessages, EndpointAdapter, Gemini, GeminiGenerateContent, ModelAdapter,
+    OpenAI, OpenAIChat, OpenAICompatible, OpenAIResponses,
+};
+pub use audit::{
+    AuditConfig, AuditEvent, AuditOutcome, AuditSink, AuditStats, AuditStatsSnapshot, ByteCounts,
+    FirstTokenKind, ProfileAuditSnapshot, RequestTiming, bounded_audit_channel,
+};
+#[cfg(feature = "blocking")]
+pub use blocking::{BlockingAdapter, BlockingStream};
+pub use cancel::CancellationToken;
+pub use error::{Error, ErrorKind, ProviderErrorInfo, Result};
+pub use headers::{
+    ClientInfo, HeaderInjector, HeaderPolicy, RequestContext, RequestOptions, SDK_USER_AGENT,
+    TransportConfig, apply_headers,
+};
+pub use native_tool_stream::{CustomToolAccumulator, NativeToolIdentity};
+pub use normalize::{
+    ExternalRole, MissingToolResultPolicy, NormalizeAction, NormalizeOptions, NormalizeReport,
+    NormalizeStats, NormalizedChat, NormalizedMessage, OrphanToolResultPolicy, Protocol,
+    SystemPlacement, normalize, normalize_with_options,
+};
+pub use profile::{
+    AuthStyle, Capabilities, EffortMapping, EndpointSpec, MaxTokensSemantics, ModelMatcher,
+    ModelProfile, NormalizeProfile, ProfileId, ProfileRegistry, ProfileSelector, ProtocolSurface,
+    ProviderProfile, ProviderRequestOptions, ReasoningAliases, ReasoningCapabilities,
+    ReasoningProfile, ReasoningReplayPolicy, RequestProfile, StreamCapabilities, StreamProfile,
+    StreamTerminal, ThinkingRequestProfile, ToolCallContentMode, ToolCallIdPolicy,
+    ToolCapabilities, ToolProfile, UsagePlacement, UsageProfile,
+};
+pub use report::{CompletionReport, WireAction, WireFeature, WireReport};
+pub use retry::{
+    RetryDirective, RetryPolicy, RetryProvider, RetrySource, parse_retry_after,
+    parse_retry_after_at, parse_retry_headers, parse_retry_headers_at, retry_async,
+};
+pub use security::ResponseLimits;
+pub use sse::{SseError, SseEvent, SseMessage, SseParser, SseUtf8Policy, TailPolicy};
+pub use stream::{
+    ModelStream, StreamError, StreamEvent, StreamReconnectPolicy, collect_stream, next_event,
+};
+pub use transform::RequestTransform;
+pub use types::{
+    ChatRequest, ChatResponse, CustomToolFormat, ImageDetail, ImagePart, ImageSource, ImageUrl,
+    Message, NativeToolCall, NativeToolCompletion, NativeToolKind, NativeToolPayload, Part,
+    ProviderState, ProviderStateFormat, Reasoning, ReasoningConfig, ReasoningEffort, ReasoningKind,
+    ReasoningMode, ReasoningSummary, ResponseFormat, ResponseMetadata, Role, ScopedToolDeclaration,
+    ServerTool, ServerToolItem, ServerToolState, ToolCall, ToolChoice, ToolDeclaration, ToolResult,
+    ToolResultPart, ToolSpec, Usage, validate_tool_declarations,
+};
