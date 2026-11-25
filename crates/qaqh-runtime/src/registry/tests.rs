@@ -275,3 +275,110 @@ async fn cancelled_goal_turn_defers_audit_and_retrigger() {
     );
     assert_eq!(row.empty_turns, 0, "Cancelled 不计入空回复");
 }
+
+/// P2-0 补漏反证：闲置卸载 **seed 之外**、被 `close` 顺带卸载的子代 `SessionOwner`。
+///
+/// 现场构造生产泄漏形状：父会话先装配（`last_activity_ms` 更早，达到闲置阈值），
+/// 子循环在其后 1.2s 装配（自身未达阈值，不进 seed 快照，模拟父 Idle/子忙
+/// 的等待窗口）。旧实现只对 seed 根 `take_session`，子代 owner 滞留
+/// `OwnerDirectory`——`Arc::strong_count` 停在 2（目录+本地句柄）必红；
+/// 新实现对整棵被卸载树回收，目录放手后只剩本地句柄 == 1 变绿。
+#[tokio::test]
+async fn idle_unload_reaps_descendant_session_owners() {
+    use qaqh_agent_runtime::provider_job::ProviderRequestSpec;
+    use qaqh_agent_runtime::session_loop::SessionLoop;
+    use qaqh_agent_runtime::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
+
+    fn assemble_test_loop(
+        owners: &std::sync::Arc<qaqh_session::owner::OwnerDirectory>,
+        dir: &std::path::Path,
+        session_id: &str,
+    ) -> std::sync::Arc<SessionLoop> {
+        let owner = owners.get_or_create(session_id);
+        let manager = std::sync::Arc::new(std::sync::Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(&[]),
+        ));
+        let port = std::sync::Arc::new(WorkspaceToolPort::new(
+            session_id,
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.join("ws")),
+            owner.lifecycle(),
+            std::sync::Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+        let provider = qaqh_gate::ProviderConfig::chat(
+            "http://127.0.0.1:1",
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        // SessionLoop::new 消费一个 owner Arc——这正好复现生产形状：
+        // loop 不 drop，目录外引用就永远存在。
+        SessionLoop::new(session_id, owner, port, spec, dir.to_path_buf())
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owners = std::sync::Arc::new(
+        qaqh_session::owner::OwnerDirectory::open(dir.path().join("qaqh.db"))
+            .expect("open owners db"),
+    );
+    owners.ensure_session("ses-idle-parent", None, false).expect("parent row");
+    owners
+        .ensure_session("ses-idle-child", Some("ses-idle-parent"), false)
+        .expect("child row");
+    // 本地观察句柄（不计入目录）：断言 strong_count 用。
+    let parent_handle = owners.get_or_create("ses-idle-parent");
+    let child_handle = owners.get_or_create("ses-idle-child");
+
+    let mut registry = AgentRegistry::new(owners.clone());
+    let parent_loop = assemble_test_loop(&owners, dir.path(), "ses-idle-parent");
+    // 父循环装配后等过 1s 阈值再装子循环：子代不进 seed 快照，只能被父
+    // `close` 顺带卸载——正是被旧实现漏掉的回收对象。
+    tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+    let child_loop = assemble_test_loop(&owners, dir.path(), "ses-idle-child");
+    registry.instances.insert(
+        "ses-idle-parent".to_string(),
+        AgentInstance {
+            session_id: "ses-idle-parent".to_string(),
+            loop_: parent_loop,
+        },
+    );
+    registry.instances.insert(
+        "ses-idle-child".to_string(),
+        AgentInstance {
+            session_id: "ses-idle-child".to_string(),
+            loop_: child_loop,
+        },
+    );
+    registry
+        .link_subagent("ses-idle-parent", "ses-idle-child")
+        .expect("link lineage");
+
+    let unloaded = registry.unload_idle_sessions(1);
+    assert_eq!(
+        unloaded,
+        vec!["ses-idle-parent".to_string()],
+        "seed 只应包含达到阈值的父会话"
+    );
+    // 反证断言：目录已放手，唯一存活引用是本地句柄。旧实现此处子代
+    // 目录引用滞留，strong_count == 2 变红。
+    assert_eq!(
+        std::sync::Arc::strong_count(&parent_handle),
+        1,
+        "seed 根 owner 目录引用必须摘除（v4.4 P1-2 既有行为）"
+    );
+    assert_eq!(
+        std::sync::Arc::strong_count(&child_handle),
+        1,
+        "被顺带卸载的子代 owner 目录引用必须一并摘除（P2-0 补漏）"
+    );
+    assert!(
+        owners.take_session("ses-idle-child").is_none(),
+        "子代目录项已被回收，重复 take 应落空"
+    );
+}
