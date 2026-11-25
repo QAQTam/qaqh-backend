@@ -20,7 +20,7 @@ pub mod tools;
 
 pub use error::{GitxError, Result};
 pub use registry::WorktreeRecord;
-pub use tools::{GitxHost, install_host, host, register};
+pub use tools::{GitxHost, register};
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

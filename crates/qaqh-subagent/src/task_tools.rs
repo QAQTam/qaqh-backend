@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 use crate::host::{
     TaskBoardHost, TaskBoardTask, TaskClaimAction, TaskClaimRequest, TaskCloseAction,
     TaskCloseRequest, TaskCreateRequest, TaskListRequest, TaskUpdateAction, TaskUpdateRequest,
-    task_host,
 };
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -171,7 +170,10 @@ impl ToolProjection for TaskListOutput {
     }
 }
 
-pub struct TaskCreateTool;
+/// `task_create`：任务板宿主在注册期注入（v4.5 P2-1b，无全局槽）。
+pub struct TaskCreateTool {
+    pub host: std::sync::Arc<dyn TaskBoardHost>,
+}
 
 impl TypedTool for TaskCreateTool {
     type Args = TaskCreateArgs;
@@ -192,7 +194,7 @@ impl TypedTool for TaskCreateTool {
         ctx: &ToolCallContext,
         args: TaskCreateArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let task = task_host_or_error("task_create")?
+        let task = self.host
             .task_create(TaskCreateRequest {
                 caller_session_id: &ctx.session_id,
                 title: &args.title,
@@ -204,7 +206,9 @@ impl TypedTool for TaskCreateTool {
     }
 }
 
-pub struct TaskClaimTool;
+pub struct TaskClaimTool {
+    pub host: std::sync::Arc<dyn TaskBoardHost>,
+}
 
 impl TypedTool for TaskClaimTool {
     type Args = TaskClaimArgs;
@@ -225,7 +229,7 @@ impl TypedTool for TaskClaimTool {
         ctx: &ToolCallContext,
         args: TaskClaimArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let task = task_host_or_error("task_claim")?
+        let task = self.host
             .task_claim(TaskClaimRequest {
                 caller_session_id: &ctx.session_id,
                 task_id: &args.task_id,
@@ -237,7 +241,9 @@ impl TypedTool for TaskClaimTool {
     }
 }
 
-pub struct TaskUpdateTool;
+pub struct TaskUpdateTool {
+    pub host: std::sync::Arc<dyn TaskBoardHost>,
+}
 
 impl TypedTool for TaskUpdateTool {
     type Args = TaskUpdateArgs;
@@ -258,7 +264,7 @@ impl TypedTool for TaskUpdateTool {
         ctx: &ToolCallContext,
         args: TaskUpdateArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let task = task_host_or_error("task_update")?
+        let task = self.host
             .task_update(TaskUpdateRequest {
                 caller_session_id: &ctx.session_id,
                 task_id: &args.task_id,
@@ -274,7 +280,9 @@ impl TypedTool for TaskUpdateTool {
     }
 }
 
-pub struct TaskCloseTool;
+pub struct TaskCloseTool {
+    pub host: std::sync::Arc<dyn TaskBoardHost>,
+}
 
 impl TypedTool for TaskCloseTool {
     type Args = TaskCloseArgs;
@@ -295,7 +303,7 @@ impl TypedTool for TaskCloseTool {
         ctx: &ToolCallContext,
         args: TaskCloseArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let task = task_host_or_error("task_close")?
+        let task = self.host
             .task_close(TaskCloseRequest {
                 caller_session_id: &ctx.session_id,
                 task_id: &args.task_id,
@@ -308,7 +316,9 @@ impl TypedTool for TaskCloseTool {
     }
 }
 
-pub struct TaskListTool;
+pub struct TaskListTool {
+    pub host: std::sync::Arc<dyn TaskBoardHost>,
+}
 
 impl TypedTool for TaskListTool {
     type Args = TaskListArgs;
@@ -329,7 +339,7 @@ impl TypedTool for TaskListTool {
         ctx: &ToolCallContext,
         args: TaskListArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let page = task_host_or_error("task_list")?
+        let page = self.host
             .task_list(TaskListRequest {
                 caller_session_id: &ctx.session_id,
                 state: args.state.as_deref(),
@@ -347,18 +357,8 @@ impl TypedTool for TaskListTool {
     }
 }
 
-fn task_host_or_error(tool: &str) -> Result<std::sync::Arc<dyn TaskBoardHost>, ToolExecutionError> {
-    task_host().ok_or_else(|| {
-        task_error(
-            "host_unavailable",
-            format!("{tool} requires the in-process task board host"),
-        )
-    })
-}
-
 fn task_error(code: &str, message: impl Into<String>) -> ToolExecutionError {
     let kind = match code {
-        "host_unavailable" => ToolErrorKind::Unavailable,
         "task_create_failed" | "task_claim_failed" | "task_update_failed" | "task_close_failed"
         | "task_list_failed" => ToolErrorKind::Execution,
         _ => ToolErrorKind::Custom,

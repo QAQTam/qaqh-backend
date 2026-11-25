@@ -75,11 +75,6 @@ impl QaqhService {
         }
         // 不预热（ADR-0025）：启动不拉起任何三方进程。可见性改由聚合工具
         // 的 list_tools action 按需连接 + 投影代数重建闭环。
-        // daemon 进程的工具注册表（供 `skills.list_tools` 等查询；worker 各自
-        // 独立 init_tools，本进程只提供注册表快照，不参与工具执行）。
-        // 不带会话工具注册器：spawn_subagent 等属于会话工具面，不在 daemon
-        // 查询注册表里。
-        qaqh_workspace::runtime::init_tools("daemon", &[], vec![]);
         // 业务库:SQLite WAL 单权威(报告一 §7)。打不开就停止启动,不降级。
         let owners = Arc::new(
             qaqh_session::owner::OwnerDirectory::open(data_dir.join("qaqh.db"))
@@ -114,6 +109,24 @@ impl QaqhService {
                 }
             })));
         }
+        // v4.5 P2-1b：会话工具面宿主束——原 daemon 装配期的 5 个进程级
+        // `install_*_host`（subagent/task/goal/gitx/todo）全局槽全部删除，
+        // 由本处一次性注入 registry；`spawn_session_inprocess` 在注册期把
+        // 宿主交给工具实例。未注入即无法 spawn（fail-closed）。
+        let tool_hosts = crate::tool_hosts::SessionToolHosts::from_service(&service);
+        if let Ok(mut registry) = service.registry() {
+            registry.set_tool_hosts(Arc::clone(&tool_hosts));
+        }
+        // daemon 进程的工具注册表（供 `skills.list_tools` 等查询；worker 各自
+        // 独立 init_tools，本进程只提供注册表快照，不参与工具执行）。
+        // 不带会话工具注册器：spawn_subagent 等属于会话工具面，不在 daemon
+        // 查询注册表里。todo 宿主用同一 service 实现（真实 DB 单事务 RMW）。
+        qaqh_workspace::runtime::init_tools(
+            "daemon",
+            &[],
+            vec![],
+            Arc::clone(&tool_hosts.todo),
+        );
         service
     }
 

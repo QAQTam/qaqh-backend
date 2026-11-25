@@ -1,9 +1,11 @@
 //! `worktree_*` 模型工具面（ADR-0041 切片 2）。
 //!
 //! 与 goal 工具面（`qaqh-subagent::goal`）同款先例：领域 crate 自带 TypedTool 面 + 宿主 trait，
-//! daemon 装配时经 [`install_host`] 注入进程内实现（qaqh-runtime `gitx_host`），
-//! 工具 handler 经宿主句柄解析**源工作区**后直达 [`WorktreeManager`]。
-//! 未安装宿主即报错，不做降级。
+//! v4.5 P2-1b 起宿主（qaqh-runtime `gitx_host`）经 [`register`] 的构造参数在
+//! **注册期显式注入**工具实例；进程级 `OnceLock` 动态宿主槽已
+//! 物理删除，未注入即无法构造，不做降级（同进程多套宿主互不串台，反证：
+//! `crates/qaqh-gitx/tests/host_isolation.rs`）。工具 handler 经宿主句柄
+//! 解析**源工作区**后直达 [`WorktreeManager`]。
 //!
 //! 作用域纪律（对齐服务面 `service/handlers/gitx.rs`）：五个工具全部锚定
 //! **源工作区**（注册表所在地）。读面走源根是因为注册表只在源工作区——绑定
@@ -23,7 +25,7 @@
 //! 服务面 handler 同样在 attach 分支前置检查（两侧口径一致）。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use qaqh_ringing_contract::{
@@ -53,21 +55,6 @@ pub trait GitxHost: Send + Sync {
     /// 会话绑定的源工作区根；`None` = 会话没有可用工作区（工具报
     /// `workspace_unbound`）。
     fn source_workspace(&self, session_id: &str) -> Option<PathBuf>;
-}
-
-static HOST: OnceLock<Arc<dyn GitxHost>> = OnceLock::new();
-
-/// 安装进程内 gitx 宿主（幂等，首个生效）。
-pub fn install_host(host: Arc<dyn GitxHost>) {
-    if HOST.set(host).is_ok() {
-        log::info!("[gitx] in-process gitx host installed");
-    }
-}
-
-/// 已安装的 gitx 宿主；未安装返回 `None`。
-#[must_use]
-pub fn host() -> Option<Arc<dyn GitxHost>> {
-    HOST.get().cloned()
 }
 
 // ── 错误映射 ────────────────────────────────────────────────────────────────
@@ -152,13 +139,10 @@ fn engine_error(operation: &'static str, error: GitxError) -> ToolExecutionError
 // ── 内核函数（源工作区锚定，测试直接驱动）───────────────────────────────────
 
 /// 解析调用会话的源工作区（宿主单一路径）。
-fn resolve_source(ctx: &ToolCallContext) -> Result<PathBuf, ToolExecutionError> {
-    let host = host().ok_or_else(|| {
-        gitx_error(
-            "host_unavailable",
-            "worktree tools require the daemon gitx host (install_host)",
-        )
-    })?;
+fn resolve_source(
+    host: &dyn GitxHost,
+    ctx: &ToolCallContext,
+) -> Result<PathBuf, ToolExecutionError> {
     host.source_workspace(&ctx.session_id).ok_or_else(|| {
         gitx_error(
             "workspace_unbound",
@@ -502,7 +486,9 @@ pub struct WorktreeRemoveArgs {
 // ── 工具实现 ────────────────────────────────────────────────────────────────
 
 /// 列出源工作区的全部 worktree（管理面完整视图）。
-pub struct WorktreeListTool;
+pub struct WorktreeListTool {
+    pub host: Arc<dyn GitxHost>,
+}
 
 impl TypedTool for WorktreeListTool {
     type Args = WorktreeListArgs;
@@ -525,7 +511,7 @@ impl TypedTool for WorktreeListTool {
         ctx: &ToolCallContext,
         _args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let source = resolve_source(ctx)?;
+        let source = resolve_source(&*self.host, ctx)?;
         Ok(WorktreeListToolOutput {
             result: list_worktrees(&source)?,
         })
@@ -533,7 +519,9 @@ impl TypedTool for WorktreeListTool {
 }
 
 /// 建 worktree（attach 语义：会话级绑定，不是模型的选择而是显式动作）。
-pub struct WorktreeCreateTool;
+pub struct WorktreeCreateTool {
+    pub host: Arc<dyn GitxHost>,
+}
 
 impl TypedTool for WorktreeCreateTool {
     type Args = WorktreeCreateArgs;
@@ -563,7 +551,7 @@ impl TypedTool for WorktreeCreateTool {
         if attach_session.is_some() {
             ensure_switchable(ctx)?;
         }
-        let source = resolve_source(ctx)?;
+        let source = resolve_source(&*self.host, ctx)?;
         Ok(WorktreeCreateToolOutput {
             result: create_worktree(
                 &source,
@@ -576,7 +564,9 @@ impl TypedTool for WorktreeCreateTool {
 }
 
 /// 绑定当前会话到 managed worktree（会话级属性，registry CAS 唯一仲裁点）。
-pub struct WorktreeBindTool;
+pub struct WorktreeBindTool {
+    pub host: Arc<dyn GitxHost>,
+}
 
 impl TypedTool for WorktreeBindTool {
     type Args = WorktreeBindArgs;
@@ -602,7 +592,7 @@ impl TypedTool for WorktreeBindTool {
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
         ensure_switchable(ctx)?;
-        let source = resolve_source(ctx)?;
+        let source = resolve_source(&*self.host, ctx)?;
         Ok(WorktreeBindToolOutput {
             binding: bind_worktree(&source, &args.worktree_id, &ctx.session_id)?,
         })
@@ -610,7 +600,9 @@ impl TypedTool for WorktreeBindTool {
 }
 
 /// 释放当前会话的绑定（幂等）。
-pub struct WorktreeUnbindTool;
+pub struct WorktreeUnbindTool {
+    pub host: Arc<dyn GitxHost>,
+}
 
 impl TypedTool for WorktreeUnbindTool {
     type Args = WorktreeUnbindArgs;
@@ -634,7 +626,7 @@ impl TypedTool for WorktreeUnbindTool {
         _args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
         ensure_switchable(ctx)?;
-        let source = resolve_source(ctx)?;
+        let source = resolve_source(&*self.host, ctx)?;
         Ok(WorktreeUnbindToolOutput {
             result: unbind_worktree(&source, &ctx.session_id)?,
         })
@@ -642,7 +634,9 @@ impl TypedTool for WorktreeUnbindTool {
 }
 
 /// 删除 managed worktree（owner 校验 + dirty 保护）。
-pub struct WorktreeRemoveTool;
+pub struct WorktreeRemoveTool {
+    pub host: Arc<dyn GitxHost>,
+}
 
 impl TypedTool for WorktreeRemoveTool {
     type Args = WorktreeRemoveArgs;
@@ -667,20 +661,21 @@ impl TypedTool for WorktreeRemoveTool {
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
         ensure_switchable(ctx)?;
-        let source = resolve_source(ctx)?;
+        let source = resolve_source(&*self.host, ctx)?;
         Ok(WorktreeRemoveToolOutput {
             result: remove_worktree(&source, &args.worktree_id, args.force, Some(&ctx.session_id))?,
         })
     }
 }
 
-/// 注册 worktree 工具面（`SESSION/ROOT_TOOL_REGISTRARS` 消费）。
-pub fn register(mgr: &mut ToolManager) {
-    mgr.register_typed(WorktreeListTool);
-    mgr.register_typed(WorktreeCreateTool);
-    mgr.register_typed(WorktreeBindTool);
-    mgr.register_typed(WorktreeUnbindTool);
-    mgr.register_typed(WorktreeRemoveTool);
+/// 注册 worktree 工具面（runtime 侧 `SessionToolHosts::registrars` 消费）；
+/// `GitxHost` 在注册期显式注入工具实例（v4.5 P2-1b）。
+pub fn register(mgr: &mut ToolManager, host: Arc<dyn GitxHost>) {
+    mgr.register_typed(WorktreeListTool { host: Arc::clone(&host) });
+    mgr.register_typed(WorktreeCreateTool { host: Arc::clone(&host) });
+    mgr.register_typed(WorktreeBindTool { host: Arc::clone(&host) });
+    mgr.register_typed(WorktreeUnbindTool { host: Arc::clone(&host) });
+    mgr.register_typed(WorktreeRemoveTool { host });
 }
 
 #[cfg(test)]
@@ -723,7 +718,7 @@ mod tests {
 
     /// 最小宿主：`ses-empty` 映射为 None（覆盖 workspace_unbound 分支），其余
     /// 会话映射到固定路径（切换类工具在宿主解析前就被空闲闸拦截，路径不会被
-    /// 实际触碰）。OnceLock 进程级单宿主：两个 ctx 级测试共用这一个安装。
+    /// 实际触碰）。v4.5 P2-1b：宿主随工具实例构造，无进程级槽。
     struct TestHost;
 
     impl GitxHost for TestHost {
@@ -736,10 +731,8 @@ mod tests {
         }
     }
 
-    fn ensure_test_host() {
-        if host().is_none() {
-            install_host(Arc::new(TestHost));
-        }
+    fn test_host() -> Arc<dyn GitxHost> {
+        Arc::new(TestHost)
     }
 
     fn detail_of(error: ToolExecutionError) -> String {
@@ -772,7 +765,7 @@ mod tests {
     #[test]
     fn registry_exposes_the_five_worktree_tools() {
         let mut mgr = ToolManager::new();
-        register(&mut mgr);
+        register(&mut mgr, test_host());
         let defs = mgr.all_defs();
         let names: Vec<String> = defs.iter().map(|def| def.function.name.clone()).collect();
         for name in [
@@ -884,9 +877,8 @@ mod tests {
 
     #[test]
     fn tools_fail_closed_without_host_or_workspace() {
-        ensure_test_host();
         let ctx = model_ctx("ses-empty", qaqh_workspace::tool_api::CancellationToken::new());
-        let error = WorktreeListTool
+        let error = WorktreeListTool { host: test_host() }
             .run(&ctx, WorktreeListArgs {})
             .expect_err("empty host mapping must fail");
         assert!(detail_of(error).contains("no bound workspace"));
@@ -894,7 +886,6 @@ mod tests {
 
     #[test]
     fn switch_is_rejected_when_turn_is_cancelled() {
-        ensure_test_host();
         let token = qaqh_workspace::tool_api::CancellationToken::new();
         token.cancel();
         let ctx = model_ctx("ses-x", token);
@@ -902,19 +893,19 @@ mod tests {
         for (name, error) in [
             (
                 "bind",
-                WorktreeBindTool
+                WorktreeBindTool { host: test_host() }
                     .run(&ctx, WorktreeBindArgs { worktree_id: "w".to_string() })
                     .expect_err("cancelled turn must reject bind"),
             ),
             (
                 "unbind",
-                WorktreeUnbindTool
+                WorktreeUnbindTool { host: test_host() }
                     .run(&ctx, WorktreeUnbindArgs {})
                     .expect_err("cancelled turn must reject unbind"),
             ),
             (
                 "create",
-                WorktreeCreateTool
+                WorktreeCreateTool { host: test_host() }
                     .run(&ctx, WorktreeCreateArgs {
                         branch_name: "feature/x".to_string(),
                         base_ref: None,
@@ -924,7 +915,7 @@ mod tests {
             ),
             (
                 "remove",
-                WorktreeRemoveTool
+                WorktreeRemoveTool { host: test_host() }
                     .run(&ctx, WorktreeRemoveArgs { worktree_id: "w".to_string(), force: false })
                     .expect_err("cancelled turn must reject remove"),
             ),

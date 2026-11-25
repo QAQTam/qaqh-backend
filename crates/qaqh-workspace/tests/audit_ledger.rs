@@ -39,7 +39,7 @@ fn setup(label: &str) -> Env {
         std::env::set_var("HOME", tmp.path());
         std::env::set_var("USERPROFILE", tmp.path());
     }
-    qaqh_workspace::runtime::init_tools(label, &[], vec![]);
+    qaqh_workspace::runtime::init_tools(label, &[], vec![], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()));
     Env {
         _tmp: tmp,
         data,

@@ -23,16 +23,24 @@ use super::skill;
 use super::visualize;
 
 /// 工具注册器函数签名。
-pub type ToolRegistrar = fn(&mut ToolManager);
+///
+/// v4.5 P2-1b：从裸 `fn` 指针改为可捕获状态的 `Arc<dyn Fn>`——会话工具面
+/// （subagent/gitx/todo/goal）的宿主 `Arc<dyn *Host>` 在注册期闭包内显式
+/// 注入工具实例，全仓不再存在进程级 `OnceLock` 动态宿主反向槽。
+pub type ToolRegistrar = std::sync::Arc<dyn Fn(&mut ToolManager) + Send + Sync>;
 
 /// 构造并注册全部工具 handler，返回初始化后的 ToolManager。
 /// `extra_registrars` 允许外部 crate（如 qaqh-subagent）注入工具。
+/// `todo_host` 是 todo 工具面的状态权威端口（注册期显式注入，无全局槽）。
 ///
 /// P0-2：manager 持有一份**会话私有** [`qaqh_file_tools::FileRuntime`]（账本 +
 /// 读缓存），全部文件工具共享同一 `Arc`；进程级 `LEDGER`/`file_cache` 单例与
 /// 门面线程态钩子（`hooks::set_ambient_provider` 等 OnceLock<fn()>）已随旧
 /// 「执行线程 ambient 视图」前提一并退役。
-pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
+pub fn build_tool_manager(
+    extra_registrars: &[ToolRegistrar],
+    todo_host: std::sync::Arc<dyn crate::todo::TodoHost>,
+) -> ToolManager {
     let files = std::sync::Arc::new(qaqh_file_tools::FileRuntime::default());
     let mut mgr = ToolManager::new();
     mgr.set_file_runtime(std::sync::Arc::clone(&files));
@@ -56,7 +64,7 @@ pub fn build_tool_manager(extra_registrars: &[ToolRegistrar]) -> ToolManager {
     // ── Todo（直接、会话内状态工具）──
     // Todo v4（全量覆写）：todo_write（items 即完整清单，整体替换）/ todo_update
     // 单条状态 / todo_list 只读。无 insert；增删改排序均在 todo_write 整体重写。
-    todo::register(&mut mgr);
+    todo::register(&mut mgr, todo_host);
 
     // ── 交互 ──
     ask_user::register(&mut mgr);
@@ -89,7 +97,8 @@ mod tests {
 
     #[test]
     fn default_registry_exposes_the_formal_tool_vocabulary() {
-        let names: Vec<String> = build_tool_manager(&[])
+        let host = std::sync::Arc::new(crate::todo::MemoryTodoHost::default());
+        let names: Vec<String> = build_tool_manager(&[], host)
             .all_defs()
             .into_iter()
             .map(|def| def.function.name)

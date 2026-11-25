@@ -18,7 +18,9 @@ use crate::tool_api::{
     ToolExecutionError, ToolHeader, ToolMeta, ToolProjection, TypedTool,
 };
 
-use super::host::require_host;
+use std::sync::Arc;
+
+use super::host::TodoHost;
 use super::model::{TodoItem, TodoStatus};
 use super::parse::{parse_todo_text, render_todo_text};
 use super::store::{count_status, normalize_current_id, status_name};
@@ -273,7 +275,11 @@ impl ToolProjection for TodoUpdateOutput {
     }
 }
 
-pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOutput, String> {
+pub fn todo_list_for_typed(
+    host: &dyn TodoHost,
+    session_id: &str,
+    args: &Value,
+) -> Result<TodoListOutput, String> {
     let args: TodoListArgs = serde_json::from_value(args.clone()).map_err(|error| {
         crate::json_err_string(
             "invalid_input",
@@ -284,8 +290,7 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
     if session_id.is_empty() {
         return Err("no active session".into());
     }
-    let store = super::host::host()
-        .ok_or_else(|| "todo requires the daemon host (install_host)".to_string())?
+    let store = host
         .load_todo(session_id)?
         .unwrap_or_else(super::host::empty_store);
     // v2 类型生成后 filter 已是 typed enum（schema enum 由类型给出），
@@ -316,7 +321,11 @@ pub fn todo_list_for_typed(session_id: &str, args: &Value) -> Result<TodoListOut
 }
 
 /// `todo_write` 的 canonical mutation 路径。
-pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteOutput, String> {
+pub fn todo_write_for_typed(
+    host: &dyn TodoHost,
+    session_id: &str,
+    args: &Value,
+) -> Result<TodoWriteOutput, String> {
     let args: TodoWriteArgs = serde_json::from_value(args.clone()).map_err(|error| {
         crate::json_err_string(
             "invalid_input",
@@ -329,7 +338,7 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
     }
     // 读-改-写整体落在宿主的单个写事务内：并发 todo_write 不互踩、
     // 不与 update/cancel 丢更新（旧全局 TODO_LOCK 的替代判据）。
-    let value = require_host()?.mutate_todo(
+    let value = host.mutate_todo(
         session_id,
         Box::new(move |store| {
             let replaced = store.items.len();
@@ -366,7 +375,11 @@ pub fn todo_write_for_typed(session_id: &str, args: &Value) -> Result<TodoWriteO
 ///
 /// 保留既有三种输入形态：单条 `{id,status,evidence?}`、`ids` 批量状态、
 /// `updates` 并行条目；工具面仍由 `TodoUpdateArgs` 限制为单条。
-pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdateOutput, String> {
+pub fn todo_update_for_typed(
+    host: &dyn TodoHost,
+    session_id: &str,
+    args: &Value,
+) -> Result<TodoUpdateOutput, String> {
     let args: TodoUpdateArgs = serde_json::from_value(args.clone()).map_err(|error| {
         crate::json_err_string(
             "invalid_input",
@@ -386,7 +399,7 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
     if session_id.is_empty() {
         return Err("no active session".into());
     }
-    let value = require_host()?.mutate_todo(
+    let value = host.mutate_todo(
         session_id,
         Box::new(move |store| {
             let Some(index) = store.items.iter().position(|item| item.title == title) else {
@@ -423,18 +436,22 @@ pub fn todo_update_for_typed(session_id: &str, args: &Value) -> Result<TodoUpdat
 
 /// service 查询面(`todo.list`)的纯快照入口:typed 解析后不经工具信封。
 /// `status` 与 todo 工具同词表(pending|in_progress|completed|cancelled)。
-pub fn todo_list_snapshot_value(session_id: &str, status: Option<&str>) -> Result<Value, String> {
+pub fn todo_list_snapshot_value(
+    host: &dyn TodoHost,
+    session_id: &str,
+    status: Option<&str>,
+) -> Result<Value, String> {
     // 无过滤也必须是 `{}` 而不是 `Null`:`TodoListArgs` 是 struct,`null`
     // 解不出来(service 面无 status 查询曾因此 400,真机验收实证)。
     let args = match status {
         None => serde_json::json!({}),
         Some(status) => serde_json::json!({ "status": status }),
     };
-    todo_list_for_typed(session_id, &args)?.to_snapshot_value()
+    todo_list_for_typed(host, session_id, &args)?.to_snapshot_value()
 }
 
 /// service 面直接返回 canonical Value，避免 `parse_json_string`。
-pub fn todo_list_value_for(session_id: &str, args: &Value) -> Result<Value, String> {
+pub fn todo_list_value_for(host: &dyn TodoHost, session_id: &str, args: &Value) -> Result<Value, String> {
     // service 信封把会话键与业务参数放在同一对象；typed args 只接受 status，
     // 且 `TodoListArgs` 开了 `deny_unknown_fields`——会话键必须剥掉，
     // 否则 `todo.list` 会以 `invalid todo_list args` 失败。
@@ -442,7 +459,7 @@ pub fn todo_list_value_for(session_id: &str, args: &Value) -> Result<Value, Stri
     if let Some(object) = tool_args.as_object_mut() {
         object.remove("session_id");
     }
-    todo_list_for_typed(session_id, &tool_args)?.to_envelope_value()
+    todo_list_for_typed(host, session_id, &tool_args)?.to_envelope_value()
 }
 
 fn recoverable(error: String) -> ToolExecutionError {
@@ -491,7 +508,10 @@ fn to_args_value<T: Serialize>(args: &T) -> Result<Value, ToolExecutionError> {
     })
 }
 
-pub struct TodoWriteTool;
+/// `todo_write`：宿主在注册期注入（工具实例显式持有 `Arc<dyn TodoHost>`）。
+pub struct TodoWriteTool {
+    pub host: Arc<dyn TodoHost>,
+}
 
 impl TypedTool for TodoWriteTool {
     type Args = TodoWriteArgs;
@@ -513,11 +533,14 @@ impl TypedTool for TodoWriteTool {
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
         let args = to_args_value(&args)?;
-        todo_write_for_typed(&ctx.session_id, &args).map_err(recoverable)
+        todo_write_for_typed(&*self.host, &ctx.session_id, &args).map_err(recoverable)
     }
 }
 
-pub struct TodoUpdateTool;
+/// `todo_update`：宿主在注册期注入。
+pub struct TodoUpdateTool {
+    pub host: Arc<dyn TodoHost>,
+}
 
 impl TypedTool for TodoUpdateTool {
     type Args = TodoUpdateArgs;
@@ -539,7 +562,7 @@ impl TypedTool for TodoUpdateTool {
         args: Self::Args,
     ) -> Result<Self::Output, ToolExecutionError> {
         let args = to_args_value(&args)?;
-        todo_update_for_typed(&ctx.session_id, &args).map_err(recoverable)
+        todo_update_for_typed(&*self.host, &ctx.session_id, &args).map_err(recoverable)
     }
 }
 

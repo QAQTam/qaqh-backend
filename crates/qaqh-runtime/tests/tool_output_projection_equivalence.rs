@@ -21,7 +21,7 @@ fn isolate_data_root() -> tempfile::TempDir {
 fn todo_typed_output_is_the_single_source_for_model_display_and_service() {
     let _home = isolate_data_root();
     let session_id = "typed-output-equivalence";
-    qaqh_workspace::runtime::init_tools(session_id, &[], vec![]);
+    qaqh_workspace::runtime::init_tools(session_id, &[], vec![], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()));
 
     // `todo_write` 的入参是纯文本块（`list`），不是结构化数组：解析与状态词表
     // 都在工具域，客户端只消费结构化输出。

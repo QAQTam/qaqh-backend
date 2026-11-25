@@ -206,6 +206,8 @@ pub struct SpawnInput<'a> {
     pub exec_sessions: Arc<qaqh_process_tools::exec_session::ExecSessionManager>,
     /// ADR-0014：外部工具注册器（子代理工具面经此进入每个会话）。
     pub tool_registrars: &'a [qaqh_workspace::registration::ToolRegistrar],
+    /// v4.5 P2-1b：todo 工具面宿主——注册期显式注入（无进程级全局槽）。
+    pub todo_host: Arc<dyn qaqh_workspace::todo::TodoHost>,
     /// ADR-0033：回合边界 workspace 重解析钩子（registry 注入；`None` = 不解析）。
     pub workspace_resolver: Option<crate::session_loop::WorkspaceResolver>,
 }
@@ -220,6 +222,7 @@ impl<'a> SpawnInput<'a> {
         workspace_root: PathBuf,
         owner: Arc<SessionOwner>,
         exec_sessions: Arc<qaqh_process_tools::exec_session::ExecSessionManager>,
+        todo_host: Arc<dyn qaqh_workspace::todo::TodoHost>,
     ) -> Result<Self, String> {
         Ok(Self {
             session_id,
@@ -234,6 +237,7 @@ impl<'a> SpawnInput<'a> {
             workspace_root,
             exec_sessions,
             tool_registrars: &[],
+            todo_host,
             workspace_resolver: None,
         })
     }
@@ -277,10 +281,12 @@ pub fn assemble(input: SpawnInput<'_>) -> Result<Arc<SessionLoop>, String> {
         workspace_root,
         exec_sessions,
         tool_registrars,
+        todo_host,
         workspace_resolver,
     } = input;
 
-    let mut tool_manager = qaqh_workspace::registration::build_tool_manager(tool_registrars);
+    let mut tool_manager =
+        qaqh_workspace::registration::build_tool_manager(tool_registrars, todo_host);
     tool_manager.set_global_allowed(global_allowed_tools);
     tool_manager.apply_init(allowed_tools);
     let mut provider = provider_spec(config, tool_defs(&tool_manager))?;
@@ -410,6 +416,7 @@ mod tests {
                 PathBuf::from("/w"),
                 owner,
                 Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+                Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
             )
             .unwrap()
         };
@@ -432,6 +439,7 @@ mod tests {
                 PathBuf::from("/w"),
                 owner,
                 Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+                Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
             )
             .unwrap()
         };

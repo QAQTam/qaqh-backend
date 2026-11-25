@@ -1148,7 +1148,10 @@ mod swap_workspace_root_tests {
         WorkspaceToolPort::new(
             "SES-SWAP",
             Arc::new(std::sync::Mutex::new(
-                qaqh_workspace::registration::build_tool_manager(&[]),
+                qaqh_workspace::registration::build_tool_manager(
+                    &[],
+                    Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+                ),
             )),
             ToolPolicySnapshot::workspace_write(root),
             owner.lifecycle(),

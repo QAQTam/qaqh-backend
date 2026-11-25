@@ -308,6 +308,10 @@ pub struct AgentRegistry {
     terminal_router: Option<qaqh_agent_runtime::session_loop::TurnTerminalPort>,
     /// ADR-0014：spawn 名缓存（child id → name），首次子会话投影时懒加载。
     spawn_names: Option<std::collections::HashMap<String, String>>,
+    /// v4.5 P2-1b：会话工具面宿主束（service init 注入一次；取代 daemon
+    /// 装配期的 5 个进程级 `install_*_host` 全局槽）。未注入即无法
+    /// `spawn_session_inprocess`——fail-closed，不降级。
+    tool_hosts: Option<std::sync::Arc<crate::tool_hosts::SessionToolHosts>>,
 }
 
 impl AgentRegistry {
@@ -329,6 +333,7 @@ impl AgentRegistry {
             outbound_attempts: HashMap::new(),
             terminal_router: None,
             spawn_names: None,
+            tool_hosts: None,
         }
     }
 
@@ -348,6 +353,12 @@ impl AgentRegistry {
         router: Option<qaqh_agent_runtime::session_loop::TurnTerminalPort>,
     ) {
         self.terminal_router = router;
+    }
+
+    /// v4.5 P2-1b：注入会话工具面宿主束（service init 调用一次；
+    /// `spawn_session_inprocess` 的唯一宿主来源）。
+    pub fn set_tool_hosts(&mut self, hosts: std::sync::Arc<crate::tool_hosts::SessionToolHosts>) {
+        self.tool_hosts = Some(hosts);
     }
 }
 

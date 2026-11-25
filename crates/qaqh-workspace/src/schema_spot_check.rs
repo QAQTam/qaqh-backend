@@ -3,6 +3,10 @@
 mod schema_spot_check {
     use crate::registration::build_tool_manager;
 
+    fn mem_todo() -> std::sync::Arc<dyn crate::todo::TodoHost> {
+        std::sync::Arc::new(crate::todo::MemoryTodoHost::default())
+    }
+
     /// SDK v2 全量形态验收：input schema 一律由 `Args` 类型生成——
     /// 必须是 object，且不得出现手写聚合 schema 残留的 oneOf/anyOf/allOf
     /// （类型生成路径从机制上不允许组合键）。
@@ -13,7 +17,7 @@ mod schema_spot_check {
     /// （prompt_and_tool_defs_char_budget）覆盖。
     #[test]
     fn all_defs_are_object_shaped_without_composition_keys() {
-        let defs = build_tool_manager(&[]).all_defs();
+        let defs = build_tool_manager(&[], mem_todo()).all_defs();
         assert!(
             defs.len() >= 19,
             "builtin surface unexpectedly small: {}",
@@ -69,7 +73,7 @@ mod schema_spot_check {
             }
         }
 
-        let defs = build_tool_manager(&[]).all_defs();
+        let defs = build_tool_manager(&[], mem_todo()).all_defs();
         let mut hits = Vec::new();
         for def in &defs {
             walk(&def.function.parameters, &def.function.name, &mut hits);
@@ -83,7 +87,7 @@ mod schema_spot_check {
     /// deny_unknown_fields Args 的生成形态：additionalProperties=false。
     #[test]
     fn closed_args_generate_additional_properties_false() {
-        let defs = build_tool_manager(&[]).all_defs();
+        let defs = build_tool_manager(&[], mem_todo()).all_defs();
         let by_name = |n: &str| defs.iter().find(|d| d.function.name == n).unwrap();
         for name in ["edit", "skill_list", "todo_write"] {
             assert_eq!(
@@ -98,7 +102,7 @@ mod schema_spot_check {
     /// 决定，防止字段改名/描述丢失悄悄破坏模型面。
     #[test]
     fn schema_descriptions_are_effective() {
-        let defs = build_tool_manager(&[]).all_defs();
+        let defs = build_tool_manager(&[], mem_todo()).all_defs();
         let by_name = |n: &str| defs.iter().find(|d| d.function.name == n).unwrap();
         let params = |n: &str| &by_name(n).function.parameters["properties"];
         let required_of = |n: &str| -> Vec<String> {
@@ -220,13 +224,17 @@ mod schema_spot_check {
 /// qaqh-tool-core；需要 build_tool_manager 的断言留在门面侧）。
 mod tool_capabilities_cross_check {
     use crate::registration::build_tool_manager;
+
+    fn mem_todo() -> std::sync::Arc<dyn crate::todo::TodoHost> {
+        std::sync::Arc::new(crate::todo::MemoryTodoHost::default())
+    }
     use qaqh_types::policy::ToolCategory;
     use qaqh_tool_core::tool_api::Concurrency;
     use qaqh_tool_core::tool_capabilities::{builtin_capabilities, table_tool_names};
 
     #[test]
     fn table_covers_registry_exactly() {
-        let registry: Vec<String> = build_tool_manager(&[])
+        let registry: Vec<String> = build_tool_manager(&[], mem_todo())
             .all_defs()
             .into_iter()
             .map(|def| def.function.name)
@@ -243,7 +251,7 @@ mod tool_capabilities_cross_check {
 
     #[test]
     fn parallel_tools_are_pure_reads() {
-        let manager = build_tool_manager(&[]);
+        let manager = build_tool_manager(&[], mem_todo());
         for name in table_tool_names() {
             let capabilities = builtin_capabilities(name).expect("表内条目");
             if capabilities.concurrency == Concurrency::Parallel {
@@ -258,7 +266,7 @@ mod tool_capabilities_cross_check {
 
     #[test]
     fn exclusive_tools_are_execution_sessions_or_rewrite() {
-        let manager = build_tool_manager(&[]);
+        let manager = build_tool_manager(&[], mem_todo());
         let exclusive: Vec<&str> = table_tool_names()
             .into_iter()
             .filter(|name| {
@@ -281,7 +289,7 @@ mod tool_capabilities_cross_check {
 
     #[test]
     fn idempotent_tools_are_pure_reads() {
-        let manager = build_tool_manager(&[]);
+        let manager = build_tool_manager(&[], mem_todo());
         for name in table_tool_names() {
             let capabilities = builtin_capabilities(name).expect("表内条目");
             if capabilities.idempotent {

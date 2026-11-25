@@ -26,14 +26,9 @@ mod session_meta;
 mod todo_host;
 mod subagent_supervisor;
 mod shell;
+mod tool_hosts;
 
 pub use error::{QaqhError, QaqhResult};
 pub use registry::{AgentRegistry, cache_system_path, detect_os_info, detect_shell};
 pub use service::QaqhService;
 pub use shell::{ShellAttach, ShellFrame, ShellInfo, ShellOpen, ShellRegistry, ShellStopReason};
-
-/// v4.4 P1-3 装配入口：把 `TodoHost` 端口实现（本 crate 的 `todo_host`）
-/// 安装进 `qaqh-workspace::todo`。daemon 不链接 workspace，装配从这里进。
-pub fn install_todo_host(service: std::sync::Arc<QaqhService>) {
-    qaqh_workspace::todo::install_host(service);
-}

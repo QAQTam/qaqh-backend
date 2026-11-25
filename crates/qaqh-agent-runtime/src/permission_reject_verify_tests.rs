@@ -94,7 +94,10 @@ mod tests {
             .await
             .expect("create session");
         let manager = Arc::new(std::sync::Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&[]),
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
         ));
         let port = Arc::new(WorkspaceToolPort::new(
             "SES-REJECT",

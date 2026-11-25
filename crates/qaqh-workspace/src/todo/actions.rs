@@ -7,18 +7,24 @@
 
 use serde_json::Value;
 
+use super::host::TodoHost;
+
 /// Seed 参数化的 todo.set 直访变体（HTTP service 面 / CLI 用；不依赖
 /// runtime 线程局部上下文）。
-pub fn todo_set_for(session_id: &str, args: &Value) -> Result<String, String> {
-    serde_json::to_string(&todo_set_value_for(session_id, args)?)
+pub fn todo_set_for(host: &dyn TodoHost, session_id: &str, args: &Value) -> Result<String, String> {
+    serde_json::to_string(&todo_set_value_for(host, session_id, args)?)
         .map_err(|error| format!("todo: {error}"))
 }
 
-pub fn todo_set_value_for(session_id: &str, args: &Value) -> Result<Value, String> {
-    super::typed::todo_update_for_typed(session_id, args)?.to_envelope_value()
+pub fn todo_set_value_for(
+    host: &dyn TodoHost,
+    session_id: &str,
+    args: &Value,
+) -> Result<Value, String> {
+    super::typed::todo_update_for_typed(host, session_id, args)?.to_envelope_value()
 }
 
 /// Seed 参数化的 todo.list 直访变体（HTTP service 面 / CLI 用）。
-pub fn todo_list_for(session_id: &str, args: &Value) -> Result<String, String> {
-    super::typed::todo_list_for_typed(session_id, args)?.to_envelope_string()
+pub fn todo_list_for(host: &dyn TodoHost, session_id: &str, args: &Value) -> Result<String, String> {
+    super::typed::todo_list_for_typed(host, session_id, args)?.to_envelope_string()
 }

@@ -2,10 +2,11 @@
 //!
 //! v4.4 P1-3：持久化全部经 [`super::host::TodoHost`]——`todo.json` 的
 //! 读写函数与 `TODO_LOCK` 已物理删除，运行期不存在第二条读写路径。
+//! v4.5 P2-1b：宿主经调用方显式传入（`host: &dyn TodoHost`），全局槽已删除。
 
 use crate::json_err_string;
 
-use super::host::{empty_store, require_host};
+use super::host::{TodoHost, empty_store};
 use super::model::{TodoItem, TodoStatus, TodoStore};
 
 // ═══════════════════════════════════════════════════════
@@ -13,22 +14,22 @@ use super::model::{TodoItem, TodoStatus, TodoStore};
 // ═══════════════════════════════════════════════════════
 
 /// Session-aware variant: load TodoStore for an explicit seed (no RUNTIME_CTX).
-pub fn load_todo_for(session_id: &str) -> Result<TodoStore, String> {
+pub fn load_todo_for(host: &dyn TodoHost, session_id: &str) -> Result<TodoStore, String> {
     if session_id.is_empty() {
         return Err("no active session".into());
     }
-    Ok(require_host()?
+    Ok(host
         .load_todo(session_id)?
         .unwrap_or_else(empty_store))
 }
 
 /// Session-scoped todo status for the frontend Todo panel.
-pub fn todo_status_value(session_id: &str) -> Result<serde_json::Value, String> {
+pub fn todo_status_value(host: &dyn TodoHost, session_id: &str) -> Result<serde_json::Value, String> {
     if session_id.is_empty() {
         return Ok(serde_json::Value::Null);
     }
     // 无记录 = 旧「文件不存在」：对前端面板保持 Null。
-    let Some(store) = require_host()?.load_todo(session_id)? else {
+    let Some(store) = host.load_todo(session_id)? else {
         return Ok(serde_json::Value::Null);
     };
     let current = store
@@ -64,16 +65,19 @@ pub fn todo_status_value(session_id: &str) -> Result<serde_json::Value, String> 
     }))
 }
 
-pub fn todo_status_json(session_id: &str) -> Result<String, String> {
-    serde_json::to_string(&todo_status_value(session_id)?).map_err(|e| format!("todo: {e}"))
+pub fn todo_status_json(host: &dyn TodoHost, session_id: &str) -> Result<String, String> {
+    serde_json::to_string(&todo_status_value(host, session_id)?).map_err(|e| format!("todo: {e}"))
 }
 
 /// Direct cancel by session seed — no runtime context needed.
-pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value, String> {
+pub fn todo_cancel_value(
+    host: &dyn TodoHost,
+    session_id: &str,
+    id: &str,
+) -> Result<serde_json::Value, String> {
     if session_id.is_empty() {
         return Err(json_err_string("invalid_input", "no active session", ""));
     }
-    let host = require_host()?;
     if host.load_todo(session_id)?.is_none() {
         return Err(json_err_string(
             "not_found",
@@ -110,8 +114,8 @@ pub fn todo_cancel_value(session_id: &str, id: &str) -> Result<serde_json::Value
     )
 }
 
-pub fn todo_cancel_json(session_id: &str, id: &str) -> Result<String, String> {
-    serde_json::to_string(&todo_cancel_value(session_id, id)?).map_err(|e| format!("todo: {e}"))
+pub fn todo_cancel_json(host: &dyn TodoHost, session_id: &str, id: &str) -> Result<String, String> {
+    serde_json::to_string(&todo_cancel_value(host, session_id, id)?).map_err(|e| format!("todo: {e}"))
 }
 
 pub(crate) fn status_name(status: &TodoStatus) -> &'static str {
@@ -174,13 +178,12 @@ pub(crate) fn refresh_archive_flag(store: &mut TodoStore) {
 ///
 /// **快照即冻结**：调用方把返回值写进 tool_result 后不得再改——历史
 /// append-only 是 KV cache 前缀命中的前提。
-pub fn todo_meta_snapshot(session_id: &str) -> Option<String> {
+pub fn todo_meta_snapshot(host: &dyn TodoHost, session_id: &str) -> Option<String> {
     if session_id.is_empty() {
         return None;
     }
     // 快照注入是尽力而为的旁路：宿主缺失/读失败都归入「不注入」，
     // 与原 read_store_for 失败路径同律（不伪装成功也不拖崩回合）。
-    let host = require_host().ok()?;
     let mut store = host.load_todo(session_id).ok()??;
     if store.items.is_empty() {
         return None;

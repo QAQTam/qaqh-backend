@@ -11,7 +11,7 @@ fn ten_parallel_reads() {
     let ws = tmp.to_string_lossy().to_string();
 
     // Init tool manager
-    qaqh_workspace::runtime::init_tools("test", &[], vec![]);
+    qaqh_workspace::runtime::init_tools("test", &[], vec![], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()));
 
     let file_path_str = file_path.to_string_lossy().to_string();
     let args = serde_json::json!({"path": file_path_str}).to_string();

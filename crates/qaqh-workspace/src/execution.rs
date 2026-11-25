@@ -735,7 +735,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let allowed: Vec<String> = vec![];
-        crate::runtime::init_tools("test", &[], allowed);
+        crate::runtime::init_tools("test", &[], allowed, std::sync::Arc::new(crate::todo::MemoryTodoHost::default()));
         crate::runtime::register_test_probe(crate::probe::ProbeTool {
             key: "test_counter".to_string(),
             description: "test handler",
