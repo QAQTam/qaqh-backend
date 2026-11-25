@@ -32,3 +32,4 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 21. LTS 属性按线承载而非按仓：LTS 分支（现为 LTS-v3.0 / LTS-v3.1）遵循用户空间（前后端API）不可变，内核空间（后端）保持对外一致或同等效力下可以发生部分小破坏性变化或以exp设计接线；main 线（v4+）是开发快车兼发版线，`v*` tag 是版本化交付、不默认携带 LTS 承诺（tag≠LTS，ADR-0031），是否开设新 LTS 线由所有者显式决定。
 22. 本仓禁止直接使用git checkout，可以使用更加安全的新用法。
 23. shell新增uutils组件替换pwsh7的部分实现，调用时LLM可以较为自然的调用uutils
+24. Agent 实名提交修正案:今后各平台 AI Agent 执行 git 提交时，应优先通过 `Co-Authored-By` trailer 使用自家官方提交者信息实名署名（如 Claude Code 用 `Co-Authored-By: Claude <noreply@anthropic.com>`，Codex 用 `Co-Authored-By: Codex <noreply@openai.com>`，Gemini / Antigravity 用 `Co-Authored-By: Gemini Antigravity <176961590+gemini-code-assist[bot]@users.noreply.github.com>`）；小众或无官方标准署名的 Agent 直接复用 Claude 或 Codex 的署名即可。**唯一豁免**：QAQHarness 本身可直接以用户 git 身份提交，无需附加 AI 署名。
