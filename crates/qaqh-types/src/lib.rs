@@ -1,4 +1,9 @@
-#![cfg_attr(not(test), forbid(unsafe_code))]
+// v4.5 P2-2b（plan §三.5 / L-27）：`platform::process_is_running` 换
+// `OpenProcess`+`GetExitCodeProcess` / `libc::kill` 原生探测，需要受控 unsafe。
+// crate 闸门由 `forbid` 放宽为 `deny`（对齐 `qaqh-client/src/lib.rs` 既有姿势）：
+// unsafe 仍全局默认红，仅该函数 `#[allow(unsafe_code)]` + 逐块 `// SAFETY:`，
+// 且 workspace lints `undocumented_unsafe_blocks = "deny"` 机器兜底。见 ADR-0044。
+#![cfg_attr(not(test), deny(unsafe_code))]
 // ── Type definitions for qaqh core types ──
 //
 // All type definitions are split across sub-modules below.

@@ -68,6 +68,15 @@ path-clean = "1"
 chrono = { version = "0.4", features = ["clock"] }
 ulid = "3"
 
+# v4.5 P2-2b：系统级/重型手写轮子退役（plan §三.5）。`libc`/`windows-sys` 把
+# 判活从子进程派生（tasklist / kill -0，L-27）换成原生系统调用；`jsonc-parser`
+# （dprint，JSONC 权威实现，13.5M 下载）替掉 zed_integration 的 480 行手写
+# JSONC 词法/剥离/拼接状态机。`cst` = 保留全部注释与空白的一等编辑 API；
+# `serde_json` = CST 节点直读 serde_json::Value（Already 语义判定复用既有比较）。
+libc = "0.2"
+windows-sys = "0.61"
+jsonc-parser = { version = "0.34", features = ["cst", "serde_json"] }
+
 [workspace.package]
 version = "4.2.0"
 edition = "2024"
