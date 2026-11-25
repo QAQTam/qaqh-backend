@@ -27,8 +27,6 @@ public sealed record ConfigDto
     public GoalsDto Goals { get; init; }
     [JsonPropertyName("mcp")]
     public McpDto Mcp { get; init; }
-    [JsonPropertyName("lsp")]
-    public LspDto Lsp { get; init; }
     [JsonPropertyName("exec")]
     public ExecDto Exec { get; init; }
     [JsonPropertyName("sandbox")]

@@ -5,7 +5,7 @@
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "8f0d94ccde0f7b409ca5ff4db66a7701f7472dc8cc67ebbbcdbb7693ef89f0e5",
+  "contract_hash": "c52b62186f4e6c9fffd61119eb81888cbc542e0a308c23b608e7e250d8ba0a3a",
   "files": [
     {
       "path": "constants.ts",
@@ -81,7 +81,7 @@
     },
     {
       "path": "cs/ConfigDto.cs",
-      "sha256": "86769263acedec4b4b1e3e443c9c477aa86008c59877cd2e2b187f6bae68068e"
+      "sha256": "944ff703b1bdc6e052a67980d04cdc8d64da6004dec0f55fb0d3dfc145838ddf"
     },
     {
       "path": "cs/ConfigLoadParams.cs",
@@ -350,14 +350,6 @@
     {
       "path": "cs/InterruptReason.cs",
       "sha256": "7bede75bc6f4b2e43d01f268031c41649a11228aba438b20a355e1680a94a9c8"
-    },
-    {
-      "path": "cs/LspDto.cs",
-      "sha256": "a1521f23b4674a86e15f64108db1d316612d75782dcd15d5f97c000c452ef6ed"
-    },
-    {
-      "path": "cs/LspServerDto.cs",
-      "sha256": "e757740251b890e75d5f38ce4e5dc7bde12c545e688896d3103a47cc1540f2da"
     },
     {
       "path": "cs/McpDto.cs",
@@ -665,11 +657,11 @@
     },
     {
       "path": "cs/SessionEvent.cs",
-      "sha256": "56a3fc37cab589eef57de9455b958f23d23a42d0f47238866473443dd8151b00"
+      "sha256": "4fd0dd27b47bffa3345b1141210d4746c1c0039578ef80bb0afab41879d84b62"
     },
     {
       "path": "cs/SessionEventFrame.cs",
-      "sha256": "095ebda071f5865c480f16dccb15f5c2fb783834326f9dd04fe3e015ec36d6c5"
+      "sha256": "c683ea7c52d103449a791418e504306fd0d0d3f4014a30b14173e201d2ad8e8a"
     },
     {
       "path": "cs/SessionGetActivityParams.cs",
@@ -949,7 +941,7 @@
     },
     {
       "path": "cs/ToolCallView.cs",
-      "sha256": "15bf468ecad57afde354e489a21c7615c4276cb3bafad5709efb0cc9c6a332dd"
+      "sha256": "2ee277e92fdeb6087bc1a15e6225edcaa5baedae2a803fad4754cc58a649ceaf"
     },
     {
       "path": "cs/ToolCancellationReason.cs",
@@ -1173,7 +1165,7 @@
     },
     {
       "path": "fixtures/service-config-load-result.json",
-      "sha256": "2c50d39c35c1b3b3acfda15f3316e4aaf398a5620794d73be03f0b9510e9e867"
+      "sha256": "471cd3dd6b5682bc18ba115bcff8c1ce85053f4800c1047a671fce6a1e21e99b"
     },
     {
       "path": "fixtures/service-daemon-version-params.json",
@@ -1585,7 +1577,7 @@
     },
     {
       "path": "index.ts",
-      "sha256": "3966dcd24afb1f142514e5c098797c8e5a5c0e30275e026b3a621dea694d9b62"
+      "sha256": "b37a384e366493df21f804084ce63c596863f506ab7ded496bba652a09f0f0c3"
     },
     {
       "path": "node.ts",
@@ -1685,7 +1677,7 @@
     },
     {
       "path": "types/qaqh/ConfigDto.ts",
-      "sha256": "482f6a21a3a54be6f67a55b8c6c797fe67fda5967a3773e10d6b02df0244fbff"
+      "sha256": "25e6036645f0b34adf8518938fcc49f8fea6dd9cfe7e3d6e04b165735a56b365"
     },
     {
       "path": "types/qaqh/ConfigLoadParams.ts",
@@ -1966,14 +1958,6 @@
     {
       "path": "types/qaqh/InterruptReason.ts",
       "sha256": "29058e675f83816f8bcfad704433c6165fd4eaa7b90361438e819449942de81e"
-    },
-    {
-      "path": "types/qaqh/LspDto.ts",
-      "sha256": "9fc5da388a8a5457c64d2d8855a5e05cbd676f01833e0c11b527fb224af1f82d"
-    },
-    {
-      "path": "types/qaqh/LspServerDto.ts",
-      "sha256": "c9cb543a421a6975229212728208c16e8805bae79626ddc3b13799ea185c315d"
     },
     {
       "path": "types/qaqh/McpDto.ts",
@@ -2273,11 +2257,11 @@
     },
     {
       "path": "types/qaqh/SessionEvent.ts",
-      "sha256": "cb1d752179d0ae69db6a22eb230b1a143f3c94ba51672ffda35aedf1b462cfe3"
+      "sha256": "56ad3146d27062087a1b5fdec52b5cdc669a939b9566ef08549d7017c64aa26f"
     },
     {
       "path": "types/qaqh/SessionEventFrame.ts",
-      "sha256": "ff93d8432ede042aa7d2dc2eee87a27cc636fe3b6a878402582f2477d2e75f97"
+      "sha256": "c45cfa130bb07e09ab7de9f36273950c8227d74a370f25486968d3b11985e386"
     },
     {
       "path": "types/qaqh/SessionGetActivityParams.ts",
@@ -2573,7 +2557,7 @@
     },
     {
       "path": "types/qaqh/ToolCallView.ts",
-      "sha256": "68e08e40fbdf9f7d8d6dc1c813d536b2841ae4d85a726652174fd3ae9773caac"
+      "sha256": "c960a299563d3bf27d67dd566c0b2e857d7fd80416a98665b8fea8bee4e7e017"
     },
     {
       "path": "types/qaqh/ToolCancellationReason.ts",

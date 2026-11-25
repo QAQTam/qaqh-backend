@@ -1530,7 +1530,15 @@ impl SessionLoop {
                                     if effective_scope
                                         == qaqh_ringing_contract::PermissionGrantScope::Persistent
                                     {
-                                        qaqh_workspace::trust_folder(&dir_to_trust);
+                                        // L-29（P1-0d）：trust_folder 同步读写全局
+                                        // trust 落盘文件，不得压在 async worker 上。
+                                        // 闭包 panic 即缺陷，按同步原语义向外传播。
+                                        let trusted = dir_to_trust.clone();
+                                        tokio::task::spawn_blocking(move || {
+                                            qaqh_workspace::trust_folder(&trusted)
+                                        })
+                                        .await
+                                        .expect("trust_folder blocking task must not panic");
                                     }
                                 }
                             }

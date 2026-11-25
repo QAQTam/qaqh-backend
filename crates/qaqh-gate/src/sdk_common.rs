@@ -637,12 +637,12 @@ impl RetryHub {
     }
 
     pub(crate) fn drain(&self, on_event: &mut (dyn FnMut(StreamEvent) + Send)) {
-        while let Some(ev) = self
-            .pending
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .pop_front()
-        {
+        // L-21（P1-0d）：锁内 `std::mem::take` 整条队列后立即放锁，再逐条回调。
+        // 旧 `while let Some(ev) = self.pending.lock()...pop_front()` 形态下，
+        // MutexGuard 临时量存活到整个循环体末（edition≤2023 语义），`on_event`
+        // 内任何重入 `record`（审计回调再投递重试事件）都会在超时线程上自死锁。
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap_or_else(|p| p.into_inner()));
+        for ev in pending {
             on_event(ev);
         }
     }
@@ -773,6 +773,48 @@ pub(crate) async fn empty_stream_backoff(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L-21（P1-0d）反证：`drain` 回调内重入 `record`。旧实现（`while let
+    /// Some(ev) = self.pending.lock()...pop_front()`）的 MutexGuard 临时量
+    /// 存活到整个循环体末（edition≤2023 语义），同线程重入 `record` 抢同一把
+    /// std Mutex 即自死锁——本测试限时 recv，旧实现必红；新实现锁外回调，绿。
+    #[test]
+    fn retry_hub_drain_permits_reentrant_record() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let hub = Arc::new(RetryHub::new(3));
+        let schedule = |attempt: u32| {
+            AuditEvent::RetryScheduled {
+                attempt,
+                next_attempt: attempt + 1,
+                delay: Duration::from_millis(50),
+                error_kind: None,
+            }
+        };
+        hub.record(schedule(1));
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bg = Arc::clone(&hub);
+        std::thread::spawn(move || {
+            let mut first = 0u32;
+            bg.drain(&mut |_ev| {
+                // 模拟审计回调侧再投递一条重试事件：死锁发生在这一步。
+                bg.record(schedule(2));
+                first += 1;
+            });
+            let _ = tx.send(first);
+        });
+        let first = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("drain 回调重入 record 不得死锁（旧实现持锁跨整个循环体）");
+        assert_eq!(first, 1, "首轮 drain 恰好回调锁外预备的那一条");
+
+        // 重入投递的事件完整保留在 pending 中，二次 drain 全部取出。
+        let mut got = 0;
+        hub.drain(&mut |_| got += 1);
+        assert_eq!(got, 1, "重入投递的事件不得被首轮 drain 吞没");
+    }
 
     #[test]
     fn split_url_keeps_gateway_path_prefixes() {

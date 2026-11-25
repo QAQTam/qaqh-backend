@@ -300,16 +300,29 @@ pub fn append_event(root: &Path, event: Event) -> Result<Record, AuditError> {
 fn append_event_with_limit(root: &Path, event: Event, limit: u64) -> Result<Record, AuditError> {
     std::fs::create_dir_all(root)?;
     let path = active_path(root);
+    // L-13（P1-0d）：`recover_state` 的文件 IO 挪出 APPEND_LOCK/CHAIN 双锁。
+    // 先在锁外短查 CHAIN（纯 map 操作），未命中才在取 APPEND_LOCK 之前完成
+    // 恢复预备；并发 append 若已抢先入链，双锁临界区内以 CHAIN 权威值为准、
+    // 预备值整体作废（torn 尾修复幂等，预备期重叠读不影响正确性）。
+    let recovered = if CHAIN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains_key(&path)
+    {
+        None
+    } else {
+        Some(recover_state(root, &path))
+    };
     let _guard = APPEND_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-
     rotate_if_needed(root, limit);
-
     let state = {
         let mut chain = CHAIN.lock().unwrap_or_else(|p| p.into_inner());
         match chain.get(&path) {
             Some(state) => state.clone(),
             None => {
-                let recovered = recover_state(root, &path);
+                // 首查命中而二查落空的唯一通路是测试侧 CHAIN::clear——账本
+                // 清零后的正确重启态即 genesis。
+                let recovered = recovered.unwrap_or_else(ChainState::genesis);
                 chain.insert(path.clone(), recovered.clone());
                 recovered
             }

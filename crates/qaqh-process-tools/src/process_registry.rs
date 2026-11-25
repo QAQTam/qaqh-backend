@@ -711,35 +711,42 @@ impl ProcessRegistry {
 
     /// W-low①：读取已捕获 stdout/stderr 快照（取消收集超时兜底用）。
     pub fn captured(id: u32) -> Option<(String, String)> {
-        Self::with(|r| {
-            r.entries.get(&id).map(|e| {
-                (
-                    e.output.lock().unwrap_or_else(|er| er.into_inner()).clone(),
-                    e.stderr.lock().unwrap_or_else(|er| er.into_inner()).clone(),
-                )
-            })
-        })
+        // L-16（P1-0d）同病灶一并收口：全局 REGISTRY 锁内只取条目的两个 Arc
+        // 句柄，大文本克隆挪到全局锁外的内层锁上进行。
+        let snapshots = Self::with(|r| {
+            r.entries
+                .get(&id)
+                .map(|e| (Arc::clone(&e.output), Arc::clone(&e.stderr)))
+        })?;
+        let out = snapshots.0.lock().unwrap_or_else(|er| er.into_inner()).clone();
+        let err = snapshots.1.lock().unwrap_or_else(|er| er.into_inner()).clone();
+        Some((out, err))
     }
 
     /// 完整捕获快照（exec 生命周期重写阶段 2）：seal 的权威数据源。
     /// 返回 (stdout, stderr)；条目不存在（已被惰性驱逐）返回 None。
     pub fn captured_full(id: u32) -> Option<(String, String)> {
-        Self::with(|r| {
-            r.entries.get(&id).map(|e| {
-                (
-                    e.full_output
-                        .lock()
-                        .unwrap_or_else(|er| er.into_inner())
-                        .text
-                        .clone(),
-                    e.full_stderr
-                        .lock()
-                        .unwrap_or_else(|er| er.into_inner())
-                        .text
-                        .clone(),
-                )
-            })
-        })
+        // L-16（P1-0d）：全局 REGISTRY 锁内只取 `full_output/full_stderr` 两条
+        // Arc 句柄，seal 级大文本的 `.text.clone()` 挪到全局锁外的内层锁完成，
+        // REGISTRY 临界区缩到哈希查找 + 两次引用计数。
+        let captures = Self::with(|r| {
+            r.entries
+                .get(&id)
+                .map(|e| (Arc::clone(&e.full_output), Arc::clone(&e.full_stderr)))
+        })?;
+        let out = captures
+            .0
+            .lock()
+            .unwrap_or_else(|er| er.into_inner())
+            .text
+            .clone();
+        let err = captures
+            .1
+            .lock()
+            .unwrap_or_else(|er| er.into_inner())
+            .text
+            .clone();
+        Some((out, err))
     }
 
     /// 子进程是否仍在运行（读线程 settle 判定用）。

@@ -76,11 +76,12 @@ impl FileRuntime {
         inner.counter
     }
 
-    fn insert(inner: &mut Inner, path: &str, op: &'static str, line_count: usize, hash: Option<String>) {
-        let key = ledger_key(path);
+    /// L-15（P1-0d）：`ledger_key` 内含 `canonicalize` 磁盘 IO，必须由调用方在
+    /// 取锁**之前**算好再以键传入——本函数与全部持锁路径只做纯 Map 操作。
+    fn insert(inner: &mut Inner, key: String, op: &'static str, line_count: usize, hash: Option<String>) {
         let order = Self::next_order(inner);
         inner.entries.insert(
-            key.clone(),
+            key,
             FileEntry {
                 op,
                 line_count,
@@ -101,6 +102,8 @@ impl FileRuntime {
     /// Record a file read (full file or range — both establish the ledger).
     /// 同时建立行号基线：清空该文件的编辑偏移链，并把内容存入读缓存。
     pub fn record_read(&self, path: &str, content: &str, line_count: usize) {
+        let key = ledger_key(path);
+        let ledger = ledger_hash(content);
         let hash = hash_content(content);
         let hash_short = short_hash(&hash).to_string();
         let mut inner = self.lock();
@@ -119,8 +122,8 @@ impl FileRuntime {
             hash_short,
             line_count
         );
-        Self::insert(&mut inner, path, "read", line_count, Some(ledger_hash(content)));
-        inner.shifts.remove(&ledger_key(path));
+        Self::insert(&mut inner, key.clone(), "read", line_count, Some(ledger));
+        inner.shifts.remove(&key);
     }
 
     /// Read 缓存命中检查。返回 `Some(json)` 表示内容自上次 read 后未变。
@@ -165,35 +168,38 @@ impl FileRuntime {
     /// Record a file write (create/overwrite/append). 全覆盖语义：行号全失效，
     /// 清空偏移链（模型应重新 read 建立基线）。
     pub fn record_write(&self, path: &str, content: &str) {
+        let key = ledger_key(path);
+        let ledger = ledger_hash(content);
         let mut inner = self.lock();
         Self::invalidate_cache(&mut inner, path);
-        let op = if inner.entries.contains_key(&ledger_key(path)) {
+        let op = if inner.entries.contains_key(&key) {
             "edited"
         } else {
             "created"
         };
         Self::insert(
             &mut inner,
-            path,
+            key.clone(),
             op,
             content.lines().count(),
-            Some(ledger_hash(content)),
+            Some(ledger),
         );
-        inner.shifts.remove(&ledger_key(path));
+        inner.shifts.remove(&key);
     }
 
     /// Record a file edit with per-hunk line shifts (账本行号修正的数据源)。
     /// `shifts` = 编辑前 1-based 起始行 → 行号增量（按序应用，均相对同一快照）。
     pub fn record_edit_with_shifts(&self, path: &str, content: &str, shifts: &[(usize, i64)]) {
+        let key = ledger_key(path);
+        let ledger = ledger_hash(content);
         let mut inner = self.lock();
         Self::invalidate_cache(&mut inner, path);
-        let key = ledger_key(path);
         Self::insert(
             &mut inner,
-            path,
+            key.clone(),
             "edited",
             content.lines().count(),
-            Some(ledger_hash(content)),
+            Some(ledger),
         );
         let list = inner.shifts.entry(key).or_default();
         for (before_line, delta) in shifts {
@@ -228,23 +234,26 @@ impl FileRuntime {
 
     /// grep 输出的是实时行号：清空偏移链，防止后续 read 用 grep 行号时被误修正。
     pub fn record_grep(&self, path: &str) {
-        self.lock().shifts.remove(&ledger_key(path));
+        let key = ledger_key(path);
+        self.lock().shifts.remove(&key);
     }
 
     /// Record a file deletion (ledger cleared — the file no longer exists).
     pub fn record_delete(&self, path: &str) {
+        let key = ledger_key(path);
         let mut inner = self.lock();
         Self::invalidate_cache(&mut inner, path);
-        Self::insert(&mut inner, path, "deleted", 0, None);
+        Self::insert(&mut inner, key, "deleted", 0, None);
     }
 
     /// 工具侧账本：该路径最近一次被工具看到时的 LF 视图 hash。
     /// `None` = 本会话中工具从未见过该文件（尚无校验基线）。
     pub fn last_hash(&self, path: &str) -> Option<String> {
+        let key = ledger_key(path);
         let inner = self.lock();
         inner
             .entries
-            .get(&ledger_key(path))
+            .get(&key)
             .and_then(|e| e.hash.clone())
     }
 
