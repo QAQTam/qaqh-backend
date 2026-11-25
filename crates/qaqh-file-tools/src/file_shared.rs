@@ -19,67 +19,24 @@ pub fn content_hash(content: &str) -> String {
 }
 
 /// Write through a sibling temporary file, so a failed write never leaves a partially
-/// truncated destination. Rename is atomic on supported filesystems.
+/// truncated destination.
+///
+/// v4.5 P2-2a（plan §三.4-3）：机制收编 `tempfile::NamedTempFile`——
+/// `new_in(parent)` 保证临时文件与目标**同目录**（rename 原子必须同卷），
+/// `O_CREAT|O_EXCL` + 随机后缀保证逐次唯一（原手写 `.qaqh-{pid}-{nonce}` 名
+/// 与失败手动 remove 一并退役，失败路径由 `Drop` 清理）；`sync_all` 之后
+/// `persist` 原子替换（Windows 内部即带 REPLACE_EXISTING 的原子移动，
+/// 原 `replace_file` 双分支 unsafe FFI 物理删除，`Win32_Storage_FileSystem`
+/// 特性随之下架）。
 pub fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
     let target = Path::new(path);
     let parent = target.parent().unwrap_or_else(|| Path::new("."));
-    let name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("qaqh-file");
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let temporary = parent.join(format!(".{name}.qaqh-{}-{nonce}.tmp", std::process::id()));
-    let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)?;
-        file.write_all(content.as_bytes())?;
-        file.sync_all()?;
-        replace_file(&temporary, target)
-    })();
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result
-}
-
-#[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    std::fs::rename(source, target)
-}
-
-#[cfg(windows)]
-#[allow(unsafe_code)]
-fn replace_file(source: &Path, target: &Path) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    let source = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    let target = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect::<Vec<_>>();
-    // SAFETY: 两个宽字符串缓冲以 NUL 结尾且在调用期间存活，MoveFileExW 只读。
-    unsafe {
-        MoveFileExW(
-            PCWSTR::from_raw(source.as_ptr()),
-            PCWSTR::from_raw(target.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(std::io::Error::other)
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(content.as_bytes())?;
+    temp.flush()?;
+    temp.as_file().sync_all()?;
+    temp.persist(target).map_err(|error| error.error)?;
+    Ok(())
 }
 
 /// 行尾风格。

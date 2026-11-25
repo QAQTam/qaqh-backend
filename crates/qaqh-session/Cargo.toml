@@ -19,7 +19,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 toml = "1.1"
 log = "0.4"
 sha2 = "0.11"
-hex = "0.4"
+hex = { workspace = true }
 uuid = { version = "1", features = ["v7"] }
 
 [dev-dependencies]

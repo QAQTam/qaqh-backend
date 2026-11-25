@@ -164,6 +164,9 @@ pub fn mirror_dir(session_id: &str) -> PathBuf {
 }
 
 /// `MM-DD-HHMMSS`（UTC+8，与 `platform::now_utc8` 同一口径）。
+///
+/// v4.5 P2-2a（plan §三.4-5）：手写日序换算退役，交 `chrono`
+/// 格式化（`%m-%d-%H%M%S` 与原 `MM-DD-HHMMSS` 逐字等价）。
 #[must_use]
 pub fn stamp() -> String {
     let secs = std::time::SystemTime::now()
@@ -171,14 +174,16 @@ pub fn stamp() -> String {
         .unwrap_or_default()
         .as_secs()
         + 8 * 3600;
-    let day_secs = secs % 86_400;
-    let (_, m, d) = qaqh_types::platform::civil_from_days((secs / 86_400) as i64);
-    format!(
-        "{m:02}-{d:02}-{:02}{:02}{:02}",
-        day_secs / 3600,
-        (day_secs % 3600) / 60,
-        day_secs % 60
-    )
+    // `u64::MAX as i64` 环绕：先 try_from，超界饱和而非伪造时刻。
+    match i64::try_from(secs)
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+    {
+        Some(dt) => dt.format("%m-%d-%H%M%S").to_string(),
+        None => chrono::DateTime::<chrono::Utc>::MAX_UTC
+            .format("%m-%d-%H%M%S")
+            .to_string(),
+    }
 }
 
 /// 落盘交接文档镜像，返回写入路径。

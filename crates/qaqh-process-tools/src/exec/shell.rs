@@ -511,58 +511,27 @@ pub(crate) fn ps_encode(command: &str) -> String {
     base64_encode(&utf16le)
 }
 
+/// RFC 4648 §4 标准字母表 Base64（带 canonical padding）。
+///
+/// v4.5 P2-2a（plan §三.4-1）：`base64` crate 取代原手写位循环表。
 pub(crate) fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[((n >> 18) & 63) as usize] as char);
-        out.push(TABLE[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[((n >> 6) & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    STANDARD.encode(bytes)
 }
 
 #[cfg(test)]
 pub(crate) fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for ch in input.chars() {
-        if ch == '=' {
-            break;
-        }
-        if ch.is_whitespace() {
-            continue;
-        }
-        let val = match ch {
-            'A'..='Z' => ch as u32 - 'A' as u32,
-            'a'..='z' => ch as u32 - 'a' as u32 + 26,
-            '0'..='9' => ch as u32 - '0' as u32 + 52,
-            '+' => 62,
-            '/' => 63,
-            _ => return Err(format!("invalid base64 char: {ch}")),
-        };
-        buf = (buf << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(((buf >> bits) & 0xFF) as u8);
-        }
-    }
-    Ok(out)
+    use base64::{Engine as _, engine::general_purpose::STANDARD_PAD_INDIFFERENT};
+    // 与退役前契约一致：忽略空白，第一个 `=` 后整段丢弃，padded/无 padding
+    // 皆接受。
+    let head = input.split('=').next().unwrap_or(input);
+    let compact: Vec<u8> = head
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    STANDARD_PAD_INDIFFERENT
+        .decode(&compact)
+        .map_err(|e| format!("invalid base64: {e}"))
 }
 
 pub(crate) fn executable_on_path(name: &str) -> bool {

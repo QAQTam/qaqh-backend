@@ -129,12 +129,20 @@ impl ProfilesStore {
     }
 
     /// 原子保存至磁盘
+    ///
+    /// v4.5 P2-2a（plan §三.4-3 同步清扫）：定名 `.toml.tmp` + rename 的手写
+    /// 原子写改 `tempfile::NamedTempFile`（同目录唯一临时名 + sync + persist
+    /// 原子替换，失败自动清理）。
     pub fn save(&self) -> Result<(), ProfileStoreError> {
         let serialized = toml::to_string_pretty(&self.doc)?;
-        let tmp_path = self.path.with_extension("toml.tmp");
-        fs::write(&tmp_path, serialized)?;
-        fs::rename(&tmp_path, &self.path)?;
-        Ok(())
+        let parent = self.path.parent().unwrap_or(std::path::Path::new("."));
+        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        std::io::Write::write_all(&mut temp, serialized.as_bytes())?;
+        std::io::Write::flush(&mut temp)?;
+        temp.as_file().sync_all()?;
+        temp.persist(self.path.clone())
+            .map(|_| ())
+            .map_err(|error| ProfileStoreError::from(error.error))
     }
 
     /// 新增或更新一个 Provider

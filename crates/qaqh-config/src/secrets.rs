@@ -18,8 +18,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
 /// Which credential slot a secret belongs to.
 /// 历史的 `Subagent` 槽随模型配置统一退役（子代理凭据走 provider 槽）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,57 +447,35 @@ impl SecretStore {
         sibling_path(&self.path, "secrets.toml", ".lock")
     }
 
-    /// 中间文件路径：与目标同目录（rename 必须同卷）+ 带 pid 与单调 nonce
-    /// （参照 `qaqh-workspace::file_shared::atomic_write`），并发写者互不覆盖。
-    fn next_temp_path(&self) -> PathBuf {
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let nonce = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        sibling_path(
-            &self.path,
-            "secrets.toml",
-            &format!(".tmp-{}-{stamp}-{nonce}", std::process::id()),
-        )
-    }
-
-    /// 本轮 tmp 名（供回归测试断言"逐次唯一 + 带 pid"；不做 IO）。
-    #[doc(hidden)]
-    pub fn temp_path_for_test(&self) -> PathBuf {
-        self.next_temp_path()
-    }
-
     fn write_doc(&self, doc: &toml::map::Map<String, toml::Value>) -> Result<(), String> {
         let content = toml::to_string_pretty(doc)
             .map_err(|e| format!("secrets serialization failed: {e}"))?;
-        if let Some(parent) = self.path.parent() {
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("secrets create_dir_all failed: {e}"))?;
         }
-        let tmp = self.next_temp_path();
-        let result = (|| {
-            let mut file = OpenOptions::new()
-                .create_new(true)
-                .write(true)
-                .open(&tmp)
-                .map_err(|e| format!("secrets write failed: {e}"))?;
-            restrict_permissions(&tmp);
-            file.write_all(content.as_bytes())
-                .map_err(|e| format!("secrets write failed: {e}"))?;
-            file.flush()
-                .map_err(|e| format!("secrets flush failed: {e}"))?;
-            // 落盘后再 rename：崩溃不会留下"重命名成功但内容未持久化"的空壳。
-            file.sync_all()
-                .map_err(|e| format!("secrets sync failed: {e}"))?;
-            drop(file);
-            replace_file(&tmp, &self.path)
+        // BUG-2026-09-13-11：临时文件必须与目标同目录（rename 同卷才原子）且
+        // 逐次唯一（跨进程不互覆）。自 v4.5 P2-2a 起由 `tempfile::NamedTempFile`
+        // 承担——内部以 `O_CREAT|O_EXCL` + 随机后缀创建（Unix 直接 0600），
+        // 失败时 Drop 自动清理，无需手写 nonce/计数器/remove。
+        let mut temp = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|e| format!("secrets write failed: {e}"))?;
+        let result = (|| -> std::io::Result<()> {
+            restrict_permissions(temp.path());
+            temp.write_all(content.as_bytes())?;
+            temp.flush()?;
+            // 落盘后再 persist：崩溃不会留下"重命名成功但内容未持久化"的空壳。
+            temp.as_file().sync_all()?;
+            Ok(())
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(&tmp);
+        if let Err(e) = result {
+            return Err(format!("secrets write failed: {e}"));
         }
-        result?;
+        // `persist` 内部即原子替换（Unix rename；Windows 带
+        // MOVEFILE_REPLACE_EXISTING）——原手写 `replace_file` 双分支随本行退役。
+        temp.persist(self.path.clone())
+            .map_err(|e| format!("secrets rename failed: {}", e.error))?;
         restrict_permissions(&self.path);
         Ok(())
     }
@@ -516,43 +492,6 @@ fn sibling_path(path: &Path, fallback: &str, suffix: &str) -> PathBuf {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| fallback.to_owned());
     path.with_file_name(format!("{name}{suffix}"))
-}
-
-/// 原子替换目标文件：同目录 rename（POSIX 原子；Windows 上 `rename` 不能
-/// 覆盖已存在目标，故走 `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`）。
-#[cfg(not(windows))]
-fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
-    std::fs::rename(source, target).map_err(|e| format!("secrets rename failed: {e}"))
-}
-
-#[cfg(windows)]
-#[allow(unsafe_code)]
-fn replace_file(source: &Path, target: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-    use windows::core::PCWSTR;
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let target: Vec<u16> = target
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: 两个宽字符串缓冲以 NUL 结尾且在调用期间存活，MoveFileExW 只读。
-    unsafe {
-        MoveFileExW(
-            PCWSTR::from_raw(source.as_ptr()),
-            PCWSTR::from_raw(target.as_ptr()),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    }
-    .map_err(|e| format!("secrets rename failed: {e}"))
 }
 
 /// 把任意载荷加密成可落盘的密文串（Windows: `dpapi:<base64>`；其它平台：明文 + 0600）。
@@ -574,6 +513,7 @@ pub fn unprotect(cipher: &str) -> Result<Vec<u8>, String> {
 fn encrypt(plain: &[u8]) -> Result<String, String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     // CRYPTPROTECT_UI_FORBIDDEN: never show a prompt; CurrentUser scope.
     const CRYPTPROTECT_UI_FORBIDDEN: u32 = 0x1;
@@ -598,7 +538,7 @@ fn encrypt(plain: &[u8]) -> Result<String, String> {
         .map_err(|e| format!("CryptProtectData failed: {e}"))?;
         let bytes = std::slice::from_raw_parts(out_blob.pbData, out_blob.cbData as usize).to_vec();
         let _ = LocalFree(Some(HLOCAL(out_blob.pbData as *mut _)));
-        Ok(format!("dpapi:{}", base64_encode(&bytes)))
+        Ok(format!("dpapi:{}", STANDARD.encode(&bytes)))
     }
 }
 
@@ -607,11 +547,14 @@ fn encrypt(plain: &[u8]) -> Result<String, String> {
 fn decrypt(raw: &str) -> Result<String, String> {
     use windows::Win32::Foundation::{HLOCAL, LocalFree};
     use windows::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptUnprotectData};
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     let b64 = raw
         .strip_prefix("dpapi:")
         .ok_or_else(|| "secret is not a dpapi blob".to_string())?;
-    let blob = base64_decode(b64)?;
+    let blob = STANDARD
+        .decode(b64)
+        .map_err(|e| format!("secret base64 解码失败: {e}"))?;
     let in_blob = CRYPT_INTEGER_BLOB {
         cbData: blob.len() as u32,
         pbData: blob.as_ptr() as *mut u8,
@@ -649,65 +592,13 @@ fn restrict_permissions(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_permissions(_path: &Path) {}
 
-// ── Minimal base64 (RFC 4648) — avoids pulling a new dependency ──
-// 生产用途仅限 Windows DPAPI blob 编解码；非 Windows 平台仅测试使用。
-
-#[cfg_attr(not(windows), allow(dead_code))]
-const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-#[cfg_attr(not(windows), allow(dead_code))]
-fn base64_encode(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        out.push(B64_ALPHABET[(b0 >> 2) as usize] as char);
-        out.push(B64_ALPHABET[((b0 & 0x03) << 4 | b1 >> 4) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            B64_ALPHABET[((b1 & 0x0F) << 2 | b2 >> 6) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            B64_ALPHABET[(b2 & 0x3F) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
-
-#[cfg_attr(not(windows), allow(dead_code))]
-fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(s.len() * 3 / 4);
-    let mut buf = 0u32;
-    let mut bits = 0u32;
-    for ch in s.bytes() {
-        if ch == b'=' {
-            break;
-        }
-        let v = match ch {
-            b'A'..=b'Z' => ch - b'A',
-            b'a'..=b'z' => ch - b'a' + 26,
-            b'0'..=b'9' => ch - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            _ => return Err(format!("invalid base64 char: {ch}")),
-        };
-        buf = (buf << 6) | v as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-        }
-    }
-    Ok(out)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // DPAPI blob 的线格式（RFC 4648 §4 标准字母表 + canonical padding）自 v4.5
+    // P2-2a 起由 `base64` crate 保证（plan §三.4-1：手写轮子退役）。
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
 
     #[test]
     fn base64_roundtrip() {
@@ -721,15 +612,15 @@ mod tests {
             b"foobar",
             b"sk-1234567890-abcdefghijklmnopqrstuvwxyz",
         ] {
-            let encoded = base64_encode(sample);
+            let encoded = STANDARD.encode(sample);
             assert_eq!(
-                base64_decode(&encoded).unwrap(),
+                STANDARD.decode(&encoded).unwrap(),
                 sample,
                 "sample: {sample:?}"
             );
         }
-        assert_eq!(base64_encode(b"foo"), "Zm9v");
-        assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(STANDARD.encode(b"foo"), "Zm9v");
+        assert_eq!(STANDARD.encode(b"foobar"), "Zm9vYmFy");
     }
 
     #[test]

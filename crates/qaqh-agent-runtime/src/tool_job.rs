@@ -280,12 +280,8 @@ impl ToolPolicySnapshot {
     }
 }
 
-/// 小写 hex sha256(工具参数/请求身份摘要的公共原语)。
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::Digest;
-    let hash = sha2::Sha256::digest(bytes);
-    hash.iter().map(|byte| format!("{byte:02x}")).collect()
-}
+// 小写 hex sha256 直接复用 `qaqh_types::sha256_hex`（v4.5 P2-2a：本 crate 的
+// 重复实现——逐字节 `format!("{byte:02x}")` 循环——物理删除，plan §三.4-2）。
 
 /// Single-use user approval bound to one exact `(call_id, execution_id, args_hash, workspace)`.
 ///
@@ -598,7 +594,7 @@ impl WorkspaceToolPort {
         }
         let args_value: serde_json::Value = serde_json::from_slice(&request.args)
             .map_err(|e| ToolFailure::NotStarted(format!("invalid tool JSON arguments: {e}")))?;
-        let args_hash = sha256_hex(&request.args);
+        let args_hash = qaqh_types::sha256_hex(&request.args);
 
         let policy = self
             .policy
@@ -704,7 +700,7 @@ impl WorkspaceToolPort {
 
     /// Content hash of the exact bytes a grant is bound to.
     pub fn args_hash(args: &[u8]) -> String {
-        sha256_hex(args)
+        qaqh_types::sha256_hex(args)
     }
 }
 

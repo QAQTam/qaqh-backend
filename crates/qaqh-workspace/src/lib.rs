@@ -89,17 +89,11 @@ pub use permission::{
 pub use safety::SafetyVerdict;
 
 /// Return current time as "UTC+8 YYYY-MM-DD HH:MM" (matching the [timeis:] prefix convention).
+///
+/// 本函数曾是 types 版 `now_utc8` 的**逐字重复实现**（含同款手写日历换算）。
+/// v4.5 P2-2a（plan §三.4-5）：重复体物理删除，转发到 chrono 化的单源。
 pub fn now_utc8() -> String {
-    let dur = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = dur.as_secs() + 8 * 3600;
-    let days = secs / 86400;
-    let day_secs = secs % 86400;
-    let hours = day_secs / 3600;
-    let minutes = (day_secs % 3600) / 60;
-    let (y, m, d) = qaqh_types::platform::civil_from_days(days as i64);
-    format!("UTC+8 {y:04}-{m:02}-{d:02} {hours:02}:{minutes:02}")
+    qaqh_types::platform::now_utc8()
 }
 
 pub use qaqh_tool_core::ToolRisk;

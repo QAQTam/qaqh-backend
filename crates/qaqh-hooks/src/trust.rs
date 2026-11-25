@@ -127,15 +127,20 @@ impl HookTrustStore {
     }
 
     fn persist(&self) -> Result<(), TrustStoreError> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(TrustStoreError::Io)?;
-        }
         let text = serde_json::to_string_pretty(&self.state)
             .map_err(|error| TrustStoreError::Io(std::io::Error::other(error)))?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, text.as_bytes()).map_err(TrustStoreError::Io)?;
-        std::fs::rename(&tmp, &self.path).map_err(TrustStoreError::Io)?;
-        Ok(())
+        // v4.5 P2-2a（plan §三.4-3 同步清扫）：定名 `.json.tmp` + rename 的
+        // 手写原子写（且**从不 fsync**）退役，改 `tempfile::NamedTempFile`：
+        // 同目录唯一临时名、`sync_all` 后 `persist` 原子替换、失败即 drop 清理。
+        let parent = self.path.parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent).map_err(TrustStoreError::Io)?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(TrustStoreError::Io)?;
+        std::io::Write::write_all(&mut temp, text.as_bytes()).map_err(TrustStoreError::Io)?;
+        std::io::Write::flush(&mut temp).map_err(TrustStoreError::Io)?;
+        temp.as_file().sync_all().map_err(TrustStoreError::Io)?;
+        temp.persist(self.path.clone())
+            .map(|_| ())
+            .map_err(|error| TrustStoreError::Io(error.error))
     }
 
     pub fn path(&self) -> &Path {
@@ -184,7 +189,8 @@ pub fn project_hooks_digest(lines: &[String]) -> String {
         hasher.update(b"\n");
     }
     let digest = hasher.finalize();
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    // v4.5 P2-2a（plan §三.4-2）：`hex::encode` 取代逐字节 format 循环。
+    hex::encode(digest)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ qaqh-skills = { path = "../qaqh-skills" }
 qaqh-types = { path = "../qaqh-types" }
 serde_json = "1"
 log = "0.4"
+path-clean = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

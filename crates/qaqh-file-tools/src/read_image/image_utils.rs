@@ -148,61 +148,34 @@ fn encode_jpeg(img: &image::DynamicImage, quality: u8) -> Option<Vec<u8>> {
 }
 
 // ── Base64 ────────────────────────────────────────────────────────────
+//
+// v4.5 P2-2a（plan §三.4-1）：编解码本体移交 `base64` crate（0.23，与本仓
+// daemon/client 同版）；手写 RFC 4648 位循环物理删除。既有对模型输入的宽容
+// 契约保持不变：编码带 canonical padding；解码忽略空白、第一个 `=` 之后的
+// 内容整段丢弃（数据 URL 场景）、padded/无 padding 皆接受——但截断到只剩
+// `len % 4 == 1` 的非法残段现在 fail-closed 报错（旧实现静默吞尾，宪法 #3）。
 
-/// Encode arbitrary bytes to a base64 string.
+use base64::{
+    Engine as _,
+    engine::general_purpose::{STANDARD, STANDARD_PAD_INDIFFERENT},
+};
+
+/// Encode arbitrary bytes to a base64 string (RFC 4648 §4, padded).
 pub fn encode_base64(bytes: &[u8]) -> String {
-    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as u32 } else { 0 };
-        let triple = (b0 << 16) | (b1 << 8) | b2;
-
-        output.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
-        output.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
-        if chunk.len() > 1 {
-            output.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
-        } else {
-            output.push('=');
-        }
-        if chunk.len() > 2 {
-            output.push(CHARS[(triple & 0x3F) as usize] as char);
-        } else {
-            output.push('=');
-        }
-    }
-    output
+    STANDARD.encode(bytes)
 }
 
-/// Minimal RFC 4648 base64 decode (padding-tolerant, ignores whitespace).
+/// RFC 4648 base64 decode (padding-tolerant, ignores whitespace, ignores
+/// everything from the first `=` onwards).
 pub fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buffer = 0u32;
-    let mut bits = 0u32;
-    for ch in input.bytes() {
-        if ch == b'=' {
-            break;
-        }
-        let v = match ch {
-            b'A'..=b'Z' => (ch - b'A') as u32,
-            b'a'..=b'z' => (ch - b'a') as u32 + 26,
-            b'0'..=b'9' => (ch - b'0') as u32 + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'\r' | b'\n' | b' ' | b'\t' => continue,
-            _ => return Err(format!("invalid base64 char: {ch}")),
-        };
-        buffer = (buffer << 6) | v;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buffer >> bits) as u8);
-            buffer &= (1 << bits) - 1;
-        }
-    }
-    Ok(out)
+    let head = input.split('=').next().unwrap_or(input);
+    let compact: Vec<u8> = head
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect();
+    STANDARD_PAD_INDIFFERENT
+        .decode(&compact)
+        .map_err(|error| format!("invalid base64: {error}"))
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────

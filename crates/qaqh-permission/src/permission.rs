@@ -7,7 +7,7 @@
 //! - `TrustedFolderSet` persists cross-workspace folder trust decisions.
 
 use std::collections::HashSet;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use crate::conflict::paths_from_args;
 
@@ -290,20 +290,18 @@ pub fn resolve_target_path_in(path: PathBuf, base: &Path) -> PathBuf {
     resolved
 }
 
+/// 词法归一（去 `.`/消解 `..`/冗余分隔符），不触碰文件系统。
+///
+/// v4.5 P2-2a（plan §三.4-4）：退役手写 `components()+pop()` 循环，收编
+/// `path-clean::clean`。对**绝对路径**逐字等价（越深 `..` 仍以文件系统根为
+/// 锚点丢弃）；相对路径的越界前导 `..` 现予保留（`a/../../x` → `../x`，旧
+/// 实现静默吞成 `x` 是对逃逸的伪装）——生产调用方均先经 `resolve_target_path`
+/// 锚成绝对路径，行为不变。空输入仍返回空（守卫 `is_empty` 的调用方契约）。
 pub fn normalize_lexically(path: &Path) -> PathBuf {
-    let mut normalized = PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
-                normalized.push(component.as_os_str());
-            }
-            Component::CurDir => {}
-            Component::ParentDir => {
-                normalized.pop();
-            }
-        }
+    if path.as_os_str().is_empty() {
+        return PathBuf::new();
     }
-    normalized
+    path_clean::clean(path)
 }
 
 /// 路径比较键：在 `OsStr` 的**原始字节**上比较，不做有损转换。

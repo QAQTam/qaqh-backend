@@ -227,11 +227,9 @@ pub(crate) fn resolve_workspace_path(cwd: &Path, path: &Path) -> Result<PathBuf,
     let cwd_abs = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
     // Windows canonicalize returns a `\\?\`-prefixed verbatim path; strip it on
     // both sides so the prefix comparison is meaningful.
-    let strip_verbatim = |p: &Path| -> PathBuf {
-        let s = p.to_string_lossy();
-        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        PathBuf::from(s)
-    };
+    // v4.5 P2-2a（plan §三.4-4）：strip 判定交 `dunce` 单源（保留名/越界
+    // verbatim 不再被朴素剥坏）。
+    let strip_verbatim = qaqh_types::platform::strip_verbatim;
     // 2026-10-05 权限规则：跨工作区写由 admit 层提权（patch 头路径已全部提取进
     // 授权资源），引擎不再按 workspace 边界硬拒——词法上就在工作区外的路径
     // （绝对路径 / `..` 逃逸，`joined` 已词法归一）在审批后照常落盘。

@@ -29,11 +29,8 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
     html2text = "0.17"
 log = "0.4"
 sha2 = "0.11"
-hex = "0.4"
-chrono = { version = "0.4", features = ["clock"] }
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Storage_FileSystem"] }
+hex = { workspace = true }
+chrono = { workspace = true }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

@@ -259,8 +259,8 @@ fn valid_daemon_id(value: &str) -> bool {
 }
 
 fn random_token() -> String {
-    let bytes: [u8; 32] = rand::random();
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    // v4.5 P2-2a（plan §三.4-2）：`hex::encode` 取代逐字节 format 循环。
+    hex::encode(rand::random::<[u8; 32]>())
 }
 
 #[cfg(test)]

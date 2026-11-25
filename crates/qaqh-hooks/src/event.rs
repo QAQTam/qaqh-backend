@@ -263,7 +263,7 @@ impl HookEventEnvelope {
     }
 }
 
-/// RFC3339 UTC 当前时刻;无 chrono 依赖,civil_from_days 为 Hinnant 算法。
+/// RFC3339 UTC 当前时刻。
 pub fn rfc3339_utc_now() -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -271,29 +271,21 @@ pub fn rfc3339_utc_now() -> String {
     format_rfc3339(now.as_secs())
 }
 
+/// epoch 秒 → `YYYY-MM-DDTHH:MM:SSZ`。
+///
+/// v4.5 P2-2a（plan §三.4-5）：手写 Hinnant 日历换算拷贝物理删除,
+/// 换算交 `chrono`;`%Y-%m-%dT%H:%M:%SZ` 与退役前 `format!` 逐字等价。
 pub fn format_rfc3339(secs: u64) -> String {
-    let days = secs / 86400;
-    let rem = secs % 86400;
-    let (year, month, day) = civil_from_days(days as i64);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        rem / 3600,
-        (rem % 3600) / 60,
-        rem % 60
-    )
-}
-
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
+    // `u64::MAX as i64` 环绕：先 try_from，超界饱和而非伪造时刻。
+    match i64::try_from(secs)
+        .ok()
+        .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+    {
+        Some(dt) => dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        None => chrono::DateTime::<chrono::Utc>::MAX_UTC
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string(),
+    }
 }
 
 /// 载荷内文本上限:128KB 信封口径下对超长文本统一截断。

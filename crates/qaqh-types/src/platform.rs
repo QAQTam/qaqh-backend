@@ -451,37 +451,61 @@ fn background_command(program: &str) -> std::process::Command {
     command
 }
 
+/// 剥离 Windows verbatim（`\\?\`）前缀的**全仓单源**（v4.5 P2-2a，plan §三.4-4）。
+///
+/// 此前 5 处散落手写 `strip_prefix(r"\\?\")`（file-tools grep/apply_patch/
+/// file_state、session grouping、runtime service）统一收到这里，剥前缀的
+/// 判定交 `dunce::simplified`：
+/// - `\\?\C:\foo` → `C:\foo`（仅当路径可安全表达为传统形式——保留设备名、
+///   `.`/`..`、超长、非盘符根 verbatim 一律**原样返回**，fail-closed）；
+/// - `\\?\UNC\server\share` 这类 verbatim UNC 由 dunce 判定不可安全降级，
+///   原样返回合法 UNC（旧朴素 strip 会吐出去根的坏相对路径 `UNC\server\…`）；
+///   如需传统 `\\server\share` 形态，调用方再走 `unc_to_legacy`。
+/// - 非 Windows 平台 `dunce::simplified` 恒为 no-op（本函数直接透传）。
+pub fn strip_verbatim(path: &Path) -> PathBuf {
+    dunce::simplified(path).to_path_buf()
+}
+
+/// `\\?\UNC\server\share\…` → `\\server\share\…`（dunce 刻意不做该转换；
+/// 单点复刻 runtime service 既有口径，供 canonicalize 结果转用户可见形态）。
+pub fn unc_to_legacy(path: &Path) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{rest}"));
+    }
+    path.to_path_buf()
+}
+
 /// 当前时间的 UTC+8 文本戳（`UTC+8 YYYY-MM-DD HH:MM`）。
 ///
 /// 自 qaqh-workspace 下沉（P2 拆分）：fs-core 缓存 / SDK 工具输出 / 审计
-/// 时间线共用同一格式，底层日历换算本就在本模块（civil_from_days）。
+/// 时间线共用同一格式。v4.5 P2-2a（plan §三.4-5）：日历换算收编 `chrono`，
+/// 手写 Howard Hinnant 日序换算物理删除（连同 qaqh-hooks 的同款
+/// 拷贝）；epoch 秒 + 8h 后按 UTC 格式化与旧算法逐字一致（跨整点/闰年/
+/// 世纪边界由 chrono proleptic Gregorian 保证）。
 pub fn now_utc8() -> String {
     let dur = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    let secs = dur.as_secs() + 8 * 3600;
-    let days = secs / 86400;
-    let day_secs = secs % 86400;
-    let hours = day_secs / 3600;
-    let minutes = (day_secs % 3600) / 60;
-    let (y, m, d) = civil_from_days(days as i64);
-    format!("UTC+8 {y:04}-{m:02}-{d:02} {hours:02}:{minutes:02}")
+    utc8_text_for(dur.as_secs())
 }
 
-/// Convert days since epoch 0000-01-01 to (year, month, day).
-/// Algorithm from Howard Hinnant's civil_from_days.
-pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u32;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d)
+/// [`now_utc8`] 的纯函数形态（给定 epoch 秒 → `UTC+8 YYYY-MM-DD HH:MM`），
+/// 供测试与需要固定时刻输入的消费方复用。
+pub fn utc8_text_for(epoch_secs: u64) -> String {
+    // `u64::MAX as i64` 会环绕成 -1（反证测试抓到的真病灶）：先 try_from
+    // 再 checked_add，任何超界一律走饱和分支，绝不落到"1970-01-01 07:59"。
+    let shifted = i64::try_from(epoch_secs)
+        .ok()
+        .and_then(|secs| secs.checked_add(8 * 3600));
+    match shifted.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0)) {
+        Some(dt) => dt.format("UTC+8 %Y-%m-%d %H:%M").to_string(),
+        // chrono 可表示范围外（>2621-01-01）：饱和到最大可表示时刻，
+        // 绝不回退伪造一个"今天"。
+        None => chrono::DateTime::<chrono::Utc>::MAX_UTC
+            .format("UTC+8 %Y-%m-%d %H:%M")
+            .to_string(),
+    }
 }
 
 #[cfg(test)]
