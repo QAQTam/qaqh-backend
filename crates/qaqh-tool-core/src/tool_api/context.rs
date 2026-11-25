@@ -13,7 +13,7 @@ use std::time::Duration;
 use super::official_web::OfficialWebBackend;
 use super::progress::ProgressSink;
 use crate::permission::PermissionLevel;
-pub use qaqh_policy::SandboxSpec;
+pub use qaqh_types::policy::SandboxSpec;
 use qaqh_types::{ExecSessionId, ToolCallOutcome};
 
 /// Sandbox policy effective for one tool call.

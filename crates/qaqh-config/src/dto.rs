@@ -1,16 +1,16 @@
-//! 引擎 [`Config`](crate::Config) ↔ wire DTO（`qaqh-config-api`）双向映射层。
+//! 引擎 [`Config`](crate::Config) ↔ wire DTO（`qaqh-profile::dto`）双向映射层。
 //! 当前架构：service 层不再手拼 config json，
 //! 所有字段同步收敛到本模块的**穷举字面量**里——任何一端新增字段而另一端
 //! 未映射，在此处直接编译失败（S2「人肉同步」病根由编译器接管）。
 //! 守卫语义冻结（与 2026-08 前 `update_string/update_u32` 行为对齐，见
-//! qaqh-config-api `ConfigPatch` 文档）：
+//! wire DTO 层 `ConfigPatch` 文档）：
 //! - 字符串字段：空串 = 保持
 //!   （防未加载草稿整包写回时清空用户配置——2026-08 根因 1 同类防御）；
 //! - exec.defaultShell：空串 / "auto" = 回到平台自动探测（None）；
 //! - 数值：validate() 已保证值域；u64→u32 饱和转换防回绕。
 
 use crate::config::Config;
-use qaqh_config_api::{
+use qaqh_profile::{
     ConfigDto, ConfigPatch, ExecDto, GoalsDto, McpDto, McpServerDto, SandboxDto,
 };
 
@@ -152,7 +152,7 @@ mod tests {
         let mut cfg = Config::default();
         assert_eq!(cfg.exec.default_shell, None);
         let patch = ConfigPatch {
-            exec: Some(qaqh_config_api::ExecPatch {
+            exec: Some(qaqh_profile::ExecPatch {
                 default_shell: Some("Bash".into()),
             }),
             session_idle_unload_secs: Some(900),
@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(cfg.session_idle_unload_secs, 900);
         // 空串 / "auto" = 回到自动探测。
         let auto = ConfigPatch {
-            exec: Some(qaqh_config_api::ExecPatch {
+            exec: Some(qaqh_profile::ExecPatch {
                 default_shell: Some("auto".into()),
             }),
             session_idle_unload_secs: Some(0),
@@ -180,7 +180,7 @@ mod tests {
         let mut cfg = Config::default();
         assert!(cfg.sandbox.enabled);
         let patch = ConfigPatch {
-            sandbox: Some(qaqh_config_api::SandboxPatch {
+            sandbox: Some(qaqh_profile::SandboxPatch {
                 enabled: Some(false),
             }),
             ..Default::default()
@@ -190,7 +190,7 @@ mod tests {
         assert!(!to_dto(&cfg).sandbox.enabled);
 
         let patch_on = ConfigPatch {
-            sandbox: Some(qaqh_config_api::SandboxPatch {
+            sandbox: Some(qaqh_profile::SandboxPatch {
                 enabled: Some(true),
             }),
             ..Default::default()
@@ -205,7 +205,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.goals.max_token_budget = Some(120);
         let patch = ConfigPatch {
-            goals: Some(qaqh_config_api::GoalsPatch {
+            goals: Some(qaqh_profile::GoalsPatch {
                 enabled: Some(false),
                 max_token_budget: Some(None),
             }),

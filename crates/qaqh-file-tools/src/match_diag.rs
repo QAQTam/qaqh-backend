@@ -208,7 +208,9 @@ pub(crate) fn render_diff_block(
 
 fn leading_ws(s: &str) -> &str {
     let trimmed = s.trim_start();
-    &s[..s.len() - trimmed.len()]
+    // trim_start 只切空白字节，偏移必落在字符边界；split_at 与 string_slice
+    // 等价但可过 `clippy::string-slice` 门（workspace lints deny，582d4d1c 遗留）。
+    s.split_at(s.len() - trimmed.len()).0
 }
 
 fn char_ratio(a: &str, b: &str) -> f32 {

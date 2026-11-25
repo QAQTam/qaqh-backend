@@ -25,14 +25,14 @@ pub(crate) const TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegis
 /// goal 语义只挂根(Codex 对 review 子代理禁用 goals 同律)。
 /// ADR-0015:根会话工具面 = 会话工具面 + goal 三件套(team 关)。
 pub(crate) const ROOT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] =
-    &[qaqh_subagent::register, qaqh_gitx::register, qaqh_goal::register];
+    &[qaqh_subagent::register, qaqh_gitx::register, qaqh_subagent::goal::register];
 
 /// ADR-0033:根会话 + team 开启 = agent 面 + 协作面 + goal。
 pub(crate) const ROOT_TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
     qaqh_subagent::register,
     qaqh_subagent::register_collaboration_tools,
     qaqh_gitx::register,
-    qaqh_goal::register,
+    qaqh_subagent::goal::register,
 ];
 
 /// 会话绑定的 cwd(业务库 `sessions.cwd`),空串/`.` 视为未绑定。

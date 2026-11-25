@@ -1,6 +1,6 @@
 //! `worktree_*` 模型工具面（ADR-0041 切片 2）。
 //!
-//! 与 `qaqh-goal` 同款先例：领域 crate 自带 TypedTool 面 + 宿主 trait，
+//! 与 goal 工具面（`qaqh-subagent::goal`）同款先例：领域 crate 自带 TypedTool 面 + 宿主 trait，
 //! daemon 装配时经 [`install_host`] 注入进程内实现（qaqh-runtime `gitx_host`），
 //! 工具 handler 经宿主句柄解析**源工作区**后直达 [`WorktreeManager`]。
 //! 未安装宿主即报错，不做降级。

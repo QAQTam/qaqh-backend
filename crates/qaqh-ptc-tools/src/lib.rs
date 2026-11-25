@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use qaqh_policy::ToolCategory;
+use qaqh_types::policy::ToolCategory;
 use qaqh_ptc_core::{
     PtcBindingFn, PtcBindingNamespace, PtcCancel, PtcError, PtcRunRequest, PtcRunResult, PtcRuntime,
 };
@@ -440,7 +440,7 @@ mod tests {
             call_id: "call_1".to_owned(),
             session_id: "session_1".to_owned(),
             workspace_root: std::path::PathBuf::from("/tmp"),
-            permission_level: qaqh_policy::PermissionLevel::WorkspaceWrite,
+            permission_level: qaqh_types::policy::PermissionLevel::WorkspaceWrite,
             sandbox: qaqh_tool_core::SandboxMode::Main,
             sandbox_spec: qaqh_tool_core::SandboxSpec::workspace_write(std::path::PathBuf::from(
                 "/tmp",

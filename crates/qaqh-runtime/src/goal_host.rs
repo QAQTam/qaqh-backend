@@ -11,7 +11,7 @@ use qaqh_session::db::goals::{self, GoalUpdate};
 use crate::service::QaqhService;
 use crate::service::handlers::goal::{goals_config, publish_goal};
 
-impl qaqh_goal::GoalHost for QaqhService {
+impl qaqh_subagent::goal::GoalHost for QaqhService {
     fn create_goal(
         &self,
         session_id: &str,

@@ -388,7 +388,7 @@ pub struct WorkspaceListParams {}
 
 // ── B08:此前 untyped 的 8 个方法的权威 DTO ─────────────────────────────
 
-/// `config.load` 无参数；params 恒为 `{}`。结果为 `qaqh_config_api::ConfigDto`
+/// `config.load` 无参数；params 恒为 `{}`。结果为 `qaqh_profile::ConfigDto`
 /// (camelCase wire,与 `config.save` 的读形状同源)。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]

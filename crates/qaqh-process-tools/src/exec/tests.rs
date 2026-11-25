@@ -1449,10 +1449,10 @@ fn handle_run_exec(call: TestCall) -> crate::ToolResult {
 
 #[test]
 fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
-    let mut manager = qaqh_workspace::ToolManager::new();
+    let mut manager = crate::tool_api::DescriptorRegistry::default();
     super::register::register(&mut manager);
     assert!(
-        manager.builtin("exec").is_some(),
+        manager.contains("exec"),
         "exec must be on the typed execution surface"
     );
 
@@ -1497,7 +1497,7 @@ fn exec_registration_is_typed_and_failure_status_is_not_disguised() {
 #[test]
 fn exec_registered_alone_with_shell_param() {
     // 方案 A 独占：生产注册仅 exec（旧 register_shell_tool 退为单测载体）。
-    let mut mgr = qaqh_workspace::ToolManager::new();
+    let mut mgr = crate::tool_api::DescriptorRegistry::default();
     super::register::register(&mut mgr);
     let defs = mgr.all_defs();
     assert_eq!(
@@ -1650,7 +1650,7 @@ fn exec_rejects_removed_argv_and_requires_command() {
 #[test]
 fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
     use crate::exec::direct::direct_exec_sandboxed;
-    use qaqh_policy::{NetworkPolicy, SandboxBackend, SandboxSpec};
+    use qaqh_types::policy::{NetworkPolicy, SandboxBackend, SandboxSpec};
 
     // 提权环境下受限令牌语义不成立(sbx README 测试要求),跳过。
     if is_elevated() {
@@ -1754,7 +1754,7 @@ fn sbx_bypass_authorized_write_lands_and_unauthorized_denied() {
 #[test]
 fn sbx_auto_session_spec_unauthorized_write_is_enforced() {
     use crate::exec::direct::direct_exec_sandboxed;
-    use qaqh_policy::SandboxSpec;
+    use qaqh_types::policy::SandboxSpec;
 
     if is_elevated() {
         eprintln!("skipped: elevated process");
@@ -1836,7 +1836,7 @@ fn is_elevated() -> bool {
 
 #[test]
 fn probe_exec_schema_shell_only_for_diagnosis() {
-    let mut mgr = qaqh_workspace::ToolManager::new();
+    let mut mgr = crate::tool_api::DescriptorRegistry::default();
     super::register::register(&mut mgr);
     let defs = mgr.all_defs();
     let exec = &defs[0];

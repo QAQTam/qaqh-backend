@@ -240,7 +240,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     qaqh_subagent::install_host(Arc::new(service.clone()));
     qaqh_subagent::install_task_host(Arc::new(service.clone()));
     // ADR-0015：goal 工具宿主（create_goal/update_goal/get_goal 直达进程内）。
-    qaqh_goal::install_host(Arc::new(service.clone()));
+    qaqh_subagent::goal::install_host(Arc::new(service.clone()));
     // ADR-0033 切片 2：worktree 工具宿主（source_workspace 解析直达会话库）。
     qaqh_gitx::install_host(Arc::new(service.clone()));
     // v4.4 P1-3：todo 工具面宿主——todo_* 直达 qaqh.db 单事务 RMW

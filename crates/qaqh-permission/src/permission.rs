@@ -15,7 +15,7 @@ use crate::conflict::paths_from_args;
 // Policy vocabulary
 // ──────────────────────────────────────
 
-pub use qaqh_policy::{PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory};
+pub use qaqh_types::policy::{PermissionDecision, PermissionLevel, PermissionRisk, ToolCategory};
 
 // 分类器经本模块路径对外可达（qaqh-workspace 以 `crate::permission::*` 引用）。
 pub use crate::command_class::{
@@ -374,7 +374,7 @@ pub fn all_within_workspace(paths: &[PathBuf], workspace: &Path) -> bool {
 // Permission decision
 // ──────────────────────────────────────
 
-// `PermissionDecision` is re-exported above from `qaqh-policy`.
+// `PermissionDecision` is re-exported above from `qaqh_types::policy`.
 
 /// 模型不得读写的**自身管理面**（自我提权 / 凭据外泄路径）。
 ///

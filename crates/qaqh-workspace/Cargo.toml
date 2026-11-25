@@ -15,7 +15,6 @@ qaqh-process-tools = { path = "../qaqh-process-tools" }
 # 权限引擎 + 全局状态（P2 拆分）：单一事实源在 qaqh-permission。
 qaqh-permission = { path = "../qaqh-permission" }
 qaqh-skills = { path = "../qaqh-skills" }
-qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-types = { path = "../qaqh-types" }
 serde = { version = "1", features = ["derive"] }

@@ -46,7 +46,7 @@ pub struct ExecSessionStart {
     pub yield_time_ms: u32,
     pub max_output_bytes: usize,
     pub cancellation: Arc<AtomicBool>,
-    pub sandbox_spec: Option<qaqh_policy::SandboxSpec>,
+    pub sandbox_spec: Option<qaqh_types::policy::SandboxSpec>,
 }
 
 #[derive(Debug, Clone)]

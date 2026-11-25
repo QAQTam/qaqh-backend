@@ -1041,38 +1041,38 @@ mod tests {
 
     #[test]
     fn write_and_delete_registration_carries_no_legacy_executor() {
-        let mut manager = qaqh_workspace::ToolManager::new();
+        let mut manager = crate::tool_api::DescriptorRegistry::default();
         register(&mut manager, &crate::FileRuntime::default());
         for name in ["write", "delete"] {
             let tool = manager
-                .builtin(name)
+                .get(name)
                 .unwrap_or_else(|| panic!("{name} must be registered"));
             assert_eq!(
-                tool.descriptor.name.as_str(),
+                tool.name.as_str(),
                 name,
                 "{name} descriptor name"
             );
         }
         assert_eq!(
-            manager.builtin("write").unwrap().descriptor.input_schema["additionalProperties"],
+            manager.get("write").unwrap().input_schema["additionalProperties"],
             serde_json::json!(false)
         );
         assert!(
-            manager.builtin("write").unwrap().descriptor.input_schema["properties"]["path"]
+            manager.get("write").unwrap().input_schema["properties"]["path"]
                 .is_object(),
             "write input schema 由 WriteArgs 类型生成"
         );
         assert!(
-            manager.builtin("write").unwrap().descriptor.input_schema["properties"]["content"]
+            manager.get("write").unwrap().input_schema["properties"]["content"]
                 .is_object(),
             "write input schema 由 WriteArgs 类型生成"
         );
         assert_eq!(
-            manager.builtin("delete").unwrap().descriptor.input_schema["additionalProperties"],
+            manager.get("delete").unwrap().input_schema["additionalProperties"],
             serde_json::json!(false)
         );
         assert!(
-            manager.builtin("delete").unwrap().descriptor.input_schema["properties"]["path"]
+            manager.get("delete").unwrap().input_schema["properties"]["path"]
                 .is_object(),
             "delete input schema 由 DeleteArgs 类型生成"
         );

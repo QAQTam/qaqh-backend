@@ -1,6 +1,6 @@
 //! 沙箱策略与 spawn 前 ACL 计划(纯函数,可单测)。
 //!
-//! JSON 形状是冻结契约(与 qaqh-policy::SandboxSpec 的映射在合入时做,
+//! JSON 形状是冻结契约(与 qaqh_types::policy::SandboxSpec 的映射在合入时做,
 //! 方向永远是 "qaqh 适配 sbx",见 README 宪法第 2 条)。
 
 use serde::{Deserialize, Serialize};

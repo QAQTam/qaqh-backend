@@ -12,7 +12,7 @@
 //! - redirect turn 边界固定 merge(ConfirmDeletions 默认):删除项按 ADR-0004
 //!   不落盘,`skipped_deletions` 以 WARN 记录,审批确认接线(step 4)补齐。
 
-use qaqh_policy::SandboxSpec;
+use qaqh_types::policy::SandboxSpec;
 
 use crate::ExecProgressSender;
 
@@ -513,7 +513,7 @@ pub(crate) fn sbx_exec(
     );
     let combined_for_denial = format!("{stderr_out}{stdout_out}");
     qaqh_sandbox::record_denial_if_any(
-        qaqh_policy::SandboxBackend::WindowsToken,
+        qaqh_types::policy::SandboxBackend::WindowsToken,
         Some(exit.code as i32),
         &combined_for_denial,
         tool_call_id,

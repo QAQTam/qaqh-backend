@@ -6,7 +6,7 @@ import type { SandboxDto } from "./SandboxDto";
 
 /**
  * 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
- * TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见 crate 级兼容策略）。
+ * TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见模块级兼容策略）。
  */
 export type ConfigDto = { autoCompactThreshold: number, permissionLevel: number, lang: string | null, fontFamily: string, 
 /**

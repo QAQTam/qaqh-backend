@@ -8,7 +8,7 @@ description = "run_code: the PTC model-surface tool that bridges program binding
 [dependencies]
 qaqh-ptc-core = { path = "../qaqh-ptc-core" }
 qaqh-ptc-sdk = { path = "../qaqh-ptc-sdk" }
-qaqh-policy = { path = "../qaqh-policy" }
+qaqh-types = { path = "../qaqh-types" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }

@@ -924,10 +924,10 @@ mod tests {
 
     #[test]
     fn typed_copy_range_registration_and_display_are_same_source() {
-        let mut manager = qaqh_workspace::ToolManager::new();
+        let mut manager = crate::tool_api::DescriptorRegistry::default();
         register(&mut manager, &crate::FileRuntime::default());
         assert!(
-            manager.builtin("copy_range").is_some(),
+            manager.contains("copy_range"),
             "copy_range must be on the typed execution surface"
         );
 

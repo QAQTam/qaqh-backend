@@ -814,10 +814,10 @@ mod tests {
 
     #[test]
     fn tool_description_warns_about_ambiguous_context() {
-        let mut mgr = qaqh_workspace::ToolManager::new();
+        let mut mgr = crate::tool_api::DescriptorRegistry::default();
         register(&mut mgr, &crate::FileRuntime::default());
         let desc = mgr
-            .lookup("apply_patch")
+            .get("apply_patch")
             .expect("apply_patch registered")
             .description
             .as_str();
@@ -852,11 +852,11 @@ mod tests {
 
     #[test]
     fn typed_apply_patch_registration_and_display_are_same_source() {
-        let mut manager = qaqh_workspace::ToolManager::new();
+        let mut manager = crate::tool_api::DescriptorRegistry::default();
         let files = crate::FileRuntime::default();
         register(&mut manager, &files);
         assert!(
-            manager.builtin("apply_patch").is_some(),
+            manager.contains("apply_patch"),
             "apply_patch must be on the typed execution surface"
         );
 

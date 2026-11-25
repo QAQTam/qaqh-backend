@@ -745,7 +745,7 @@ fn write_fixtures(stage: &Path) -> Result<(), Box<dyn std::error::Error>> {
     write_fixture(
         stage,
         "service-config-load-result.json",
-        &qaqh_config_api::ConfigDto::default(),
+        &qaqh_profile::ConfigDto::default(),
     )?;
     write_fixture(
         stage,
@@ -1270,17 +1270,17 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_types::SessionRunStatus,
         // ── 配置 DTO 面（config.load / config.save 的读写形状）──
         // ADR-0018：SubagentDto/SubagentPatch 随子代理配置面退役。
-        qaqh_config_api::ConfigDto,
-        qaqh_config_api::ConfigPatch,
+        qaqh_profile::ConfigDto,
+        qaqh_profile::ConfigPatch,
         // ADR-0015：goal 配置段。
-        qaqh_config_api::GoalsDto,
-        qaqh_config_api::GoalsPatch,
-        qaqh_config_api::ExecDto,
-        qaqh_config_api::ExecPatch,
-        qaqh_config_api::SandboxDto,
-        qaqh_config_api::SandboxPatch,
-        qaqh_config_api::McpDto,
-        qaqh_config_api::McpServerDto,
+        qaqh_profile::GoalsDto,
+        qaqh_profile::GoalsPatch,
+        qaqh_profile::ExecDto,
+        qaqh_profile::ExecPatch,
+        qaqh_profile::SandboxDto,
+        qaqh_profile::SandboxPatch,
+        qaqh_profile::McpDto,
+        qaqh_profile::McpServerDto,
         qaqh_types::ReasoningKind,
         // ── RingingV2 唯一命令目录、信封、目标与前置条件 ──
         qaqh_ringing::CommandTarget,

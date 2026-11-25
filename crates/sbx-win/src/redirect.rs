@@ -38,12 +38,12 @@ pub struct SplitPlan {
 }
 
 /// 路径是否位于 workspace 之下;是则返回规范化相对路径(反斜杠形态,
-/// 工作区本身 = "")。规范化经 sbx_nt::normalize(小写/反斜杠/无前缀),
+/// 工作区本身 = "")。规范化经 crate::nt::normalize(小写/反斜杠/无前缀),
 /// 大小写差异天然消除;8.3 短名等不可解析形态返回 None → 走就地流水线,
 /// 由平面一的路径无关强制兜底。
 pub fn workspace_rel(workspace: &Path, p: &Path) -> Option<String> {
-    let ws = sbx_nt::normalize(workspace.to_string_lossy().as_ref()).ok()?;
-    let np = sbx_nt::normalize(p.to_string_lossy().as_ref()).ok()?;
+    let ws = crate::nt::normalize(workspace.to_string_lossy().as_ref()).ok()?;
+    let np = crate::nt::normalize(p.to_string_lossy().as_ref()).ok()?;
     let rel = if np == ws {
         String::new()
     } else {

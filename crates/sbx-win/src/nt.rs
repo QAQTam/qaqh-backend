@@ -4,7 +4,10 @@
 //! 连续分隔符折叠、大小写折叠、尾部空点修剪;8.3 短名与 `\Device\`
 //! 卷形态识别为未解析,调用方按 deny(PathUnresolved) 处置(spec §4.2 规则 1)。
 //! 卷符号映射(QueryDosDeviceW)待 hook 平面接入时补齐。
-
+//!
+//! 原独立 crate(159 行,纯字符串函数、零依赖),v4.5 P2-1a 物理并入 sbx-win。
+//! 本模块**不设平台门控**(与 sbx-win 其余 Windows 语义模块不同):纯函数跨平台
+//! 编译,NT 路径归一单测在 Linux 宿主照常运行。
 #![cfg_attr(not(test), forbid(unsafe_code))]
 use std::fmt;
 

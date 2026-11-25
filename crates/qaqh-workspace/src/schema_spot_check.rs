@@ -220,7 +220,7 @@ mod schema_spot_check {
 /// qaqh-tool-core；需要 build_tool_manager 的断言留在门面侧）。
 mod tool_capabilities_cross_check {
     use crate::registration::build_tool_manager;
-    use qaqh_policy::ToolCategory;
+    use qaqh_types::policy::ToolCategory;
     use qaqh_tool_core::tool_api::Concurrency;
     use qaqh_tool_core::tool_capabilities::{builtin_capabilities, table_tool_names};
 

@@ -5,7 +5,7 @@
   "source_revision": "development",
   "source_dirty": true,
   "generator_version": "qaqh-contract-export/0.2.0",
-  "contract_hash": "c52b62186f4e6c9fffd61119eb81888cbc542e0a308c23b608e7e250d8ba0a3a",
+  "contract_hash": "78532e60f9eaac31f379879fb2a593997f1065c7e6fb7d9ac40bb37494c88b02",
   "files": [
     {
       "path": "constants.ts",
@@ -1677,11 +1677,11 @@
     },
     {
       "path": "types/qaqh/ConfigDto.ts",
-      "sha256": "25e6036645f0b34adf8518938fcc49f8fea6dd9cfe7e3d6e04b165735a56b365"
+      "sha256": "cde7a6625cd035a19974eadcded571a28ea25616581419dafa7ab7245a203595"
     },
     {
       "path": "types/qaqh/ConfigLoadParams.ts",
-      "sha256": "58fb494d04758ebf12fff3d55686b30e3977e09b06e6cc3aa03c1e14696eaff3"
+      "sha256": "8c0b7b5a75219cfde9859e8b5d5b04e46fcc2f05c26a0bdd6414ee440afe1730"
     },
     {
       "path": "types/qaqh/ConfigPatch.ts",

@@ -29,6 +29,9 @@ pub mod arg;
 // Platform-specific utilities
 pub mod platform;
 
+// 权限/沙箱决策词汇（原独立叶子 crate，v4.5 P2-1a 并入避环）
+pub mod policy;
+
 // ── Re-exports: flat public API ──
 
 pub use api_types::UsageInfo;
@@ -61,6 +64,12 @@ pub use tool_result::{
     ToolResultDisplayFile, ToolResultDisplayHeader, ToolResultDisplayItem,
     ToolResultDisplayOutcome, ToolResultDisplayOutcomeState, ToolResultDisplayPathOp,
     ToolResultMetrics, ToolStatus,
+};
+
+// ── Policy vocabulary（平铺 re-export，同本 crate 惯例）──
+pub use policy::{
+    NetworkPolicy, PermissionDecision, PermissionLevel, PermissionRisk, SandboxBackend,
+    SandboxSpec, ToolCategory,
 };
 
 // ── Unified arg parsers ──

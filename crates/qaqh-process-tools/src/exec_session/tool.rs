@@ -266,7 +266,7 @@ impl TypedTool for ExecCommandTool {
             });
         let _ = &args.justification;
         let effective_sandbox = if args.with_escalated_permissions.unwrap_or(false) {
-            qaqh_policy::SandboxSpec::disabled()
+            qaqh_types::policy::SandboxSpec::disabled()
         } else {
             context.sandbox_spec().clone()
         };

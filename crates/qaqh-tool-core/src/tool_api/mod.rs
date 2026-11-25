@@ -48,6 +48,7 @@ pub mod output;
 pub mod progress;
 pub mod result;
 pub mod schema;
+pub mod test_support;
 pub mod typed;
 
 pub use args::{CommandArgs, OffsetLimit, PathArg, PatternArg};
@@ -77,6 +78,7 @@ pub use output::{
 };
 pub use progress::{ProgressSink, ProgressStream, ToolProgress};
 pub use result::map_tool_result;
+pub use test_support::DescriptorRegistry;
 pub use typed::{TypedTool, TypedToolAdapter};
 
 /// 抽象「可注册 typed 工具的注册表」。

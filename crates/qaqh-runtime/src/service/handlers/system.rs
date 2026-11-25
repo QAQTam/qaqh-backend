@@ -38,7 +38,7 @@ pub(crate) fn handle(service: &QaqhService, command: SystemCommand) -> QaqhResul
 pub(crate) fn handle_ringing(service: &QaqhService, command: &RingingCommand) -> QaqhResult<Value> {
     match command {
         RingingCommand::ConfigSave { patch } => {
-            let patch: qaqh_config_api::ConfigPatch = serde_json::from_value(patch.clone())
+            let patch: qaqh_profile::ConfigPatch = serde_json::from_value(patch.clone())
                 .map_err(|error| {
                     QaqhError::invalid(format!("invalid config.save payload: {error}"))
                 })?;
