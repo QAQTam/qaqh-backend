@@ -198,7 +198,7 @@ flowchart TD
 
 | 切片 | PR | 状态 | 备注 |
 |---|---|---|---|
-| `P2-0` | — | 待开工 | `unload_idle_sessions` 子代回收补漏 + `P1-0d` 6 项锁微修 + `todo` DTO 对齐 |
+| `P2-0` | #39（merge `fe091bde`） | **已合入** | `unload_idle_sessions` 子代回收补漏 + `P1-0d` 5 项锁微修（L-21/L-15/L-16/L-13/L-29）双反证红→绿落地；`todo` DTO 对齐按 ADR-0042 跳过（对应基线红测 `todo_typed_output...` 已复测登记）。**附带前置欠账清偿 `[contract-refreeze]` commit `66bcb896`**：`docs/api-surface/v4.2` 金标准机器重切（歼灭 a7819f80 后 4 个 LSP 孤儿产物 + `ConfigDto.lsp` 残留 + `diff` 字段未随切；干净基线导出与含 P2-0 导出逐字节相同，铁闸 1 对后续切片恢复可达 EXIT=0）。main 无 CI 工作流（仅 `release.yml`；Smoke/闸门线只在 LTS-v4.1），核验以本地四联单为准。 |
 | `P2-1a` | — | 待开工 | 4 空壳 crate 合并（`qaqh-policy → qaqh-types` 避环）+ 拆 `[dev-dependencies]` 环 |
 | `P2-1b` | — | 待开工 | 消 5 个 `OnceLock<Arc<dyn *Host>>` 槽 + `siwc`/`dsaccount` 公共层抽离 |
 | `P2-2a` | — | 待开工 | Base64×5 / `hex` / `tempfile` / `dunce`+`path-clean` / `chrono` / `ulid` |
