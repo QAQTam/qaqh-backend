@@ -11,7 +11,7 @@
 
 1. **`v4.4` P1 主体已清零，但有 1 处中危补漏 + 6 项 `P1-0d` 顺延项须在 `v4.5` 最前端收口**：
    - **Review 新发现（须入 `P2-0`）**：`crates/qaqh-runtime/src/registry/lifecycle.rs:92-107` 中，`unload_idle_sessions` 调用 `self.close(&session_id)` 会把 `supervisor.descendants_postorder(&session_id)` 的所有子代实例一起卸载并 `unlink`，但紧接着只对根 `session_id` 调用了 `self.owners.take_session(&session_id)`，**漏掉了被顺带卸载的子代 `SessionOwner`**，导致子代泵任务与 `ReplayRing` 滞留 `OwnerDirectory` 直到 daemon 退出。
-   - **`P1-0d` 顺延项（6 项锁边界微修）**：`L-21`（`RetryHub::drain` 持锁回调引信）、`L-23`（LSP `conns→state` 嵌套边）、`L-15`/`L-16`/`L-13`（锁外预备）、`L-29`（`trust_folder` 进 `spawn_blocking`）；另 `L-27`（`tasklist.exe → OpenProcess`）归入 `P2-2b`。
+   - **`P1-0d` 顺延项（5 项锁边界微修）**：`L-21`（`RetryHub::drain` 持锁回调引信）、`L-15`/`L-16`/`L-13`（锁外预备）、`L-29`（`trust_folder` 进 `spawn_blocking`）；注：`L-23`（LSP `conns→state` 嵌套边）已随 `a7819f80` 物理移除 `qaqh-lsp` 自然消亡；另 `L-27`（`tasklist.exe → OpenProcess`）归入 `P2-2b`。
 2. **`P2-1` 架构硬校准（防子代理踩编译环坑）**：
    - **`qaqh-policy` 不能直接并入 `qaqh-permission`！** 实测 `crates/qaqh-permission/Cargo.toml:9-10` 依赖 `qaqh-sandbox`，而 `crates/qaqh-sandbox/Cargo.toml:10` 依赖 `qaqh-policy`；直合并会造成 `qaqh-permission ↔ qaqh-sandbox` 循环依赖。**`P2-1a` 改走无环方案：将 `qaqh-policy` 并入叶子 crate `qaqh-types`**（7 个消费方均已依赖 `qaqh-types`）。
    - **`qaqh-config-api → qaqh-profile` 波及契约导出器**：`tools/qaqh-contract-export/Cargo.toml:9` 直接依赖 `qaqh-config-api`（`features = ["ts"]`），合并时必须同步切到 `qaqh-profile` 并跑 `docs/api-surface/v4.2` 0 差异对账。
@@ -47,20 +47,19 @@ flowchart TD
 - **改动目标**：
   1. **补漏 `unload_idle_sessions` 子代 `SessionOwner` 回收**：
      - `crates/qaqh-runtime/src/registry/lifecycle.rs:32-49,92-107`：在 `unload_idle_sessions` / `finish_for_unload` 中对所有被卸载的 `descendants` 一并调用 `self.owners.take_session(...)`，并在 `registry` 锁外 drop 摘出的 `Vec<Arc<SessionOwner>>`；补充父子会话树闲置卸载后父+子 `Arc::strong_count` 归零的回归测试。
-  2. **清零 `P1-0d` 6 项顺延锁微修（对照 `LOCK_AUDIT_REPORT.md` §五）**：
+  2. **清零 `P1-0d` 5 项顺延锁微修（对照 `LOCK_AUDIT_REPORT.md` §五；`L-23` 已随 `a7819f80` 删 `qaqh-lsp` 消亡）**：
      - `L-21` `crates/qaqh-gate/src/sdk_common.rs:639-648`：`RetryHub::drain` 改为锁内 `std::mem::take` 到本地 `Vec`，放锁后再调 `on_event`（反证：回调内重入 `record` 在超时线程下不死锁）；
-     - `L-23` `crates/qaqh-lsp/src/manager.rs:340-345`：`evict_recycled_conns` 先锁内收集候选再锁外查状态，拆掉 `conns → state` 嵌套边；
      - `L-15` `crates/qaqh-file-tools/src/file_state.rs:80,231,309-326`：`FileRuntime::ledger_key`（含 `canonicalize`）移到会话锁外计算；
      - `L-16` `crates/qaqh-process-tools/src/process_registry.rs:727-743`：锁内只取 `Arc`，大文本 `clone` 挪锁外；
      - `L-13` `crates/qaqh-workspace/src/audit/v2.rs:312,414-470`：`recover_state` 文件读取挪到 `APPEND_LOCK`/`CHAIN` 双锁外预备；
      - `L-29` `crates/qaqh-agent-runtime/src/session_loop.rs:1540`：`trust_folder` 写盘套 `tokio::task::spawn_blocking`。
-  3. **`todo.status` / `todo.list` 契约 DTO 对齐（0 wire 漂移前提）**：
-     - `crates/qaqh-runtime/src/ringing/service_methods.rs:491`（`TodoStatusSnapshot`）与 `crates/qaqh-runtime/src/service/handlers/task.rs:15-25`：核对 `TodoStatusSnapshot` 的 `skip_serializing_if` 与现有手拼 `json!` 在缺失值时的 `null` 键差异；**若不改 wire 即可对齐（调整 DTO serde 注解使其与既有 wire 形状 100% 一致）则完成绑定，否则保留现状并在 PR 说明中登记推迟至 `v4.6` 同窗处理**（严禁破坏铁闸 1）。
+  3. **`todo.status` / `todo.list` 契约 DTO 对齐（按 `ADR-0042` 降级为可选）**：
+     - 鉴于 `v4.8` 已拍板切入 RingingV3（[ADR-0042](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)），不再为了旧 V2 JSON 的 `null` 键兼容绕弯子；可直接跳过此项，或直接绑定强类型 `TodoStatusSnapshot`（不强求维护旧 V2 跨语言契约仪式）。
 - **不准动**：不改任何 Crate 目录结构、不改路由表、不触碰 `tasklist.exe`（留给 `P2-2b`）。
 - **反证与验证**：
   - `RetryHub::drain` 重入 `record` 限时测试（旧实现死锁超时红，新实现绿）；
   - 父子会话 `unload_idle_sessions` 子代 `SessionOwner` 回收测试（旧实现子代滞留红，新实现绿）；
-  - `cargo test -p qaqh-gate -p qaqh-lsp -p qaqh-file-tools -p qaqh-process-tools -p qaqh-agent-runtime -p qaqh-runtime` + `qaqh-contract-export` LF 归一 0 差异。
+  - `cargo test -p qaqh-gate -p qaqh-file-tools -p qaqh-process-tools -p qaqh-agent-runtime -p qaqh-runtime` + 精准回归。
 
 ---
 

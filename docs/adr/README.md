@@ -73,6 +73,7 @@
 | [0039](0039-unify-tls-crypto-provider-aws-lc-rs.md) | TLS/密码学栈统一:全图单 provider aws-lc-rs,host 构建图移除 ring(client target 分治,ohos 保 ring;dsaccount/siwc/rcgen 弃 ring;非契约面) | 已采纳并实施(`-p` 定向测试 60+65+84+7 全绿;host 编译单元 ring=0;lock 保留 ohos-only ring 条目) |
 | [0040](0040-windows-sandbox-preflight-and-escalation-permission.md) | Windows 沙箱分步自检协议(`sandbox.preflight.start/status`)、`exec_command` 接入 `sbx-win` 执行会话、`with_escalated_permissions`+`justification` 提权摘要与 `PermissionGrantScope`(`once\|session\|persistent`)本对话默认授权 | 已采纳并实施(`[contract-refreeze]`:`ringing-commands-11`/`ringing-session-6` + v4.2 金标准机器重切) |
 | [0041](0041-qaqh-gitx-worktree.md) | qaqh-gitx:工作区 git 消费(`gitx.snapshot`)与 linked-worktree 会话隔离(`worktree_list/create/remove/bind/unbind`,注册表+owner CAS,双锚点) | 已采纳并落 main(自 LTS-v4.1 e8d6ae6d 移植,ADR 顺延改号 0033→0041 防与 AgentTeam 撞号;wire `qaqh.ringing.gitx/v1` additive;金标准重切随 v4.2 批次) |
+| [0042](0042-ringing-v3-rust-native-ipc-and-quic.md) | RingingV3：Rust Native 二进制多路流（`postcard` + 本地 Named Pipe/UDS `yamux` + 远端纯 QUIC `quinn`），冻结 `ADR-0008` C# 投影演进并规划 `v4.8` 物理删除旧 HTTP+SSE+WS 控制面 | 已采纳 · 未实施（2026-11-25 所有者拍板：默认前端切 `../qaqh-gpui`，远端走纯 QUIC 不套 HTTP/3，拒绝 V2/V3 双栈转换层） |
 
 ## 阅读顺序
 

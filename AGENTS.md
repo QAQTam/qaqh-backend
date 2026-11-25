@@ -33,3 +33,4 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 22. 本仓禁止直接使用git checkout，可以使用更加安全的新用法。
 23. shell新增uutils组件替换pwsh7的部分实现，调用时LLM可以较为自然的调用uutils
 24. Agent 实名提交修正案:今后各平台 AI Agent 执行 git 提交时，应优先通过 `Co-Authored-By` trailer 使用自家官方提交者信息实名署名（如 Claude Code 用 `Co-Authored-By: Claude <noreply@anthropic.com>`，Codex 用 `Co-Authored-By: Codex <noreply@openai.com>`，Gemini / Antigravity 用 `Co-Authored-By: Gemini Antigravity <176961590+gemini-code-assist[bot]@users.noreply.github.com>`）；小众或无官方标准署名的 Agent 直接复用 Claude 或 Codex 的署名即可。**唯一豁免**：QAQHarness 本身可直接以用户 git 身份提交，无需附加 AI 署名。
+25. 上帝文件止血修正案:`session_loop.rs`（以及 `store.rs`、`owner.rs` 等所有非测试生产代码 > 1,000 行的文件）即刻进入**净行数只减不增**管制，严禁任何后续 PR 再向其中堆砌新业务分支；`v4.6` 的 `ADR-0035` 泄洪闸、PTC 派发等新能力必须独立成子模块（如 `spill_gate.rs`、`ptc_dispatch.rs`），在 `session_loop.rs` 内只允许 ≤ 10 行的薄调用接线；`SessionLoop` 彻底重写（Effect 驱动状态机 + 全异步工具 + Per-Root Actor）锁定在 `v5.0` 一次性完成，不做中途半吊子返工。
