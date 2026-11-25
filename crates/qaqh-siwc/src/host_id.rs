@@ -15,9 +15,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{SiwcCode, SiwcError};
 use crate::store::write_json_atomic;
-use crate::util::{new_host_id, now_ms};
+use qaqh_oauth_core::util::now_ms;
 
 const FILE_NAME: &str = "chatgpt-host.json";
+
+/// `urn:uuid:<uuidv4>`：host 标识的默认形态（文档支持的备选，推荐形态是
+/// jwk-thumbprint；本 M0 用 UUID，因为一个 host id 不需要私钥参与）。
+/// host id 不是凭据，只要求唯一性；UUIDv4 的随机量来自系统 CSPRNG（core）。
+fn new_host_id() -> String {
+    format!("urn:uuid:{}", qaqh_oauth_core::util::random_uuid_v4())
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct HostFile {

@@ -59,7 +59,6 @@ pub mod manager;
 pub mod pkce;
 pub mod protocol;
 pub mod store;
-pub mod util;
 pub mod web_tools;
 
 #[cfg(test)]

@@ -10,11 +10,16 @@
 //! `todo_list` 调用。`actions::todo_set_for`/`todo_list_for` 保留全量能力,
 //! HTTP service 面与 CLI 直访不受模型工具形态约束。
 
+use std::sync::Arc;
+
+use super::host::TodoHost;
+
 // ═══════════════════════════════════════════════════════
 // Registration
 // ═══════════════════════════════════════════════════════
 
-pub fn register(mgr: &mut crate::ToolManager) {
+/// 注册模型工具面；`TodoHost` 由构造点显式注入（v4.5 P2-1b，全局槽已删）。
+pub fn register(mgr: &mut crate::ToolManager, host: Arc<dyn TodoHost>) {
     // 本版本起模型工具面收敛为 todo_write / todo_update 双工具：完整列表
     // 由 write/update 自身的 output.items 携带（全量快照），只读 list 从
     // 模型面退役（`todo_list_for` 保留给 HTTP service / CLI 直访）。
@@ -22,6 +27,6 @@ pub fn register(mgr: &mut crate::ToolManager) {
     mgr.register_display("todo_write", crate::display::project_todo_write);
     mgr.register_display("todo_update", crate::display::project_todo_update);
     mgr.register_display("todo_list", crate::display::project_todo_list);
-    mgr.register_typed(super::typed::TodoWriteTool);
-    mgr.register_typed(super::typed::TodoUpdateTool);
+    mgr.register_typed(super::typed::TodoWriteTool { host: Arc::clone(&host) });
+    mgr.register_typed(super::typed::TodoUpdateTool { host });
 }

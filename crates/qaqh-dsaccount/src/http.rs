@@ -1,20 +1,26 @@
-//! HTTP 薄封装（ureq，同步）。
+//! HTTP 薄封装（同步 ureq 的 DeepSeek 产品投影）。
 //!
-//! 为什么同步：授权流程与回环监听跑在**专用 std 线程**上，不进 tokio（既避开
-//! 「阻塞 tokio worker」，也避开「runtime 内建 runtime」）。与 `qaqh-siwc::http`
-//! 同构。
+//! 机械层（ureq 客户端、全局超时、`http_status_as_error(false)`、原文读取与
+//! request id）在 `qaqh_oauth_core::http`。为什么同步：授权流程与回环监听跑在
+//! **专用 std 线程**上，不进 tokio（既避开「阻塞 tokio worker」，也避开
+//! 「runtime 内建 runtime」）。
 //!
-//! 两个关键选择：
+//! 本文件保留的 DeepSeek 侧不变量：
 //!
-//! - `http_status_as_error(false)`：4xx/5xx 要能读到 body——平台把业务结论放在
-//!   信封里，压成一句「HTTP 错误」就丢掉了「到底是凭据失效还是余额不足」。
 //! - **`max_redirects(0)`**：请求带账号凭据，重定向必须由**我们**判断（跨 origin
 //!   跟随就等于把凭据转发给第三方）。3xx 会原样回来，由
 //!   [`crate::error::classify_http_status`] 判成协议异常。
+//! - 4xx/5xx 要能读到 body——平台把业务结论放在信封里，压成一句「HTTP 错误」
+//!   就丢掉了「到底是凭据失效还是余额不足」。
+//! - 诊断文本**绝不回正文片段**（[`HttpResponse::diagnostic`]）：平台会在某些
+//!   响应的 `biz_data` 里回显凭据。
+//! - 传输层失败映射 `DsCode::Network`：这是**可用性**问题，不是凭据问题。
 
 use std::time::Duration;
 
 use serde_json::Value;
+
+use qaqh_oauth_core::http::{HttpAgent, HttpFailure, RawResponse};
 
 use crate::error::{DsCode, DsError};
 
@@ -44,6 +50,13 @@ fn dig<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
 }
 
 impl HttpResponse {
+    fn from_raw(raw: RawResponse) -> Self {
+        Self {
+            status: raw.status,
+            body: raw.body,
+        }
+    }
+
     /// 2xx。
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
@@ -84,29 +97,31 @@ impl HttpResponse {
 /// 带超时的同步 HTTP 客户端。
 #[derive(Debug, Clone)]
 pub struct Http {
-    agent: ureq::Agent,
+    agent: HttpAgent,
+}
+
+fn map_failure(failure: HttpFailure) -> DsError {
+    // core 的文案即旧形状（「请求失败: …」/「读取响应失败: …」）；
+    // 两类失败（Transport / BodyRead）在 DeepSeek 侧同为 Network 可用性故障。
+    DsError::new(DsCode::Network, failure.message)
 }
 
 impl Http {
     /// `timeout` 是**整次请求**的预算（连接 + 读写）。
     pub fn new(timeout: Duration) -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .http_status_as_error(false)
-            .max_redirects(0)
-            .user_agent(concat!("qaqh-dsaccount/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .into();
-        Self { agent }
+        Self {
+            agent: HttpAgent::new(
+                timeout,
+                concat!("qaqh-dsaccount/", env!("CARGO_PKG_VERSION")),
+                true,
+            ),
+        }
     }
 
     /// GET（`headers` 用于账号头与客户端身份头）。
     pub fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, DsError> {
-        let mut request = self.agent.get(url).header("accept", "application/json");
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        self.finish(request.call())
+        let raw = self.agent.get(url, headers).map_err(map_failure)?;
+        Ok(HttpResponse::from_raw(raw))
     }
 
     /// JSON POST。
@@ -116,15 +131,11 @@ impl Http {
         headers: &[(&str, &str)],
         body: &Value,
     ) -> Result<HttpResponse, DsError> {
-        let mut request = self
+        let raw = self
             .agent
-            .post(url)
-            .header("accept", "application/json")
-            .header("content-type", "application/json");
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        self.finish(request.send_json(body))
+            .post_json(url, headers, body)
+            .map_err(map_failure)?;
+        Ok(HttpResponse::from_raw(raw))
     }
 
     /// **无正文、无 `content-type`** 的 POST。
@@ -137,28 +148,8 @@ impl Http {
     /// `200` + `code: 0`。同一时刻 `users/current` 与余额都能用——所以当时那句
     /// "invalid token" 说的不是凭据，是请求形状（这个端点的措辞有误导性）。
     pub fn post_empty(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResponse, DsError> {
-        let mut request = self.agent.post(url);
-        for (name, value) in headers {
-            request = request.header(*name, *value);
-        }
-        self.finish(request.send_empty())
-    }
-
-    fn finish(
-        &self,
-        result: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
-    ) -> Result<HttpResponse, DsError> {
-        match result {
-            Ok(mut response) => {
-                let status = response.status().as_u16();
-                let body = response.body_mut().read_to_string().map_err(|error| {
-                    DsError::new(DsCode::Network, format!("读取响应失败: {error}"))
-                })?;
-                Ok(HttpResponse { status, body })
-            }
-            // 传输层失败（连不上、超时、TLS）：**可用性**问题，不是凭据问题。
-            Err(error) => Err(DsError::new(DsCode::Network, format!("请求失败: {error}"))),
-        }
+        let raw = self.agent.post_empty(url, headers).map_err(map_failure)?;
+        Ok(HttpResponse::from_raw(raw))
     }
 }
 

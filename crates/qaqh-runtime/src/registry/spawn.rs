@@ -5,35 +5,17 @@ use super::*;
 
 use crate::error::{QaqhError, QaqhResult};
 
-/// ADR-0014 切片 D/E：会话工具面的单一事实源——agent 面（spawn/send/wait/
-/// list/cancel）+ worktree 面（worktree_*，ADR-0041）。`spawn_session_inprocess`
-/// 与表面测试共用；增删会话工具必须经此，白名单天花板仍在 assemble 的 apply_init 生效。
-/// ADR-0033:基础会话工具面 = agent 五件(所有会话,不分根/子) + gitx 面。
-pub(crate) const AGENT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
-    qaqh_subagent::register,
-    qaqh_gitx::register,
-];
-
-/// ADR-0033:team 开启时的协作面(task_* 五件,自足含 agent 面)——按根 team_mode 条件注册。
-/// 留言板词表已随 ADR-0033-agent-team 退役，不得复活。
-pub(crate) const TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
-    qaqh_subagent::register_collaboration_tools,
-    qaqh_gitx::register,
-];
-
-/// ADR-0015：根会话工具面 = 会话工具面 + goal 三件套。子会话是派生瞬时体,
-/// goal 语义只挂根(Codex 对 review 子代理禁用 goals 同律)。
-/// ADR-0015:根会话工具面 = 会话工具面 + goal 三件套(team 关)。
-pub(crate) const ROOT_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] =
-    &[qaqh_subagent::register, qaqh_gitx::register, qaqh_subagent::goal::register];
-
-/// ADR-0033:根会话 + team 开启 = agent 面 + 协作面 + goal。
-pub(crate) const ROOT_TEAM_TOOL_REGISTRARS: &[qaqh_workspace::registration::ToolRegistrar] = &[
-    qaqh_subagent::register,
-    qaqh_subagent::register_collaboration_tools,
-    qaqh_gitx::register,
-    qaqh_subagent::goal::register,
-];
+// ADR-0014 切片 D/E：会话工具面的单一事实源——agent 面（spawn/send/wait/
+// list/cancel）+ worktree 面（worktree_*，ADR-0041）。增删会话工具必须经
+// `SessionToolHosts::registrars`（v4.5 P2-1b：原四张 const 注册器表随进程级
+// 进程级 `OnceLock` 动态宿主槽一并删除，改为宿主束的注册期闭包构造），
+// 白名单天花板仍在 assemble 的 apply_init 生效。画像矩阵：
+// - 子·非 team（原 AGENT）：agent 五件 + gitx；
+// - 子·team（原 TEAM）：task 五件 + gitx（留言板词表已随 ADR-0033-agent-team
+//   退役，不得复活）；
+// - 根·非 team（原 ROOT）：agent 五件 + gitx + goal 三件（子会话是派生瞬时体，
+//   goal 只挂根，ADR-0015）；
+// - 根·team（原 ROOT_TEAM）：agent + task + gitx + goal。
 
 /// 会话绑定的 cwd(业务库 `sessions.cwd`),空串/`.` 视为未绑定。
 pub(crate) fn session_cwd(
@@ -441,6 +423,17 @@ impl AgentRegistry {
         let session = crate::session_meta::read(&self.owners, session_id)
             .ok_or_else(|| format!("session metadata unavailable for {session_id}"))?;
         let owner = self.owners.get_or_create(session_id);
+        // v4.5 P2-1b：会话工具面宿主束由 `QaqhService::init` 注入（原 daemon
+        // 装配期 5 个进程级 `install_*_host` 槽已物理删除）。未注入即响亮
+        // 报错——fail-closed，不做无宿主降级。
+        let hosts = self
+            .tool_hosts
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| QaqhError::message(
+                "agent registry has no session tool hosts (spawn is only available through QaqhService)"
+                    .to_string(),
+            ))?;
         let mut input = qaqh_agent_runtime::session_agent::assembly::SpawnInput::for_session(
             session_id,
             &agent_config,
@@ -449,6 +442,7 @@ impl AgentRegistry {
             ws_dir,
             owner,
             self.exec_sessions(),
+            Arc::clone(&hosts.todo),
         )?;
         // ADR-0014：sandbox 角色由血缘派生——会话行有父即子代理 sandbox。
         // ADR-0015：goal 工具面仅根会话注入。
@@ -478,22 +472,13 @@ impl AgentRegistry {
             .unwrap_or(false);
         if is_child {
             input.sandbox = qaqh_agent_runtime::session_agent::assembly::subagent_sandbox();
-            input.tool_registrars = if team_mode {
-                TEAM_TOOL_REGISTRARS
-            } else {
-                AGENT_TOOL_REGISTRARS
-            };
-        } else {
-            input.tool_registrars = if team_mode {
-                ROOT_TEAM_TOOL_REGISTRARS
-            } else {
-                ROOT_TOOL_REGISTRARS
-            };
         }
         // ADR-0014：子代理工具面进入每个会话（spawn/send/wait/list/cancel）。
-        // ADR-0014 切片E：协作工具面（task_*/board_*）同路进入每个会话——
-        // 宿主已由 daemon 安装（server.rs install_task_host/install_board_host），
-        // 板按根树键控，lead 与子级共用同一注册器；白名单天花板仍在 apply_init 生效。
+        // ADR-0014 切片E：协作工具面（task_*）同路进入每个会话——宿主经
+        // `SessionToolHosts` 在注册期注入工具实例（无全局槽），板按根树键控，
+        // lead 与子级共用同一注册器；白名单天花板仍在 apply_init 生效。
+        let registrars = hosts.registrars(is_child, team_mode);
+        input.tool_registrars = &registrars;
         let loop_ = qaqh_agent_runtime::session_agent::assembly::assemble(input)?;
         // ADR-0033：终态回传路由注入（loop 报告终态，registry 判定血缘）。
         if let Some(router) = &self.terminal_router {
@@ -542,14 +527,145 @@ impl AgentRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{AGENT_TOOL_REGISTRARS, ROOT_TEAM_TOOL_REGISTRARS, TEAM_TOOL_REGISTRARS};
+    use super::*;
+    use crate::tool_hosts::SessionToolHosts;
+    use std::sync::Arc;
+
+    // 注册冒烟桩（v4.5 P2-1b：注册器改宿主束闭包构造，无全局槽；
+    // 断言只看词表，不触达执行路径）。
+    struct StubSubagent;
+    impl qaqh_subagent::SubagentHost for StubSubagent {
+        fn spawn_subagent(
+            &self,
+            _r: qaqh_subagent::SpawnSubagentRequest<'_>,
+        ) -> Result<qaqh_subagent::SpawnedSubagent, String> {
+            Err("stub".into())
+        }
+        fn list_agents(
+            &self,
+            _c: &str,
+            _p: &str,
+        ) -> Result<Vec<qaqh_subagent::ListedAgent>, String> {
+            Err("stub".into())
+        }
+        fn send_agent_message(
+            &self,
+            _r: qaqh_subagent::SendAgentMessageRequest<'_>,
+        ) -> Result<qaqh_subagent::SentAgentMessage, String> {
+            Err("stub".into())
+        }
+        fn wait_agent(
+            &self,
+            _r: qaqh_subagent::WaitAgentRequest<'_>,
+        ) -> Result<qaqh_subagent::WaitAgentOutcome, String> {
+            Err("stub".into())
+        }
+        fn interrupt_agent(
+            &self,
+            _r: qaqh_subagent::InterruptAgentRequest<'_>,
+        ) -> Result<qaqh_subagent::InterruptedAgent, String> {
+            Err("stub".into())
+        }
+        fn send_ringing(
+            &self,
+            _s: &str,
+            _c: qaqh_ringing::RingingCommand,
+        ) -> Result<(), String> {
+            Err("stub".into())
+        }
+    }
+
+    struct StubTask;
+    impl qaqh_subagent::TaskBoardHost for StubTask {
+        fn task_create(
+            &self,
+            _r: qaqh_subagent::TaskCreateRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".into())
+        }
+        fn task_claim(
+            &self,
+            _r: qaqh_subagent::TaskClaimRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".into())
+        }
+        fn task_update(
+            &self,
+            _r: qaqh_subagent::TaskUpdateRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".into())
+        }
+        fn task_close(
+            &self,
+            _r: qaqh_subagent::TaskCloseRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".into())
+        }
+        fn task_list(
+            &self,
+            _r: qaqh_subagent::TaskListRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskListPage, String> {
+            Err("stub".into())
+        }
+    }
+
+    struct StubGitx;
+    impl qaqh_gitx::GitxHost for StubGitx {
+        fn source_workspace(&self, _session_id: &str) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    struct StubGoal;
+    impl qaqh_subagent::goal::GoalHost for StubGoal {
+        fn create_goal(
+            &self,
+            _s: &str,
+            _o: &str,
+            _b: Option<u64>,
+        ) -> Result<qaqh_ringing_contract::state::GoalView, String> {
+            Err("stub".into())
+        }
+        fn update_goal_status(
+            &self,
+            _s: &str,
+            _st: qaqh_ringing_contract::state::GoalStatus,
+        ) -> Result<qaqh_ringing_contract::state::GoalView, String> {
+            Err("stub".into())
+        }
+        fn get_goal(
+            &self,
+            _s: &str,
+        ) -> Result<Option<qaqh_ringing_contract::state::GoalView>, String> {
+            Ok(None)
+        }
+    }
+
+    fn stub_hosts() -> SessionToolHosts {
+        SessionToolHosts {
+            subagent: Arc::new(StubSubagent),
+            task: Arc::new(StubTask),
+            goal: Arc::new(StubGoal),
+            gitx: Arc::new(StubGitx),
+            todo: Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+        }
+    }
+
+    fn manager_for(is_child: bool, team_mode: bool) -> qaqh_workspace::ToolManager {
+        let hosts = stub_hosts();
+        let registrars = hosts.registrars(is_child, team_mode);
+        qaqh_workspace::registration::build_tool_manager(
+            &registrars,
+            Arc::clone(&hosts.todo),
+        )
+    }
 
     /// ADR-0033 闸门：基础面 = agent 五件 + worktree 面（ADR-0041）；
     /// team 开启的会话再加 task_* 五件；留言板词表不得复活。
     /// 注册器列表被削（回到悬置状态）时本测试必须红。
     #[test]
     fn team_mode_switches_the_collaboration_surface() {
-        let agent = qaqh_workspace::registration::build_tool_manager(AGENT_TOOL_REGISTRARS);
+        let agent = manager_for(true, false);
         for name in [
             "spawn_subagent",
             "send_message",
@@ -575,7 +691,7 @@ mod tests {
             assert!(agent.lookup(name).is_some(), "{name} must be callable");
         }
 
-        let team = qaqh_workspace::registration::build_tool_manager(TEAM_TOOL_REGISTRARS);
+        let team = manager_for(true, true);
         for name in [
             "task_create",
             "task_claim",
@@ -595,7 +711,11 @@ mod tests {
             );
         }
 
-        let root_team = qaqh_workspace::registration::build_tool_manager(ROOT_TEAM_TOOL_REGISTRARS);
+        let root_team = manager_for(false, true);
         assert!(root_team.lookup("create_goal").is_some(), "goal 仍只挂根");
+        let root = manager_for(false, false);
+        assert!(root.lookup("create_goal").is_some());
+        assert!(root.lookup("task_create").is_none());
+        assert!(root.lookup("spawn_subagent").is_some());
     }
 }

@@ -8,8 +8,8 @@ use qaqh_workspace::registration::build_tool_manager;
 
 #[test]
 fn full_surface_schemas_are_object_shaped_without_composition_keys() {
-    let defs = build_tool_manager(&[]).all_defs();
-    let builtin_names: Vec<_> = build_tool_manager(&[])
+    let defs = build_tool_manager(&[], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default())).all_defs();
+    let builtin_names: Vec<_> = build_tool_manager(&[], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()))
         .all_defs()
         .into_iter()
         .map(|def| def.function.name)
@@ -38,7 +38,7 @@ fn full_surface_schemas_are_object_shaped_without_composition_keys() {
 fn base_registry_omits_subagent_and_collaboration_tools() {
     // 基础注册表（无外部注册器）不含子代理/协作工具；生产会话面经
     // registry::spawn::SESSION_TOOL_REGISTRARS 注入，另有单元测试守门。
-    let manager = build_tool_manager(&[]);
+    let manager = build_tool_manager(&[], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()));
     let defs = manager.all_defs();
     for name in [
         "spawn_subagent",

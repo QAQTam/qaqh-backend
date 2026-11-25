@@ -11,13 +11,6 @@ use serde_json::Value;
 
 use crate::error::{SiwcCode, SiwcError};
 use crate::http::Http;
-use crate::util::base64url_encode;
-
-/// `code_challenge = base64url(SHA-256(verifier))`（RFC 7636 §4.2，S256）。
-pub fn pkce_challenge(verifier: &str) -> String {
-    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, verifier.as_bytes());
-    base64url_encode(digest.as_ref())
-}
 
 /// authorize 请求参数。
 #[derive(Debug, Clone)]
@@ -308,7 +301,7 @@ mod tests {
         // RFC 7636 Appendix B 的官方示例向量。
         let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         assert_eq!(
-            pkce_challenge(verifier),
+            qaqh_oauth_core::util::pkce_challenge(verifier),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
     }

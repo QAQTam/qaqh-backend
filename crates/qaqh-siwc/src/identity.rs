@@ -13,7 +13,7 @@
 use serde_json::Value;
 
 use crate::error::{SiwcCode, SiwcError};
-use crate::util::base64url_decode;
+use qaqh_oauth_core::util::base64url_decode;
 
 /// 允许的时钟偏移（文档示例 5 秒）。
 pub const CLOCK_SKEW_MS: u64 = 5_000;
@@ -397,11 +397,11 @@ mod tests {
             SiwcCode::InvalidIdToken
         );
         // header 里 alg=none 必须拒。
-        let header = crate::util::base64url_encode(br#"{"alg":"none","kid":"k1"}"#);
-        let payload = crate::util::base64url_encode(br#"{"sub":"s"}"#);
+        let header = qaqh_oauth_core::util::base64url_encode(br#"{"alg":"none","kid":"k1"}"#);
+        let payload = qaqh_oauth_core::util::base64url_encode(br#"{"sub":"s"}"#);
         let token = format!(
             "{header}.{payload}.{}",
-            crate::util::base64url_encode(b"sig")
+            qaqh_oauth_core::util::base64url_encode(b"sig")
         );
         assert_eq!(
             split_id_token(&token).expect_err("alg none").code(),

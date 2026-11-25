@@ -7,7 +7,7 @@ use qaqh_workspace::tool_capabilities::{builtin_capabilities, table_tool_names};
 
 #[test]
 fn builtin_sdk_parity_matches_registry_capabilities_and_dynamic_fallback() {
-    let manager = build_tool_manager(&[]);
+    let manager = build_tool_manager(&[], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()));
     let defs = manager.all_defs();
     let registry: Vec<&str> = defs
         .iter()

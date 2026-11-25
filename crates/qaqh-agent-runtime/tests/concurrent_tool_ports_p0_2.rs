@@ -50,8 +50,10 @@ fn eight_threads_concurrent_tool_ports_never_cross_contaminate() {
     }
     // v4.4 P1-3：todo_* 经 TodoHost 端口读写，内存宿主按 session key 隔离
     // ——判据 2「零跨会话 todo 串台」在这里依旧成立（真 DB 形态的并发原子性
-    // 钉在 `qaqh-session/tests/todos_atomicity.rs`）。
-    qaqh_workspace::todo::install_memory_host();
+    // 钉在 `qaqh-session/tests/todos_atomicity.rs`）。v4.5 P2-1b：宿主由
+    // 测试自建并在注册期注入 8 个 port（无进程级全局槽）。
+    let todo_host: Arc<dyn qaqh_workspace::todo::TodoHost> =
+        Arc::new(qaqh_workspace::todo::MemoryTodoHost::default());
 
     let owners = Arc::new(
         OwnerDirectory::open(data_dir.join("qaqh.db")).expect("open OwnerDirectory"),
@@ -66,6 +68,7 @@ fn eight_threads_concurrent_tool_ports_never_cross_contaminate() {
             let exec_sessions = Arc::clone(&exec_sessions);
             let barrier = Arc::clone(&barrier);
             let root = temp_root.path().to_path_buf();
+            let todo_host = Arc::clone(&todo_host);
             handles.push(scope.spawn(move || {
                 let session_id = format!("p02-concurrent-{idx}");
                 let ws = root.join(format!("ws-{idx}"));
@@ -86,6 +89,7 @@ fn eight_threads_concurrent_tool_ports_never_cross_contaminate() {
                     &session_id,
                     Arc::new(Mutex::new(qaqh_workspace::registration::build_tool_manager(
                         &[],
+                        todo_host.clone(),
                     ))),
                     ToolPolicySnapshot::workspace_write(&ws),
                     owner.lifecycle(),
@@ -184,7 +188,8 @@ fn eight_threads_concurrent_tool_ports_never_cross_contaminate() {
                     patch_disk.replace("\r\n", "\n"),
                     format!("patch-{idx}-gamma\nkeep-line\n")
                 );
-                let todo_store = qaqh_workspace::todo::load_todo_for(&session_id).unwrap();
+                let todo_store =
+                    qaqh_workspace::todo::load_todo_for(&*todo_host, &session_id).unwrap();
                 assert_eq!(todo_store.items.len(), 1);
                 assert_eq!(todo_store.items[0].title, format!("task-{idx}"));
             }));

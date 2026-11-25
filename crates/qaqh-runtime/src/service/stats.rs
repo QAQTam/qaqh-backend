@@ -18,11 +18,12 @@ struct ToolActivityRow {
 /// SQLite 工具结果的代码变更投影(最近优先)。handler 直出
 /// typed 结构,序列化即 wire 形状。
 pub(crate) fn dashboard(
+    todo: &dyn qaqh_workspace::todo::TodoHost,
     owners: &qaqh_session::owner::OwnerDirectory,
     session_id: &str,
 ) -> Result<crate::ringing::service_methods::SessionDashboard, String> {
     use crate::ringing::service_methods::{SessionDashboard, SessionDashboardTask};
-    let tasks: Vec<SessionDashboardTask> = qaqh_workspace::todo::todo_status_value(session_id)
+    let tasks: Vec<SessionDashboardTask> = qaqh_workspace::todo::todo_status_value(todo, session_id)
         .ok()
         .and_then(|v| {
             v.get("items")?.as_array().map(|arr| {

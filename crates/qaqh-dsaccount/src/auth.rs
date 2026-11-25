@@ -41,7 +41,7 @@ impl DeviceInfo {
     /// 取当前进程所在机器（`device_id` 每次登录新生成：平台侧只把它当一次性指纹）。
     pub fn current() -> Self {
         Self {
-            device_id: crate::util::random_uuid_v4(),
+            device_id: qaqh_oauth_core::util::random_uuid_v4(),
             device_model: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
             os_version: std::env::consts::OS.to_string(),
         }

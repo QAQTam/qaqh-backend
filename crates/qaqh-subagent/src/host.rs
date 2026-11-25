@@ -9,11 +9,13 @@
 //! qaqh-ringing-contract / qaqh-ringing），不引用 qaqh-runtime 任何类型，
 //! 保证依赖方向 `runtime → subagent` 不回环。
 //!
-//! 安装：daemon 装配（`QaqhService::init`）时调用 [`install_host`]；工具
-//! handler 通过 [`host`] 探测。宿主不可用（非 daemon 进程 / 单元测试）即
-//! spawn 失败——legacy HTTP/SSE 回连降级路径已随 PR-4-2 删除。
+//! 注入：v4.5 P2-1b 起宿主由**注册期显式传入**——daemon 装配
+//! （`QaqhService::init`）把实现打包进 `AgentRegistry` 的
+//! `SessionToolHosts`，`register(mgr, Arc<dyn SubagentHost>)` 构造工具实例；
+//! 全仓不再存在进程级 `OnceLock` 动态宿主槽（反证：
+//! `crates/qaqh-subagent/src/host_isolation_tests.rs`）。legacy HTTP/SSE 回连
+//! 降级路径已随 PR-4-2 删除。
 
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use qaqh_ringing::RingingCommand;
@@ -377,18 +379,6 @@ pub trait TaskBoardHost: Send + Sync {
     fn task_list(&self, request: TaskListRequest<'_>) -> Result<TaskListPage, String>;
 }
 
-static TASK_HOST: OnceLock<Arc<dyn TaskBoardHost>> = OnceLock::new();
-
-/// Install the process-wide task board host. Idempotent: the first host wins.
-pub fn install_task_host(host: Arc<dyn TaskBoardHost>) {
-    let _ = TASK_HOST.set(host);
-}
-
-/// Return the installed task board host, if any.
-pub fn task_host() -> Option<Arc<dyn TaskBoardHost>> {
-    TASK_HOST.get().cloned()
-}
-
 pub trait SubagentHost: Send + Sync {
     /// 生成新 seed 并在宿主进程内注册一个 in-process 子代理 actor。
     ///
@@ -432,21 +422,7 @@ pub trait SubagentHost: Send + Sync {
     fn send_ringing(&self, session_id: &str, command: RingingCommand) -> Result<(), String>;
 }
 
-/// 进程级宿主安装位。多个 actor 并发调用 `host()` 读取；daemon 只安装一次。
-///
-/// 只读语义：安装后**不可替换**，因此不需要 `Mutex<Option<…>>`——此前那把锁
-/// 只是为了让"首次安装生效、重复安装忽略"这条规则成立，而 `OnceLock::set`
-/// 本身就表达了这个规则。锁消失后，读取路径是一段无锁的 `Arc` 克隆。
-static HOST: OnceLock<Arc<dyn SubagentHost>> = OnceLock::new();
-
-/// 安装进程内宿主。重复安装被忽略（保留首次）。
-pub fn install_host(host: Arc<dyn SubagentHost>) {
-    if HOST.set(host).is_ok() {
-        log::info!("[SUBAGENT] in-process subagent host installed");
-    }
-}
-
-/// 读取已安装的宿主；未安装返回 `None`（调用方即报错——legacy HTTP/SSE 降级已随 PR-4-2 删除）。
-pub fn host() -> Option<Arc<dyn SubagentHost>> {
-    HOST.get().cloned()
-}
+// v4.5 P2-1b：原 `static HOST / static TASK_HOST`（OnceLock 动态宿主槽）
+// 与 `install_host / install_task_host / host / task_host` 四件套已物理删除
+// ——宿主经 `register` / `register_collaboration_tools` 的构造参数进入工具
+// 实例（见 lib.rs），同进程可并存多套互不串台。

@@ -2,7 +2,7 @@ use serde_json::json;
 
 #[test]
 fn public_schema_exposes_todo_write_update_with_no_legacy_names() {
-    let manager = qaqh_workspace::registration::build_tool_manager(&[]);
+    let manager = qaqh_workspace::registration::build_tool_manager(&[], std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()));
     let definitions = manager.all_defs();
     let names: Vec<&str> = definitions
         .iter()
@@ -90,10 +90,17 @@ fn public_schema_exposes_todo_write_update_with_no_legacy_names() {
 #[test]
 fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     // v4.4 P1-3：todo 权威已入 DB（经 TodoHost 端口），旧「QAQH_DATA_DIR/
-    // HOME 三变量钉住隔离 todo.json」的整套环境夹具失去对象——这里装内存
-    // 宿主（session key = "todo-contract"，进程内自隔离，跑几遍都不假红）。
-    qaqh_workspace::todo::install_memory_host();
-    qaqh_workspace::runtime::init_tools("todo-contract", &[], vec![]);
+    // HOME 三变量钉住隔离 todo.json」的整套环境夹具失去对象——这里自建内存
+    // 宿主（session key = "todo-contract"，注册期显式注入，与测试读回的
+    // 宿主同一实例；进程级全局槽已随 v4.5 P2-1b 删除）。
+    let todo_host: std::sync::Arc<dyn qaqh_workspace::todo::TodoHost> =
+        std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default());
+    qaqh_workspace::runtime::init_tools(
+        "todo-contract",
+        &[],
+        vec![],
+        std::sync::Arc::clone(&todo_host),
+    );
     // 显式上下文。刻意用最严档 read-only：todo_* 是会话内状态工具，
     // permission 层对其豁免（永不弹确认），本测试同时验证这一点。
     let ctx = qaqh_workspace::runtime::ToolCtx {
@@ -189,7 +196,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(items[1]["evidence"], "verified");
 
     let status: serde_json::Value = serde_json::from_str(
-        &qaqh_workspace::todo::todo_status_json("todo-contract").expect("status JSON"),
+        &qaqh_workspace::todo::todo_status_json(&*todo_host, "todo-contract").expect("status JSON"),
     )
     .expect("parse status JSON");
     assert_eq!(status["mode"], "manual");
@@ -204,7 +211,7 @@ fn manual_status_transitions_round_trip_to_the_frontend_contract() {
     assert_eq!(status["items"][2]["status"], "cancelled");
 
     // 宿主态清单干净（无 legacy Goal 强制归一化）。
-    let store = qaqh_workspace::todo::load_todo_for("todo-contract").expect("load todo");
+    let store = qaqh_workspace::todo::load_todo_for(&*todo_host, "todo-contract").expect("load todo");
     assert_eq!(store.mode, qaqh_workspace::todo::TodoMode::Manual);
 }
 

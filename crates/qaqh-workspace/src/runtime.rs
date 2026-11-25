@@ -61,8 +61,9 @@ pub fn init_tools(
     session_id: &str,
     extra_registrars: &[crate::registration::ToolRegistrar],
     allowed_tools: Vec<String>,
+    todo_host: std::sync::Arc<dyn crate::todo::TodoHost>,
 ) {
-    let mut manager = crate::registration::build_tool_manager(extra_registrars);
+    let mut manager = crate::registration::build_tool_manager(extra_registrars, todo_host);
     // `session_id` 只用于日志：装配不写任何进程级/线程级会话状态。
     let _ = session_id;
     manager.apply_init(allowed_tools);

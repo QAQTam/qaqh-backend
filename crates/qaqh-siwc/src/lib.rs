@@ -44,7 +44,6 @@ mod models;
 mod oauth;
 mod protocol;
 mod store;
-mod util;
 
 #[cfg(test)]
 mod e2e_tests;

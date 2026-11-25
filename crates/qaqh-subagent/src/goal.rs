@@ -2,13 +2,14 @@
 //!
 //! Codex goal 语义的本仓落地:模型只能声明 complete/blocked/paused,
 //! resume 与预算态由用户命令(`goal.set`)或系统控制。宿主(`GoalHost`)由
-//! daemon 装配时安装(`install_host`,subagent 同款先例);未安装即报错,
-//! 不做降级。工具仅注入根会话(registry spawn 侧控制)。
+//! v4.5 P2-1b 起在**注册期显式注入**工具实例(`register(mgr, Arc<dyn
+//! GoalHost>)`);进程级 `OnceLock` 槽已物理删除,未注入即无法构造,不做
+//! 降级。工具仅注入根会话(registry spawn 侧控制)。
 //!
 //! 原独立叶子 crate,v4.5 P2-1a 物理并入本 crate(依赖面为 subagent 既有依赖
 //! 的子集,无环)。
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use qaqh_ringing_contract::state::{GoalStatus, GoalView};
@@ -34,18 +35,6 @@ pub trait GoalHost: Send + Sync {
     /// 状态迁移(模型面只许 complete/blocked/paused,工具侧已校验)。
     fn update_goal_status(&self, session_id: &str, status: GoalStatus) -> Result<GoalView, String>;
     fn get_goal(&self, session_id: &str) -> Result<Option<GoalView>, String>;
-}
-
-static HOST: OnceLock<Arc<dyn GoalHost>> = OnceLock::new();
-
-pub fn install_host(host: Arc<dyn GoalHost>) {
-    if HOST.set(host).is_ok() {
-        log::info!("[goal] in-process goal host installed");
-    }
-}
-
-pub fn host() -> Option<Arc<dyn GoalHost>> {
-    HOST.get().cloned()
 }
 
 // ── Output ──────────────────────────────────────────────────────────────────
@@ -149,9 +138,15 @@ pub struct GetGoalArgs {}
 
 // ── Tools ───────────────────────────────────────────────────────────────────
 
-pub struct CreateGoalTool;
-pub struct UpdateGoalTool;
-pub struct GetGoalTool;
+pub struct CreateGoalTool {
+    pub host: Arc<dyn GoalHost>,
+}
+pub struct UpdateGoalTool {
+    pub host: Arc<dyn GoalHost>,
+}
+pub struct GetGoalTool {
+    pub host: Arc<dyn GoalHost>,
+}
 
 fn goal_error(
     code: &str,
@@ -160,22 +155,11 @@ fn goal_error(
 ) -> ToolExecutionError {
     let kind = match code {
         "missing_objective" | "invalid_status" => ToolErrorKind::InvalidArguments,
-        "host_unavailable" => ToolErrorKind::Unavailable,
         _ => ToolErrorKind::Execution,
     };
     let mut error = ToolError::new(kind, message).with_hint(hint);
     error.code = ToolErrorCode::parse_or_builtin(code, kind);
     ToolExecutionError::Recoverable(error)
-}
-
-fn require_host() -> Result<Arc<dyn GoalHost>, ToolExecutionError> {
-    host().ok_or_else(|| {
-        goal_error(
-            "host_unavailable",
-            "goal tools require the daemon host",
-            "Goal tools require the daemon host (install_host).",
-        )
-    })
 }
 
 impl TypedTool for CreateGoalTool {
@@ -205,8 +189,8 @@ impl TypedTool for CreateGoalTool {
                 "Provide the concrete objective to pursue.",
             ));
         }
-        let host = require_host()?;
-        let goal = host
+        let goal = self
+            .host
             .create_goal(&ctx.session_id, &objective, args.token_budget)
             .map_err(|error| {
                 goal_error(
@@ -243,8 +227,8 @@ impl TypedTool for UpdateGoalTool {
             UpdateGoalStatus::Blocked => GoalStatus::Blocked,
             UpdateGoalStatus::Paused => GoalStatus::Paused,
         };
-        let host = require_host()?;
-        let goal = host
+        let goal = self
+            .host
             .update_goal_status(&ctx.session_id, status)
             .map_err(|error| {
                 goal_error(
@@ -279,8 +263,7 @@ impl TypedTool for GetGoalTool {
         ctx: &ToolCallContext,
         _args: GetGoalArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        let host = require_host()?;
-        let goal = host.get_goal(&ctx.session_id).map_err(|error| {
+        let goal = self.host.get_goal(&ctx.session_id).map_err(|error| {
             goal_error(
                 "goal_read_failed",
                 format!("get_goal: {error}"),
@@ -292,10 +275,10 @@ impl TypedTool for GetGoalTool {
 }
 
 /// 注册器:经 `SpawnInput.tool_registrars` 进入根会话(ADR-0015)。
-pub fn register(mgr: &mut ToolManager) {
-    mgr.register_typed(CreateGoalTool);
-    mgr.register_typed(UpdateGoalTool);
-    mgr.register_typed(GetGoalTool);
+pub fn register(mgr: &mut ToolManager, host: Arc<dyn GoalHost>) {
+    mgr.register_typed(CreateGoalTool { host: Arc::clone(&host) });
+    mgr.register_typed(UpdateGoalTool { host: Arc::clone(&host) });
+    mgr.register_typed(GetGoalTool { host });
 }
 
 #[cfg(test)]
@@ -306,12 +289,34 @@ mod tests {
     #[test]
     fn register_exposes_the_goal_tool_triplet() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, Arc::new(StubGoalHost));
         for name in ["create_goal", "update_goal", "get_goal"] {
             assert!(
                 manager.builtin(name).is_some(),
                 "{name} must be on the typed execution surface"
             );
+        }
+    }
+
+    struct StubGoalHost;
+    impl GoalHost for StubGoalHost {
+        fn create_goal(
+            &self,
+            _session_id: &str,
+            _objective: &str,
+            _token_budget: Option<u64>,
+        ) -> Result<GoalView, String> {
+            Err("stub".to_string())
+        }
+        fn update_goal_status(
+            &self,
+            _session_id: &str,
+            _status: GoalStatus,
+        ) -> Result<GoalView, String> {
+            Err("stub".to_string())
+        }
+        fn get_goal(&self, _session_id: &str) -> Result<Option<GoalView>, String> {
+            Ok(None)
         }
     }
 

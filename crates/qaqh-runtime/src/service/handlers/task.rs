@@ -15,13 +15,18 @@ use crate::service::plan::{plan_action, read_plan};
 pub(crate) fn handle(service: &QaqhService, command: TaskCommand) -> QaqhResult<Value> {
     match command {
         TaskCommand::TodoStatus(args) => {
-            qaqh_workspace::todo::todo_status_value(&args.session_id).map_err(QaqhError::message)
+            qaqh_workspace::todo::todo_status_value(service, &args.session_id)
+                .map_err(QaqhError::message)
         }
         TaskCommand::TodoList(args) => {
             // B08:service 查询走纯快照 DTO(无工具信封键),status 词表与
             // todo 工具一致。
-            qaqh_workspace::todo::todo_list_snapshot_value(&args.session_id, args.status.as_deref())
-                .map_err(QaqhError::message)
+            qaqh_workspace::todo::todo_list_snapshot_value(
+                service,
+                &args.session_id,
+                args.status.as_deref(),
+            )
+            .map_err(QaqhError::message)
         }
         TaskCommand::PlanRead(args) => {
             // 先解 Result 再序列化:serde 会把 `Result<T, E>` 外部标记成
@@ -45,10 +50,12 @@ pub(crate) fn handle_ringing(
     };
     match command {
         RingingCommand::TodoSet { args } => {
-            qaqh_workspace::todo::todo_set_value_for(session_id, args).map_err(QaqhError::message)
+            qaqh_workspace::todo::todo_set_value_for(service, session_id, args)
+                .map_err(QaqhError::message)
         }
         RingingCommand::TodoCancel { id } => {
-            qaqh_workspace::todo::todo_cancel_value(session_id, id).map_err(QaqhError::message)
+            qaqh_workspace::todo::todo_cancel_value(service, session_id, id)
+                .map_err(QaqhError::message)
         }
         RingingCommand::PlanAction {
             item_id,

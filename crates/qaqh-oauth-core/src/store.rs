@@ -1,0 +1,87 @@
+//! 凭据 JSON 的原子落盘（provider 无关的机械层）。
+//!
+//! 两条纪律（两个 provider crate 旧拷贝的合一）：
+//!
+//! 1. **`.json.tmp` + rename**：绝不就地截断写——半截文件在「损坏即空启动」
+//!    策略下等于凭空丢登录；
+//! 2. **尽力 0600**：Unix 上收紧权限位；Windows 上真正的保护是 DPAPI 密文
+//!    本身（密文盒留在 `qaqh-config::secrets`，由 provider crate 使用）；
+//!    rename 前先尽力删除既成目标（Windows 的 rename 不覆盖既有文件——
+//!    siwc 实证），rename 失败时清掉临时文件（dsaccount 实证）。
+
+use std::path::Path;
+
+/// 失败阶段（错误码映射与文案归 provider crate）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreFailure {
+    CreateDir { parent: String, reason: String },
+    WriteTemp { temp: String, reason: String },
+    Rename { path: String, reason: String },
+}
+
+/// `.json.tmp` + rename 原子写（见模块文档）。
+pub fn atomic_write_json(path: &Path, text: &str) -> Result<(), StoreFailure> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|e| StoreFailure::CreateDir {
+            parent: parent.display().to_string(),
+            reason: e.to_string(),
+        })?;
+    }
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, text.as_bytes()).map_err(|e| StoreFailure::WriteTemp {
+        temp: temp.display().to_string(),
+        reason: e.to_string(),
+    })?;
+    restrict_permissions(&temp);
+    #[cfg(windows)]
+    {
+        let _ = std::fs::remove_file(path);
+    }
+    std::fs::rename(&temp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&temp);
+        StoreFailure::Rename {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        }
+    })
+}
+
+/// 尽力收紧权限（Unix 0600；其它平台由密文本身负责）。
+fn restrict_permissions(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn atomic_replace_round_trips_and_leaves_no_temp_behind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested").join("creds.json");
+        atomic_write_json(&path, "{\"a\":1}").expect("first write creates parent");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "{\"a\":1}");
+        atomic_write_json(&path, "{\"a\":2}").expect("replace existing");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "{\"a\":2}");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file must not linger"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).expect("meta").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "凭据文件必须 0600，实际 {mode:o}");
+        }
+    }
+}

@@ -10,20 +10,13 @@ license.workspace = true
 qaqh-config = { path = "../qaqh-config" }
 # `platform::config_path()`（凭据文件落在 config 同目录）。
 qaqh-types = { path = "../qaqh-types" }
-# 随机量与 sha256 走 aws-lc-rs：与 qaqh-siwc、daemon 服务端 TLS 同一栈（ADR-0039；
-# PKCE 的 S256 就是 sha256）。OHOS 不消费本 crate，无 ring 保留诉求。
-aws-lc-rs = "1"
-# 常数时间比较（PKCE state 校验）：LTO 下手写 XOR 循环随时被优化掉常数时间
-# 特性，subtle 是唯一可信实现。
-subtle = "2"
-# device_id/attempt_id 的 UUIDv4（P0-3：手写「时间戳+PID」兜底退役）。
-uuid = { version = "1", features = ["v4"] }
+# OAuth 原生应用机械层（回环监听/PKCE 随机量/base64url/ureq 超时/
+# 原子落盘）——与 qaqh-siwc 的公共归宿，v4.5 P2-1b（MUST 复制粘贴清剿）。
+qaqh-oauth-core = { path = "../qaqh-oauth-core" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
-# 同步 HTTP：授权流程与回环监听跑在**专用 std 线程**上，不进 tokio。
-ureq = { version = "3", features = ["json"] }
-# 回调查询串解析（百分号编码手写是安全 bug 高发区）。
+# 推理端点 URL 校验与回调查询串的百分号解码（手写是安全 bug 高发区）。
 url = "2"
 
 ts-rs = { version = "12", features = ["serde-compat", "serde-json-impl", "no-serde-warnings"], optional = true }

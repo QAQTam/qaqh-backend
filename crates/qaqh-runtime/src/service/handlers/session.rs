@@ -61,7 +61,7 @@ pub(crate) fn handle(service: &QaqhService, command: SessionCommand) -> QaqhResu
         ),
         SessionCommand::SessionDashboard(args) => {
             // B08 权威 DTO:typed 结构直出,序列化即 wire 形状。
-            dashboard(&service.owners, &args.session_id)
+            dashboard(service, &service.owners, &args.session_id)
                 .and_then(|dashboard| {
                     serde_json::to_value(dashboard).map_err(|error| error.to_string())
                 })

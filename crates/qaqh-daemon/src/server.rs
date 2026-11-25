@@ -235,17 +235,10 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         Arc::clone(service.owners().db()),
     ));
     service.attach_ringing(hub.clone());
-    // 宿主直连：`spawn_subagent` 工具此后经进程内宿主句柄运行，不再回连
-    // daemon HTTP/SSE（Knife-1 step-2 收尾）。service 已含 registry 与 hub。
-    qaqh_subagent::install_host(Arc::new(service.clone()));
-    qaqh_subagent::install_task_host(Arc::new(service.clone()));
-    // ADR-0015：goal 工具宿主（create_goal/update_goal/get_goal 直达进程内）。
-    qaqh_subagent::goal::install_host(Arc::new(service.clone()));
-    // ADR-0033 切片 2：worktree 工具宿主（source_workspace 解析直达会话库）。
-    qaqh_gitx::install_host(Arc::new(service.clone()));
-    // v4.4 P1-3：todo 工具面宿主——todo_* 直达 qaqh.db 单事务 RMW
-    //（MUST 铁闸 2 收编后运行期唯一读写路径）。
-    qaqh_runtime::install_todo_host(Arc::new(service.clone()));
+    // v4.5 P2-1b：subagent/task/goal/gitx/todo 五个工具宿主的进程级
+    // `install_*_host` 装配已物理删除——`QaqhService::init` 直接把宿主束
+    // 注入 registry，会话工具面在注册期显式持有 `Arc<dyn *Host>`（工具
+    // 仍走进程内宿主句柄，不回连 daemon HTTP/SSE——Knife-1 step-2 收尾）。
     let ringing_leases = Arc::new(Mutex::new(qaqh_ringing_runtime::RingingLeaseStore::new()));
     let (shutdown, _) = watch::channel(false);
     // Route OS signals through the same loop/process shutdown path as the control endpoint.

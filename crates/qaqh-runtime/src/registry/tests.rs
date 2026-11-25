@@ -296,7 +296,10 @@ async fn idle_unload_reaps_descendant_session_owners() {
     ) -> std::sync::Arc<SessionLoop> {
         let owner = owners.get_or_create(session_id);
         let manager = std::sync::Arc::new(std::sync::Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&[]),
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
         ));
         let port = std::sync::Arc::new(WorkspaceToolPort::new(
             session_id,

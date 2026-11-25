@@ -151,7 +151,10 @@ mod tests {
             .expect("create session");
         let rx = owner.subscribe();
         let manager = Arc::new(std::sync::Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&[]),
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
         ));
         let port = Arc::new(WorkspaceToolPort::new(
             "SES-LOOP",
@@ -332,7 +335,10 @@ mod tests {
             .expect("create session");
         let mut rx = owner.subscribe();
         let manager = Arc::new(std::sync::Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&[]),
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
         ));
         let port = Arc::new(WorkspaceToolPort::new(
             "SES-LOOP",
@@ -1099,7 +1105,10 @@ mod handoff_tests {
             .await
             .expect("create session");
         let manager = Arc::new(Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&[]),
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
         ));
         let port = Arc::new(WorkspaceToolPort::new(
             "SES-HANDOFF",
@@ -2172,7 +2181,10 @@ mod handoff_tests {
             .expect("create session");
         let rx = owner.subscribe();
         let manager = Arc::new(Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&[]),
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
         ));
         let port = Arc::new(WorkspaceToolPort::new(
             "SES-OUTBOUND",
@@ -2404,7 +2416,10 @@ fn effective_workspace_follows_resolver_at_turn_boundary() {
     let port = Arc::new(WorkspaceToolPort::new(
         "SES-WSWAP",
         Arc::new(std::sync::Mutex::new(
-            qaqh_workspace::registration::build_tool_manager(&[]),
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
         )),
         ToolPolicySnapshot::workspace_write(ws.clone()),
         owner.lifecycle(),

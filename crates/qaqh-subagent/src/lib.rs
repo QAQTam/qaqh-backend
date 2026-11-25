@@ -37,13 +37,15 @@ use serde::{Deserialize, Serialize};
 mod host;
 pub mod goal;
 mod task_tools;
+#[cfg(test)]
+mod host_isolation_tests;
 pub use host::{
     AgentOutcome, InterruptAgentRequest, InterruptedAgent, ListedAgent, ListedAgentResidency,
     ListedAgentStatus, SendAgentMessageRequest, SentAgentMessage, SpawnSubagentRequest,
     SpawnedSubagent, SubagentHost, TaskBoardArtifact, TaskBoardHost, TaskBoardTask,
     TaskClaimAction, TaskClaimRequest, TaskCloseAction, TaskCloseRequest, TaskCreateRequest,
     TaskListPage, TaskListRequest, TaskUpdateAction, TaskUpdateRequest, WaitAgentOutcome,
-    WaitAgentRequest, host, install_host, install_task_host, normalize_write_scope, task_host,
+    WaitAgentRequest, normalize_write_scope,
     task_is_ready, write_scope_warnings,
 };
 
@@ -169,7 +171,9 @@ impl ToolProjection for ListAgentsOutput {
     }
 }
 
-pub struct ListAgentsTool;
+pub struct ListAgentsTool {
+    pub host: Arc<dyn SubagentHost>,
+}
 
 impl TypedTool for ListAgentsTool {
     type Args = ListAgentsArgs;
@@ -202,13 +206,7 @@ impl TypedTool for ListAgentsTool {
             .map(str::trim)
             .filter(|prefix| !prefix.is_empty())
             .unwrap_or("/root");
-        let host = host().ok_or_else(|| {
-            subagent_error(
-                "host_unavailable",
-                "list_agents: no in-process subagent host installed",
-                "Agent discovery requires the daemon host (install_host).",
-            )
-        })?;
+        let host = self.host.as_ref();
         let agents = host
             .list_agents(&ctx.session_id, path_prefix)
             .map_err(|error| {
@@ -277,7 +275,9 @@ impl ToolProjection for AgentMessageOutput {
     }
 }
 
-pub struct SendMessageTool;
+pub struct SendMessageTool {
+    pub host: Arc<dyn SubagentHost>,
+}
 
 impl TypedTool for SendMessageTool {
     type Args = AgentMessageArgs;
@@ -317,7 +317,7 @@ impl TypedTool for SendMessageTool {
                 ));
             }
         };
-        handle_agent_message(ctx, args, delivery)
+        handle_agent_message(&*self.host, ctx, args, delivery)
     }
 }
 
@@ -378,7 +378,9 @@ impl ToolProjection for WaitAgentOutput {
     }
 }
 
-pub struct WaitAgentTool;
+pub struct WaitAgentTool {
+    pub host: Arc<dyn SubagentHost>,
+}
 
 impl TypedTool for WaitAgentTool {
     type Args = WaitAgentArgs;
@@ -412,13 +414,7 @@ impl TypedTool for WaitAgentTool {
                 "Use a bounded wait timeout.",
             ));
         }
-        let host = host().ok_or_else(|| {
-            subagent_error(
-                "host_unavailable",
-                "wait_agent requires the in-process subagent host",
-                "Check that the daemon installed the subagent host.",
-            )
-        })?;
+        let host = self.host.as_ref();
         let should_cancel = || ctx.cancellation.is_cancelled();
         let targets = args.targets;
         if targets.is_empty() {
@@ -445,7 +441,7 @@ impl TypedTool for WaitAgentTool {
                 )
             })? {
             WaitAgentOutcome::Settled => {
-                let agents = wait_agent_snapshot(&host, &ctx.session_id, &targets);
+                let agents = wait_agent_snapshot(host, &ctx.session_id, &targets);
                 Ok(WaitAgentOutput {
                     message: format!("Wait completed: {} target(s) finished.", agents.len()),
                     timed_out: false,
@@ -453,7 +449,7 @@ impl TypedTool for WaitAgentTool {
                 })
             }
             WaitAgentOutcome::TimedOut => {
-                let agents = wait_agent_snapshot(&host, &ctx.session_id, &targets);
+                let agents = wait_agent_snapshot(host, &ctx.session_id, &targets);
                 Ok(WaitAgentOutput {
                     message: "Wait timed out.".to_string(),
                     timed_out: true,
@@ -471,7 +467,7 @@ impl TypedTool for WaitAgentTool {
 
 /// `targets` 模式的快照：一次 `list_agents` 读，读失败退化为空快照。
 fn wait_agent_snapshot(
-    host: &Arc<dyn SubagentHost>,
+    host: &dyn SubagentHost,
     caller_session_id: &str,
     targets: &[String],
 ) -> Vec<WaitAgentTarget> {
@@ -548,7 +544,9 @@ impl ToolProjection for InterruptAgentOutput {
     }
 }
 
-pub struct InterruptAgentTool;
+pub struct InterruptAgentTool {
+    pub host: Arc<dyn SubagentHost>,
+}
 
 impl TypedTool for InterruptAgentTool {
     type Args = InterruptAgentArgs;
@@ -576,13 +574,7 @@ impl TypedTool for InterruptAgentTool {
                 "Provide the target session id (from spawn_subagent/list_agents) or an AgentPath.",
             ));
         }
-        let host = host().ok_or_else(|| {
-            subagent_error(
-                "host_unavailable",
-                "interrupt_agent requires the in-process subagent host",
-                "Check that the daemon installed the subagent host.",
-            )
-        })?;
+        let host = self.host.as_ref();
         let interrupted = host
             .interrupt_agent(InterruptAgentRequest {
                 caller_session_id: &ctx.session_id,
@@ -603,6 +595,7 @@ impl TypedTool for InterruptAgentTool {
 }
 
 fn handle_agent_message(
+    host: &dyn SubagentHost,
     ctx: &ToolCallContext,
     args: AgentMessageArgs,
     delivery: InterAgentDelivery,
@@ -621,13 +614,6 @@ fn handle_agent_message(
             "Provide a non-empty message.",
         ));
     }
-    let host = host().ok_or_else(|| {
-        subagent_error(
-            "host_unavailable",
-            "agent messaging requires the in-process subagent host",
-            "Check that the daemon installed the subagent host.",
-        )
-    })?;
     let sent = host
         .send_agent_message(SendAgentMessageRequest {
             caller_session_id: &ctx.session_id,
@@ -656,7 +642,9 @@ fn handle_agent_message(
     })
 }
 
-pub struct SpawnSubagentTool;
+pub struct SpawnSubagentTool {
+    pub host: Arc<dyn SubagentHost>,
+}
 
 impl TypedTool for SpawnSubagentTool {
     type Args = SpawnSubagentArgs;
@@ -677,31 +665,33 @@ impl TypedTool for SpawnSubagentTool {
         ctx: &ToolCallContext,
         args: SpawnSubagentArgs,
     ) -> Result<Self::Output, ToolExecutionError> {
-        handle_spawn_subagent(ctx, args)
+        handle_spawn_subagent(&*self.host, ctx, args)
     }
 }
 
-pub fn register(mgr: &mut ToolManager) {
+/// 注册会话工具面（agent 五件）；`SubagentHost` 在注册期显式注入工具实例。
+pub fn register(mgr: &mut ToolManager, host: Arc<dyn SubagentHost>) {
     mgr.register_display("spawn_subagent", project_subagent_display);
-    mgr.register_typed(SpawnSubagentTool);
+    mgr.register_typed(SpawnSubagentTool { host: Arc::clone(&host) });
     mgr.register_display("list_agents", project_list_agents_display);
-    mgr.register_typed(ListAgentsTool);
+    mgr.register_typed(ListAgentsTool { host: Arc::clone(&host) });
     mgr.register_display("send_message", project_agent_message_display);
-    mgr.register_typed(SendMessageTool);
+    mgr.register_typed(SendMessageTool { host: Arc::clone(&host) });
     mgr.register_display("wait_agent", project_wait_agent_display);
-    mgr.register_typed(WaitAgentTool);
+    mgr.register_typed(WaitAgentTool { host: Arc::clone(&host) });
     mgr.register_display("interrupt_agent", project_interrupt_agent_display);
-    mgr.register_typed(InterruptAgentTool);
+    mgr.register_typed(InterruptAgentTool { host });
 }
 
 /// Register the collaboration surface (task_*). ADR-0033 切片D:留言板词表
 /// 退役——通信只走 canonical mailbox(send_message),协调走任务板。
-pub fn register_collaboration_tools(mgr: &mut ToolManager) {
-    mgr.register_typed(task_tools::TaskCreateTool);
-    mgr.register_typed(task_tools::TaskClaimTool);
-    mgr.register_typed(task_tools::TaskUpdateTool);
-    mgr.register_typed(task_tools::TaskCloseTool);
-    mgr.register_typed(task_tools::TaskListTool);
+/// v4.5 P2-1b：`TaskBoardHost` 注册期注入。
+pub fn register_collaboration_tools(mgr: &mut ToolManager, host: Arc<dyn TaskBoardHost>) {
+    mgr.register_typed(task_tools::TaskCreateTool { host: Arc::clone(&host) });
+    mgr.register_typed(task_tools::TaskClaimTool { host: Arc::clone(&host) });
+    mgr.register_typed(task_tools::TaskUpdateTool { host: Arc::clone(&host) });
+    mgr.register_typed(task_tools::TaskCloseTool { host: Arc::clone(&host) });
+    mgr.register_typed(task_tools::TaskListTool { host });
 }
 
 /// 构造子代理任务文本：固定身份提示（`[SYSTEM]`）+ 显式包裹的上下文
@@ -825,6 +815,7 @@ fn project_interrupt_agent_display(
 }
 
 fn handle_spawn_subagent(
+    host: &dyn SubagentHost,
     ctx: &ToolCallContext,
     args: SpawnSubagentArgs,
 ) -> Result<SpawnSubagentOutput, ToolExecutionError> {
@@ -863,13 +854,6 @@ fn handle_spawn_subagent(
         Some(parent_workspace.into_owned())
     };
     // ── 1. Create the child conversation (ADR-0014: subagent = session). ──
-    let host = host().ok_or_else(|| {
-        subagent_error(
-            "host_unavailable",
-            "spawn_subagent: no in-process subagent host installed",
-            "Subagent spawning requires the daemon host (install_host).",
-        )
-    })?;
     let spawned = host
         .spawn_subagent(SpawnSubagentRequest {
             parent_session_id: &ctx.session_id,
@@ -974,10 +958,70 @@ fn subagent_error(
 mod tests {
     use super::*;
 
+    /// 注册冒烟用桩宿主（schema 面断言不触达执行路径；执行面的宿主隔离
+    /// 反证在 `src/host_isolation_tests.rs`）。
+    struct StubHost;
+    impl SubagentHost for StubHost {
+        fn spawn_subagent(
+            &self,
+            _request: SpawnSubagentRequest<'_>,
+        ) -> Result<SpawnedSubagent, String> {
+            Err("stub".to_string())
+        }
+        fn list_agents(
+            &self,
+            _caller_session_id: &str,
+            _path_prefix: &str,
+        ) -> Result<Vec<ListedAgent>, String> {
+            Err("stub".to_string())
+        }
+        fn send_agent_message(
+            &self,
+            _request: SendAgentMessageRequest<'_>,
+        ) -> Result<SentAgentMessage, String> {
+            Err("stub".to_string())
+        }
+        fn wait_agent(&self, _request: WaitAgentRequest<'_>) -> Result<WaitAgentOutcome, String> {
+            Err("stub".to_string())
+        }
+        fn interrupt_agent(
+            &self,
+            _request: InterruptAgentRequest<'_>,
+        ) -> Result<InterruptedAgent, String> {
+            Err("stub".to_string())
+        }
+        fn send_ringing(&self, _session_id: &str, _command: qaqh_ringing::RingingCommand) -> Result<(), String> {
+            Err("stub".to_string())
+        }
+    }
+
+    fn stub_subagent_host() -> Arc<dyn SubagentHost> {
+        Arc::new(StubHost)
+    }
+
+    struct StubTaskHost;
+    impl TaskBoardHost for StubTaskHost {
+        fn task_create(&self, _r: TaskCreateRequest<'_>) -> Result<TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_claim(&self, _r: TaskClaimRequest<'_>) -> Result<TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_update(&self, _r: TaskUpdateRequest<'_>) -> Result<TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_close(&self, _r: TaskCloseRequest<'_>) -> Result<TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_list(&self, _r: TaskListRequest<'_>) -> Result<TaskListPage, String> {
+            Err("stub".to_string())
+        }
+    }
+
     #[test]
     fn spawn_subagent_schema_never_accepts_api_keys() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, stub_subagent_host());
 
         let handler = manager
             .lookup("spawn_subagent")
@@ -993,7 +1037,7 @@ mod tests {
     #[test]
     fn list_agents_schema_is_registered_and_path_prefix_is_optional() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, stub_subagent_host());
 
         let handler = manager
             .lookup("list_agents")
@@ -1014,7 +1058,7 @@ mod tests {
     #[test]
     fn agent_message_tools_are_registered_with_required_fields() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, stub_subagent_host());
 
         for name in ["send_message"] {
             let handler = manager.lookup(name).expect("agent message tool registered");
@@ -1033,7 +1077,7 @@ mod tests {
     #[test]
     fn wait_agent_schema_requires_targets_and_optional_timeout() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, stub_subagent_host());
 
         let handler = manager
             .lookup("wait_agent")
@@ -1055,7 +1099,7 @@ mod tests {
     #[test]
     fn interrupt_agent_schema_requires_target() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, stub_subagent_host());
 
         assert!(
             manager.lookup("close_agent").is_none(),
@@ -1079,7 +1123,7 @@ mod tests {
     #[test]
     fn task_tools_are_registered_with_closed_schemas() {
         let mut manager = ToolManager::new();
-        register_collaboration_tools(&mut manager);
+        register_collaboration_tools(&mut manager, Arc::new(StubTaskHost));
 
         for name in [
             "task_create",
@@ -1106,7 +1150,7 @@ mod tests {
     #[test]
     fn spawn_subagent_schema_exposes_only_the_llm_facing_params() {
         let mut manager = ToolManager::new();
-        register(&mut manager);
+        register(&mut manager, stub_subagent_host());
         let handler = manager
             .lookup("spawn_subagent")
             .expect("spawn_subagent should be registered");
@@ -1240,7 +1284,7 @@ mod tests {
             official_web: None,
             source: qaqh_tool_core::tool_api::ToolCallSource::Model,
         };
-        let error = SpawnSubagentTool
+        let error = SpawnSubagentTool { host: stub_subagent_host() }
             .run(
                 &ctx,
                 SpawnSubagentArgs {

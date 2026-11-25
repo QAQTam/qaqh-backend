@@ -119,10 +119,51 @@ fn read_agents_instructions(cwd: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// 注册冒烟桩（宿主经注册期注入，v4.5 P2-1b；schema/prompt 面断言不触达执行）。
+    struct StubTaskHost;
+    impl qaqh_subagent::TaskBoardHost for StubTaskHost {
+        fn task_create(
+            &self,
+            _r: qaqh_subagent::TaskCreateRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_claim(
+            &self,
+            _r: qaqh_subagent::TaskClaimRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_update(
+            &self,
+            _r: qaqh_subagent::TaskUpdateRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_close(
+            &self,
+            _r: qaqh_subagent::TaskCloseRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskBoardTask, String> {
+            Err("stub".to_string())
+        }
+        fn task_list(
+            &self,
+            _r: qaqh_subagent::TaskListRequest<'_>,
+        ) -> Result<qaqh_subagent::TaskListPage, String> {
+            Err("stub".to_string())
+        }
+    }
+
     fn spec_with_collaboration_tools() -> ProviderRequestSpec {
-        let manager = qaqh_workspace::registration::build_tool_manager(&[
-            qaqh_subagent::register_collaboration_tools,
-        ]);
+        let manager = qaqh_workspace::registration::build_tool_manager(
+            &[std::sync::Arc::new(|mgr: &mut qaqh_workspace::ToolManager| {
+                qaqh_subagent::register_collaboration_tools(
+                    mgr,
+                    std::sync::Arc::new(StubTaskHost),
+                );
+            })],
+            std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+        );
         let mut spec = ProviderRequestSpec::new(
             qaqh_gate::ProviderConfig::responses("https://example.com", "", "m", None),
             1024,

@@ -15,7 +15,8 @@ use serde_json::Value;
 use crate::fixture::MockOidc;
 use crate::manager::{SignInOptions, SiwcConfig, SiwcManager};
 use crate::store::{CredentialStore, ProfileStatus};
-use crate::{SiwcCode, util};
+use crate::SiwcCode;
+use qaqh_oauth_core::util;
 
 struct Harness {
     mock: MockOidc,
