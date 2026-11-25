@@ -1,7 +1,7 @@
 //! QAQ-Harness 进程工具组（P2 crate split from qaqh-workspace）。
 //!
 //! 承载执行会话、共享进程控制原语与旧执行器内部实现。
-//! 依赖 qaqh-sandbox（沙箱执行）、qaqh-policy、qaqh-file-tools（exec 结果
+//! 依赖 qaqh-sandbox（沙箱执行）、qaqh-types::policy（决策词汇）、qaqh-file-tools（exec 结果
 //! 落 journal）、qaqh-tool-core（SDK）。
 //!
 //! P0-2：门面注入钩子（`hooks::EXEC_MAX_OUTPUT_CHARS` / `PROJECT_PROCESS`

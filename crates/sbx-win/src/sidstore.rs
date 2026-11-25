@@ -16,7 +16,7 @@ pub fn data_root() -> PathBuf {
 }
 
 pub fn workspace_key(root: &Path) -> String {
-    let norm = sbx_nt::normalize(&root.display().to_string())
+    let norm = crate::nt::normalize(&root.display().to_string())
         .unwrap_or_else(|_| root.display().to_string().to_lowercase());
     norm.as_bytes().iter().map(|b| format!("{b:02X}")).collect()
 }

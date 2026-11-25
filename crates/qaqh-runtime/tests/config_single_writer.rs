@@ -24,7 +24,7 @@ fn daemon_config_actions_share_one_write_port() {
     let service = QaqhService::init(qaqh_types::platform::data_dir());
 
     // 载荷用**当前**契约键风格（K2 camelCase）。这里原先是 snake_case，
-    // 靠 `qaqh-config-api` 的 `alias` 才能解析进 ConfigPatch——该兼容臂已按
+    // 靠 wire DTO（`qaqh-profile::dto`）的 `alias` 才能解析进 ConfigPatch——该兼容臂已按
     // spec §0b 删除，故载荷随之改正。本测试真正要钉的东西（「权限写入不得
     // 丢掉其它字段」）与键风格无关。
     // 端点族字段（baseUrl/maxTokens）已随统一模型配置退役（ConfigPatch

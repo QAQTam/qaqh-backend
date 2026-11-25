@@ -718,27 +718,27 @@ fn out_of_range_start_still_rejects() {
 
 #[test]
 fn read_registration_is_typed_and_schema_is_type_generated() {
-    let mut manager = qaqh_workspace::ToolManager::new();
+    let mut manager = crate::tool_api::DescriptorRegistry::default();
     register(&mut manager, &crate::FileRuntime::default());
-    let registered = manager.builtin("read").expect("read registered");
+    let registered = manager.get("read").expect("read registered");
     assert_eq!(
-        registered.descriptor.name.as_str(),
+        registered.name.as_str(),
         "read",
         "read must be on the typed execution surface"
     );
     assert_eq!(
-        registered.descriptor.input_schema["additionalProperties"],
+        registered.input_schema["additionalProperties"],
         serde_json::json!(false)
     );
     // v2：schema 由 ReadArgs 类型生成——聚合形态不再手写 oneOf 判别。
     assert!(
-        registered.descriptor.input_schema.get("oneOf").is_none(),
+        registered.input_schema.get("oneOf").is_none(),
         "generated schema must not carry oneOf"
     );
-    assert!(registered.descriptor.input_schema["properties"]["requests"].is_object());
+    assert!(registered.input_schema["properties"]["requests"].is_object());
     // 糖字段必须在模型面可见且带单类型：description 一直在教模型用它们，
     // 藏出 schema 只会让「教用的形状」与「据以容错的形状」分叉（见下条测试）。
-    let properties = &registered.descriptor.input_schema["properties"];
+    let properties = &registered.input_schema["properties"];
     assert_eq!(properties["path"]["type"], serde_json::json!("string"));
     assert_eq!(
         properties["start_line"]["type"],
@@ -752,14 +752,13 @@ fn read_registration_is_typed_and_schema_is_type_generated() {
     // 可选性由「字段不在 required 里」表达；schemars 在无必填字段时整个不发
     // 该键，糖字段不得被写成必填。
     let required: Vec<&serde_json::Value> = registered
-        .descriptor
         .input_schema
         .get("required")
         .and_then(Value::as_array)
         .map(|items| items.iter().collect())
         .unwrap_or_default();
     assert!(required.is_empty(), "糖字段不得进 required：{required:?}");
-    assert_eq!(registered.descriptor.output_schema["type"], "object");
+    assert_eq!(registered.output_schema["type"], "object");
 }
 
 /// 顶层 sugar 与 `requests[]` 两条形状都必须接受字符串形态的行号。

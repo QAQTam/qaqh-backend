@@ -1,13 +1,17 @@
 //! QAQ-Harness 配置契约层（wire DTO）。
+//!
+//! 原独立叶子 crate，v4.5 P2-1a 物理并入 `qaqh-profile`：沿用本 crate 的 `ts`
+//! 特性门控，下述 K1–K4 纪律原样成立，仅「叶子 crate」改述为「叶子模块」——
+//! wire DTO 的单一事实源经本 crate 根平铺 re-export。
 //! 前后端共享的**唯一真相**：
-//! - K1 叶子 crate：只依赖 serde，不依赖 runtime/daemon/config 引擎；
-//!   winui / ratatui / web(axum) 三端只依赖本 crate 即可参与配置读写。
+//! - K1 叶子模块：只依赖 serde，不依赖 runtime/daemon/config 引擎；
+//!   winui / ratatui / web(axum) 三端只依赖 `qaqh-profile` 即可参与配置读写。
 //! - K2 键风格定死 camelCase（`rename_all`），snake/camel 双键 shim 就此终结。
 //! - K3 写语义 = JSON Merge Patch（RFC 7386 风格）：[`ConfigPatch`] 只含
 //!   `Option` 字段，缺失 = 不动；多端并发编辑互不覆盖，且天然免疫
 //!   「未加载字段整包写回」类毒化（2026-08-25 设置页事故 R5）。
 //! - K4 fingerprint/字节序属 ringing 传输层，本 crate 零耦合。
-//! 映射纪律：引擎侧 [`crate`] 与 `qaqh_config::Config` 的互转**不用**
+//! 映射纪律：引擎侧 `qaqh_config::Config` 与本模块 DTO 的互转**不用**
 //! `..Default::default()` 兜底——穷举字面量让"新增字段未同步映射"变成编译错误。
 //! 兼容策略（2026-09-15 改）：**不做向前兼容**。读路径的 snake_case `alias`、读模型
 //! 的 struct 级 `#[serde(default)]` 均已删除——前后端共进退，不存在「另一个版本的
@@ -17,12 +21,10 @@
 //! 那是 K3 合并补丁的语义（字段缺失 = 不动），不是兼容。
 //! 子代理配置段（`SubagentDto`/`SubagentPatch`）已随 ADR-0018 退役：
 //! 子代理=会话，预算/工具面与父同律，限额是内核常量，不再经设置面暴露。
-
-#![cfg_attr(not(test), forbid(unsafe_code))]
 use serde::{Deserialize, Serialize};
 
 /// 读模型：daemon `config.load` 的完整投影。所有消费者（设置页/Info 面板/
-/// TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见 crate 级兼容策略）。
+/// TUI/web）从这里取值；不做向前兼容——缺字段即解析失败（见模块级兼容策略）。
 #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

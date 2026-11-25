@@ -22,7 +22,7 @@ fn config_patch_rejects_invalid_permission_level_without_mutating() {
     };
 
     for invalid in [0u64, 5, 255] {
-        let patch: qaqh_config_api::ConfigPatch =
+        let patch: qaqh_profile::ConfigPatch =
             serde_json::from_value(serde_json::json!({ "permissionLevel": invalid }))
                 .expect("deserialize patch");
         let result = qaqh_config::dto::apply_patch(&mut cfg, &patch);
@@ -38,7 +38,7 @@ fn config_patch_rejects_invalid_permission_level_without_mutating() {
 
     // 合法值 1..=4 照常写入（含 4=sandbox-run）。
     for valid in [1u64, 2, 3, 4] {
-        let patch_ok: qaqh_config_api::ConfigPatch =
+        let patch_ok: qaqh_profile::ConfigPatch =
             serde_json::from_value(serde_json::json!({ "permissionLevel": valid }))
                 .expect("deserialize patch");
         qaqh_config::dto::apply_patch(&mut cfg, &patch_ok).expect("valid level applies");

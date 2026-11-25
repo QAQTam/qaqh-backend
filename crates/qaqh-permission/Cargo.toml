@@ -6,7 +6,6 @@ license.workspace = true
 description = "QAQ-Harness permission engine + process-wide session/workspace/cancel state (P2 crate split from qaqh-workspace)"
 
 [dependencies]
-qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-skills = { path = "../qaqh-skills" }
 qaqh-types = { path = "../qaqh-types" }

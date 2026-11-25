@@ -4,9 +4,9 @@
 //! resume 与预算态由用户命令(`goal.set`)或系统控制。宿主(`GoalHost`)由
 //! daemon 装配时安装(`install_host`,subagent 同款先例);未安装即报错,
 //! 不做降级。工具仅注入根会话(registry spawn 侧控制)。
-
-#![cfg_attr(not(test), forbid(unsafe_code))]
-#![allow(clippy::result_large_err)] // TypedTool's frozen public error boundary.
+//!
+//! 原独立叶子 crate,v4.5 P2-1a 物理并入本 crate(依赖面为 subagent 既有依赖
+//! 的子集,无环)。
 
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;

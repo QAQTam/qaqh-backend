@@ -332,10 +332,10 @@ mod tests {
 
     #[test]
     fn typed_confirm_apply_registration_and_discard() {
-        let mut manager = qaqh_workspace::ToolManager::new();
+        let mut manager = crate::tool_api::DescriptorRegistry::default();
         register(&mut manager, &crate::FileRuntime::default());
         assert!(
-            manager.builtin("confirm_apply").is_some(),
+            manager.contains("confirm_apply"),
             "confirm_apply must be on the typed execution surface"
         );
         let id = crate::pending::store("write", &serde_json::json!({}));

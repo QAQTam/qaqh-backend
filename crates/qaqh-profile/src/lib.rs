@@ -8,11 +8,16 @@
 //! 4. 内置预设是一张代码静态表（[`presets`]），选择预设即复制默认值进目录。
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
+pub mod dto;
 pub mod model;
 pub mod presets;
 pub mod resolver;
 pub mod store;
 
+pub use dto::{
+    ConfigDto, ConfigPatch, ExecDto, ExecPatch, GoalsDto, GoalsPatch, McpDto, McpServerDto,
+    SandboxDto, SandboxPatch,
+};
 pub use model::{ModelDef, ModelDefaults, ModelSelection, ProfilesDocument, ProviderDef};
 pub use presets::{PROVIDER_PRESETS, ProviderPreset, provider_preset};
 pub use resolver::{EffectiveModelConfig, ModelResolveError, resolve_model_selection};

@@ -501,10 +501,10 @@ mod tests {
 
     #[test]
     fn typed_read_image_projects_attachment_without_base64_in_model_text() {
-        let mut manager = qaqh_workspace::ToolManager::new();
+        let mut manager = crate::tool_api::DescriptorRegistry::default();
         register(&mut manager);
         assert!(
-            manager.builtin("read_image").is_some(),
+            manager.contains("read_image"),
             "read_image must be on the typed execution surface"
         );
 

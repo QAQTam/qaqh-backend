@@ -670,7 +670,7 @@ impl Config {
             // 旧配置升级后越权。无法识别的值 fail-closed 收敛到最严档 1
             // (read-only),绝不反向放大权限(BUG-2026-09-13-15)。仅打日志。
             if let Some(tier) = pc.permission_tier {
-                match qaqh_policy::PermissionLevel::try_from_u8(tier) {
+                match qaqh_types::policy::PermissionLevel::try_from_u8(tier) {
                     Ok(t) => cfg.permission_level = t.to_u8(),
                     Err(_) => {
                         log::warn!(
@@ -681,7 +681,7 @@ falling back to 1 (read-only)"
                     }
                 }
             } else if let Some(pl) = pc.permission_level {
-                match qaqh_policy::PermissionLevel::from_legacy_u8(pl) {
+                match qaqh_types::policy::PermissionLevel::from_legacy_u8(pl) {
                     Some(tier) => cfg.permission_level = tier.to_u8(),
                     None => {
                         log::warn!(

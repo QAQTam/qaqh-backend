@@ -10,7 +10,7 @@ use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 
-pub use qaqh_policy::SandboxBackend;
+pub use qaqh_types::policy::SandboxBackend;
 
 #[cfg(target_os = "linux")]
 const USER_NAMESPACE_FAILURES: [&str; 4] = [

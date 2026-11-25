@@ -112,7 +112,7 @@ pub(crate) fn activity(
     Ok(result)
 }
 
-pub(crate) fn load_config() -> Result<qaqh_config_api::ConfigDto, String> {
+pub(crate) fn load_config() -> Result<qaqh_profile::ConfigDto, String> {
     let cfg = qaqh_config::Config::load().map_err(err)?;
     // P1-C2：读模型统一走 ConfigDto（camelCase wire + providers 目录内聚到
     // qaqh-config::dto），service 层不再手拼 json。

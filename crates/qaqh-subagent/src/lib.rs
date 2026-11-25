@@ -35,6 +35,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 mod host;
+pub mod goal;
 mod task_tools;
 pub use host::{
     AgentOutcome, InterruptAgentRequest, InterruptedAgent, ListedAgent, ListedAgentResidency,

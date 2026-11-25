@@ -210,7 +210,7 @@ fn cmd_normalize(arg: Option<&str>) -> i32 {
         eprintln!("normalize: path required");
         return 2;
     };
-    match sbx_nt::normalize(p) {
+    match sbx_win::nt::normalize(p) {
         Ok(n) => {
             println!("{n}");
             0

@@ -1,17 +1,16 @@
 //! Pure policy vocabulary shared by the runtime, tools, and sandbox backend.
 //!
-//! This crate deliberately contains no filesystem access, process spawning, or
-//! platform detection. It owns the stable decision types and the canonical
-//! [`SandboxSpec`] that mechanism crates consume.
+//! 原独立叶子 crate（v4.5 P2-1a 物理并入 `qaqh-types`）：`qaqh-permission →
+//! qaqh-sandbox → 决策词汇 crate` 的环经并入叶子 types 彻底消除，7 个消费方
+//! 本就全部依赖 `qaqh-types`。本模块刻意不含任何文件系统访问、进程 spawn 或
+//! 平台探测——只拥有稳定的决策类型与机制 crate 消费的规范 [`SandboxSpec`]。
+//!
+//! 旧 crate 的 approval 子模块（ApprovalRegistry/ApprovalDecision/ApprovalTake）
+//! 全仓 0 消费方，随合并物理删除（git 历史可溯）。
 
-#![cfg_attr(not(test), forbid(unsafe_code))]
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-pub mod approval;
-
-pub use approval::{ApprovalDecision, ApprovalRegistry, ApprovalTake};
 
 /// Risk profile for each tool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -824,10 +824,10 @@ mod tests {
 
     #[test]
     fn typed_journal_registration_and_display_are_same_source() {
-        let mut manager = qaqh_workspace::ToolManager::new();
+        let mut manager = crate::tool_api::DescriptorRegistry::default();
         register(&mut manager);
         assert!(
-            manager.builtin("journal").is_some(),
+            manager.contains("journal"),
             "journal must be on the typed execution surface"
         );
 

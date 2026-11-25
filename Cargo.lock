@@ -2673,9 +2673,7 @@ name = "qaqh-config"
 version = "4.2.0"
 dependencies = [
  "log",
- "qaqh-config-api",
  "qaqh-hooks",
- "qaqh-policy",
  "qaqh-profile",
  "qaqh-types",
  "qaqh-workspace",
@@ -2689,20 +2687,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "qaqh-config-api"
-version = "4.2.0"
-dependencies = [
- "serde",
- "serde_json",
- "ts-rs",
-]
-
-[[package]]
 name = "qaqh-contract-export"
 version = "4.2.0"
 dependencies = [
  "hex",
- "qaqh-config-api",
  "qaqh-dsaccount",
  "qaqh-memwatch",
  "qaqh-profile",
@@ -2733,7 +2721,6 @@ dependencies = [
  "qaqh-client",
  "qaqh-config",
  "qaqh-gitx",
- "qaqh-goal",
  "qaqh-marketplace",
  "qaqh-mcp",
  "qaqh-process-tools",
@@ -2814,7 +2801,6 @@ dependencies = [
  "qaqh-permission",
  "qaqh-tool-core",
  "qaqh-types",
- "qaqh-workspace",
  "schemars 1.2.3",
  "serde",
  "serde_json",
@@ -2856,19 +2842,6 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "uuid",
-]
-
-[[package]]
-name = "qaqh-goal"
-version = "4.2.0"
-dependencies = [
- "log",
- "qaqh-ringing-contract",
- "qaqh-tool-core",
- "qaqh-workspace",
- "schemars 1.2.3",
- "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -2942,19 +2915,11 @@ name = "qaqh-permission"
 version = "4.2.0"
 dependencies = [
  "log",
- "qaqh-policy",
  "qaqh-sandbox",
  "qaqh-skills",
  "qaqh-types",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "qaqh-policy"
-version = "4.2.0"
-dependencies = [
- "serde",
 ]
 
 [[package]]
@@ -2966,13 +2931,11 @@ dependencies = [
  "log",
  "qaqh-file-tools",
  "qaqh-permission",
- "qaqh-policy",
  "qaqh-pty",
  "qaqh-ringing-contract",
  "qaqh-sandbox",
  "qaqh-tool-core",
  "qaqh-types",
- "qaqh-workspace",
  "regex",
  "sbx-win",
  "schemars 1.2.3",
@@ -3058,11 +3021,9 @@ dependencies = [
  "qaqh-agent-runtime",
  "qaqh-client",
  "qaqh-config",
- "qaqh-config-api",
  "qaqh-dsaccount",
  "qaqh-gate",
  "qaqh-gitx",
- "qaqh-goal",
  "qaqh-mcp",
  "qaqh-memwatch",
  "qaqh-process-tools",
@@ -3098,8 +3059,8 @@ dependencies = [
  "landlock",
  "libc",
  "log",
- "qaqh-policy",
  "qaqh-pty",
+ "qaqh-types",
  "sbx-win",
  "seccompiler",
  "serde",
@@ -3180,7 +3141,6 @@ dependencies = [
  "anyhow",
  "log",
  "qaqh-permission",
- "qaqh-policy",
  "qaqh-types",
  "schemars 1.2.3",
  "serde",
@@ -3215,7 +3175,6 @@ dependencies = [
  "qaqh-dsaccount",
  "qaqh-file-tools",
  "qaqh-permission",
- "qaqh-policy",
  "qaqh-process-tools",
  "qaqh-sandbox",
  "qaqh-skills",
@@ -3708,21 +3667,15 @@ dependencies = [
 name = "sbx-cli"
 version = "0.1.0"
 dependencies = [
- "sbx-nt",
  "sbx-win",
  "serde_json",
  "windows",
 ]
 
 [[package]]
-name = "sbx-nt"
-version = "0.1.0"
-
-[[package]]
 name = "sbx-win"
 version = "0.1.0"
 dependencies = [
- "sbx-nt",
  "serde",
  "serde_json",
  "windows",

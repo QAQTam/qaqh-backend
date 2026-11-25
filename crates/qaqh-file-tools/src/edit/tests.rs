@@ -462,9 +462,9 @@ fn exec_binary_file_is_rejected() {
 
 #[test]
 fn tool_contract_exposes_str_replace_fields() {
-    let mut mgr = qaqh_workspace::ToolManager::new();
+    let mut mgr = crate::tool_api::DescriptorRegistry::default();
     super::register(&mut mgr, &crate::FileRuntime::default());
-    let handler = mgr.lookup("edit").expect("edit tool registered");
+    let handler = mgr.get("edit").expect("edit tool registered");
     let schema = &handler.input_schema;
     let required: Vec<&str> = schema["required"]
         .as_array()
@@ -546,10 +546,10 @@ fn exec_symlink_target_is_rejected() {
 
 #[test]
 fn typed_edit_registration_and_display_are_same_source() {
-    let mut manager = qaqh_workspace::ToolManager::new();
+    let mut manager = crate::tool_api::DescriptorRegistry::default();
     super::register(&mut manager, &crate::FileRuntime::default());
     assert!(
-        manager.builtin("edit").is_some(),
+        manager.contains("edit"),
         "edit must be on the typed execution surface"
     );
 

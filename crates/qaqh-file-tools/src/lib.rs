@@ -13,7 +13,9 @@
 //!   跨会话基线互踩与「一键 clear 全进程基线」的污染机理物理消灭。
 //!
 //! `ToolManager` 留守门面；`register()` 粘合层经 `RegistersTyped` trait 接受，
-//! 组内测试经 dev-dependency 环引用门面具体 manager。
+//! 组内测试经 [`qaqh_tool_core::tool_api::DescriptorRegistry`] 断言注册面
+//! （v4.5 P2-1a 拆除 dev-dependency 反向环）；与具体 `ToolManager` 的耦合
+//! 验证保留在门面 `tests/registration_surface.rs`。
 
 #![cfg_attr(not(test), deny(unsafe_code))]
 pub mod apply_patch;

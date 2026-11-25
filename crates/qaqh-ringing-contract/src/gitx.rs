@@ -1,7 +1,7 @@
 //! gitx 契约：worktree 读模型与命令参数（ADR-0041）。
 //!
 //! wire schema `qaqh.ringing.gitx/v1`（判别惯例对齐 `TEAM_SCHEMA`）。字段风格
-//! 与 ringing 契约一致（snake_case、无 rename_all）——与 `qaqh-config-api` 的
+//! 与 ringing 契约一致（snake_case、无 rename_all）——与 `qaqh-profile` wire DTO 层的
 //! camelCase K2 域是不同域，不混用。
 
 use serde::{Deserialize, Serialize};

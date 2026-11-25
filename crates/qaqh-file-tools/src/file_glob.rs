@@ -521,28 +521,28 @@ mod tests {
 
     #[test]
     fn glob_registration_is_typed_and_schema_is_type_generated() {
-        let mut manager = qaqh_workspace::ToolManager::new();
+        let mut manager = crate::tool_api::DescriptorRegistry::default();
         register(&mut manager);
-        let registered = manager.builtin("glob").expect("glob registered");
+        let registered = manager.get("glob").expect("glob registered");
         assert_eq!(
-            registered.descriptor.name.as_str(),
+            registered.name.as_str(),
             "glob",
             "glob must be on the typed execution surface"
         );
         // v2：schema 由 GlobArgs 类型生成——pattern 带 serde(default)，不再是 required。
         assert!(
-            registered.descriptor.input_schema["properties"]["pattern"].is_object(),
+            registered.input_schema["properties"]["pattern"].is_object(),
             "generated input schema must carry pattern"
         );
         assert!(
-            registered.descriptor.input_schema["properties"]["max_results"].is_object(),
+            registered.input_schema["properties"]["max_results"].is_object(),
             "generated input schema must carry max_results"
         );
         assert_eq!(
-            registered.descriptor.input_schema["additionalProperties"],
+            registered.input_schema["additionalProperties"],
             serde_json::json!(false)
         );
-        assert_eq!(registered.descriptor.output_schema["type"], "object");
+        assert_eq!(registered.output_schema["type"], "object");
     }
 
     #[test]

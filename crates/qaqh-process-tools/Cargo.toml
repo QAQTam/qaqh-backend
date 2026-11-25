@@ -3,7 +3,7 @@ name = "qaqh-process-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "QAQ-Harness process tool group: exec + process registry/inspect (P2 crate split from qaqh-workspace)"
+description = "QAQ-Harness process tool group: exec + process registry/inspect (P2 crate split from the workspace facade crate)"
 
 [dependencies]
 qaqh-types = { path = "../qaqh-types" }
@@ -11,7 +11,6 @@ qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-permission = { path = "../qaqh-permission" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
 qaqh-file-tools = { path = "../qaqh-file-tools" }
-qaqh-policy = { path = "../qaqh-policy" }
 qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-pty = { path = "../qaqh-pty" }
 serde = { version = "1", features = ["derive"] }
@@ -32,5 +31,3 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3"
-# 测试需要具体 ToolManager（生产依赖图为单向；cargo 允许 dev-dependency 环）。
-qaqh-workspace = { path = "../qaqh-workspace" }

@@ -9,7 +9,7 @@
 //! - `max_open_files`:Job 对象无对应限额,丢弃;
 //! - TokenPlane 的 `network: Deny` 零强制(token 后端只滤写,读/网透传)。
 
-use qaqh_policy::{NetworkPolicy, SandboxBackend, SandboxSpec};
+use qaqh_types::policy::{NetworkPolicy, SandboxBackend, SandboxSpec};
 use sbx_win::policy::{IsolationKind, NetworkPolicy as SbxNetworkPolicy, SbxPolicy};
 
 /// 转正开关（CLEAN-3/T10）：`QAQH_SBX_REDIRECT=0` 退出 Auto→Redirect 晋升。
