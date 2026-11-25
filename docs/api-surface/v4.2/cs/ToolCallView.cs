@@ -32,6 +32,9 @@ public sealed record ToolCallView
     public ContentValue? Output { get; init; }
     [JsonPropertyName("output_truncated")]
     public bool OutputTruncated { get; init; }
+    [JsonPropertyName("diff")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ContentValue? Diff { get; init; }
     [JsonPropertyName("metrics")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public ToolMetrics? Metrics { get; init; }

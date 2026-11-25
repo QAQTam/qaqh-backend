@@ -31,7 +31,11 @@ import type { TurnPhase } from "./TurnPhase";
  * 会话内业务变化。exec 事件与调用事件同流同水位;客户端不得靠事件顺序
  * 推断关联,关联只按 call_id/turn_id/exec_session_id(spec §6.1)。
  */
-export type SessionEvent = { "type": "activity_changed", activity: ActivityState, current_turn_id: TurnId | null, } | { "type": "turn_started", turn_id: TurnId, input_id: InputId | null, } | { "type": "turn_phase_changed", turn_id: TurnId, phase: TurnPhase, } | { "type": "turn_ended", turn_id: TurnId, outcome: TurnOutcome, } | { "type": "tool_arguments_delta", call_id: ToolCallId, turn_id: TurnId, tool_name: string, text: string, lines_added?: number | null, lines_removed?: number | null, target_files?: Array<string>, args_complete?: boolean, } | { "type": "tool_declared", call_id: ToolCallId, turn_id: TurnId, tool_name: string, args?: JsonValue | null, } | { "type": "tool_state_changed", call_id: ToolCallId, turn_id: TurnId, state: ToolCallState, } | { "type": "tool_output_delta", call_id: ToolCallId, stream: OutputStream, text: string, } | { "type": "tool_finished", call_id: ToolCallId, outcome: ToolCallOutcome, exec_session_id?: ExecSessionId | null, output: ContentValue | null, output_truncated: boolean, metrics: ToolMetrics | null, 
+export type SessionEvent = { "type": "activity_changed", activity: ActivityState, current_turn_id: TurnId | null, } | { "type": "turn_started", turn_id: TurnId, input_id: InputId | null, } | { "type": "turn_phase_changed", turn_id: TurnId, phase: TurnPhase, } | { "type": "turn_ended", turn_id: TurnId, outcome: TurnOutcome, } | { "type": "tool_arguments_delta", call_id: ToolCallId, turn_id: TurnId, tool_name: string, text: string, lines_added?: number | null, lines_removed?: number | null, target_files?: Array<string>, args_complete?: boolean, } | { "type": "tool_declared", call_id: ToolCallId, turn_id: TurnId, tool_name: string, args?: JsonValue | null, } | { "type": "tool_state_changed", call_id: ToolCallId, turn_id: TurnId, state: ToolCallState, } | { "type": "tool_output_delta", call_id: ToolCallId, stream: OutputStream, text: string, } | { "type": "tool_finished", call_id: ToolCallId, outcome: ToolCallOutcome, exec_session_id?: ExecSessionId | null, output: ContentValue | null, output_truncated: boolean, 
+/**
+ * write/edit/apply_patch/delete 等写工具的展示面 unified diff(大 diff 走 Ref 外置)。
+ */
+diff?: ContentValue | null, metrics: ToolMetrics | null, 
 /**
  * edit 类工具的结构化结果。
  */

@@ -14,11 +14,6 @@
     "idleShutdownSecs": 0,
     "servers": []
   },
-  "lsp": {
-    "enabled": false,
-    "idleShutdownSecs": 0,
-    "servers": []
-  },
   "exec": {
     "defaultShell": null
   },

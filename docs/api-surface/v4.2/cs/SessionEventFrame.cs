@@ -144,6 +144,9 @@ public sealed record SessionEventFrameToolFinished : SessionEventFrame
     public ContentValue? Output { get; init; }
     [JsonPropertyName("output_truncated")]
     public bool OutputTruncated { get; init; }
+    [JsonPropertyName("diff")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public ContentValue? Diff { get; init; }
     [JsonPropertyName("metrics")]
     public ToolMetrics? Metrics { get; init; }
     [JsonPropertyName("code_delta")]

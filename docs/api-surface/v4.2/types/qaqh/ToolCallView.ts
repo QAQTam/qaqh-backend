@@ -20,7 +20,11 @@ export type ToolCallView = { call_id: ToolCallId, turn_id?: TurnId | null, tool_
 /**
  * 工具原始参数(裸 JSON 对象)。
  */
-args?: JsonValue | null, state: ToolCallState, exec_session_id?: ExecSessionId | null, output?: ContentValue | null, output_truncated: boolean, metrics?: ToolMetrics | null, 
+args?: JsonValue | null, state: ToolCallState, exec_session_id?: ExecSessionId | null, output?: ContentValue | null, output_truncated: boolean, 
+/**
+ * write/edit/apply_patch/delete 等写工具的展示面 unified diff(不进模型上下文;大 diff 走 Ref 外置)。
+ */
+diff?: ContentValue | null, metrics?: ToolMetrics | null, 
 /**
  * edit 类工具对代码的净变更统计(结构化结果,不压进正文)。
  */

@@ -90,8 +90,6 @@ export * from "./types/qaqh/InteractionId";
 export * from "./types/qaqh/InteractionResolution";
 export * from "./types/qaqh/InteractionView";
 export * from "./types/qaqh/InterruptReason";
-export * from "./types/qaqh/LspDto";
-export * from "./types/qaqh/LspServerDto";
 export * from "./types/qaqh/McpDto";
 export * from "./types/qaqh/McpServerDto";
 export * from "./types/qaqh/MemorySnapshot";
