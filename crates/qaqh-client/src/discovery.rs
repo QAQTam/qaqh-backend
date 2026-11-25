@@ -266,47 +266,19 @@ fn spawn_daemon_detached() -> Result<()> {
     spawn_daemon_process(&executable)
 }
 
-/// Process liveness probe — client-side implementation, deliberately distinct
-/// from [`qaqh_types::platform::process_is_running`]: on Windows this one uses
-/// the Win32 API directly (no `tasklist` subprocess latency). On non-Windows it
-/// **delegates** to that same function (`kill -0`).
-/// 曾经这里在非 Windows 上是 `true` 的 stub（注释写「discovery 文件存在即视为
-/// 存活」）。那不是占位符无伤大雅，而是**把一个陈旧 `daemon.json` 变成永久
-/// 砖**：daemon 被 SIGKILL/崩溃/重启后记录仍在，于是
-/// [`ensure_daemon_running`] 与 `Client::connect_async` 的「pid 判活过滤」
-/// 双双通过，客户端拿死端点去连 → `Connection refused`，
+/// Process liveness probe — v4.5 P2-2b 起为
+/// [`qaqh_types::platform::process_is_running`] 的薄转发（全仓单源）。
+/// 这里曾经的 Windows 复制版（同款 `OpenProcess` 直查，但无 RAII、
+/// `ERROR_ACCESS_DENIED` 一律判死）在 types 实现换成原生直查后成为重复
+/// 轮子，已物理删除；判活语义统一以 types 版为准（受保护进程拒绝查询权
+/// 时判**存活**，比旧复制版的静默判死更正确）。
+/// 历史教训（勿回退）：这里曾是非 Windows 恒 `true` 的 stub（注释写
+/// 「discovery 文件存在即视为存活」）。那不是占位符无伤大雅，而是
+/// **把一个陈旧 `daemon.json` 变成永久砖**：daemon 被 SIGKILL/崩溃/重启后
+/// 记录仍在，于是 [`ensure_daemon_running`] 与 `Client::connect_async` 的
+/// 「pid 判活过滤」双双通过，客户端拿死端点去连 → `Connection refused`，
 /// **且永不回退到拉起 daemon**。任何 shell 都得手工删文件才恢复（真机复现：
 /// 记录 pid 已死、端口无人监听，TUI 仍直连该端口报错）。
-#[cfg(windows)]
-#[allow(unsafe_code)]
-pub fn process_is_running(pid: u32) -> bool {
-    // SAFETY: 仅申请 PROCESS_QUERY_LIMITED_INFORMATION 查询权；pid 无效时
-    // 返回 null，由下方检查后走 false 路径。
-    let handle = unsafe {
-        windows_sys::Win32::System::Threading::OpenProcess(
-            windows_sys::Win32::System::Threading::PROCESS_QUERY_LIMITED_INFORMATION,
-            0,
-            pid,
-        )
-    };
-    if handle.is_null() {
-        return false;
-    }
-    // SAFETY: handle 来自上方 OpenProcess 成功路径（非 null），且只写出
-    // 一个 u32 到栈上变量。
-    let exit_code = unsafe {
-        let mut code: u32 = 0;
-        windows_sys::Win32::System::Threading::GetExitCodeProcess(handle, &mut code);
-        code
-    };
-    // SAFETY: 关闭本函数自己打开的 handle，之后不再使用。
-    unsafe {
-        let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
-    }
-    exit_code == 259 // STILL_ACTIVE
-}
-
-#[cfg(not(windows))]
 pub fn process_is_running(pid: u32) -> bool {
     qaqh_types::platform::process_is_running(pid)
 }

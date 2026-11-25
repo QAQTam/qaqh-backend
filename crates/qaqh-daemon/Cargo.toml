@@ -36,6 +36,9 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = { workspace = true }
 hex = { workspace = true }
 tempfile = { workspace = true }
+# v4.5 P2-2b（plan §三.5）：zed_integration 的 JSONC 解析/编辑单源（CST 一等
+# 编辑 API，替换基线 480 行手写状态机；features 在根 workspace 声明处统一）。
+jsonc-parser = { workspace = true }
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.7", features = ["trace", "fs", "limit", "cors", "set-header", "util"] }
 tokio-stream = "0.1"

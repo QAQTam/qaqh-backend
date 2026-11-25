@@ -4,10 +4,14 @@
 //! 与"远端 daemon 不得碰本机文件"的边界不冲突:远端场景走不到这个 flag。
 //!
 //! Zed 的 settings.json 是 JSONC(允许注释/尾逗号)。这里做**注释保留的
-//! 文本级拼接**,绝不整文件重排:语义判断用注释剥离后的解析结果,修改只
-//! 落在定位到的插入/替换点;写回前留一份 `.qaqh-bak`。
+//! 增量编辑**,绝不整文件重排:v4.5 P2-2b 起解析与拼接交给
+//! `jsonc-parser` 的 CST(基线 480 行手写状态机物理删除),改动只落在
+//! `append`/`set_value` 命中的节点;写回前留一份 `.qaqh-bak`。
 
 use std::path::{Path, PathBuf};
+
+use jsonc_parser::cst::{CstInputValue, CstObjectProp, CstRootNode};
+use jsonc_parser::ParseOptions;
 
 /// `agent_servers` 里我们的条目键(Zed 新线程菜单里的显示名)。
 const AGENT_KEY: &str = "QAQHarness";
@@ -53,12 +57,15 @@ pub fn settings_path() -> Option<PathBuf> {
 }
 
 /// 期望的条目 wire 形态。`command` 用正斜杠(Zed Windows 接受,免去转义)。
-fn desired_entry(command: &str) -> serde_json::Value {
-    serde_json::json!({
-        "type": "custom",
-        "command": command,
-        "args": ["acp"],
-    })
+fn desired_entry(command: &str) -> CstInputValue {
+    CstInputValue::Object(vec![
+        ("type".to_owned(), CstInputValue::String("custom".to_owned())),
+        ("command".to_owned(), CstInputValue::String(normalize(command))),
+        (
+            "args".to_owned(),
+            CstInputValue::Array(vec![CstInputValue::String("acp".to_owned())]),
+        ),
+    ])
 }
 
 fn normalize(path: &str) -> String {
@@ -67,7 +74,11 @@ fn normalize(path: &str) -> String {
 
 /// 手动接入提示(找不到 Zed 配置目录时的出路)。
 fn manual_snippet(command: &str) -> String {
-    let entry = serde_json::to_string_pretty(&desired_entry(command)).expect("entry json");
+    // 序列化同样交给 CST(空文档 set_value 后的 pretty 输出),
+    // `desired_entry` 保持全文件唯一形状源。
+    let scratch = CstRootNode::parse("", &jsonc_options()).expect("空文本必可解析");
+    scratch.set_value(desired_entry(command));
+    let entry = scratch.to_string();
     format!(
         "{{\n  \"agent_servers\": {{\n    \"{AGENT_KEY}\": {}\n  }}\n}}",
         indent(&entry, 6)
@@ -122,409 +133,96 @@ pub fn install(command_exe: &Path) -> Result<String, String> {
     })
 }
 
-// ────────────────────────── JSONC 扫描与拼接 ──────────────────────────
+// ──────────────────── JSONC 编辑（jsonc-parser CST） ────────────────────
+//
+// 基线在此手写的词法分类(Class/classify)、注释剥离(strip_comments)、
+// 字节区间定位(top_level_close/member_value_span)、逗号试探(needs_comma)
+// 与拼接全部物理删除:注释/空白的**逐字节保留**、尾逗号风格跟随、增量
+// 写回改由 `jsonc-parser` 的 CST(一等编辑 API)承担。
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Class {
-    Code,
-    Str,
-    LineComment,
-    BlockComment,
+/// Zed 设置 = 标准 JSONC:允许注释与尾逗号,其余严格 JSON(fail-closed)。
+/// dprint jsonc-parser 的默认 `ParseOptions` 极宽松(单引号、十六进制、
+/// 缺逗号等 JSON5 行为全开),逐项收紧到与旧实现剥离注释后交给
+/// `serde_json` 的严格 JSON 面一致。
+fn jsonc_options() -> ParseOptions {
+    ParseOptions {
+        allow_comments: true,
+        allow_trailing_commas: true,
+        allow_loose_object_property_names: false,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+        allow_bare_decimal_point_numbers: false,
+        allow_non_finite_numbers: false,
+        allow_extended_string_escapes: false,
+    }
 }
 
-/// 逐**字节**分类 JSONC 文本(字符串/行注释/块注释)。全部扫描器都以字节
-/// 偏移工作:结构字符全是 ASCII,多字节内容只出现在字符串/注释体内,逐字
-/// 节标注即可,注释里的非 ASCII 不会错位。
-fn classify(text: &str) -> Vec<Class> {
-    let bytes = text.as_bytes();
-    let mut classes = Vec::with_capacity(bytes.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut index = 0;
-    while index < bytes.len() {
-        let byte = bytes[index];
-        if in_string {
-            if escaped {
-                escaped = false;
-                classes.push(Class::Str);
-            } else {
-                match byte {
-                    b'\\' => {
-                        escaped = true;
-                        classes.push(Class::Str);
-                    }
-                    // 收尾引号标 Code(与开引号对称):扫描器才能确定字面量
-                    // 边界,content 切片 = (开引号, 收尾引号) 半开区间。
-                    b'"' => {
-                        in_string = false;
-                        classes.push(Class::Code);
-                    }
-                    _ => classes.push(Class::Str),
-                }
-            }
-            index += 1;
-            continue;
-        }
-        match byte {
-            b'"' => {
-                in_string = true;
-                classes.push(Class::Code);
-                index += 1;
-            }
-            b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'/' => {
-                classes.push(Class::LineComment);
-                classes.push(Class::LineComment);
-                index += 2;
-                while index < bytes.len() {
-                    let line_end = bytes[index] == b'\n';
-                    classes.push(if line_end {
-                        Class::Code
-                    } else {
-                        Class::LineComment
-                    });
-                    index += 1;
-                    if line_end {
-                        break;
-                    }
-                }
-            }
-            b'/' if index + 1 < bytes.len() && bytes[index + 1] == b'*' => {
-                classes.push(Class::BlockComment);
-                classes.push(Class::BlockComment);
-                index += 2;
-                while index < bytes.len() {
-                    if bytes[index] == b'*' && index + 1 < bytes.len() && bytes[index + 1] == b'/' {
-                        classes.push(Class::BlockComment);
-                        classes.push(Class::BlockComment);
-                        index += 2;
-                        break;
-                    }
-                    classes.push(Class::BlockComment);
-                    index += 1;
-                }
-            }
-            _ => {
-                classes.push(Class::Code);
-                index += 1;
-            }
-        }
-    }
-    classes
-}
-
-/// 注释整体替换为空格(换行保留),字符串原样;顺带**去掉尾逗号**(JSONC
-/// 合法、严格 JSON 非法):得到可被 serde_json 解析的纯 JSON 分析视图。
-/// 字节数不变,类数组与输出仍一一对应。
-fn strip_comments(text: &str, classes: &[Class]) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    for (index, &byte) in bytes.iter().enumerate() {
-        out.push(match classes.get(index).copied().unwrap_or(Class::Code) {
-            Class::LineComment | Class::BlockComment => {
-                if byte == b'\n' {
-                    b'\n'
-                } else {
-                    b' '
-                }
-            }
-            _ => byte,
-        });
-    }
-    // 尾逗号:`,` 后跳过空白,紧跟 `}`/`]` → 替换为空格。
-    for index in 0..out.len() {
-        if out[index] == b',' && classes.get(index).copied().unwrap_or(Class::Code) == Class::Code {
-            let mut probe = index + 1;
-            while probe < out.len() && out[probe].is_ascii_whitespace() {
-                probe += 1;
-            }
-            if probe < out.len() && (out[probe] == b'}' || out[probe] == b']') {
-                out[index] = b' ';
-            }
-        }
-    }
-    String::from_utf8(out).expect("只做逐字节替换,UTF-8 边界不变")
-}
-
-/// 顶层对象的闭合 `}` 字节偏移(深度 1→0 的位置)。未找到返回 `None`。
-fn top_level_close(text: &str, classes: &[Class]) -> Option<usize> {
-    let bytes = text.as_bytes();
-    let mut depth: usize = 0;
-    for (index, class) in classes.iter().enumerate() {
-        if *class != Class::Code {
-            continue;
-        }
-        match bytes[index] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    return Some(index);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// 在 `[start..end]` 范围(一段 JSON 对象体内)定位键为 `key` 的成员,
-/// 返回其 value 的 `(start, end_inclusive)` 字节偏移。只接受对象的**直接**
-/// 成员(相对深度 0,前置码位为 `{` 或 `,`),避免误命中嵌套/值字符串。
-fn member_value_span(
-    text: &str,
-    classes: &[Class],
-    range: std::ops::Range<usize>,
-    key: &str,
-) -> Option<(usize, usize)> {
-    let bytes = text.as_bytes();
-    let mut depth: usize = 0;
-    let mut index = range.start;
-    while index < range.end {
-        let class = classes.get(index).copied().unwrap_or(Class::Code);
-        if class != Class::Code {
-            index += 1;
-            continue;
-        }
-        match bytes[index] {
-            b'{' | b'[' => {
-                depth += 1;
-                index += 1;
-            }
-            b'}' | b']' => {
-                if depth == 0 {
-                    return None;
-                }
-                depth -= 1;
-                index += 1;
-            }
-            b'"' => {
-                // 读字符串字面量(classify 已把整段标为 Str)。
-                let start = index;
-                index += 1;
-                while index < range.end && classes.get(index) == Some(&Class::Str) {
-                    index += 1;
-                }
-                // 此刻 index 指向收尾引号。
-                let content = std::str::from_utf8(&bytes[start + 1..index])
-                    .expect("字符串字面量边界必是 UTF-8 边界");
-                index += 1;
-                if content != key || depth != 1 {
-                    continue;
-                }
-                // 前置码位必须是对象成员位置(`{` 或 `,`)。首成员时回探越不
-                // 过 range.start(那里是开括号),直接落入后续冒号查找接受——
-                // 相对深度 0 的守卫已保证这是键而非值字符串。
-                let mut probe = start;
-                while probe > range.start {
-                    probe -= 1;
-                    match classes.get(probe).copied().unwrap_or(Class::Code) {
-                        Class::Code if bytes[probe].is_ascii_whitespace() => continue,
-                        Class::Code => {
-                            if bytes[probe] != b'{' && bytes[probe] != b',' {
-                                return None; // 是值字符串,不是成员键
-                            }
-                            break;
-                        }
-                        _ => continue, // 跳过注释
-                    }
-                }
-                // 跳过 ws/注释找 `:`
-                while index < range.end {
-                    match classes.get(index).copied().unwrap_or(Class::Code) {
-                        Class::Code if bytes[index].is_ascii_whitespace() => index += 1,
-                        Class::LineComment | Class::BlockComment => index += 1,
-                        Class::Code if bytes[index] == b':' => break,
-                        _ => return None, // 键后没有冒号,不是成员
-                    }
-                }
-                if index >= range.end {
-                    return None;
-                }
-                index += 1; // 越过 `:`
-                while index < range.end {
-                    match classes.get(index).copied().unwrap_or(Class::Code) {
-                        Class::Code if bytes[index].is_ascii_whitespace() => index += 1,
-                        Class::LineComment | Class::BlockComment => index += 1,
-                        _ => break,
-                    }
-                }
-                let value_start = index;
-                let value_end = match bytes[index] {
-                    b'"' => {
-                        index += 1;
-                        while index < range.end && classes.get(index) == Some(&Class::Str) {
-                            index += 1;
-                        }
-                        index
-                    }
-                    b'{' | b'[' => {
-                        let opener = bytes[index];
-                        let closer = if opener == b'{' { b'}' } else { b']' };
-                        let mut inner: usize = 0;
-                        let mut end = None;
-                        while index < range.end {
-                            if classes.get(index) != Some(&Class::Code) {
-                                index += 1;
-                                continue;
-                            }
-                            if bytes[index] == opener {
-                                inner += 1;
-                            } else if bytes[index] == closer {
-                                inner -= 1;
-                                if inner == 0 {
-                                    end = Some(index);
-                                    break;
-                                }
-                            }
-                            index += 1;
-                        }
-                        end?
-                    }
-                    _ => {
-                        // 原始字面量:number/true/false/null,读到结构边界前。
-                        while index < range.end {
-                            let class = classes.get(index).copied().unwrap_or(Class::Code);
-                            if class == Class::Code
-                                && (bytes[index] == b','
-                                    || bytes[index] == b'}'
-                                    || bytes[index] == b']')
-                            {
-                                break;
-                            }
-                            index += 1;
-                        }
-                        // index 停在边界符上(或范围尾);回退尾随 ws。
-                        while index > value_start
-                            && text.as_bytes()[index - 1].is_ascii_whitespace()
-                        {
-                            index -= 1;
-                        }
-                        index.checked_sub(1)?
-                    }
-                };
-                return Some((value_start, value_end));
-            }
-            _ => index += 1,
-        }
-    }
-    None
-}
-
-/// 在 `at` 之前插入新成员时,是否需要前置逗号(回看跳过 ws/注释)。
-fn needs_comma(text: &str, classes: &[Class], at: usize) -> bool {
-    let bytes = text.as_bytes();
-    let mut probe = at;
-    while probe > 0 {
-        probe -= 1;
-        match classes.get(probe).copied().unwrap_or(Class::Code) {
-            Class::Code if bytes[probe].is_ascii_whitespace() => continue,
-            Class::LineComment | Class::BlockComment => continue,
-            Class::Code => {
-                return bytes[probe] != b',' && bytes[probe] != b'{' && bytes[probe] != b'[';
-            }
-            Class::Str => return true, // 字符串值结尾 → 需要逗号
-        }
-    }
-    false
+/// 条目是否已指向本二进制。与旧实现逐字段一致:type=`custom`、
+/// command 斜杠归一后相等、args 恰为 `["acp"]`。
+fn entry_is_wired(entry: &CstObjectProp, command: &str) -> bool {
+    let Some(value) = entry.value().and_then(|node| node.to_serde_value()) else {
+        return false;
+    };
+    let Some(args) = value.get("args").and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    value.get("type").and_then(serde_json::Value::as_str) == Some("custom")
+        && value
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|existing| normalize(existing) == normalize(command))
+        && args.len() == 1
+        && args.first().and_then(serde_json::Value::as_str) == Some("acp")
 }
 
 /// 把 `command` 指向的本二进制拼进设置文本。纯函数:输入原文,输出新文
-/// 与动作,便于单测覆盖全部拼接分支。
+/// 与动作,便于单测覆盖全部拼接分支。语义判定与定位走 CST 树
+/// (`get`/`object_value`),改动走 `append`/`set_value`,除被编辑节点外
+/// 原文逐字节保留(含注释/空白/尾逗号风格)。
 fn wire_entry(text: &str, command: &str) -> Result<(String, Action), String> {
-    if text.trim().is_empty() {
-        let entry = serde_json::to_string(&desired_entry(command)).expect("entry json");
-        return Ok((
-            format!("{{\n  \"agent_servers\": {{\n    \"{AGENT_KEY}\": {entry}\n  }}\n}}\n"),
-            Action::Inserted,
-        ));
-    }
-    let classes = classify(text);
-    let stripped = strip_comments(text, &classes);
-    let parsed: serde_json::Value = serde_json::from_str(&stripped)
+    let root = CstRootNode::parse(text, &jsonc_options())
         .map_err(|error| format!("settings.json 无法解析(Zed 设置已是病态): {error}"))?;
-    let Some(object) = parsed.as_object() else {
-        return Err("settings.json 顶层不是 JSON 对象".into());
+    let is_new_file = text.trim().is_empty();
+    // 空文件/新建:根无值 → 造对象;非空:根值必须是对象(否则病态,不碰盘)。
+    let Some(root_object) = (if is_new_file {
+        root.object_value_or_create()
+    } else {
+        root.object_value()
+    }) else {
+        return Err("settings.json 顶层不是 JSON 对象".to_owned());
     };
-    let wired = object
-        .get("agent_servers")
-        .and_then(|servers| servers.get(AGENT_KEY))
-        .and_then(|entry| {
-            let command_value = entry.get("command")?.as_str()?;
-            let args = entry.get("args")?.as_array()?;
-            let kind = entry.get("type")?.as_str()?;
-            Some(
-                kind == "custom"
-                    && normalize(command_value) == normalize(command)
-                    && args.len() == 1
-                    && args[0].as_str() == Some("acp"),
-            )
-        })
-        .unwrap_or(false);
-    if wired {
-        return Ok((text.to_owned(), Action::Already));
-    }
-    let entry = serde_json::to_string(&desired_entry(command)).expect("entry json");
-    // 拼接一律走字节:所有边界都是扫描器标出的 ASCII 结构位,`&str` 切片
-    // 形式会被 `-D clippy::string-slice` 拒绝,字节版还顺带免除边界疑虑。
-    let bytes = text.as_bytes();
-    let from_utf8 =
-        |out: Vec<u8>| String::from_utf8(out).expect("只在结构符边界拼接,UTF-8 边界不变");
-    match member_value_span(text, &classes, 0..text.len(), "agent_servers") {
-        Some((value_start, value_end)) => {
-            match member_value_span(text, &classes, value_start..value_end + 1, AGENT_KEY) {
-                Some((existing_start, existing_end)) => {
-                    let mut out = Vec::with_capacity(text.len() + entry.len());
-                    out.extend_from_slice(&bytes[..existing_start]);
-                    out.extend_from_slice(entry.as_bytes());
-                    out.extend_from_slice(&bytes[existing_end + 1..]);
-                    Ok((from_utf8(out), Action::Updated))
+    let action = match root_object.get("agent_servers") {
+        Some(existing) => {
+            let Some(servers) = existing.object_value() else {
+                // 相对基线的**显式行为修正**(ADR-0044 登记):旧扫描器对
+                // 非对象 `agent_servers` 也会拼出坏 JSON 写盘,现 fail-closed。
+                return Err("settings.json 的 agent_servers 不是 JSON 对象(Zed 设置已是病态)".to_owned());
+            };
+            match servers.get(AGENT_KEY) {
+                Some(entry_prop) if entry_is_wired(&entry_prop, command) => {
+                    return Ok((text.to_owned(), Action::Already));
+                }
+                Some(entry_prop) => {
+                    entry_prop.set_value(desired_entry(command));
+                    Action::Updated
                 }
                 None => {
-                    // 插在 agent_servers 对象闭合 `}` 之前(value_end 即该括号)。
-                    let at = value_end;
-                    let comma = if needs_comma(text, &classes, at) {
-                        ", "
-                    } else {
-                        ""
-                    };
-                    let mut out = Vec::with_capacity(text.len() + entry.len() + 4);
-                    out.extend_from_slice(&bytes[..at]);
-                    out.extend_from_slice(comma.as_bytes());
-                    out.extend_from_slice(snippet(&entry).as_bytes());
-                    out.extend_from_slice(&bytes[at..]);
-                    Ok((from_utf8(out), Action::InsertedNested))
+                    servers.append(AGENT_KEY, desired_entry(command));
+                    Action::InsertedNested
                 }
             }
         }
         None => {
-            let close = top_level_close(text, &classes)
-                .ok_or_else(|| "settings.json 找不到顶层对象闭合".to_owned())?;
-            // 插入点顶在最后一个非空白码位之后:逗号贴着前一个成员,
-            // 避免出现"逗号独占一行"的难看结果。
-            let mut insert_at = close;
-            while insert_at > 0 && bytes[insert_at - 1].is_ascii_whitespace() {
-                insert_at -= 1;
-            }
-            let comma = if needs_comma(text, &classes, insert_at) {
-                ","
-            } else {
-                ""
-            };
-            let mut out = Vec::with_capacity(text.len() + entry.len() + 32);
-            out.extend_from_slice(&bytes[..insert_at]);
-            out.extend_from_slice(comma.as_bytes());
-            out.extend_from_slice(b"\n  \"agent_servers\": {\n    ");
-            out.extend_from_slice(snippet(&entry).as_bytes());
-            out.extend_from_slice(b"\n  }");
-            out.extend_from_slice(&bytes[insert_at..]);
-            Ok((from_utf8(out), Action::Inserted))
+            let servers = root_object
+                .object_value_or_create("agent_servers")
+                .expect("agent_servers 成员刚确认不存在,append 建对象必成");
+            servers.append(AGENT_KEY, desired_entry(command));
+            Action::Inserted
         }
-    }
-}
-
-/// 成员片段(嵌套插入用,两格缩进的对齐交给上下文)。
-fn snippet(entry: &str) -> String {
-    format!("\"{AGENT_KEY}\": {entry}")
+    };
+    Ok((root.to_string(), action))
 }
 
 #[cfg(test)]
@@ -534,9 +232,10 @@ mod tests {
     const COMMAND: &str = "C:/qaqh/target/release/qaqh-daemon.exe";
 
     fn parse(text: &str) -> serde_json::Value {
-        let classes = classify(text);
-        serde_json::from_str(&strip_comments(text, &classes))
-            .expect("拼接结果剥离注释后必须仍是合法 JSON")
+        CstRootNode::parse(text, &jsonc_options())
+            .expect("拼接结果必须仍是合法 JSONC")
+            .to_serde_value()
+            .expect("拼接结果顶层必有值")
     }
 
     #[test]

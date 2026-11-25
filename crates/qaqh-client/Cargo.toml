@@ -39,9 +39,6 @@ shell-stream = ["dep:base64", "dep:tokio-tungstenite"]
 name = "shell_stream_e2e"
 required-features = ["shell-stream"]
 
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading"] }
-
 # TLS provider 按 target 分治（ADR-0039）：host/桌面/服务端全图单一栈 aws-lc-rs；
 # 仅 OHOS target 保留 ring——aws-lc-sys 无法在 OHOS 交叉工具链下构建（历史实测，
 # 见 src/client.rs `ensure_crypto_provider` 文档）。

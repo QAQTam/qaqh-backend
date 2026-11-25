@@ -20,6 +20,14 @@ chrono = { workspace = true }
 dunce = { workspace = true }
 tempfile = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+# v4.5 P2-2b（L-27）：`process_is_running` 的 OpenProcess/GetExitCodeProcess 直查。
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+# v4.5 P2-2b（L-27）：`process_is_running` 的 kill(pid, 0) 存活/权限探测。
+libc = { workspace = true }
+
 [features]
 # web 端 TS 类型生成（ts-rs，单一真相）：config-revamp C1 同款 feature-gate，默认关
 ts = ["dep:ts-rs"]

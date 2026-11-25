@@ -75,6 +75,7 @@
 | [0041](0041-qaqh-gitx-worktree.md) | qaqh-gitx:工作区 git 消费(`gitx.snapshot`)与 linked-worktree 会话隔离(`worktree_list/create/remove/bind/unbind`,注册表+owner CAS,双锚点) | 已采纳并落 main(自 LTS-v4.1 e8d6ae6d 移植,ADR 顺延改号 0033→0041 防与 AgentTeam 撞号;wire `qaqh.ringing.gitx/v1` additive;金标准重切随 v4.2 批次) |
 | [0042](0042-ringing-v3-rust-native-ipc-and-quic.md) | RingingV3：Rust Native 二进制多路流（`postcard` + 本地 Named Pipe/UDS `yamux` + 远端纯 QUIC `quinn`），冻结 `ADR-0008` C# 投影演进并规划 `v4.8` 物理删除旧 HTTP+SSE+WS 控制面 | 已采纳 · 未实施（2026-11-25 所有者拍板：默认前端切 `../qaqh-gpui`，远端走纯 QUIC 不套 HTTP/3，拒绝 V2/V3 双栈转换层） |
 | [0043](0043-p2-2a-handrolled-wheel-replacements.md) | v4.5 P2-2a：基础设施手写轮子清剿——Base64→`base64`、sha256 hex 循环→`hex`、固定 `.tmp` 原子写/`MoveFileExW` FFI→`tempfile::NamedTempFile::persist`、`\\?\` 剥离→`dunce`、词法归一→`path-clean`、civil_from_days→`chrono`、伪 ULID→`ulid`；含 plan 文本三条事实偏差登记与反证红→绿实录 | 已采纳 · 本批同落（v4.5 P2-2a PR） |
+| [0044](0044-p2-2b-openprocess-and-jsonc-cst.md) | v4.5 P2-2b：系统级/重型手写轮子退役——`process_is_running` 的 tasklist/kill 子进程派生（L-27）换 `OpenProcess`+`GetExitCodeProcess` RAII / `libc::kill(pid,0)` 原生直查并收编 client 复制版单源、zed_integration 404 行手写 JSONC 状态机换 `jsonc-parser`(dprint) CST 一等编辑；含 types unsafe 闸门 forbid→deny 有界放宽、plan 四条偏差与净删目标未达成如实登记 | 已采纳 · 本批同落（v4.5 P2-2b PR） |
 
 ## 阅读顺序
 

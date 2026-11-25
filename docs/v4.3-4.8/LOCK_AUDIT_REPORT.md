@@ -133,7 +133,7 @@
 | L-24 | mcp 代际竞态+重拉无去抖；lsp watchdog 空转/begin_call 无闸 | mcp/connection.rs:949-952/979-982、manager.rs:166-180、connection.rs:793-806；lsp/connection.rs:525-526/206-211 | 旧 conn 按名 remove 误删新代 CONN_NOTIFY/取走新代 pid（窗口窄）；server spam list_changed 在 2-worker 专属 RT 堆无界重拉。注册随连接代所有权化；重拉单飞；watchdog return；begin_call 补闸 | 3（小修可先行） |
 | L-25 | PREFLIGHT 残留微扰 | sandbox/preflight.rs:253/309（is_process_elevated 持锁 Win32）、state_slot 初始化 detect（Linux bwrap 两次子进程 capability.rs:183/204-213） | 自死锁已消除（见总判定 1）；初始化经只读分派面发生在 worker。elevated 预计算挪锁外；分派面随 L-01 同刀；Linux 冷初始化可懒到后台 | 4 |
 | L-26 | DAEMON_SPAWN_GUARD 持锁同步探测 | client/client.rs:1087/1098-1112 | tokio Mutex，guard 不跨 await（握手等待在放锁后 ✓）；临界区含 TCP 探测≤300ms+CreateProcess+fs 读，全在 worker。决策段 spawn_blocking；同步版 ensure_daemon_running 不取 guard（靠 daemon.lock 兜底，注释明示） | 4 |
-| L-27 | tasklist.exe `.output()` 无超时 | types/platform.rs:413-438（Win 分支 :418-420） | 后代持管道写端 ⇒ EOF 永不来（registry/mod.rs:145-153 注记 BUG-2026-09-15-02 同款）。调用方仅启动期 main.rs:194 与客户端 discovery.rs:311，不在 async 热路径。换 OpenProcess 直查（与 MUST P2-2⑥ 重合，可先行） | 1（小改） |
+| L-27 | tasklist.exe `.output()` 无超时 | types/platform.rs:413-438（Win 分支 :418-420） | 后代持管道写端 ⇒ EOF 永不来（registry/mod.rs:145-153 注记 BUG-2026-09-15-02 同款）。调用方仅启动期 main.rs:194 与客户端 discovery.rs:311，不在 async 热路径。换 OpenProcess 直查（与 MUST P2-2⑥ 重合，可先行）**——已清零（v4.5 P2-2b：`OpenProcess`+`GetExitCodeProcess` RAII / `libc::kill(pid,0)` 直查，client 复制版同刀收编单源，反证 756.3µs→1.1µs，见 ADR-0044）** | 1（小改）· 已修 |
 | L-28 | wait_agent 长占 blocking pool | runtime/host_impl.rs:650-695 | 25ms sleep 轮询+每目标 read_blocking，超时可达分钟级；经 spawn_blocking 执行不钉 worker，但挤占 db.read 的 blocking 池。改 async 轮询+快照读 | 2/3 |
 | L-29 | GLOBAL_TRUSTED worker 持锁文件写 | workspace/authorization.rs:558/562；session_loop.rs:1540（async fn 内 trust_folder） | 惰性 load+trust save 持锁 fs IO；Persistent 批准低频。调用点 spawn_blocking（一行级）；信任集随会话实例走 | 3（随 P1-2） |
 | L-30 | session_hooks trust 持锁写文件 | agent-runtime/session_hooks.rs:132-134 | ToolPermissionRespond(trust_folder)→registry 锁→respond_permission→持锁写盘（worker）。写盘挪锁外 | 4 |
@@ -340,7 +340,8 @@ lsp：conns → conn.state（evict_recycled_conns, manager.rs:343）唯一嵌套
 - **已消除**：`TODO_LOCK`（#35）、quota 无超时 file.lock/全量 replay/逐条 fsync（#35）、
   devices/receipts 全量覆写账本（#35）、`SessionManager` 野生文件句柄（#35）、
   L-07/L-08/L-09（#32）、L-22（#33）、L-01 复合停摆控制面路径（#30/#31）、
-  per-session OS 线程（#34）、结果侧二次 JSON 往返（#36/#37）。
+  per-session OS 线程（#34）、结果侧二次 JSON 往返（#36/#37）、
+  L-27（tasklist.exe/kill 子进程派生 → OpenProcess/libc 原生直查，v4.5 P2-2b · ADR-0044）。
 - **`OnceLock<Arc<dyn Host>>` 槽（§P2-1）**：v4.4 按既有先例新增 **TodoHost** 同款槽
   （#35，端口化接 SQLite 的定案，理由见 PR 正文）——P2-1 消除清单现为
   GoalHost/SubagentHost/GitxHost/**TodoHost** 四件套，v4.5 一并处置。
@@ -348,7 +349,7 @@ lsp：conns → conn.state（evict_recycled_conns, manager.rs:343）唯一嵌套
   （`OwnerDirectory::take_session` 接线 + 回归测试）；`take_session` 只摘目录条目，
   不触碰 audit/journal 面。
 - **未动项**（顺延 v4.5，逐项处置见 `V4_4_EXECUTION_PLAN.md` §六）：
-  L-13/L-15/L-16/L-21/L-23/L-27/L-29；`audit v1/v2` 与 `JOURNAL_IO` 按所有者裁定
+  L-13/L-15/L-16/L-21/L-23/L-29（L-27 已于 P2-2b 清零）；`audit v1/v2` 与 `JOURNAL_IO` 按所有者裁定
   未在 P1-3 收编。
 
 ---

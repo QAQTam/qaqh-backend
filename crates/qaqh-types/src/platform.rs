@@ -410,45 +410,85 @@ pub fn resolve_command_path(command: &str) -> PathBuf {
 }
 
 /// Return whether a process id currently exists without mutating it.
+///
+/// v4.5 P2-2b（L-27 清零）：本函数**零子进程派生**——旧实现 Windows 派生
+/// `tasklist`（单次 ~150ms，且后代持管道写端时 `.output()` 永不等不到 EOF，
+/// 即 `LOCK_AUDIT_REPORT.md` L-27 记的 BUG-2026-09-15-02 同款病灶）、Unix 派生
+/// `kill -0`（每次 fork+exec 毫秒级）。现 Windows 走
+/// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` + `GetExitCodeProcess`
+/// 直查（`STILL_ACTIVE` = 存活；`ERROR_ACCESS_DENIED` = 进程对象存在但
+/// 无权查询，判存活），Unix 走 `libc::kill(pid, 0)` 系统调用（返回 0 或
+/// `EPERM` = 存活；`ESRCH` = 判死，其余 errno fail-closed 判死）。
+/// 单次 ~1µs 由 `tests/p22b_process_probe.rs` 的 100 次均值 <50µs 反证钉死。
+#[cfg(windows)]
+#[allow(unsafe_code)] // crate 级 deny(unsafe_code)；本函数的 FFI 块逐块 SAFETY 注释。
+pub fn process_is_running(pid: u32) -> bool {
+    use std::os::windows::io::RawHandle;
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    if pid == 0 {
+        return false;
+    }
+
+    /// RAII：构造即取得所有权，Drop 保证 `CloseHandle`，任何早退路径不泄句柄。
+    struct HandleGuard(RawHandle);
+
+    impl Drop for HandleGuard {
+        fn drop(&mut self) {
+            // SAFETY: 包装的句柄只来自 `OpenProcess` 成功分支（非空、本函数
+            // 自开、无第二持有者），Drop 后原值不再被使用。
+            let _closed = unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    // SAFETY: `OpenProcess` 是纯查询——只申请 PROCESS_QUERY_LIMITED_INFORMATION、
+    // 不继承句柄（第二个参数 FALSE）；pid 不存在时返回空句柄，不写任何内存。
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        // 打开失败：ERROR_ACCESS_DENIED 说明进程对象存在（仅查询权被拒）→ 存活；
+        // 其余（如 ERROR_INVALID_PARAMETER：pid 不存在或已回收）→ 判死。
+        // 判死是**正常路径**（陈旧 discovery、进程已退出），与旧实现一致静默。
+        // SAFETY: `GetLastError` 读调用线程自身的末错码，无内存解引用。
+        return unsafe { GetLastError() } == ERROR_ACCESS_DENIED;
+    }
+    let guard = HandleGuard(handle);
+    let mut exit_code: u32 = 0;
+    // SAFETY: guard.0 是本函数刚打开且未失效的进程句柄；`&mut exit_code` 是
+    // 栈上 u32 的可写指针，GetExitCodeProcess 只写这一个 u32。
+    let queried = unsafe { GetExitCodeProcess(guard.0, std::ptr::addr_of_mut!(exit_code)) };
+    if queried == 0 {
+        // fail-closed：查询失败不猜测。持有 QUERY_LIMITED 权时理论上不可达。
+        return false;
+    }
+    // STILL_ACTIVE = 259（`windows_sys` 以 NTSTATUS 暴露，退出码面是 u32）。
+    exit_code == STILL_ACTIVE as u32
+}
+
+/// 非 Windows 版语义与 [`process_is_running`] 的 Windows 版逐条对齐：
+/// 零子进程、fail-closed。`cfg(windows)` 面在本仓 Linux 宿主仅经
+/// `x86_64-pc-windows-msvc` 交叉 `cargo check` 自证（未真机验，宪法 #13）。
+#[cfg(not(windows))]
+#[allow(unsafe_code)] // crate 级 deny(unsafe_code)；下方 libc 块带 SAFETY 注释。
 pub fn process_is_running(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    if cfg!(target_os = "windows") {
-        background_command("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
-            .output()
-            .ok()
-            .filter(|output| output.status.success())
-            .is_some_and(|output| {
-                String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-                    line.split(',')
-                        .nth(1)
-                        .is_some_and(|field| field.trim_matches('"').trim() == pid.to_string())
-                })
-            })
-    } else {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            // 判死是**正常路径**（陈旧 discovery、进程已退出），不是异常：
-            // kill 的 `没有那个进程` 不该漏进调用方的 stderr。
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
+    let Ok(native) = <libc::pid_t>::try_from(pid) else {
+        // 超出平台 pid_t 值域：不可能是活进程，fail-closed 判死。
+        return false;
+    };
+    // SAFETY: `kill(pid, 0)` 不发信号，仅做存在性/权限检查；入参是值类型
+    // pid_t，libc 不解引用任何指针。
+    if unsafe { libc::kill(native, 0) } == 0 {
+        return true;
     }
-}
-
-fn background_command(program: &str) -> std::process::Command {
-    // mut 仅为 Windows 分支的 creation_flags 所需；非 Windows 平台无后续可变使用。
-    #[cfg_attr(not(target_os = "windows"), allow(unused_mut))]
-    let mut command = std::process::Command::new(program);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
+    // EPERM：进程存在但当前 uid 无权发信号 → 存活；ESRCH 及其余 errno → 判死。
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 /// 剥离 Windows verbatim（`\\?\`）前缀的**全仓单源**（v4.5 P2-2a，plan §三.4-4）。
