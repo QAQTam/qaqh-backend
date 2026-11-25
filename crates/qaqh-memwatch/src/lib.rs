@@ -39,7 +39,7 @@ impl ComponentGroup {
             Some(("ringing", _)) => Self::Ringing,
             Some(("agent_registry", _)) => Self::AgentRegistry,
             Some(("service", _)) => Self::Service,
-            Some(("mcp" | "lsp", _)) => Self::Transport,
+            Some(("mcp", _)) => Self::Transport,
             Some(("workspace", _)) => Self::Workspace,
             _ => Self::Other,
         }
@@ -612,10 +612,6 @@ mod tests {
         );
         assert_eq!(
             ComponentGroup::classify("mcp.connections"),
-            ComponentGroup::Transport
-        );
-        assert_eq!(
-            ComponentGroup::classify("lsp.connections"),
             ComponentGroup::Transport
         );
         assert_eq!(

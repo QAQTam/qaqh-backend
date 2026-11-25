@@ -40,8 +40,6 @@ pub struct ConfigDto {
     pub goals: GoalsDto,
     /// MCP 客户端配置（Phase 1 只读；写模型随 workspace 隔离权限重构另立）。
     pub mcp: McpDto,
-    /// LSP 客户端配置（M1 只读；写模型另立）。
-    pub lsp: LspDto,
     /// exec 工具默认执行配置（热字段；`exec.default_shell` 被 exec 真正消费）。
     pub exec: ExecDto,
     /// 沙箱执行配置（读模型）。
@@ -116,32 +114,6 @@ pub struct McpServerDto {
     pub max_concurrent_calls: u32,
     /// stdio 子进程工作目录；空 = 继承 daemon 进程 cwd。
     pub cwd: String,
-}
-
-/// LSP 客户端配置读模型。
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LspDto {
-    pub enabled: bool,
-    pub idle_shutdown_secs: u64,
-    /// 按 server 名排序（BTreeMap → Vec，确定性 wire 顺序）。
-    pub servers: Vec<LspServerDto>,
-}
-
-/// 单个 LSP server 读模型。
-#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export, export_to = "qaqh/"))]
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LspServerDto {
-    pub name: String,
-    pub command: String,
-    pub args: Vec<String>,
-    /// 原样回显（值可为 `${secret:name}` 占位符；secret 本体在 secrets.toml）。
-    pub env: std::collections::BTreeMap<String, String>,
-    pub extensions: Vec<String>,
-    pub startup_timeout_secs: u64,
-    pub default_timeout_secs: u64,
 }
 
 /// 写模型：JSON Merge Patch（K3）。反序列化时缺失即 None = 不动；
@@ -298,7 +270,6 @@ mod tests {
             "notificationsEnabled": true,
             "goals": { "enabled": true, "maxTokenBudget": null },
             "mcp": { "enabled": false, "idleShutdownSecs": 300, "servers": [] },
-            "lsp": { "enabled": false, "idleShutdownSecs": 600, "servers": [] },
             "exec": { "defaultShell": "bash" },
             "sandbox": { "enabled": true },
             "sessionIdleUnloadSecs": 900,
@@ -313,7 +284,7 @@ mod tests {
         assert_eq!(dto.exec.default_shell.as_deref(), Some("bash"));
         assert!(dto.sandbox.enabled);
         assert_eq!(dto.session_idle_unload_secs, 900);
-        assert!(!dto.mcp.enabled && !dto.lsp.enabled);
+        assert!(!dto.mcp.enabled);
     }
 
     /// K3：空 Patch 序列化为 `{}`——wire 上不发 null、不发未改动字段。

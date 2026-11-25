@@ -8,7 +8,6 @@ this table.
 | Read a file or range | `read` | Lines are `L{n}: content`; strip the prefix for edits. |
 | Find files | `glob` | Gitignore-aware; narrow the pattern if truncated. |
 | Search contents | `grep` | Uses ripgrep; case-insensitive by default. |
-| Resolve a symbol | `lsp` | Prefer over grep when a server is attached. |
 | Create/replace | `write` | Returns a receipt; stale files must be re-read. |
 | Exact replacement | `edit` | `old_string` must occur once unless `replace_all`. |
 | Codex patch | `apply_patch` | First context hit; partial application possible. |

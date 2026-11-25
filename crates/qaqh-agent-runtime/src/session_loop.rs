@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::Duration;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use qaqh_ringing::ConversationSendMessage;
@@ -97,8 +97,6 @@ pub struct SessionLoop {
     /// MCP 动态层投影代数游标:0 = 本会话尚未播种(manager 构造即第 1 代,
     /// 首轮必拉到批次);此后仅在代数变化时重建目录。
     mcp_projection_gen: AtomicU64,
-    /// `lsp` 聚合工具已并入本会话动态层。
-    lsp_projection_seeded: AtomicBool,
     /// ADR-0014：终态通知端口（registry 注入；未注入 = 不回传）。
     terminal_port: RwLock<Option<TurnTerminalPort>>,
     /// ADR-0038：生命周期 hooks(None = 无 hook 声明,零开销直通)。
@@ -214,7 +212,6 @@ impl SessionLoop {
             }),
             last_activity_ms: AtomicU64::new(unix_now_ms().max(0) as u64),
             mcp_projection_gen: AtomicU64::new(0),
-            lsp_projection_seeded: AtomicBool::new(false),
             terminal_port: RwLock::new(None),
             hooks: RwLock::new(None),
             workspace_resolver: RwLock::new(None),
@@ -2762,32 +2759,17 @@ impl SessionLoop {
             .clone()
     }
 
-    /// 回合边界 MCP/LSP 动态层投影(设计 §5.3;34e971cb 埋葬旧 agentloop 时
+    /// 回合边界 MCP 动态层投影(设计 §5.3;34e971cb 埋葬旧 agentloop 时
     /// 丢失、此处复活的那根线)。代数游标各会话自持:代数变化才取批次重建,
     /// 目录未动时 spec 逐字节不变。
     fn refresh_dynamic_projections(&self) {
         let generation = qaqh_mcp::projection_generation();
-        let mcp_changed = generation != self.mcp_projection_gen.load(Ordering::Relaxed);
-        // clear_dynamic 会连 `lsp` 聚合工具一起清掉,MCP 重建当轮必须带上 LSP 层。
-        let lsp_needed = mcp_changed || !self.lsp_projection_seeded.load(Ordering::Relaxed);
-        let lsp_batch = if lsp_needed {
-            qaqh_lsp::take_projection_batch()
-        } else {
-            None
-        };
-        if !mcp_changed && lsp_batch.is_none() {
-            // MCP 无新代数、LSP 未启用:目录不动,不产生任何重建(spec 稳定)。
+        if generation == self.mcp_projection_gen.load(Ordering::Relaxed) {
             return;
         }
-        let mcp_batch = mcp_changed.then(qaqh_mcp::projection_batch);
-        let lsp_applied = lsp_batch.is_some();
-        let defs = self.port.apply_dynamic_projection(mcp_batch, lsp_batch);
-        if mcp_changed {
-            self.mcp_projection_gen.store(generation, Ordering::Relaxed);
-        }
-        if lsp_applied {
-            self.lsp_projection_seeded.store(true, Ordering::Relaxed);
-        }
+        let mcp_batch = Some(qaqh_mcp::projection_batch());
+        let defs = self.port.apply_dynamic_projection(mcp_batch);
+        self.mcp_projection_gen.store(generation, Ordering::Relaxed);
         self.rebuild_spec_tools(defs);
     }
 

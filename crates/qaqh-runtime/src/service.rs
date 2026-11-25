@@ -58,9 +58,6 @@ impl QaqhService {
         // 禁用配置时 manager 以
         // disabled 形态拒绝一切调用（MCP_DISABLED）。
         qaqh_mcp::install_manager(qaqh_mcp::McpManager::new(config.mcp.clone()));
-        // LSP manager 装配（；与 MCP 同款单例；
-        // 默认关闭——enabled=false 时 disabled 形态拒一切调用 LSP_DISABLED）。
-        qaqh_lsp::install_manager(qaqh_lsp::LspManager::new(config.lsp.clone()));
         // [exec.env] 子进程 env 注入面：启动铺底（解析 `${secret:name}` 后写入
         // process-tools 覆盖层，exec/PTY 各 spawn 组装点消费）；热重载订阅在
         // 下方 tokio 守卫内接线。
@@ -73,7 +70,6 @@ impl QaqhService {
         // 等同步调用方跳过——热重载只对长驻 daemon 有意义）。
         if tokio::runtime::Handle::try_current().is_ok() {
             spawn_mcp_reloader();
-            spawn_lsp_reloader();
             spawn_config_file_poller();
             spawn_exec_env_reloader();
         }
@@ -329,19 +325,6 @@ impl QaqhService {
             name: "mcp.connections".into(),
             item_count: mcp_connections.len() as u64,
             payload_bytes: Some(mcp_name_bytes),
-            heap_estimate_bytes: None,
-            ..Default::default()
-        });
-        component_count += 1;
-        let lsp_connections = qaqh_lsp::manager_slot().connections();
-        let lsp_name_bytes = lsp_connections
-            .iter()
-            .map(|connection| connection.server().len() as u64)
-            .sum();
-        monitor.update_component(qaqh_memwatch::ComponentMemory {
-            name: "lsp.connections".into(),
-            item_count: lsp_connections.len() as u64,
-            payload_bytes: Some(lsp_name_bytes),
             heap_estimate_bytes: None,
             ..Default::default()
         });
@@ -1016,30 +999,6 @@ async fn reload_loop<F, Fut>(
         };
         on_publish(published).await;
     }
-}
-
-/// P2-1 同款：`[lsp]` 热重载——新配置与 manager 当前配置不等 →
-/// `apply_config` diff 保连。LSP 无外部源重扫（只认手写面）。
-fn spawn_lsp_reloader() {
-    let rx = qaqh_config::watch::subscribe();
-    tokio::spawn(async move {
-        reload_loop(rx, |published| async move {
-            let manager = qaqh_lsp::manager_slot();
-            if published.lsp == manager.config() {
-                return; // 非 [lsp] 段变更：与 LSP 无关，跳过
-            }
-            let report = manager.apply_config(published.lsp.clone()).await;
-            log::info!(
-                "[lsp] hot-reload applied (added={:?} updated={:?} removed={:?} kept={} conn)",
-                report.added,
-                report.updated,
-                report.removed,
-                report.kept.len()
-            );
-        })
-        .await;
-        log::warn!("[lsp] hot-reload watcher channel closed; exiting");
-    });
 }
 
 /// `[exec.env]` → 子进程 env 覆盖层：解析 `${secret:name}`（secrets.toml

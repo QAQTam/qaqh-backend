@@ -11,7 +11,6 @@ qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
 qaqh-config = { path = "../qaqh-config" }
 qaqh-config-api = { path = "../qaqh-config-api" }
 qaqh-mcp = { path = "../qaqh-mcp" }
-qaqh-lsp = { path = "../qaqh-lsp" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 # schema feature：gitx 工具的 Args/Output schema 从契约类型派生（ADR-0008 形状权威）。
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract", features = ["schema"] }

@@ -107,9 +107,6 @@ fn main() {
                 // → 子进程组杀兜底；必须显式调用——进程 exit 路径不跑 Drop，
                 // 跳过则 MCP server 子进程成孤儿。
                 qaqh_mcp::shutdown_global().await;
-                // L-08：LSP 同一等义务（放在 MCP 之后：lsp 收尾里有 L-09 的
-                // 限时硬顶，不会把退出路径挂死）。
-                qaqh_lsp::shutdown_global().await;
                 result
             });
             if let Err(error) = result {
@@ -123,11 +120,8 @@ fn main() {
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(async {
                 let result = qaqh_acp::run_stdio().await;
-                // L-08：acp 分支曾被漏掉的两个收尾（stdio 桥同样会装配会话面，
-                // 否则被 Zed 拉起的桥进程退出时 MCP 与 LSP 子进程全部留成孤儿）。
                 // P1-1 后与 server/run 分支同形：在宿主 runtime 内 await。
                 qaqh_mcp::shutdown_global().await;
-                qaqh_lsp::shutdown_global().await;
                 result
             });
             if let Err(error) = result {
@@ -164,10 +158,9 @@ fn main() {
             let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
             let result = runtime.block_on(async {
                 let result = server::run().await;
-                // MCP/LSP 优雅收尾（同上）：显式 shutdown_all 防子进程孤儿，
+                // MCP 优雅收尾（同上）：显式 shutdown_all 防子进程孤儿，
                 // 且必须在宿主 runtime 仍被驱动时 await（P1-1）。
                 qaqh_mcp::shutdown_global().await;
-                qaqh_lsp::shutdown_global().await;
                 result
             });
             if let Err(error) = result {

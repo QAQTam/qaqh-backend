@@ -415,13 +415,10 @@ impl WorkspaceToolPort {
     /// 目标是本会话 port 的 ToolManager——模型面目录与执行器
     /// （`ToolExecutionScope::with_manager`）是同一实例，注册即同时打通
     /// 可见与执行，不经过任何 thread-local 中转。
-    /// `mcp_batch=Some` 全量重建动态层（clear 会连 `lsp` 聚合工具一起清掉，
-    /// 调用方须同轮把 LSP 层一并传入）；`lsp_batch=Some` 只增量注册。
-    /// 返回重过滤后的模型面目录。
+    /// `mcp_batch=Some` 全量重建动态层；返回重过滤后的模型面目录。
     pub fn apply_dynamic_projection(
         &self,
         mcp_batch: Option<Vec<(String, qaqh_workspace::DynamicTool)>>,
-        lsp_batch: Option<Vec<(String, qaqh_workspace::DynamicTool)>>,
     ) -> Vec<qaqh_types::ToolDef> {
         let mut manager = self
             .manager
@@ -435,15 +432,8 @@ impl WorkspaceToolPort {
                 }
             }
         }
-        if let Some(batch) = lsp_batch {
-            for (name, tool) in batch {
-                if manager.register_dynamic(name.clone(), tool).is_err() {
-                    log::warn!("[TOOLS] dynamic registration rejected (collision): {name:?}");
-                }
-            }
-        }
         // 与 runtime::replace_dynamic_tools 同款收口：custom/minimal 白名单
-        // 含 MCP/LSP 工具名时，投影换名后不得静默失效。
+        // 含 MCP 工具名时，投影换名后不得静默失效。
         manager.reapply_allowed_after_dynamic_change();
         manager.filtered_defs()
     }

@@ -11,8 +11,7 @@
 
 use crate::config::Config;
 use qaqh_config_api::{
-    ConfigDto, ConfigPatch, ExecDto, GoalsDto, LspDto, LspServerDto, McpDto, McpServerDto,
-    SandboxDto,
+    ConfigDto, ConfigPatch, ExecDto, GoalsDto, McpDto, McpServerDto, SandboxDto,
 };
 
 /// 引擎配置 → 读模型。api_key 按契约掩码：非空一律 `"****"`（明文永不出 daemon）。
@@ -52,24 +51,6 @@ pub fn to_dto(cfg: &Config) -> ConfigDto {
                     default_timeout_secs: s.default_timeout_secs,
                     max_concurrent_calls: s.max_concurrent_calls,
                     cwd: s.cwd.clone(),
-                })
-                .collect(),
-        },
-        lsp: LspDto {
-            enabled: cfg.lsp.enabled,
-            idle_shutdown_secs: cfg.lsp.idle_shutdown_secs,
-            servers: cfg
-                .lsp
-                .servers
-                .iter()
-                .map(|(name, s)| LspServerDto {
-                    name: name.clone(),
-                    command: s.command.clone(),
-                    args: s.args.clone(),
-                    env: s.env.clone(),
-                    extensions: s.extensions.clone(),
-                    startup_timeout_secs: s.startup_timeout_secs,
-                    default_timeout_secs: s.default_timeout_secs,
                 })
                 .collect(),
         },

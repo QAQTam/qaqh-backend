@@ -2,8 +2,7 @@ use crate::error::{ConfigError, ConfigResult};
 use crate::secrets::SecretStore;
 use qaqh_types::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentGoalsConfig,
-    PersistentLspConfig, PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
-    PersistentSandboxConfig,
+    PersistentMcpConfig, PersistentMcpServerConfig, PersistentSandboxConfig,
 };
 use std::sync::{Mutex, OnceLock};
 
@@ -119,8 +118,6 @@ pub struct Config {
     pub tool_allowlist: Vec<String>,
     /// MCP 客户端配置。
     pub mcp: McpConfig,
-    /// LSP 客户端配置。
-    pub lsp: LspConfig,
     /// 沙箱执行配置。
     pub sandbox: SandboxConfig,
     /// 生命周期 hooks(ADR-0036):config.toml `[[hooks.<Event>]]`。
@@ -211,45 +208,6 @@ impl Default for McpConfig {
             servers: std::collections::BTreeMap::new(),
             import_external: default_import_external(),
             inject_resource_env_block: false,
-        }
-    }
-}
-
-// ── LSP 客户端配置──
-
-/// 单个 LSP server 的运行时配置（已通过 fail-fast 校验；stdio 唯一形态）。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LspServerConfig {
-    /// stdio 启动命令（如 "rust-analyzer"）。
-    pub command: String,
-    pub args: Vec<String>,
-    /// 注入 server 进程的环境变量原值；`${secret:name}` 占位符由 qaqh-lsp
-    /// 在启动时解析（qaqh-config 不做 secret 求值；secret 段复用 `[secrets.mcp]`）。
-    pub env: std::collections::BTreeMap<String, String>,
-    /// 路由键：该 server 负责的文件扩展名（无点小写）；空 = 不参与路由。
-    pub extensions: Vec<String>,
-    /// 启动超时（秒；含进程拉起 + initialize + 索引门）；1..=600。
-    pub startup_timeout_secs: u64,
-    /// 单次 LSP 请求默认超时（秒）；1..=3600。
-    pub default_timeout_secs: u64,
-}
-
-/// LSP 客户端运行时配置。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct LspConfig {
-    pub enabled: bool,
-    /// idle 回收阈值（秒）；0 = 常驻不回收。判定口径与 mcp 同款。
-    pub idle_shutdown_secs: u64,
-    /// server 名（已校验 `[a-z0-9_-]+`）→ 配置。
-    pub servers: std::collections::BTreeMap<String, LspServerConfig>,
-}
-
-impl Default for LspConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            idle_shutdown_secs: 120,
-            servers: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -367,85 +325,6 @@ pub(crate) fn map_mcp_config(
     })
 }
 
-/// PersistentLspConfig → 运行时 [`LspConfig`]，含 fail-fast 校验。
-/// 校验规则：
-/// - server 名非空、仅 `[a-z0-9_-]`、≤64 字符（与 mcp 同规）；
-/// - command 非空（stdio 唯一形态）；
-/// - extensions 条目：去点转小写后非空（空条目即错，不静默丢弃）；
-/// - `startup_timeout_secs` 缺省 30，∈ 1..=600；
-/// - `default_timeout_secs` 缺省 30，∈ 1..=3600。
-pub(crate) fn map_lsp_config(
-    lsp: Option<qaqh_types::PersistentLspConfig>,
-) -> Result<LspConfig, String> {
-    let Some(lsp) = lsp else {
-        return Ok(LspConfig::default());
-    };
-    let mut servers = std::collections::BTreeMap::new();
-    for (name, ps) in lsp.servers.unwrap_or_default() {
-        validate_server_name(&name)?;
-        let command = ps.command.unwrap_or_default();
-        if command.trim().is_empty() {
-            return Err(format!(
-                "[lsp] server {name:?}: 缺少 command（stdio 需要启动命令）"
-            ));
-        }
-        let mut extensions = Vec::new();
-        for ext in ps.extensions.unwrap_or_default() {
-            let normalized = ext.trim().trim_start_matches('.').to_ascii_lowercase();
-            if normalized.is_empty() {
-                return Err(format!("[lsp] server {name:?}: extensions 包含空条目"));
-            }
-            if !extensions.iter().any(|e| e == &normalized) {
-                extensions.push(normalized);
-            }
-        }
-        let startup_timeout_secs = match ps.startup_timeout_secs {
-            None => 30,
-            Some(0) => {
-                return Err(format!(
-                    "[lsp] server {name:?}: startup_timeout_secs 必须在 1..=600（得到 0）"
-                ));
-            }
-            Some(n) if n > 600 => {
-                return Err(format!(
-                    "[lsp] server {name:?}: startup_timeout_secs 必须在 1..=600（得到 {n}）"
-                ));
-            }
-            Some(n) => n,
-        };
-        let default_timeout_secs = match ps.default_timeout_secs {
-            None => 30,
-            Some(0) => {
-                return Err(format!(
-                    "[lsp] server {name:?}: default_timeout_secs 必须在 1..=3600（得到 0）"
-                ));
-            }
-            Some(n) if n > 3600 => {
-                return Err(format!(
-                    "[lsp] server {name:?}: default_timeout_secs 必须在 1..=3600（得到 {n}）"
-                ));
-            }
-            Some(n) => n,
-        };
-        servers.insert(
-            name,
-            LspServerConfig {
-                command,
-                args: ps.args.unwrap_or_default(),
-                env: ps.env.unwrap_or_default().into_iter().collect(),
-                extensions,
-                startup_timeout_secs,
-                default_timeout_secs,
-            },
-        );
-    }
-    Ok(LspConfig {
-        enabled: lsp.enabled.unwrap_or(!servers.is_empty()),
-        idle_shutdown_secs: lsp.idle_shutdown_secs.unwrap_or(120),
-        servers,
-    })
-}
-
 // ── `${secret:name}` 占位符（设计 §6/E-4）──
 //
 // 职责边界（M1-3 定稿）：
@@ -548,32 +427,6 @@ fn validate_mcp_secret_refs(mcp: &McpConfig, secrets: &SecretStore) -> Result<()
     Ok(())
 }
 
-/// LSP 启动校验：env/args 里的 `${secret:name}` 必须在 `[secrets.mcp]` 已注册
-/// （与 mcp 同段复用：LSP 也是本地子进程 env 注入，同信任面）。
-fn validate_lsp_secret_refs(lsp: &LspConfig, secrets: &SecretStore) -> Result<(), String> {
-    for (name, server) in &lsp.servers {
-        let available = || secrets.list_mcp();
-        let check = |field: &str, value: &str| -> Result<(), String> {
-            for secret_name in secret_placeholder_names(value)? {
-                if !secrets.has_mcp(&secret_name) {
-                    return Err(format!(
-                        "[lsp] server {name:?} {field}: 引用的 secret {secret_name:?} 未注册；已注册：{:?}",
-                        available()
-                    ));
-                }
-            }
-            Ok(())
-        };
-        for (key, value) in &server.env {
-            check(&format!("env[{key}]"), value)?;
-        }
-        for (index, arg) in server.args.iter().enumerate() {
-            check(&format!("args[{index}]"), arg)?;
-        }
-    }
-    Ok(())
-}
-
 /// server 名校验：非空、仅 `[a-z0-9_-]`、≤64 字符。
 fn validate_server_name(name: &str) -> Result<(), String> {
     if name.is_empty() || name.len() > 64 {
@@ -602,7 +455,7 @@ pub const DEFAULT_CONTEXT_LENGTH: u32 = 383_000;
 /// api key 走设置页 → `secrets.toml`，本文件不包含密钥。
 const FIRST_RUN_CONFIG: &str = r#"# QAQ-Harness 配置（首次启动自动生成）。
 #
-# 本文件只承载**全局策略**（权限档位、子代理、MCP/LSP、沙箱等）。
+# 本文件只承载**全局策略**（权限档位、子代理、MCP、沙箱等）。
 # 服务商与模型不再写在这里：端点、凭据与模型的唯一真源是同目录的
 # providers.toml 目录（设置页「服务商与模型」维护），会话按
 # model_selection 从目录解析端点与凭据。
@@ -683,7 +536,6 @@ impl Default for Config {
             tool_allowlist_enabled: false,
             tool_allowlist: Vec::new(),
             mcp: McpConfig::default(),
-            lsp: LspConfig::default(),
             sandbox: SandboxConfig::default(),
             hooks: qaqh_hooks::HookEventsConfig::default(),
         }
@@ -876,12 +728,8 @@ falling back to 1 (read-only)"
             // E-4 fail-fast：`${secret:name}` 引用的名字必须在 secrets.toml
             // 已注册（拼错名启动即报，不拖到首次调用；DTO/save 永不见明文）。
             validate_mcp_secret_refs(&cfg.mcp, &secrets)?;
-            // ── LSP 客户端（fail-fast 口径同 mcp：非法名/缺 command 直接 load 失败）──
-            cfg.lsp = map_lsp_config(pc.lsp.clone())?;
-            // LSP env 的 `${secret:name}` 复用 mcp 校验（同 secrets.toml `[secrets.mcp]` 段）。
-            validate_lsp_secret_refs(&cfg.lsp, &secrets)?;
             // [exec.env] E-4 同律：`${secret:name}` 引用的名必须已注册
-            // （fail-fast 与 mcp/lsp 同口径；拼错名启动即报，不拖到首次调用）。
+            // （fail-fast 与 mcp 同口径；拼错名启动即报，不拖到首次调用）。
             validate_exec_env_secret_refs(&cfg.exec.env, &secrets)?;
 
             // 迁移写回：config.toml 中旧工具名的默认白名单归一化为当前
@@ -979,32 +827,6 @@ falling back to 1 (read-only)"
                                     max_concurrent_calls: Some(s.max_concurrent_calls),
                                     cwd: (!s.cwd.trim().is_empty())
                                         .then(|| s.cwd.trim().to_owned()),
-                                },
-                            )
-                        })
-                        .collect()
-                }),
-            }),
-            lsp: Some(PersistentLspConfig {
-                enabled: Some(self.lsp.enabled),
-                idle_shutdown_secs: (self.lsp.idle_shutdown_secs > 0)
-                    .then_some(self.lsp.idle_shutdown_secs),
-                servers: (!self.lsp.servers.is_empty()).then(|| {
-                    self.lsp
-                        .servers
-                        .iter()
-                        .map(|(name, s)| {
-                            (
-                                name.clone(),
-                                PersistentLspServerConfig {
-                                    command: Some(s.command.clone()),
-                                    args: (!s.args.is_empty()).then(|| s.args.clone()),
-                                    env: (!s.env.is_empty())
-                                        .then(|| s.env.clone().into_iter().collect()),
-                                    extensions: (!s.extensions.is_empty())
-                                        .then(|| s.extensions.clone()),
-                                    startup_timeout_secs: Some(s.startup_timeout_secs),
-                                    default_timeout_secs: Some(s.default_timeout_secs),
                                 },
                             )
                         })

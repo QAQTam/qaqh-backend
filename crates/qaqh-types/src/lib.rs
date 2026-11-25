@@ -35,8 +35,7 @@ pub use api_types::UsageInfo;
 pub use code_delta::CodeDeltaRecord;
 pub use config::{
     ConfigStore, PersistentConfig, PersistentExecConfig, PersistentGoalsConfig,
-    PersistentLspConfig, PersistentLspServerConfig, PersistentMcpConfig, PersistentMcpServerConfig,
-    PersistentSandboxConfig,
+    PersistentMcpConfig, PersistentMcpServerConfig, PersistentSandboxConfig,
 };
 pub use context_usage::{
     ContextUsage, clear_api_context_usage, current_api_context_usage, note_api_context_usage,

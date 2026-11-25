@@ -170,8 +170,6 @@ pub fn build_dynamic_tool(
 fn dynamic_source(name: &str) -> ToolSource {
     if name.starts_with(MCP_DYNAMIC_PREFIX) {
         ToolSource::Mcp
-    } else if name.starts_with("lsp__") {
-        ToolSource::Lsp
     } else {
         ToolSource::Extension
     }

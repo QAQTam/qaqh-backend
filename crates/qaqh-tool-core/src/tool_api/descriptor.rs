@@ -85,8 +85,6 @@ fn validate_name(raw: &str) -> Result<(), DescriptorError> {
 pub enum Namespace {
     /// `mcp__{server}__{tool}`。
     Mcp { server: String },
-    /// `lsp__{tool}`。
-    Lsp,
     /// `extension__{id}__{tool}`（预留，供插件类来源使用）。
     Extension { id: String },
 }
@@ -102,12 +100,6 @@ impl Namespace {
             return Some(Namespace::Mcp {
                 server: server.to_owned(),
             });
-        }
-        if let Some(rest) = name.strip_prefix("lsp__") {
-            if rest.is_empty() {
-                return None;
-            }
-            return Some(Namespace::Lsp);
         }
         if let Some(rest) = name.strip_prefix("extension__") {
             let (id, tool) = rest.split_once("__")?;
@@ -141,8 +133,6 @@ pub enum ToolSource {
     Builtin,
     /// MCP 动态工具。
     Mcp,
-    /// LSP 动态工具。
-    Lsp,
     /// 扩展/插件来源。
     Extension,
 }
@@ -438,9 +428,6 @@ mod tests {
         );
         assert_eq!(mcp.as_str(), "mcp__fs__read_file", "查找键不变");
 
-        let lsp = ToolName::new("lsp__definition").expect("valid");
-        assert_eq!(lsp.namespace(), Some(Namespace::Lsp));
-
         let ext = ToolName::new("extension__demo__run").expect("valid");
         assert_eq!(
             ext.namespace(),
@@ -455,8 +442,6 @@ mod tests {
         // 约定不完整时不给出视图（回退为无命名空间），不报错。
         let malformed = ToolName::new("mcp__only_server").expect("valid");
         assert_eq!(malformed.namespace(), None);
-        let malformed_lsp = ToolName::new("lsp__").expect("valid");
-        assert_eq!(malformed_lsp.namespace(), None);
     }
 
     fn descriptor() -> ToolDescriptor {

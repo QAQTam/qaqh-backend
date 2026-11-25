@@ -1281,8 +1281,6 @@ fn export_types(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         qaqh_config_api::SandboxPatch,
         qaqh_config_api::McpDto,
         qaqh_config_api::McpServerDto,
-        qaqh_config_api::LspDto,
-        qaqh_config_api::LspServerDto,
         qaqh_types::ReasoningKind,
         // ── RingingV2 唯一命令目录、信封、目标与前置条件 ──
         qaqh_ringing::CommandTarget,
