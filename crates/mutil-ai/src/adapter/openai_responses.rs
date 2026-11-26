@@ -11,6 +11,10 @@ use super::{
     finish_sse_stream, json_body_bytes, merge_extra_body, prepare_headers, protocol_name,
     resolve_api_key, send_json_retry, send_stream_retry, validate_tool_choice,
 };
+use super::openai_responses_custom::{
+    backfill_custom_inputs, custom_event_index, custom_identity, parse_custom_item,
+    parse_custom_item_with_fallback, reconcile_custom_output_items,
+};
 use crate::error::{Error, Result};
 use crate::headers::{RequestOptions, TransportConfig};
 use crate::native_tool_stream::{CustomToolAccumulator, NativeToolIdentity};
@@ -776,62 +780,9 @@ impl ResponsesStreamMapper {
         let mut events = Vec::new();
         self.push_start(&mut events);
 
-        // Some compatible endpoints (notably DeepSeek) document the custom
-        // tool-call output item without an `input` field. The streamed
-        // `custom_tool_call_input.delta` / `.done` frames are then the only
-        // authoritative payload. Inject the accumulated snapshot before both
-        // the accumulator reconciliation and `from_responses_response` parse
-        // the terminal item, so a completed call is not lost.
         let mut normalized_response = response.clone();
-        if let Some(output) = normalized_response
-            .get_mut("output")
-            .and_then(Value::as_array_mut)
-        {
-            for (index, item) in output.iter_mut().enumerate() {
-                if item.get("type").and_then(Value::as_str) != Some("custom_tool_call") {
-                    continue;
-                }
-                let has_input = item
-                    .get("input")
-                    .and_then(Value::as_str)
-                    .is_some_and(|input| !input.is_empty());
-                if has_input {
-                    continue;
-                }
-                let Some(streamed) = self
-                    .custom_calls
-                    .get(&index)
-                    .map(|call| call.input())
-                    .filter(|input| !input.is_empty())
-                else {
-                    continue;
-                };
-                if let Some(object) = item.as_object_mut() {
-                    object.insert("input".to_owned(), Value::String(streamed.to_owned()));
-                }
-            }
-        }
-
-        if let Some(output) = normalized_response.get("output").and_then(Value::as_array) {
-            for (index, item) in output.iter().enumerate() {
-                if item.get("type").and_then(Value::as_str) == Some("custom_tool_call") {
-                    let call = parse_custom_item(item)?;
-                    let accumulator = self.custom_calls.entry(index).or_default();
-                    accumulator.merge_identity(&custom_identity(item))?;
-                    let NativeToolPayload::RawText(input) = &call.payload else {
-                        unreachable!()
-                    };
-                    accumulator.finish_item(input)?;
-                } else if self.custom_calls.contains_key(&index) {
-                    return Err(Error::StreamProtocol(
-                        "tool_identity_conflict: output item changed type".into(),
-                    ));
-                }
-            }
-        }
-        if self.custom_calls.values().any(|call| !call.is_completed()) {
-            return Err(Error::StreamProtocol("tool_call_incomplete".into()));
-        }
+        backfill_custom_inputs(&self.custom_calls, &mut normalized_response);
+        reconcile_custom_output_items(&mut self.custom_calls, &normalized_response)?;
         let mut normalized = from_responses_response(normalized_response)?;
         let mut terminal_ids = std::collections::HashSet::new();
         for part in &normalized.message.parts {
@@ -1143,7 +1094,18 @@ impl SseMapper for ResponsesStreamMapper {
                         .get("input")
                         .and_then(Value::as_str)
                         .ok_or_else(|| Error::StreamProtocol("tool_payload_conflict".into()))?;
+                    let prev_len = call.input().len();
                     call.finish_input(input)?;
+                    if call.input().len() > prev_len {
+                        events.push(StreamEvent::NativeToolProgress {
+                            index,
+                            item_id,
+                            call_id: call.call_id().map(str::to_string),
+                            name: call.name().map(str::to_string),
+                            delta: call.input()[prev_len..].to_string(),
+                            input_so_far: call.input().to_owned(),
+                        });
+                    }
                 }
             }
             "response.output_text.delta" => {
@@ -1517,82 +1479,6 @@ pub(crate) fn from_responses_response(value: Value) -> Result<ChatResponse> {
         metadata: None,
         report: CompletionReport::default(),
     })
-}
-
-fn parse_custom_item(item: &Value) -> Result<NativeToolCall> {
-    if item.get("status").and_then(Value::as_str) != Some("completed") {
-        return Err(Error::StreamProtocol("tool_call_incomplete".into()));
-    }
-    let required = |key: &str| {
-        item.get(key)
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .ok_or_else(|| Error::StreamProtocol("tool_identity_conflict".into()))
-    };
-    let input = item
-        .get("input")
-        .and_then(Value::as_str)
-        .ok_or_else(|| Error::StreamProtocol("tool_payload_conflict".into()))?;
-    let call = NativeToolCall {
-        kind: NativeToolKind::Custom,
-        namespace: item
-            .get("namespace")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-        name: required("name")?,
-        call_id: required("call_id")?,
-        item_id: item.get("id").and_then(Value::as_str).map(str::to_string),
-        payload: NativeToolPayload::RawText(input.to_owned()),
-        completion: NativeToolCompletion::Completed,
-        provider_state: Some(ProviderState::new(
-            ProviderStateFormat::OpenAiResponses,
-            item.clone(),
-        )),
-    };
-    call.validate_completed()?;
-    Ok(call)
-}
-
-/// Parse a completed custom item, allowing a streamed snapshot to stand in
-/// when the terminal item omits `input` (DeepSeek's documented item shape).
-fn parse_custom_item_with_fallback(
-    item: &Value,
-    fallback_input: Option<&str>,
-) -> Result<NativeToolCall> {
-    let has_input = item
-        .get("input")
-        .and_then(Value::as_str)
-        .is_some_and(|input| !input.is_empty());
-    if has_input || fallback_input.is_none_or(str::is_empty) {
-        return parse_custom_item(item);
-    }
-    let mut patched = item.clone();
-    if let Some(object) = patched.as_object_mut() {
-        object.insert(
-            "input".to_owned(),
-            Value::String(fallback_input.unwrap_or_default().to_owned()),
-        );
-    }
-    parse_custom_item(&patched)
-}
-
-fn custom_identity(item: &Value) -> NativeToolIdentity {
-    let get = |key: &str| item.get(key).and_then(Value::as_str).map(str::to_string);
-    NativeToolIdentity {
-        namespace: get("namespace"),
-        name: get("name"),
-        call_id: get("call_id"),
-        item_id: get("id"),
-    }
-}
-
-fn custom_event_index(event: &Value) -> Result<usize> {
-    event
-        .get("output_index")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .ok_or_else(|| Error::StreamProtocol("tool_identity_conflict: missing output_index".into()))
 }
 
 fn is_responses_server_item(kind: &str) -> bool {

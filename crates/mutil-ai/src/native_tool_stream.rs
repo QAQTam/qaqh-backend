@@ -119,6 +119,11 @@ impl CustomToolAccumulator {
         self.identity.name.as_deref()
     }
 
+    /// Upstream item id, once a frame has supplied it.
+    pub fn item_id(&self) -> Option<&str> {
+        self.identity.item_id.as_deref()
+    }
+
     /// Whether a completed item snapshot was observed.
     pub fn is_completed(&self) -> bool {
         self.item_completed && !self.invalid

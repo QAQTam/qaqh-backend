@@ -10,19 +10,30 @@
 //!   as a stream error; the bridge re-reads it as a normal Done carrying the
 //!   truncation reason and the authoritative output items).
 
+mod projection;
+mod reconcile;
+
+pub(crate) use projection::project_responses_messages;
+#[cfg(test)]
+use projection::provider_state_item;
+#[cfg(all(test, feature = "native-tool-plan"))]
+use projection::native_call_from_item;
+use reconcile::{freeform_custom_blocks, interpret_provider_stream, reconcile_streamed_tool_calls};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use futures::StreamExt;
 use mutil_ai::{
-    ChatRequest, CustomToolFormat, EndpointAdapter, EndpointSpec, Error as SdkError, ImagePart,
+    ChatRequest, CustomToolFormat, EndpointAdapter, EndpointSpec, Error as SdkError,
     Message as WireMessage, ModelAdapter, Part, ProfileSelector, ProtocolSurface, ProviderProfile,
     ProviderRequestOptions, ReasoningConfig, ReasoningEffort, ReasoningSummary, RequestOptions,
-    Role, ScopedToolDeclaration, ServerTool, ServerToolItem, ServerToolState,
-    StreamEvent as SdkEvent, ToolCall as WireToolCall, ToolDeclaration,
-    ToolResult as WireToolResult, ToolSpec, TransportConfig, Usage as WireUsage,
+    Role, ScopedToolDeclaration, ServerTool, ServerToolState, StreamEvent as SdkEvent,
+    ToolDeclaration, ToolSpec, TransportConfig, Usage as WireUsage,
 };
+#[cfg(test)]
+use mutil_ai::ToolCall as WireToolCall;
 #[cfg(feature = "native-tool-plan")]
 use qaqh_tool_core::model_tool_plan::{
     CustomFormat, ModelToolDeclaration, ModelToolKind, ModelToolPlan, NativeToolCall as PlanCall,
@@ -44,7 +55,7 @@ pub(crate) enum ModelToolPlan {}
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, adopt_identity,
     apply_management_headers, empty_stream_backoff, insert_header, roomy_response_limits,
-    sdk_error_detail, sdk_retry_policy, split_url, tool_result_name,
+    sdk_error_detail, sdk_retry_policy, split_url,
 };
 use super::transport::{
     RetryPolicy as GateRetryPolicy, SseTrace, empty_request_noop_done_event, is_cancelled,
@@ -53,8 +64,6 @@ use super::types::{
     EFFORT_LADDER, ProviderConfig, ResponsesCompat, StreamEvent, normalize_reasoning_effort,
     stored_reasoning_kind,
 };
-
-const MEDIA_ATTACHMENT_TEXT: &str = "Attached media from tool result:";
 
 fn build_responses_url(base_url: &str, responses_path: Option<&str>) -> String {
     if let Some(path) = responses_path {
@@ -261,402 +270,6 @@ fn sanitize_openai_schema(value: &serde_json::Value) -> serde_json::Value {
         }
         _ => value.clone(),
     }
-}
-
-fn provider_state_item(item: serde_json::Value) -> Part {
-    Part::ProviderItem(ServerToolItem::new(mutil_ai::ProviderState::new(
-        mutil_ai::ProviderStateFormat::OpenAiResponses,
-        item,
-    )))
-}
-
-/// 回放前的 item 归一化：OpenAI Responses 端点对 `input` 里的
-/// `reasoning` / `web_search_call` item 要求必填 `summary` 数组（缺失即
-/// HTTP 400 `missing_required_parameter: 'input[N].summary'`）。原样回放的
-/// provider item 自带该字段；但历史经过 timeline 重建等有损路径后只剩
-/// 语义块，派生合成（或旧版本持久化的）item 可能没有 `summary`——
-/// 统一在这里补空数组，语义等价（无摘要）且满足 schema。
-fn replay_item(mut item: serde_json::Value) -> serde_json::Value {
-    if let Some(obj) = item.as_object_mut() {
-        let it = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if (it == "reasoning" || it == "web_search_call") && !obj.contains_key("summary") {
-            obj.insert("summary".into(), serde_json::json!([]));
-        }
-        // id 卫生（对标 codex `prepare_response_items_for_request`，
-        // codex-rs/core/src/client.rs:1087-1096 + `ResponseItemId::is_prefixed`）：
-        // 端点只接受 `<prefix>_<suffix>` 形的 item id；有损历史留下的空 id /
-        // 无前缀 id 会被 400，直接摘除让端点重新分配。
-        let malformed_id = obj
-            .get("id")
-            .and_then(|v| v.as_str())
-            .is_some_and(|id| !is_prefixed_item_id(id));
-        if malformed_id {
-            obj.remove("id");
-        }
-    }
-    item
-}
-
-/// codex `ResponseItemId::is_prefixed` 的投影：`prefix_suffix` 且两段非空。
-fn is_prefixed_item_id(id: &str) -> bool {
-    id.split_once('_')
-        .is_some_and(|(prefix, suffix)| !prefix.is_empty() && !suffix.is_empty())
-}
-
-/// Project harness history onto the SDK's neutral Responses model.
-/// 第一条 system → `instructions`（提顶）；后续 system/developer → 原位
-/// `developer` item（与退役前逐字节同形态，依赖 SystemPlacement 策略）。
-/// assistant 消息里持久化的 provider output items 原样回放
-/// （`ResponseOutputItem`），QAQ 自己派生的 reasoning/text/function_call/
-/// web_search 只在没有对应回放 item 时合成，防双份。
-pub(crate) fn project_responses_messages(
-    messages: &[Message],
-    compat: &ResponsesCompat,
-) -> Vec<WireMessage> {
-    // mutil-ai 0.4.0 matches a tool result to its call by BOTH id and name, and
-    // the projected call name is the provider-mapped function name — so resolve
-    // result names from history against that same mapping (`Message::tool_result`
-    // carries no name of its own).
-    let names: HashMap<String, String> = messages
-        .iter()
-        .filter(|m| m.role == "assistant")
-        .flat_map(|m| m.content.iter())
-        .filter_map(|b| match b {
-            ContentBlock::ToolUse { id, name, .. } => {
-                Some((id.clone(), provider_function_name(name, compat).to_string()))
-            }
-            _ => None,
-        })
-        .collect();
-    let mut out: Vec<WireMessage> = Vec::new();
-    let mut top_taken = false;
-    let mut img_idx: usize = 0;
-
-    let stale_boundary = super::sdk_common::stale_image_boundary(messages);
-    for (msg_index, msg) in messages.iter().enumerate() {
-        match msg.role.as_str() {
-            "system" => {
-                let text = first_text(&msg.content);
-                if !top_taken {
-                    top_taken = true;
-                    out.push(WireMessage::system(text));
-                } else {
-                    // 动态注入：原位 developer item（追加语义）。
-                    out.push(WireMessage::new(Role::Developer, vec![Part::text(text)]));
-                }
-            }
-            "developer" => {
-                let text = first_text(&msg.content);
-                out.push(WireMessage::new(Role::Developer, vec![Part::text(text)]));
-            }
-            "user" => {
-                let mut parts: Vec<Part> = Vec::new();
-                for b in &msg.content {
-                    match b {
-                        ContentBlock::Text { text } => parts.push(Part::text(text)),
-                        ContentBlock::Image { mime_type, data } => {
-                            parts.push(Part::text(format!(
-                                "[Image #{}: {}, ~{} bytes — call read_image(image_index={}) to view it yourself]",
-                                img_idx, mime_type, data.len(), img_idx
-                            )));
-                            img_idx += 1;
-                        }
-                        ContentBlock::ImageRef {
-                            mime_type,
-                            bytes_len,
-                            ..
-                        } => {
-                            parts.push(Part::text(format!(
-                                "[Image #{}: {}, ~{bytes_len} bytes — call read_image(image_index={}) to view it yourself]",
-                                img_idx, mime_type, img_idx
-                            )));
-                            img_idx += 1;
-                        }
-                        _ => {}
-                    }
-                }
-                if parts.is_empty() {
-                    parts.push(Part::text(""));
-                }
-                out.push(WireMessage::new(Role::User, parts));
-            }
-            "assistant" => {
-                let raw_items: Vec<&serde_json::Value> = msg
-                    .content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ResponseOutputItem { item } => Some(item),
-                        _ => None,
-                    })
-                    .collect();
-                let item_type = |item: &serde_json::Value| -> String {
-                    item.get("type")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string()
-                };
-                let has_response_type =
-                    |expected: &str| raw_items.iter().any(|item| item_type(item) == expected);
-                let mut parts: Vec<Part> = Vec::new();
-                // 调用项**必须**排在整条 message 的最后：DeepSeek OAuth 的
-                // Responses 端点要求每个 `function_call` 后面紧跟它的
-                // `function_call_output`，中间不许夹任何 item。历史里的
-                // assistant 消息是 [text, tool_use…, 回放的 function_call…]，
-                // 若按原顺序回放，正文（一个 `{"role":"assistant"}` item）就会
-                // 落在 call 与下一轮 tool 消息之间——端点随即报
-                // `No tool output found for tool call call_xx`（线上实测，
-                // 结果明明在 input 里且 call_id 逐字相同）。所以正文/思考等
-                // 非调用项先出，调用项统一收在尾部。见 `calls`。
-                let mut calls: Vec<Part> = Vec::new();
-                // 1) 回放 provider 原生 items（非调用项保持原样）。
-                for item in &raw_items {
-                    let kind = item_type(item);
-                    let is_reasoning = kind == "reasoning";
-                    if is_reasoning && !compat.echo_reasoning_content {
-                        continue;
-                    }
-                    if let Some(call) = native_call_from_item(item) {
-                        calls.push(Part::NativeToolCall(call));
-                    } else if is_replayed_call_item(&kind) {
-                        // 原样回放的 provider 调用（无 namespace 的 function_call /
-                        // custom_tool_call）同样是"调用"，不得早于正文出现。
-                        calls.push(provider_state_item(replay_item((*item).clone())));
-                    } else {
-                        parts.push(provider_state_item(replay_item((*item).clone())));
-                    }
-                }
-                // 2) 派生 reasoning（无回放 item 且开关开启时合成旧形态）。
-                if compat.echo_reasoning_content && !has_response_type("reasoning") {
-                    for b in &msg.content {
-                        if let ContentBlock::Reasoning { reasoning, .. } = b
-                            && !reasoning.is_empty()
-                        {
-                            parts.push(provider_state_item(serde_json::json!({
-                                "type": "reasoning",
-                                "content": [{"type": "reasoning_text", "text": reasoning}],
-                                "summary": [],
-                            })));
-                        }
-                    }
-                }
-                // 3) 派生正文。
-                let text_parts: Vec<String> = msg
-                    .content
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } if !text.is_empty() => Some(text.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                if !text_parts.is_empty() && !has_response_type("message") {
-                    for t in text_parts {
-                        parts.push(Part::text(t));
-                    }
-                }
-                // 4) 派生 function_call（未被回放 item 覆盖的 call_id）。
-                for b in &msg.content {
-                    if let ContentBlock::ToolUse { id, name, input } = b {
-                        let already = raw_items.iter().any(|item| {
-                            matches!(
-                                item_type(item).as_str(),
-                                "function_call" | "custom_tool_call"
-                            ) && item.get("call_id").and_then(|v| v.as_str()) == Some(id.as_str())
-                        });
-                        if already {
-                            continue;
-                        }
-                        // Null input（上游参数不可还原）在 wire 层折叠成 {}，
-                        // 端点不接受 "arguments": "null"（T-7-1）。
-                        let mut call = WireToolCall::new(
-                            provider_function_name(name, compat).to_string(),
-                            super::sdk_common::wire_tool_input(input),
-                        );
-                        // 0.4.0 rejects an empty explicit id; leave it unset so the
-                        // SDK's normalizer assigns a collision-free one.
-                        call.id = if id.is_empty() {
-                            None
-                        } else {
-                            Some(id.clone())
-                        };
-                        calls.push(Part::ToolCall(call));
-                    }
-                }
-                // 5) 派生 web_search_call 回放（未被覆盖的 id）。
-                if compat.echo_web_search_call {
-                    for b in &msg.content {
-                        if let ContentBlock::WebSearchCall { id, action } = b {
-                            let already = raw_items.iter().any(|item| {
-                                item_type(item) == "web_search_call"
-                                    && item.get("id").and_then(|v| v.as_str()) == Some(id.as_str())
-                            });
-                            if already {
-                                continue;
-                            }
-                            parts.push(provider_state_item(serde_json::json!({
-                                "type": "web_search_call",
-                                "id": id,
-                                "action": action,
-                                "summary": [],
-                            })));
-                        }
-                    }
-                }
-                if !parts.is_empty() || !calls.is_empty() {
-                    parts.extend(calls);
-                    out.push(WireMessage::new(Role::Assistant, parts));
-                }
-            }
-            "tool" => {
-                // 跨轮丢弃：位于最后一条 user 消息之前的工具图属于已消化回合，
-                // 不再重发（见 sdk_common::stale_image_boundary）。
-                let stale = stale_boundary.is_some_and(|boundary| msg_index < boundary);
-                let mut dropped = 0usize;
-                let mut run: Vec<Part> = Vec::new();
-                let mut attachments: Vec<WireMessage> = Vec::new();
-                for b in &msg.content {
-                    match b {
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            result,
-                        } => {
-                            let name = tool_result_name(&names, msg.name.as_deref(), tool_use_id);
-                            let mut tr = WireToolResult::new(
-                                if tool_use_id.is_empty() {
-                                    None
-                                } else {
-                                    Some(tool_use_id.clone())
-                                },
-                                name,
-                                result.render_xml_envelope(),
-                            );
-                            tr.is_error = !result.is_success();
-                            run.push(Part::ToolResult(tr));
-                        }
-                        // 工具图：紧随其后的合成 user message（input_image data URL）。
-                        // Responses 协议不要求 assistant(tool_calls) 后必须连续
-                        // tool item，原位发出即可（与退役前一致）。
-                        ContentBlock::Image { mime_type, data } => {
-                            if stale {
-                                dropped += 1;
-                                continue;
-                            }
-                            attachments.push(WireMessage::new(
-                                Role::User,
-                                response_media_parts(&mut img_idx, mime_type, data),
-                            ));
-                        }
-                        ContentBlock::ImageRef {
-                            sha256, mime_type, ..
-                        } => match qaqh_types::image_store::load_image_b64(sha256, mime_type) {
-                            _ if stale => {
-                                dropped += 1;
-                            }
-                            Ok(data) => attachments.push(WireMessage::new(
-                                Role::User,
-                                response_media_parts(&mut img_idx, mime_type, &data),
-                            )),
-                            Err(e) => log::warn!(
-                                "[gate] image {sha256} load failed, dropped from responses request: {e}"
-                            ),
-                        },
-                        _ => {}
-                    }
-                }
-                if !run.is_empty() {
-                    if dropped > 0
-                        && let Some(Part::ToolResult(tr)) = run.last_mut()
-                    {
-                        tr.content.push('\n');
-                        tr.content.push_str(super::sdk_common::STALE_IMAGE_STUB);
-                    }
-                    out.push(WireMessage::new(Role::Tool, run));
-                }
-                // Native Responses calls must be paired with their tool output
-                // before any following user input. In particular, read_image
-                // stores its image on the tool message; emitting that attachment
-                // while iterating would put a user item between the call and its
-                // result, which OpenAI rejects as a missing native tool result.
-                out.extend(attachments);
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// 回放 item 里属于「模型调用、等客户端输出」的两类。
-///
-/// 它们必须排在 assistant message 的最后（见
-/// `project_responses_messages` 的 `calls` 分组）：DeepSeek OAuth 的 Responses
-/// 端点在 `function_call` 与其 output 之间出现任何其他 item 就报
-/// `No tool output found for tool call …`。
-fn is_replayed_call_item(kind: &str) -> bool {
-    matches!(kind, "function_call" | "custom_tool_call")
-}
-
-fn native_call_from_item(item: &serde_json::Value) -> Option<mutil_ai::NativeToolCall> {
-    if item
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .is_some_and(|status| status != "completed")
-    {
-        return None;
-    }
-    let typ = item.get("type")?.as_str()?;
-    let (kind, payload) = match typ {
-        "custom_tool_call" => (
-            mutil_ai::NativeToolKind::Custom,
-            mutil_ai::NativeToolPayload::RawText(item.get("input")?.as_str()?.to_owned()),
-        ),
-        "function_call"
-            if item.get("namespace").is_some()
-                || item.get("qaqh_native_call").and_then(|v| v.as_bool()) == Some(true) =>
-        {
-            (
-                mutil_ai::NativeToolKind::Function,
-                mutil_ai::NativeToolPayload::JsonArguments(
-                    item.get("arguments")?.as_str()?.to_owned(),
-                ),
-            )
-        }
-        _ => return None,
-    };
-    let call = mutil_ai::NativeToolCall {
-        kind,
-        payload,
-        namespace: item
-            .get("namespace")
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
-        name: item.get("name")?.as_str()?.to_owned(),
-        call_id: item.get("call_id")?.as_str()?.to_owned(),
-        item_id: item.get("id").and_then(|v| v.as_str()).map(str::to_owned),
-        completion: mutil_ai::NativeToolCompletion::Completed,
-        provider_state: Some(mutil_ai::ProviderState::new(
-            mutil_ai::ProviderStateFormat::OpenAiResponses,
-            item.clone(),
-        )),
-    };
-    call.validate_completed().ok()?;
-    Some(call)
-}
-
-fn response_media_parts(_img_idx: &mut usize, mime_type: &str, data: &str) -> Vec<Part> {
-    vec![
-        Part::text(MEDIA_ATTACHMENT_TEXT),
-        Part::Image {
-            image: ImagePart::base64(mime_type, data),
-        },
-    ]
-}
-
-fn first_text(blocks: &[ContentBlock]) -> String {
-    for b in blocks {
-        if let ContentBlock::Text { text } = b {
-            return text.clone();
-        }
-    }
-    String::new()
 }
 
 fn responses_profile() -> Arc<ProviderProfile> {
@@ -1035,51 +648,6 @@ fn adapt_native(
     ))
 }
 
-/// 生产路径（无 plan）的 freeform `apply_patch` 收口：DeepSeek Responses 的
-/// custom 工具只认 `{"type":"custom","name":"apply_patch"}`，模型返回
-/// `custom_tool_call`、`input` 为裸补丁文本。转成与 function_json 形态相同的
-/// `{"input": raw}` ToolUse——执行器、审批、事件流零改动；并回存原样 provider
-/// item，下一轮按 `custom_tool_call` / `custom_tool_call_output` 配对回放
-/// （形状对齐 plan 路径的 `adapt_native` 双块输出）。
-///
-/// 返回 `None` = 不是本收口的目标调用（非 custom、非 apply_patch 或未完成），
-/// 交回调用方既有逻辑处置。
-fn freeform_custom_blocks(call: &mutil_ai::NativeToolCall) -> Option<Vec<ContentBlock>> {
-    if call.kind != mutil_ai::NativeToolKind::Custom || call.name != "apply_patch" {
-        return None;
-    }
-    call.validate_completed().ok()?;
-    let raw = match &call.payload {
-        mutil_ai::NativeToolPayload::RawText(text) => text.clone(),
-        mutil_ai::NativeToolPayload::JsonArguments(text) => text.clone(),
-    };
-    let mut item = call
-        .provider_state
-        .as_ref()
-        .map(|state| state.data.clone())
-        .filter(serde_json::Value::is_object)
-        .unwrap_or_else(|| serde_json::json!({}));
-    item["type"] = "custom_tool_call".into();
-    item["name"] = call.name.clone().into();
-    item["call_id"] = call.call_id.clone().into();
-    item["status"] = "completed".into();
-    if let Some(object) = item.as_object_mut() {
-        object.remove("qaqh_native_call");
-    }
-    if let Some(id) = &call.item_id {
-        item["id"] = id.clone().into();
-    }
-    item["input"] = raw.clone().into();
-    Some(vec![
-        ContentBlock::ToolUse {
-            id: call.call_id.clone(),
-            name: call.name.clone(),
-            input: serde_json::json!({ "input": raw }),
-        },
-        ContentBlock::ResponseOutputItem { item },
-    ])
-}
-
 /// Responses usage：`input_tokens`/`output_tokens` +
 /// `input_tokens_details.cached_tokens` +
 /// `output_tokens_details.reasoning_tokens`（DeepSeek 语境口径），
@@ -1113,222 +681,6 @@ fn server_tool_status_name(state: ServerToolState) -> &'static str {
         ServerToolState::Completed => "completed",
         ServerToolState::Failed => "failed",
         ServerToolState::Unknown => "in_progress",
-    }
-}
-
-/// 收口对账：流里明明出现过 `function_call`，terminal 帧却没把它带回来。
-///
-/// 兼容网关上这是真实形态：`response.output_item.done` 给了完整调用，
-/// `response.completed.response.output` 里却只剩 message/reasoning 条目。
-/// SDK 只在终态 parts **完全为空**时才回退到自己的累计器
-/// （`openai_responses.rs::complete`），所以只要同轮还吐了任何一个文本块，
-/// 这条调用就既不进历史也不执行——模型留下一句「我先看看」就静默结束回合，
-/// 前端什么也不会显示。这里按流里见过的事实补齐终态块。
-///
-/// 去重锚点：优先 `call_id`；身份缺席时退回 `name`+参数（不编造 id——
-/// 缺 id 的调用交给 runtime 的可见失败块处理）。
-///
-/// 损坏参数不得伪造为空对象；以终态为准去重，缺终态时保留 Null 供执行面拒绝。
-fn reconcile_streamed_tool_calls(
-    blocks: &mut Vec<ContentBlock>,
-    streamed: &HashMap<usize, (String, String, String)>,
-) {
-    let mut sorted: Vec<(usize, String, String, String)> = streamed
-        .iter()
-        .map(|(index, (id, name, args))| (*index, id.clone(), name.clone(), args.clone()))
-        .collect();
-    sorted.sort_by_key(|(index, _, _, _)| *index);
-    for (_index, id, name, args) in sorted {
-        if name.is_empty() {
-            continue;
-        }
-        let parsed: Option<serde_json::Value> = mutil_ai::lenient::parse(&args);
-        let input = match parsed {
-            // `null` / 非对象同样视为「参数不可还原」——不伪造。
-            Some(v) if v.is_object() => v,
-            _ => {
-                let covered = blocks.iter().any(|b| {
-                    matches!(b, ContentBlock::ToolUse { name: known_name, .. } if known_name == &name)
-                });
-                if covered {
-                    // 终态已带同名调用：流内条目是同一调用的损坏副本，丢弃。
-                    log::warn!(
-                        "Responses 收口流条目参数损坏(name={name:?},args_head={:?})且终态已带同名调用，按重复丢弃",
-                        args.chars().take(80).collect::<String>()
-                    );
-                    continue;
-                }
-                log::warn!(
-                    "Responses 收口流条目参数损坏(name={name:?},args_head={:?})，按 Null 参数收口交 runtime 如实报错",
-                    args.chars().take(80).collect::<String>()
-                );
-                serde_json::Value::Null
-            }
-        };
-        let duplicate = blocks.iter().any(|block| match block {
-            ContentBlock::ToolUse {
-                id: known_id,
-                name: known_name,
-                input: known_input,
-            } => {
-                if known_name != &name {
-                    return false;
-                }
-                if id.is_empty() || known_id.is_empty() {
-                    known_input == &input
-                } else {
-                    // id 形态别名（item id `fc_…` vs call_id `call_…`）时
-                    // 参数逐值一致也判重复：同一调用的两份上报只执行一次。
-                    known_id == &id || known_input == &input
-                }
-            }
-            _ => false,
-        });
-        if duplicate {
-            continue;
-        }
-        log::warn!("Responses 收口缺 function_call(id={id:?},name={name:?})，按流补齐");
-        blocks.push(ContentBlock::ToolUse { id, name, input });
-    }
-}
-
-/// `response.incomplete` 等价收口：SDK 把它当流错误抛出（事件原文在
-/// `ProviderStream(json)`），旧契约里它是**带截断原因的正常终态**。这里把
-/// 事件里的 response 对象重新取用：output items → Done 块，reason → stop。
-struct IncompleteTerminal {
-    stop_reason: Option<String>,
-    usage: Option<UsageInfo>,
-    raw_message: Message,
-    is_failed: bool,
-    failure_message: String,
-}
-
-fn interpret_provider_stream(raw: &str) -> Option<IncompleteTerminal> {
-    let event: serde_json::Value = serde_json::from_str(raw).ok()?;
-    let typ = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    let response = event.get("response")?;
-    if typ == "response.failed" || typ == "error" {
-        let message = response
-            .get("error")
-            .and_then(|e| e.get("message"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("response failed")
-            .to_string();
-        return Some(IncompleteTerminal {
-            stop_reason: None,
-            usage: None,
-            raw_message: empty_assistant(),
-            is_failed: true,
-            failure_message: message,
-        });
-    }
-    if typ != "response.incomplete" {
-        return None;
-    }
-    let stop_reason = response
-        .get("incomplete_details")
-        .and_then(|d| d.get("reason"))
-        .and_then(|v| v.as_str())
-        .map(String::from);
-    let mut blocks: Vec<ContentBlock> = Vec::new();
-    if let Some(output) = response.get("output").and_then(|o| o.as_array()) {
-        for item in output {
-            let it = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-            match it {
-                // message/reasoning item：只作 ResponseOutputItem 回存；正文/思考
-                // 文本来自 delta 缓冲（旧 emit_done 同款分工）。
-                "message" | "reasoning" => {}
-                "function_call" => {
-                    let id = item
-                        .get("call_id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let name = item
-                        .get("name")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let input = item
-                        .get("arguments")
-                        .and_then(|v| v.as_str())
-                        // 0.7.1 宽松 JSON 修复：模型经 compat 网关吐出的参数
-                        // 可能是 relaxed JSON（glob 值丢引号等），修复失败再落 Null。
-                        .and_then(mutil_ai::lenient::parse)
-                        .unwrap_or(serde_json::Value::Null);
-                    if !id.is_empty() && !name.is_empty() {
-                        blocks.push(ContentBlock::ToolUse { id, name, input });
-                    }
-                }
-                "web_search_call" => {
-                    let id = item
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let action = item
-                        .get("action")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({"type": "search"}));
-                    blocks.push(ContentBlock::WebSearchCall { id, action });
-                }
-                _ => {}
-            }
-            blocks.push(ContentBlock::ResponseOutputItem { item: item.clone() });
-        }
-    }
-    let usage = response.get("usage").map(|u| {
-        let input_tokens = u.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let output_tokens = u.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let cached_value = u
-            .get("input_tokens_details")
-            .and_then(|d| d.get("cached_tokens"));
-        let cached = cached_value.and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let reported = cached_value.and_then(|v| v.as_u64()).is_some();
-        usage::normalize(
-            usage::UsageSeed {
-                prompt_tokens: input_tokens,
-                completion_tokens: output_tokens,
-                total_tokens: u
-                    .get("total_tokens")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v as u32),
-                cache_hit_tokens: cached,
-                cache_miss_tokens: if reported {
-                    input_tokens.saturating_sub(cached)
-                } else {
-                    0
-                },
-                cache_reported: reported,
-                reasoning_tokens: u
-                    .get("output_tokens_details")
-                    .and_then(|d| d.get("reasoning_tokens"))
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32,
-            },
-            Some(u),
-        )
-    });
-    Some(IncompleteTerminal {
-        stop_reason,
-        usage,
-        raw_message: Message {
-            msg_id: None,
-            role: "assistant".into(),
-            name: None,
-            content: blocks,
-        },
-        is_failed: false,
-        failure_message: String::new(),
-    })
-}
-
-fn empty_assistant() -> Message {
-    Message {
-        msg_id: None,
-        role: "assistant".into(),
-        name: None,
-        content: Vec::new(),
     }
 }
 
@@ -1411,6 +763,7 @@ struct Resps {
     /// Display-only byte watermark. Never use item ids as tool call ids and
     /// never replay a cumulative snapshot as another argument delta.
     tool_progress: HashMap<usize, usize>,
+    had_native_output: bool,
     usage: Option<UsageInfo>,
 }
 
@@ -1438,7 +791,10 @@ impl Resps {
     }
 
     fn had_output(&self) -> bool {
-        !self.text.is_empty() || !self.reasoning.is_empty() || !self.tools.is_empty()
+        !self.text.is_empty()
+            || !self.reasoning.is_empty()
+            || !self.tools.is_empty()
+            || self.had_native_output
     }
 }
 
@@ -1573,6 +929,7 @@ async fn consume(
                 delta,
                 input_so_far,
             }) => {
+                resp.had_native_output = true;
                 on_event(StreamEvent::NativeToolProgress {
                     index,
                     item_id,
@@ -1583,6 +940,7 @@ async fn consume(
                 });
             }
             Ok(SdkEvent::NativeToolCompleted { index, call }) => {
+                resp.had_native_output = true;
                 native_calls.insert(index, call);
             }
             Ok(SdkEvent::ServerToolStatus { state, .. }) => {
@@ -1812,7 +1170,7 @@ async fn consume(
                 // response.incomplete / response.failed 以事件原文形式落到这里：
                 // 前者是带截断原因的正常终态，后者维持旧 Fatal 语义。
                 if let SdkError::ProviderStream(raw) = &e
-                    && let Some(term) = interpret_provider_stream(raw)
+                    && let Some(term) = interpret_provider_stream(raw, &compat)
                 {
                     if plan.is_some() {
                         return Outcome::Fatal(anyhow::anyhow!(

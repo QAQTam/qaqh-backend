@@ -296,12 +296,9 @@ fn assistant_text_never_sits_between_a_call_and_its_output() {
         .position(|part| matches!(part, Part::Text { text, .. } if text == "我先读这两份文档。"))
         .expect("正文必须保留");
     let first_call = assistant
-            .iter()
-            .position(|part| {
-                matches!(part, Part::ProviderItem(item)
-                    if item.provider_state.data.get("type").and_then(|v| v.as_str()) == Some("function_call"))
-            })
-            .expect("回放的 function_call 必须保留");
+        .iter()
+        .position(|part| matches!(part, Part::ToolCall(_)))
+        .expect("回放的 function_call 必须转为类型化 Part::ToolCall");
     assert!(
         text_at < first_call,
         "正文必须排在调用之前，否则会插在 call 与 output 之间：{:?}",
@@ -313,6 +310,9 @@ fn assistant_text_never_sits_between_a_call_and_its_output() {
         "正文 + 两条回放调用，派生调用不得重复：{:?}",
         assistant
     );
+    let chat_req = mutil_ai::ChatRequest::new(projected);
+    mutil_ai::normalize(&chat_req, mutil_ai::Protocol::OpenAiResponses)
+        .expect("回放的历史必须能通过 mutil_ai::normalize");
 }
 
 #[test]
@@ -384,13 +384,17 @@ fn assistant_replays_raw_items_and_skips_duplicate_derivations() {
             _ => None,
         })
         .collect();
-    assert_eq!(provider_items, 1, "回放 item 原样保留");
+    assert_eq!(
+        provider_items, 0,
+        "function_call 必须转为类型化 ToolCall，不得残留 ProviderItem"
+    );
     assert_eq!(
         calls.len(),
-        1,
-        "call_id 已被回放覆盖的派生 ToolUse 不再合成（防双份）"
+        2,
+        "call_id 已被回放覆盖的派生 ToolUse 不再合成（防双份），c1 + c2 共两条"
     );
-    assert_eq!(calls[0].id.as_deref(), Some("c2"));
+    assert_eq!(calls[0].id.as_deref(), Some("c1"));
+    assert_eq!(calls[1].id.as_deref(), Some("c2"));
 }
 
 #[test]
@@ -1180,13 +1184,14 @@ fn incomplete_event_reads_as_terminal_with_reason_and_items() {
             "usage": {"input_tokens": 9, "output_tokens": 3, "total_tokens": 12}
         }
     });
-    let term = interpret_provider_stream(&event.to_string()).expect("incomplete terminal");
+    let term = interpret_provider_stream(&event.to_string(), &ResponsesCompat::default())
+        .expect("incomplete terminal");
     assert!(!term.is_failed);
     assert_eq!(term.stop_reason.as_deref(), Some("max_output_tokens"));
-    // message item 只回存；function_call → ToolUse + 回存（旧 preserve 形态）
+    // message item 只回存；普通 function_call → ToolUse（不回存 ProviderItem）
     assert_eq!(
         term.raw_message.content.len(),
-        3,
+        2,
         "{:?}",
         term.raw_message.content
     );
@@ -1207,7 +1212,8 @@ fn failed_event_reads_as_fatal() {
         "type": "response.failed",
         "response": {"error": {"message": "server is overloaded"}}
     });
-    let term = interpret_provider_stream(&event.to_string()).expect("failed terminal");
+    let term = interpret_provider_stream(&event.to_string(), &ResponsesCompat::default())
+        .expect("failed terminal");
     assert!(term.is_failed);
     assert_eq!(term.failure_message, "server is overloaded");
 }
@@ -1303,4 +1309,201 @@ fn reconcile_treats_aliased_ids_with_identical_args_as_duplicate() {
     );
     reconcile_streamed_tool_calls(&mut blocks, &streamed);
     assert_eq!(blocks.len(), 1, "别名 id + 同参不得重复执行: {blocks:?}");
+}
+
+#[test]
+fn parallel_tool_calls_with_read_image_place_attachments_after_all_tool_results() {
+    let mut compat = provider().responses_compat;
+    compat.apply_patch_freeform = true;
+    let messages = vec![
+        Message::user("inspect image and patch"),
+        qa_msg(
+            "assistant",
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call_img".into(),
+                    name: "read_image".into(),
+                    input: serde_json::json!({"path": "a.png"}),
+                },
+                ContentBlock::ResponseOutputItem {
+                    item: serde_json::json!({
+                        "type": "custom_tool_call",
+                        "id": "ctc_patch",
+                        "call_id": "call_patch",
+                        "name": "apply_patch",
+                        "input": "*** Begin Patch\n*** End Patch",
+                        "status": "completed"
+                    }),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_patch".into(),
+                    name: "apply_patch".into(),
+                    input: serde_json::json!({"input": "*** Begin Patch\n*** End Patch"}),
+                },
+            ],
+        ),
+        qa_msg(
+            "tool",
+            vec![
+                ContentBlock::ToolResult {
+                    tool_use_id: "call_img".into(),
+                    result: qaqh_types::ToolResult::ok("ok"),
+                },
+                ContentBlock::Image {
+                    mime_type: "image/png".into(),
+                    data: "aGVsbG8=".into(),
+                },
+            ],
+        ),
+        qa_msg(
+            "tool",
+            vec![ContentBlock::ToolResult {
+                tool_use_id: "call_patch".into(),
+                result: qaqh_types::ToolResult::ok("patched"),
+            }],
+        ),
+    ];
+
+    let projected = project_responses_messages(&messages, &compat);
+    assert_eq!(
+        projected
+            .iter()
+            .map(|m| m.role.clone())
+            .collect::<Vec<_>>(),
+        vec![Role::User, Role::Assistant, Role::Tool, Role::Tool, Role::User]
+    );
+    let chat_req = mutil_ai::ChatRequest::new(projected);
+    let (normalized, _) = mutil_ai::normalize(&chat_req, mutil_ai::Protocol::OpenAiResponses)
+        .expect("并行工具+图片必须通过 normalize");
+    assert_eq!(normalized.messages.len(), 5);
+    assert!(
+        normalized
+            .messages
+            .last()
+            .is_some_and(|m| m.parts.iter().any(|p| matches!(p, Part::Image { .. })))
+    );
+}
+
+#[test]
+fn incomplete_custom_tool_and_freeform_retry_roundtrip_passes_normalize() {
+    let mut compat = provider().responses_compat;
+    compat.apply_patch_freeform = true;
+    compat.search_function_alias = Some("local_search".into());
+    let incomplete_event = serde_json::json!({
+        "type": "response.incomplete",
+        "response": {
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {"type": "function_call", "call_id": "c_search", "name": "local_search", "arguments": "{\"q\":\"x\"}"},
+                {"type": "custom_tool_call", "id": "badid", "call_id": "c_patch", "name": "apply_patch", "input": "*** Begin", "status": "in_progress"}
+            ]
+        }
+    });
+    let term = interpret_provider_stream(&incomplete_event.to_string(), &compat)
+        .expect("incomplete terminal");
+    assert!(term.raw_message.content.iter().any(|b| matches!(
+        b,
+        ContentBlock::ToolUse { id, name, .. } if id == "c_search" && name == "search"
+    )));
+    assert!(term.raw_message.content.iter().any(|b| matches!(
+        b,
+        ContentBlock::ToolUse { id, name, input } if id == "c_patch" && name == "apply_patch" && input.is_null()
+    )));
+    assert!(
+        !term
+            .raw_message
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::ResponseOutputItem { .. })),
+        "未完成的 custom_tool_call 不得作为 ResponseOutputItem 回存"
+    );
+
+    // 模拟 B 路注入失败结果后的重放（无 opaque_items，仅有 ToolUse(apply_patch, {})）
+    let history = vec![
+        Message::user("fix"),
+        qa_msg(
+            "assistant",
+            vec![ContentBlock::ToolUse {
+                id: "c_patch".into(),
+                name: "apply_patch".into(),
+                input: serde_json::json!({}),
+            }],
+        ),
+        Message::tool_result("c_patch", qaqh_types::ToolResult::error("cut off")),
+    ];
+    let projected = project_responses_messages(&history, &compat);
+    assert!(matches!(
+        &projected[1].parts[0],
+        Part::NativeToolCall(call) if call.kind == mutil_ai::NativeToolKind::Custom && call.call_id == "c_patch"
+    ));
+    let chat_req = mutil_ai::ChatRequest::new(projected);
+    mutil_ai::normalize(&chat_req, mutil_ai::Protocol::OpenAiResponses)
+        .expect("B 路重试回放必须通过 normalize");
+}
+
+#[test]
+fn native_call_replay_strips_unprefixed_item_id() {
+    let compat = provider().responses_compat;
+    let history = vec![
+        Message::user("go"),
+        qa_msg(
+            "assistant",
+            vec![ContentBlock::ResponseOutputItem {
+                item: serde_json::json!({
+                    "type": "custom_tool_call",
+                    "id": "badid",
+                    "call_id": "call_1",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch",
+                    "status": "completed"
+                }),
+            }],
+        ),
+        Message::tool_result("call_1", qaqh_types::ToolResult::ok("ok")),
+    ];
+    let projected = project_responses_messages(&history, &compat);
+    assert!(matches!(
+        &projected[1].parts[0],
+        Part::NativeToolCall(call) if call.item_id.is_none()
+    ));
+}
+
+#[test]
+fn reconcile_preserves_parallel_identical_calls_with_distinct_real_ids() {
+    let mut blocks = vec![ContentBlock::ToolUse {
+        id: "call_1".into(),
+        name: "read".into(),
+        input: serde_json::json!({"path": "a.rs"}),
+    }];
+    let mut streamed = HashMap::new();
+    streamed.insert(
+        1usize,
+        (
+            "call_2".to_string(),
+            "read".to_string(),
+            "{\"path\": \"a.rs\"}".to_string(),
+        ),
+    );
+    streamed.insert(
+        2usize,
+        (
+            "call_3".to_string(),
+            "read".to_string(),
+            "{\"path\": \"broken".to_string(),
+        ),
+    );
+    reconcile_streamed_tool_calls(&mut blocks, &streamed);
+    assert_eq!(blocks.len(), 3, "不同真实 call_id 的同参调用与损坏调用都必须保留: {blocks:?}");
+    assert!(matches!(
+        &blocks[2],
+        ContentBlock::ToolUse { id, input, .. } if id == "call_3" && input.is_null()
+    ));
+}
+
+#[test]
+fn resps_had_output_counts_native_tool_events() {
+    let mut resp = Resps::default();
+    assert!(!resp.had_output());
+    resp.had_native_output = true;
+    assert!(resp.had_output());
 }

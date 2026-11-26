@@ -3,6 +3,7 @@ mod endpoint;
 mod gemini;
 mod openai_chat;
 mod openai_responses;
+mod openai_responses_custom;
 
 use std::future::Future;
 use std::pin::Pin;
