@@ -1783,6 +1783,173 @@ mod tests {
         );
     }
 
+    /// v4.5.1 PR #45 中危 5 回归:保留回合的用户附件 BLOB 只写在 `blocks.payload_json`
+    /// 中,未被 `tool_calls` 或 `exec_sessions` 引用;若被撤回合的工具输出与该附件
+    /// 发生 content_id 碰撞,`truncate_from_turn` 绝不能误删该 `session_contents` 行。
+    #[tokio::test]
+    async fn truncate_keeps_blob_referenced_only_by_retained_block_payload_json() {
+        use qaqh_ringing_contract::fact::{ContentHash, ContentRef};
+
+        let (_dir, owners) = test_owner_dir();
+        let owner = owners
+            .create_session(blob_session("SES-ATTACH-BLOB"))
+            .await
+            .expect("create session");
+
+        let blob = vec![0x5Au8; 512];
+        let retained_attach = "d".repeat(64);
+        let exclusive_t2 = "e".repeat(64);
+        let retained_for_seed = retained_attach.clone();
+        let exclusive_for_seed = exclusive_t2.clone();
+        owners
+            .db()
+            .write_blocking(move |conn| {
+                store::put_session_content(
+                    conn,
+                    "SES-ATTACH-BLOB",
+                    &retained_for_seed,
+                    "image/png",
+                    &blob,
+                    false,
+                )?;
+                store::put_session_content(
+                    conn,
+                    "SES-ATTACH-BLOB",
+                    &exclusive_for_seed,
+                    "text/plain",
+                    &blob,
+                    false,
+                )?;
+                Ok::<(), crate::db::DbError>(())
+            })
+            .expect("seed blobs");
+
+        // 保留回合 T1 的 Input 块通过 payload_json 引用 retained_attach(模拟用户上传附件);
+        // 撤回回合 T2 也按真实回合流程落一条 Input 块,使 cutoff ord 落在 T2。
+        owner.start_turn("T1", None).await.expect("start T1");
+        owner
+            .append_block(TimelineEntry::Input {
+                block_id: BlockId::new("B-T1-INPUT"),
+                turn_id: Some(TurnId::new("T1")),
+                purpose: InputPurpose::TriggerTurn,
+                content: ContentValue::Inline {
+                    text: "see attachment".into(),
+                },
+                attachments: vec![ContentRef::new(ContentHash::new(format!(
+                    "sha256:{retained_attach}"
+                )))],
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                actor: ActorRef {
+                    kind: ActorKind::User,
+                    id: "user".into(),
+                    display_name: None,
+                },
+            })
+            .await
+            .expect("append retained input block");
+        owner
+            .finish_turn(
+                "T1",
+                "finished",
+                TurnOutcome::Finished {
+                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Completed,
+                    usage: None,
+                    error: None,
+                },
+            )
+            .await
+            .expect("finish T1");
+
+        owner.start_turn("T2", None).await.expect("start T2");
+        owner
+            .append_block(TimelineEntry::Input {
+                block_id: BlockId::new("B-T2-INPUT"),
+                turn_id: Some(TurnId::new("T2")),
+                purpose: InputPurpose::TriggerTurn,
+                content: ContentValue::Inline {
+                    text: "second turn".into(),
+                },
+                attachments: vec![],
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                actor: ActorRef {
+                    kind: ActorKind::User,
+                    id: "user".into(),
+                    display_name: None,
+                },
+            })
+            .await
+            .expect("append T2 input block");
+        owner
+            .finish_turn(
+                "T2",
+                "finished",
+                TurnOutcome::Finished {
+                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Completed,
+                    usage: None,
+                    error: None,
+                },
+            )
+            .await
+            .expect("finish T2");
+
+        let state_json = serde_json::to_string(&ToolCallState::Finished {
+            outcome: ToolCallOutcome::Completed,
+        })
+        .expect("state");
+        let retained_for_call = retained_attach.clone();
+        let exclusive_for_call = exclusive_t2.clone();
+        owners
+            .db()
+            .write_blocking(move |conn| {
+                // 被撤回合 T2 的工具调用既引用了与 T1 附件同内容的 retained_attach,又引用独占 exclusive_t2。
+                store::finish_tool_call(
+                    conn,
+                    &store::ToolCallFinish {
+                        call_id: "C-T2".into(),
+                        session_id: "SES-ATTACH-BLOB".into(),
+                        turn_id: Some("T2".into()),
+                        tool_name: "read".into(),
+                        state_json,
+                        exec_session_id: None,
+                        output_text: None,
+                        output_ref: Some(store::canonical_content_ref(&retained_for_call)),
+                        output_truncated: false,
+                        diff_text: None,
+                        diff_ref: Some(store::canonical_content_ref(&exclusive_for_call)),
+                        meta_json: None,
+                        effects_json: None,
+                        code_delta_json: None,
+                    },
+                )
+            })
+            .expect("seed T2 tool call");
+
+        owner.truncate_from_turn("T2").await.expect("truncate T2");
+
+        let exists = |id: String| -> bool {
+            owners
+                .db()
+                .read_blocking(move |conn| {
+                    store::get_session_content(conn, "SES-ATTACH-BLOB", &id)
+                        .map(|row| row.is_some())
+                        .map_err(crate::db::DbError::from)
+                })
+                .expect("content lookup")
+        };
+        assert!(
+            exists(retained_attach),
+            "保留回合 blocks.payload_json 引用的附件 BLOB 严禁被误删(旧实现无 blocks 守卫,必红)"
+        );
+        assert!(
+            !exists(exclusive_t2),
+            "被撤回合独占 BLOB 仍须正常清理"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // v4.5.1 任务4:exec 进度 SQLite 落库节流(前端 20ms 合帧不变)
     // -----------------------------------------------------------------------

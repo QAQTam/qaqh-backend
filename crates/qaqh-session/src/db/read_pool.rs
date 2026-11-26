@@ -212,15 +212,32 @@ mod tests {
     /// 池满时借用在 `Condvar` 上排队,归还后放行——不扩容、不饿死。
     #[test]
     fn leases_queue_when_pool_is_exhausted_then_drain() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Barrier;
+
+        const THREADS: usize = 8;
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Arc::new(Db::open(dir.path().join("qaqh.db")).expect("open"));
-        let mut joins = Vec::new();
-        for _ in 0..4 {
+        let barrier = Arc::new(Barrier::new(THREADS));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let mut joins = Vec::with_capacity(THREADS);
+        for _ in 0..THREADS {
             let db = Arc::clone(&db);
+            let barrier = Arc::clone(&barrier);
+            let active = Arc::clone(&active);
+            let max_active = Arc::clone(&max_active);
             joins.push(std::thread::spawn(move || {
+                barrier.wait();
                 db.read_blocking(|conn| {
-                    conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                        .map_err(super::DbError::from)
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_active.fetch_max(current, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(40));
+                    let value = conn
+                        .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                        .map_err(super::DbError::from);
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    value
                 })
                 .expect("read")
             }));
@@ -228,6 +245,12 @@ mod tests {
         for join in joins {
             assert_eq!(join.join().expect("join"), 1);
         }
+        assert_eq!(active.load(Ordering::SeqCst), 0, "全部借用归还后活跃数必须归零");
+        assert_eq!(
+            max_active.load(Ordering::SeqCst),
+            super::READ_POOL_CAPACITY,
+            "8 线程并发持连接 40ms 必须精确打满 4 条连接且不超容(真实走过 Condvar::wait)"
+        );
         // 全部归还后,同一批再用并发读依然可完成(连接成功回流)。
         let db2 = Arc::clone(&db);
         assert_eq!(

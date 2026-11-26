@@ -2677,4 +2677,351 @@ mod disk_full_fail_closed_tests {
             })
             .expect("verify db state");
     }
+
+    /// v4.5.1 PR #45 Blocker 1 + Blocker 2 端到端红→绿反证:
+    /// 当 `seal_response` 因 SQLITE_FULL 失败进入 `finish_persist_failed -> finish_failed`,
+    /// 且 `owner.finish_turn` 自身也写库失败(由 `turns` BEFORE UPDATE 触发器模拟真 0 字节
+    /// 盘满):
+    /// 1. 旧实现直接跳过广播导致前端永久挂在 Running 超时卡死(必红),新实现经
+    ///    `emit_turn_persist_failed` 必在时限内收到 `TurnEnded(Failed)`(带
+    ///    `response_persist_failed` 与盘满提示)以及 `ActivityChanged(Idle)`;
+    /// 2. 旧实现会触发 `notify_terminal` **2 次**(必红),新实现 `terminal_port`
+    ///    回调计数精确等于 `1`。
+    #[tokio::test]
+    async fn finish_turn_persist_failure_unlocks_ui_and_notifies_terminal_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use qaqh_ringing_contract::fact::{ActivityState, TurnTerminal};
+        use crate::session_loop::TurnTerminalNotice;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owners =
+            Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: "SES-FINISH-FAIL".into(),
+                parent_session_id: None,
+                title: "finish-fail".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let mut rx = owner.subscribe();
+        let manager = Arc::new(Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            "SES-FINISH-FAIL",
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.path().join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+
+        let big_answer = "x".repeat(2 * 1024 * 1024);
+        let sse_body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{big_answer}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}}}\n\n\
+             data: [DONE]\n\n"
+        );
+        let (server, base_url) = sse_server();
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        spawn_gated_sse_response(server, sse_body, Arc::clone(&release));
+
+        let mut provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        provider.retry = Some(qaqh_types::RetrySpec {
+            max_retries: 1,
+            ..Default::default()
+        });
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        let loop_ = SessionLoop::new("SES-FINISH-FAIL", owner, port, spec, dir.path().to_path_buf());
+
+        let notice_count = Arc::new(AtomicUsize::new(0));
+        let notices: Arc<Mutex<Vec<TurnTerminalNotice>>> = Arc::new(Mutex::new(Vec::new()));
+        let count_hook = Arc::clone(&notice_count);
+        let notices_hook = Arc::clone(&notices);
+        loop_.set_terminal_port(Arc::new(move |notice| {
+            count_hook.fetch_add(1, Ordering::SeqCst);
+            notices_hook.lock().expect("lock").push(notice);
+        }));
+
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-FINISH-FAIL".into()),
+                text: "触发双失败".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                widget_context: None,
+            })
+            .expect("send input");
+        for _ in 0..200 {
+            if loop_.active_turn().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(loop_.active_turn().is_some(), "回合必须已启动");
+
+        // 双重故障注入:1) max_page_count 让 2 MiB seal_response 撞 SQLITE_FULL;
+        // 2) turns BEFORE UPDATE 触发器让随后的 owner.finish_turn 本身也落库失败。
+        owners
+            .db()
+            .write_blocking(|conn| {
+                let pages: i64 = conn
+                    .query_row("PRAGMA page_count", [], |row| row.get(0))
+                    .map_err(qaqh_session::db::DbError::from)?;
+                conn.execute_batch(&format!(
+                    "PRAGMA max_page_count = {};\
+                     CREATE TRIGGER block_turn_update BEFORE UPDATE ON turns \
+                     BEGIN SELECT RAISE(ABORT, 'simulated finish_turn failure'); END;",
+                    pages + 4
+                ))
+                .map_err(qaqh_session::db::DbError::from)?;
+                Ok::<(), qaqh_session::db::DbError>(())
+            })
+            .expect("inject dual failure");
+        release.store(true, Ordering::SeqCst);
+
+        let mut terminal_outcome = None;
+        let mut got_idle = false;
+        while terminal_outcome.is_none() || !got_idle {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Ok(frame)) => match frame.event {
+                    SessionEvent::TurnEnded { outcome, .. } => {
+                        terminal_outcome = Some(outcome);
+                    }
+                    SessionEvent::ActivityChanged {
+                        activity: ActivityState::Idle,
+                        current_turn_id: None,
+                    } => {
+                        got_idle = true;
+                    }
+                    _ => {}
+                },
+                Ok(Err(error)) => panic!("event channel: {error}"),
+                Err(_) => panic!(
+                    "finish_turn 失败后前端必须收到 TurnEnded(Failed) 与 ActivityChanged(Idle)(旧实现永久挂死)"
+                ),
+            }
+        }
+
+        let outcome = terminal_outcome.expect("terminal outcome");
+        let qaqh_ringing_contract::state::TurnOutcome::Finished {
+            terminal,
+            error: turn_error,
+            ..
+        } = &outcome
+        else {
+            panic!("expected finished outcome, got {outcome:?}");
+        };
+        assert!(
+            matches!(terminal, TurnTerminal::Failed),
+            "必须广播 Failed: {terminal:?}"
+        );
+        let turn_error = turn_error.as_ref().expect("failed turn must carry error");
+        assert_eq!(turn_error.code, "response_persist_failed");
+        assert!(
+            turn_error.message.contains("磁盘空间不足，上下文未保存"),
+            "必须保留盘满上下文未保存提示: {}",
+            turn_error.message
+        );
+        assert!(
+            turn_error.message.contains("simulated finish_turn failure"),
+            "必须合并 finish_turn 落库失败原因: {}",
+            turn_error.message
+        );
+
+        // 等待回合槽位清零,确保 settle_terminal 与 notify_terminal 已全部收尾。
+        for _ in 0..200 {
+            if loop_.active_turn().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(loop_.active_turn().is_none(), "active turn must clear");
+        assert_eq!(
+            notice_count.load(Ordering::SeqCst),
+            1,
+            "terminal_port 必须精确触发 1 次(旧实现会触发 2 次)"
+        );
+        let notices = notices.lock().expect("lock");
+        assert!(matches!(notices[0].terminal, TurnTerminal::Failed));
+    }
+
+    /// v4.5.1 PR #45 Blocker 2 补充反证:`seal_response` 正常落库,但
+    /// `finish_completed` 内 `owner.finish_turn` 自身写库失败时,事件流仍必须
+    /// 收到 `TurnEnded(Failed)`(`response_persist_failed`)与 `ActivityChanged(Idle)`,
+    /// 且 `terminal_port` 仅触发 1 次 `Failed`(绝不假报 Completed,也不永久挂死)。
+    #[tokio::test]
+    async fn finish_completed_persist_failure_emits_failed_and_idle() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        use qaqh_ringing_contract::fact::{ActivityState, TurnTerminal};
+        use crate::session_loop::TurnTerminalNotice;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owners =
+            Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: "SES-COMP-FAIL".into(),
+                parent_session_id: None,
+                title: "comp-fail".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let mut rx = owner.subscribe();
+        let manager = Arc::new(Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            "SES-COMP-FAIL",
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.path().join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"short answer\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}\n\n",
+            "data: [DONE]\n\n",
+        ).to_string();
+        let (server, base_url) = sse_server();
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        spawn_gated_sse_response(server, sse_body, Arc::clone(&release));
+
+        let provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        let loop_ = SessionLoop::new("SES-COMP-FAIL", owner, port, spec, dir.path().to_path_buf());
+
+        let notice_count = Arc::new(AtomicUsize::new(0));
+        let notices: Arc<Mutex<Vec<TurnTerminalNotice>>> = Arc::new(Mutex::new(Vec::new()));
+        let count_hook = Arc::clone(&notice_count);
+        let notices_hook = Arc::clone(&notices);
+        loop_.set_terminal_port(Arc::new(move |notice| {
+            count_hook.fetch_add(1, Ordering::SeqCst);
+            notices_hook.lock().expect("lock").push(notice);
+        }));
+
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-COMP-FAIL".into()),
+                text: "触发 finish_completed 落库失败".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                widget_context: None,
+            })
+            .expect("send input");
+        for _ in 0..200 {
+            if loop_.active_turn().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(loop_.active_turn().is_some(), "回合必须已启动");
+
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER block_turn_update BEFORE UPDATE ON turns \
+                     BEGIN SELECT RAISE(ABORT, 'turns update failed'); END;",
+                )
+                .map_err(qaqh_session::db::DbError::from)
+            })
+            .expect("inject trigger");
+        release.store(true, Ordering::SeqCst);
+
+        let mut terminal_outcome = None;
+        let mut got_idle = false;
+        while terminal_outcome.is_none() || !got_idle {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Ok(frame)) => match frame.event {
+                    SessionEvent::TurnEnded { outcome, .. } => {
+                        terminal_outcome = Some(outcome);
+                    }
+                    SessionEvent::ActivityChanged {
+                        activity: ActivityState::Idle,
+                        current_turn_id: None,
+                    } => {
+                        got_idle = true;
+                    }
+                    _ => {}
+                },
+                Ok(Err(error)) => panic!("event channel: {error}"),
+                Err(_) => panic!("finish_completed 失败后前端必须收到 TurnEnded(Failed) 与 Idle"),
+            }
+        }
+
+        let qaqh_ringing_contract::state::TurnOutcome::Finished {
+            terminal: TurnTerminal::Failed,
+            error: Some(turn_error),
+            ..
+        } = terminal_outcome.expect("terminal outcome")
+        else {
+            panic!("expected TurnTerminal::Failed with TurnError");
+        };
+        assert_eq!(turn_error.code, "response_persist_failed");
+        assert!(turn_error.message.contains("turns update failed"));
+
+        for _ in 0..200 {
+            if loop_.active_turn().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(notice_count.load(Ordering::SeqCst), 1);
+        let notices = notices.lock().expect("lock");
+        assert!(matches!(notices[0].terminal, TurnTerminal::Failed));
+    }
 }

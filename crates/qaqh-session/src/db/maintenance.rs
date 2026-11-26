@@ -169,7 +169,8 @@ pub(crate) fn collect_dangling_candidates(
 /// 撤回删除 `tool_calls` / `exec_sessions` / `blocks` / `turns` 之后、同事务内
 /// 清理孤儿 BLOB(修复单 §二.2.2):候选集合内、且**不再被**该会话剩余
 /// `tool_calls.output_ref` / `tool_calls.diff_ref` / `exec_sessions.output_content_id`
-/// 引用的行才删除——保留回合与被撤回合共用的同一 `content_id` 绝不误删。
+/// 或保留回合 `blocks.payload_json`(如用户上传附件)引用的行才删除——
+/// 保留回合与被撤回合共用的同一 `content_id` 绝不误删。
 /// 返回删除的行数。
 pub(crate) fn delete_orphan_session_contents(
     tx: &Transaction<'_>,
@@ -193,6 +194,10 @@ pub(crate) fn delete_orphan_session_contents(
                  AND NOT EXISTS (
                      SELECT 1 FROM exec_sessions es
                      WHERE es.session_id = ?1 AND {content} = ?2
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM blocks b
+                     WHERE b.session_id = ?1 AND instr(b.payload_json, ?2) > 0
                  )",
                 out = BARE_REF.replace("{col}", "tc.output_ref"),
                 diff = BARE_REF.replace("{col}", "tc.diff_ref"),

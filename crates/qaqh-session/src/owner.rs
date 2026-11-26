@@ -536,19 +536,44 @@ impl SessionOwner {
                         store::finish_turn(conn, &row_turn_id, status, Some(&outcome_json))
                     })
                     .await?;
-                let turn = TurnId::new(turn_id_owned);
-                pump.emit(SessionEvent::TurnEnded {
-                    turn_id: turn.clone(),
-                    outcome,
-                });
-                pump.emit(SessionEvent::ActivityChanged {
-                    activity: qaqh_ringing_contract::fact::ActivityState::Idle,
-                    current_turn_id: None,
-                });
+                emit_turn_ended(&pump, turn_id_owned, outcome);
                 Ok(())
             })
         })
         .await
+    }
+
+    /// 持久化终态写库失败时的显式内存广播口:按泵内单流序发布
+    /// `TurnEnded(Failed)` 与 `ActivityChanged(Idle)`,确保前端立即解锁并展示错误。
+    pub async fn emit_turn_persist_failed(
+        &self,
+        turn_id: &str,
+        usage: Option<qaqh_types::UsageInfo>,
+        code: &str,
+        message: String,
+    ) {
+        let turn_id_owned = turn_id.to_string();
+        let outcome = TurnOutcome::Finished {
+            terminal: qaqh_ringing_contract::fact::TurnTerminal::Failed,
+            usage,
+            error: Some(qaqh_ringing_contract::fact::TurnError {
+                code: code.to_string(),
+                message,
+                retryable: false,
+                details_ref: None,
+            }),
+        };
+        if let Err(error) = self
+            .submit_request(move |pump| {
+                Box::pin(async move {
+                    emit_turn_ended(&pump, turn_id_owned, outcome);
+                    Ok(())
+                })
+            })
+            .await
+        {
+            log::error!("[owner] emit_turn_persist_failed dropped for {turn_id}: {error}");
+        }
     }
 
     fn block_request(&self, entry: TimelineEntry) -> Result<OwnerRequest, DbError> {
@@ -1060,6 +1085,17 @@ fn emit(
     // 由转发侧水位去重。
     replay.push(frame.clone());
     let _ = events.send(frame);
+}
+
+fn emit_turn_ended(pump: &OwnerPump, turn_id: String, outcome: TurnOutcome) {
+    pump.emit(SessionEvent::TurnEnded {
+        turn_id: TurnId::new(turn_id),
+        outcome,
+    });
+    pump.emit(SessionEvent::ActivityChanged {
+        activity: qaqh_ringing_contract::fact::ActivityState::Idle,
+        current_turn_id: None,
+    });
 }
 
 /// typed 列的 serde 形式;序列化失败按代码错误响(不静默降级为 NULL)。
