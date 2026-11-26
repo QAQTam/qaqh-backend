@@ -63,12 +63,15 @@ enum AskReply {
     Dismissed,
 }
 
-/// 上下文压力的硬档位（软提醒之外的收口）。
+/// 上下文压力收口档位（以用户配置的 `auto_compact_threshold` 为唯一阈值）。
 enum HandoffPressure {
-    /// 还没到事。
+    /// 未达阈值或阈值关闭。
     Idle,
     /// 折叠工具结果正文，换一次「模型自己写交接文档」的机会。
-    Fold(qaqh_types::ContextUsage),
+    Fold {
+        context: qaqh_types::ContextUsage,
+        threshold_pct: u16,
+    },
     /// 已经折叠过一次、模型仍未交接 → 爆错终止，不静默降级。
     DeadEnd(qaqh_types::ContextUsage),
 }
@@ -116,12 +119,10 @@ struct LoopInner {
     active: Option<ActiveTurn>,
     permissions: HashMap<String, oneshot::Sender<PermissionAnswer>>,
     asks: HashMap<String, oneshot::Sender<AskReply>>,
-    /// 最近一次 provider 反馈的上下文占用：handoff 页脚与软阈值提醒的唯一读数源。
+    /// 最近一次 provider 反馈的上下文占用：handoff 页脚与折叠阈值的唯一读数源。
     last_context: Option<qaqh_types::ContextUsage>,
     /// 已封箱的回合：同回合第二次 handoff 只提示，不重复交接。
     handed_off_turn: Option<String>,
-    /// 已发过软阈值提醒的回合：每回合最多提醒一次，不刷屏。
-    reminded_turn: Option<String>,
     /// 已做过折叠腾位的回合：折叠只给一次机会，第二次直接判死。
     slimmed_turn: Option<String>,
 }
@@ -211,7 +212,6 @@ impl SessionLoop {
                 asks: HashMap::new(),
                 last_context: None,
                 handed_off_turn: None,
-                reminded_turn: None,
                 slimmed_turn: None,
             }),
             last_activity_ms: AtomicU64::new(unix_now_ms().max(0) as u64),
@@ -452,7 +452,6 @@ impl SessionLoop {
         qaqh_workspace::async_rt::block_on_host(self.owner.truncate_from_turn(turn_id))?;
         let mut inner = self.lock();
         inner.handed_off_turn = None;
-        inner.reminded_turn = None;
         inner.slimmed_turn = None;
         inner.last_context = None;
         Ok(())
@@ -685,6 +684,9 @@ impl SessionLoop {
             }
         };
         let cwd = self.effective_workspace();
+        // 动态工具投影先于系统提示词构建：否则首回合 system 里的 `[Environment] tools:`
+        // 缺少 MCP 工具而次回合补齐，导致第二回合开场即击穿系统提示词前缀缓存。
+        self.refresh_dynamic_projections();
         let system = prompt::system_prompt(&self.current_spec(), &cwd, &self.session_id);
         messages.insert(
             0,
@@ -787,13 +789,14 @@ impl SessionLoop {
                 }
             }
 
-            // 软阈值提醒：交接文档由模型写，后端只把真实读数摊开给它看。
-            self.maybe_remind_handoff(&turn_id, &mut messages).await;
-
-            // 硬阈值收口：不再赌模型自觉，也不把注定超限的请求推给上游换 400。
+            // 单一折叠阈值收口（以用户配置的 auto_compact_threshold 为唯一阈值）：
+            // 首次触发折叠历史工具结果并注入唯一一条强制交接指令，二次未交接直接判死。
             match self.handoff_pressure(&turn_id) {
                 HandoffPressure::Idle => {}
-                HandoffPressure::Fold(context) => {
+                HandoffPressure::Fold {
+                    context,
+                    threshold_pct,
+                } => {
                     // watchdog Input 是 durable 事实,重发会重复注入:Fold 轮
                     // 失败不进 turn 级重发预算。
                     watchdog_folded = true;
@@ -801,14 +804,14 @@ impl SessionLoop {
                     self.append_watchdog_input(
                         &turn_id,
                         &mut messages,
-                        crate::handoff::forced_reminder(folded, context),
+                        crate::handoff::forced_reminder(folded, context, threshold_pct),
                     )
                     .await;
                 }
                 HandoffPressure::DeadEnd(context) => {
                     let message = format!(
-                        "上下文占用 {}%（{} / {} tokens），已腾过一次位，模型仍未调用 handoff；\
-                         本回合终止，下一次请求注定超限",
+                        "Context usage reached {}% ({} / {} tokens) after folding, \
+                         and the model still did not call `handoff`; turn terminated.",
                         context.used_pct(),
                         context.used_tokens,
                         context.window_tokens
@@ -1068,7 +1071,7 @@ impl SessionLoop {
                             break;
                         }
                         Some(ProviderFinish::ToolUse) => {
-                            let message = outcome.message.clone().unwrap_or_else(empty_assistant);
+                            let mut message = outcome.message.clone().unwrap_or_else(empty_assistant);
                             let tool_uses = message
                                 .content
                                 .iter()
@@ -1262,6 +1265,13 @@ impl SessionLoop {
                                 // fact 落库，交接事实由这条调用自身在 timeline 里承载。
                                 self.finish_completed(&turn, outcome.usage.clone()).await;
                                 break 'rounds;
+                            }
+                            // 补回 Responses 原生回放锚点，使首回合内存态 messages 与
+                            // 次回合 SQLite 重建（assemble_context）逐字节一致，保住前缀缓存。
+                            for item in &outcome.opaque_items {
+                                message.content.push(ContentBlock::ResponseOutputItem {
+                                    item: item.clone(),
+                                });
                             }
                             messages.push(message);
                             messages.extend(tool_messages);
@@ -1955,36 +1965,8 @@ impl SessionLoop {
         self.lock().last_context
     }
 
-    /// 每回合最多一次的软阈值提醒：落库成**可见的** timeline Input（`interject`），
-    /// 同时在下一轮请求里以 user 角色出现——与首条输入同一位置口径。
-    async fn maybe_remind_handoff(&self, turn_id: &str, messages: &mut Vec<Message>) {
-        let Some(context) = self.last_context() else {
-            return;
-        };
-        let spec = self.current_spec();
-        if spec.auto_compact_threshold <= 0.0
-            || u16::from(context.used_pct()) < (spec.auto_compact_threshold * 100.0) as u16
-        {
-            return;
-        }
-        if !self.claim_reminder(turn_id) {
-            return;
-        }
-        self.append_watchdog_input(turn_id, messages, crate::handoff::reminder(context))
-            .await;
-    }
-
-    /// 每回合只提醒一次：`reminded_turn` 记最近一次提醒的回合。
-    fn claim_reminder(&self, turn_id: &str) -> bool {
-        let mut inner = self.lock();
-        if inner.reminded_turn.as_deref() == Some(turn_id) {
-            return false;
-        }
-        inner.reminded_turn = Some(turn_id.to_string());
-        true
-    }
-
-    /// 硬阈值收口：到 `HARD_THRESHOLD_PCT` 就不再赌模型自觉。
+    /// 单一阈值收口：达到用户配置的 `auto_compact_threshold` 即折叠历史工具结果并
+    /// 发出唯一一条强制交接指令；同回合第二次仍未调用 `handoff` 则判死。
     ///
     /// `autoCompactThreshold = 0`（契约里的「关闭自动压缩」）时整个收口停手：那是
     /// 用户明确的选择，撞墙由上游报错，本模块不替他做主。
@@ -1993,9 +1975,10 @@ impl SessionLoop {
             return HandoffPressure::Idle;
         };
         let spec = self.current_spec();
-        if spec.auto_compact_threshold <= 0.0
-            || u16::from(context.used_pct()) < crate::handoff::HARD_THRESHOLD_PCT
-        {
+        let Some(threshold_pct) = crate::handoff::threshold_pct(spec.auto_compact_threshold) else {
+            return HandoffPressure::Idle;
+        };
+        if u16::from(context.used_pct()) < threshold_pct {
             return HandoffPressure::Idle;
         }
         let mut inner = self.lock();
@@ -2003,7 +1986,10 @@ impl SessionLoop {
             return HandoffPressure::DeadEnd(context);
         }
         inner.slimmed_turn = Some(turn_id.to_string());
-        HandoffPressure::Fold(context)
+        HandoffPressure::Fold {
+            context,
+            threshold_pct,
+        }
     }
 
     /// 看门狗发言：先落成会话事实（前端在 timeline 里看得见），再进本轮请求。
@@ -2582,9 +2568,9 @@ impl SessionLoop {
                     }
                 }
                 TimelineEntry::ToolCall { call_id, .. } => {
-                    let Some(message) = group.as_mut() else {
-                        continue;
-                    };
+                    // 纯工具调用轮没有 AssistantBlock（无正文/思考/opaque）：必须按需建
+                    // assistant 组，否则次回合重建会静默丢弃 ToolUse，破坏历史与前缀缓存。
+                    let message = group.get_or_insert_with(empty_assistant);
                     let (name, args) = tools_by_id
                         .get(call_id.as_ref())
                         .map(|tool| {

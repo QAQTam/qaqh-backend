@@ -10,6 +10,7 @@
 //! level (see Cargo.toml).
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
+mod cache_diag;
 mod chat_sdk;
 mod gemini_sdk;
 mod messages_sdk;
@@ -91,7 +92,28 @@ pub async fn chat_stream(
     cancel: Option<&Arc<AtomicBool>>,
     on_event: &mut (dyn FnMut(StreamEvent) + Send),
 ) -> anyhow::Result<()> {
-    match provider.kind {
+    let diag = cache_diag::begin(
+        provider,
+        &messages,
+        tools.as_deref(),
+        max_tokens,
+        effort.as_deref(),
+        user_id.as_deref(),
+    );
+    let mut last_usage: Option<qaqh_types::UsageInfo> = None;
+    let mut observed = |event: StreamEvent| {
+        match &event {
+            StreamEvent::Done {
+                usage: Some(usage), ..
+            }
+            | StreamEvent::UsageUpdate(usage) => {
+                last_usage = Some(usage.clone());
+            }
+            _ => {}
+        }
+        on_event(event);
+    };
+    let result = match provider.kind {
         ProviderKind::Responses => {
             responses_sdk::chat_stream_responses(
                 provider,
@@ -102,7 +124,7 @@ pub async fn chat_stream(
                 effort,
                 user_id,
                 cancel,
-                on_event,
+                &mut observed,
             )
             .await
         }
@@ -116,7 +138,7 @@ pub async fn chat_stream(
                 effort,
                 user_id,
                 cancel,
-                on_event,
+                &mut observed,
             )
             .await
         }
@@ -130,7 +152,7 @@ pub async fn chat_stream(
                 effort,
                 user_id,
                 cancel,
-                on_event,
+                &mut observed,
             )
             .await
         }
@@ -144,9 +166,13 @@ pub async fn chat_stream(
                 effort,
                 user_id,
                 cancel,
-                on_event,
+                &mut observed,
             )
             .await
         }
+    };
+    if let Some(pending) = diag {
+        pending.finish(last_usage.as_ref());
     }
+    result
 }

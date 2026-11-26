@@ -36,6 +36,9 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
             .replace('\\', "/")
     ));
     prompt.push_str(&format!("model: {}\n", spec.provider.model));
+    if let Some(threshold_pct) = crate::handoff::threshold_pct(spec.auto_compact_threshold) {
+        prompt.push_str(&format!("context_fold_threshold: {threshold_pct}%\n"));
+    }
     if let Some(tools) = &spec.tools {
         let names: Vec<&str> = tools
             .iter()
@@ -221,5 +224,18 @@ mod tests {
                 .to_string()
         };
         assert_eq!(extract(&p1), extract(&p2));
+    }
+
+    #[test]
+    fn environment_section_reports_fold_threshold_only_when_enabled() {
+        let cwd = std::env::temp_dir();
+        let disabled = ProviderRequestSpec::new(
+            qaqh_gate::ProviderConfig::responses("https://example.com", "", "m", None),
+            1024,
+        );
+        assert!(!system_prompt(&disabled, &cwd, "s1").contains("context_fold_threshold:"));
+
+        let enabled = disabled.with_context(200_000, 0.75);
+        assert!(system_prompt(&enabled, &cwd, "s1").contains("context_fold_threshold: 75%\n"));
     }
 }

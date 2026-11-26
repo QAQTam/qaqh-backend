@@ -2019,23 +2019,27 @@ mod handoff_tests {
         );
     }
 
-    /// 硬压力：折叠只动模型投影、提醒以可见事实入库、占用按 hit+miss 口径。
+    /// 单一折叠阈值收口：达到用户配置的 `auto_compact_threshold` 时折叠工具结果、
+    /// 只落一条严格英文交接指令（不再双发软/硬两版），且 `[Environment]` 携带该阈值。
     #[tokio::test]
     async fn hard_pressure_folds_tool_results_and_leaves_visible_inputs() {
         let dir = tempfile::tempdir().expect("tempdir");
-        // 960/1000 = 96%：软提醒（>=50%）与硬折叠（>=95%）同轮触发。
+        // 800/1000 = 80%（hit 740 + miss 60），用户阈值 75%（低于旧硬阈值 95%）：
+        // 必须按用户阈值直接折叠并只注入一条英文强制指令。
+        let usage_80 = serde_json::json!({"prompt_tokens":60,"completion_tokens":5,"total_tokens":65,
+            "prompt_cache_hit_tokens":740,"prompt_cache_miss_tokens":60});
         let bad = tool_call_body(
             "handoff",
             &serde_json::json!({ "handoff_doc": "  ", "work_summary": "空正文" }),
             "call-h3",
-            &cache_usage(),
+            &usage_80,
         );
         let h = harness(
             dir.path(),
             vec![(200, bad), (200, text_body("收到，这就写文档"))],
             vec![handoff::tool_def()],
             1000,
-            0.5,
+            0.75,
         )
         .await;
         h.loop_.send_input(input("压力大")).expect("send input");
@@ -2043,6 +2047,10 @@ mod handoff_tests {
         let state = wait_until(&h.owners, idle_with_turns).await;
         let requests = h.requests.lock().unwrap().clone();
         assert_eq!(requests.len(), 2);
+        assert!(
+            requests[0].contains("context_fold_threshold: 75%"),
+            "系统提示 [Environment] 必须宣告本会话折叠阈值"
+        );
         assert!(!requests[0].contains(FOLD_NOTE), "第一轮没有任何东西可折叠");
         assert!(requests[1].contains(FOLD_NOTE), "第二轮必须折叠工具结果");
         assert!(
@@ -2050,10 +2058,11 @@ mod handoff_tests {
             "折叠后原文不该再进模型上下文"
         );
         assert!(
-            requests[1].contains("[系统] 上下文占用 96%"),
-            "占用必须按 hit+miss 口径，而不是裸 prompt_tokens 的 6%"
+            requests[1].contains("[SYSTEM · HANDOFF REQUIRED] Context usage reached 80% (800 / 1000 tokens; threshold 75%)"),
+            "占用必须按 hit+miss 口径、使用用户配置阈值并输出严厉英文指令: {}",
+            requests[1]
         );
-        assert!(requests[1].contains("本轮唯一任务：调用 handoff"));
+        assert!(requests[1].contains("MANDATORY ACTION: Call `handoff` NOW"));
         assert!(
             timeline_tool_result(&state).contains("不能为空"),
             "折叠只动模型投影，落库事实必须原样"
@@ -2068,7 +2077,201 @@ mod handoff_tests {
                     && entry["data"]["actor"]["kind"] == "api"
             })
             .count();
-        assert_eq!(watchdog, 2, "提醒与折叠各留一条可见事实");
+        assert_eq!(watchdog, 1, "软硬合一后同轮只允许注入一条交接指令");
+    }
+
+    /// 次回合前缀缓存回归：
+    /// 1. `[Environment]`（含 `context_fold_threshold` 与 `tools`）在首回合与次回合逐字节一致；
+    /// 2. 纯工具调用轮（无正文/无思考/无 opaque）在次回合 `assemble_context` 中不得被丢弃。
+    #[tokio::test]
+    async fn turn_two_preserves_pure_tool_call_round_and_system_prefix_byte_identically() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let usage_low = serde_json::json!({"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,
+            "prompt_cache_hit_tokens":80,"prompt_cache_miss_tokens":20});
+        let pure_tool = tool_call_body(
+            "handoff",
+            &serde_json::json!({ "handoff_doc": "  ", "work_summary": "纯工具轮" }),
+            "call-pure-1",
+            &usage_low,
+        );
+        let h = harness(
+            dir.path(),
+            vec![
+                (200, pure_tool),
+                (200, text_body("turn 1 done")),
+                (200, text_body("turn 2 done")),
+            ],
+            vec![handoff::tool_def()],
+            10_000,
+            0.75,
+        )
+        .await;
+        h.loop_.send_input(input("第一回合")).expect("send turn 1");
+        wait_until(&h.owners, idle_with_turns).await;
+
+        h.loop_.send_input(input("第二回合")).expect("send turn 2");
+        wait_until(&h.owners, |v| {
+            v["activity"] == "idle"
+                && v["turns"].as_array().is_some_and(|t| t.len() >= 2)
+        })
+        .await;
+
+        let requests = h.requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3, "首回合两轮 + 次回合一轮");
+        let req_t1_r2: serde_json::Value = serde_json::from_str(&requests[1]).expect("t1 r2 json");
+        let req_t2_r1: serde_json::Value = serde_json::from_str(&requests[2]).expect("t2 r1 json");
+        let t1_msgs = req_t1_r2["messages"].as_array().expect("t1 messages");
+        let t2_msgs = req_t2_r1["messages"].as_array().expect("t2 messages");
+        assert!(
+            t2_msgs.len() > t1_msgs.len(),
+            "次回合应包含首回合全部前缀 + 首回合终答 + 次回合用户输入"
+        );
+        assert_eq!(
+            &t2_msgs[..t1_msgs.len()],
+            t1_msgs.as_slice(),
+            "次回合前缀必须与首回合末轮逐字节一致（不得丢纯工具轮或改写 system 环境块）"
+        );
+        let system_text = t2_msgs[0]["content"].as_str().unwrap_or_default();
+        assert!(system_text.contains("context_fold_threshold: 75%"));
+    }
+
+    /// Responses 线次回合前缀缓存回归：`provider_job` 把 `ResponseOutputItem` 拆进
+    /// `outcome.opaque_items` 后，首回合内存 `messages` 必须同步回填，使首回合次轮
+    /// 与次回合 `assemble_context` 发出的 `input` 前缀逐字节一致（不得在次回合突然
+    /// 出现 `encrypted_content`/原生 item 击穿前缀缓存）。
+    #[tokio::test]
+    async fn responses_opaque_items_stay_byte_identical_across_turns() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let r1_tool = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"enc_abc\"}}\n\n",
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_r1\",\"name\":\"handoff\",\"arguments\":\"{\\\"handoff_doc\\\":\\\"  \\\",\\\"work_summary\\\":\\\"x\\\"}\"}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"status\":\"completed\",\"model\":\"test-model\",\"output\":[{\"id\":\"rs_1\",\"type\":\"reasoning\",\"status\":\"completed\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"plan\"}],\"encrypted_content\":\"enc_abc\"},{\"id\":\"fc_1\",\"type\":\"function_call\",\"status\":\"completed\",\"call_id\":\"call_r1\",\"name\":\"handoff\",\"arguments\":\"{\\\"handoff_doc\\\":\\\"  \\\",\\\"work_summary\\\":\\\"x\\\"}\"}],\"usage\":{\"input_tokens\":100,\"output_tokens\":10,\"total_tokens\":110}}}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let r_text = |id: &str, msg_id: &str, text: &str| {
+            format!(
+                "event: response.output_text.delta\n\
+                 data: {{\"type\":\"response.output_text.delta\",\"item_id\":\"{msg_id}\",\"output_index\":0,\"content_index\":0,\"delta\":\"{text}\"}}\n\n\
+                 event: response.output_item.done\n\
+                 data: {{\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{{\"id\":\"{msg_id}\",\"type\":\"message\",\"status\":\"completed\",\"role\":\"assistant\",\"content\":[{{\"type\":\"output_text\",\"text\":\"{text}\",\"annotations\":[]}}]}}}}\n\n\
+                 event: response.completed\n\
+                 data: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"{id}\",\"status\":\"completed\",\"model\":\"test-model\",\"usage\":{{\"input_tokens\":120,\"output_tokens\":5,\"total_tokens\":125}}}}}}\n\n\
+                 data: [DONE]\n\n"
+            )
+        };
+        let script = vec![
+            (200u16, r1_tool),
+            (200, r_text("resp_2", "msg_1", "turn 1 done")),
+            (200, r_text("resp_3", "msg_2", "turn 2 done")),
+        ];
+        let owners = Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("db"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: "SES-HANDOFF".into(),
+                parent_session_id: None,
+                title: "responses-cache".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let manager = Arc::new(Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            "SES-HANDOFF",
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.path().join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let base_url = format!("http://{}", server.server_addr());
+        let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        {
+            let script = Arc::new(Mutex::new(script));
+            let cursor = Arc::new(Mutex::new(0usize));
+            let requests = Arc::clone(&requests);
+            std::thread::spawn(move || {
+                let header =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                        .expect("header");
+                for mut request in server.incoming_requests() {
+                    let mut body = String::new();
+                    let _ = request.as_reader().read_to_string(&mut body);
+                    requests.lock().unwrap().push(body);
+                    let (status, payload) = {
+                        let script = script.lock().unwrap();
+                        let mut cursor = cursor.lock().unwrap();
+                        let index = (*cursor).min(script.len() - 1);
+                        *cursor += 1;
+                        script[index].clone()
+                    };
+                    let _ = request.respond(
+                        tiny_http::Response::from_string(payload)
+                            .with_status_code(status)
+                            .with_header(header.clone()),
+                    );
+                }
+            });
+        }
+        let provider = qaqh_gate::ProviderConfig::responses(&base_url, "sk-test", "test-model", None);
+        let spec = ProviderRequestSpec::new(provider, 1024)
+            .with_context(10_000, 0.75)
+            .with_tools(vec![handoff::tool_def()]);
+        let loop_ = SessionLoop::new("SES-HANDOFF", owner, port, spec, dir.path().to_path_buf());
+
+        loop_.send_input(input("第一回合")).expect("send turn 1");
+        wait_until(&owners, idle_with_turns).await;
+        loop_.send_input(input("第二回合")).expect("send turn 2");
+        wait_until(&owners, |v| {
+            v["activity"] == "idle"
+                && v["turns"].as_array().is_some_and(|t| t.len() >= 2)
+        })
+        .await;
+
+        let requests = requests.lock().unwrap().clone();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[1].contains("enc_abc"),
+            "首回合次轮必须已携带原生 ResponseOutputItem（不得等到次回合才冒出）: {}",
+            requests[1]
+        );
+        let req_t1_r2: serde_json::Value = serde_json::from_str(&requests[1]).expect("t1 r2 json");
+        let req_t2_r1: serde_json::Value = serde_json::from_str(&requests[2]).expect("t2 r1 json");
+        assert_eq!(
+            req_t1_r2["prompt_cache_key"], "SES-HANDOFF",
+            "Responses 线生产路径必须自动绑定会话级 prompt_cache_key"
+        );
+        assert_eq!(
+            req_t2_r1["prompt_cache_key"], "SES-HANDOFF",
+            "次回合 prompt_cache_key 必须与首回合一致"
+        );
+        assert_eq!(
+            req_t2_r1["instructions"], req_t1_r2["instructions"],
+            "首回合与次回合 instructions 必须逐字节一致"
+        );
+        let t1_input = req_t1_r2["input"].as_array().expect("t1 input");
+        let t2_input = req_t2_r1["input"].as_array().expect("t2 input");
+        assert!(t2_input.len() > t1_input.len());
+        assert_eq!(
+            &t2_input[..t1_input.len()],
+            t1_input.as_slice(),
+            "次回合 Responses input 前缀必须与首回合末轮逐字节一致"
+        );
     }
 
     // ── 出站口延迟 + 流式信息完整度 / 顺序回归 ────────────────────────────
