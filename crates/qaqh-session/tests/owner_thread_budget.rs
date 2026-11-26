@@ -193,12 +193,21 @@ async fn dropped_owners_reclaim_their_pump_tasks() {
             .expect("delete session tree");
     }
 
-    for _ in 0..200 {
-        tokio::task::yield_now().await;
+    // 与 evicted_* 同律:abort 的 future drop 由其他 worker 调度完成,需要真实
+    // CPU 时间片——纯 `yield_now` 在宿主负载抖动下只是观测竞态(本文件 evicted
+    // 用例的注释即首轮红测成因)。给 250ms 有界轮询窗口:任务真死会收敛到基线;
+    // 真泄漏在任何预算下都不会收敛,反证强度不变。
+    let mut after;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+    loop {
+        after = tokio::runtime::Handle::current()
+            .metrics()
+            .num_alive_tasks();
+        if after == baseline || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
-    let after = tokio::runtime::Handle::current()
-        .metrics()
-        .num_alive_tasks();
     assert_eq!(
         after, baseline,
         "{SESSIONS} 个 owner 回收后仍有 {}/基线 {baseline} 之外的泵任务存活：\

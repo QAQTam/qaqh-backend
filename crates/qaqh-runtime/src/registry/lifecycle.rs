@@ -137,6 +137,9 @@ impl AgentRegistry {
         // 断开 QaqhService -> AgentRegistry -> SessionToolHosts -> QaqhService
         // 强引用环，确保服务停机后 OwnerDirectory 与 QaqhService 可被完整析构。
         self.tool_hosts = None;
+        // v4.5.1 任务3:正常停机收口路径执行一次 `checkpoint_truncate`,封顶截断
+        // `-wal`(失败由 OwnerDirectory 响亮记日志,不阻断停机)。
+        self.owners.shutdown_checkpoint();
     }
 
     /// ADR-0014：回合终态路由——子会话的 inter-agent 触发回合终态时，向父

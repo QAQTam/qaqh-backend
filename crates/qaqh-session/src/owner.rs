@@ -22,7 +22,6 @@
 //! panic 而不是静默僵死。
 
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
@@ -53,16 +52,12 @@ use qaqh_tool_core::{
 
 use qaqh_tool_core::async_rt;
 
-use crate::db::{Db, DbError, store, view};
+use crate::db::{Db, DbError, maintenance, store, view};
+use crate::exec_progress::{ExecProgressGate, ExecProgressSnapshot, ProgressOutcome};
+pub use crate::replay_ring::{OwnerAttach, ReplayRing, ReplaySlice};
 
 /// 每会话 SSE 事件缓冲;落后客户端经快照 + `seq` 水位重新同步(报告一 §194)。
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
-
-/// 回放尾预算(P0-2026-11-10 报告 §6 H1'):帧数覆盖广播深度,字节预算
-/// 防 exec 大帧撑爆内存。超出覆盖范围的远古游标仍走快照 resync——回放尾
-/// 消灭的是「缺口即掐流」的活锁,不是 resync 本身。
-const REPLAY_FRAME_CAP: usize = 2 * EVENT_CHANNEL_CAPACITY;
-const REPLAY_BYTE_CAP: usize = 4 * 1024 * 1024;
+pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// ADR-0030：泵侧合帧窗口与批字节帽。常量，不设配置面（ADR-0029 决策 6 同律）。
 /// 窗口自批内首条起算；洪峰下先被字节帽切断，窗口只兜低频尾批。
@@ -73,142 +68,6 @@ const EXEC_OUTPUT_COALESCE_MAX_BYTES: usize = 256 * 1024;
 /// 行与事件只带 ref(见 `OwnerMsg::Settle`)。阈值取 32 KiB:edit/write 的
 /// 回执与小 diff 保持 inline 即得,只有真正的大正文才走按需拉取。
 const TOOL_OUTPUT_INLINE_MAX_BYTES: usize = 32 * 1024;
-
-/// 会话事件回放尾。定序纪律:「先入环、后广播」(`emit`)与「先 grab receiver、
-/// 后读环」(`attach_after`)交错时,每帧要么已在环内被 replay 覆盖,要么其
-/// send 晚于 receiver 订阅由转发直送;两处重合同时由转发侧水位去重。
-/// 论证见 P0-2026-11-10 报告 §6 H1'。
-#[derive(Default)]
-pub struct ReplayRing {
-    state: Mutex<RingState>,
-}
-
-#[derive(Default)]
-struct RingState {
-    frames: VecDeque<SessionEventFrame>,
-    bytes: usize,
-}
-
-/// 一帧的粗算占用:结构体本体 + 主要堆文本。预算是护栏不是精确账本——
-/// 低速率大条目(TimelineAppended 等)走 serde 实测,高频 delta 直取字段。
-fn frame_footprint(frame: &SessionEventFrame) -> usize {
-    std::mem::size_of::<SessionEventFrame>() + event_heap_bytes(&frame.event)
-}
-
-fn event_heap_bytes(event: &SessionEvent) -> usize {
-    match event {
-        SessionEvent::ToolOutputDelta { text, .. }
-        | SessionEvent::ToolArgumentsDelta { text, .. }
-        | SessionEvent::MessageDelta { text, .. }
-        | SessionEvent::ExecSessionOutputDelta { text, .. } => text.len(),
-        SessionEvent::ToolFinished { output, diff, .. } => {
-            let content_size = |value: &Option<ContentValue>| {
-                value
-                    .as_ref()
-                    .map(|value| match value {
-                        ContentValue::Inline { text } => text.len(),
-                        ContentValue::Ref { .. } => 64,
-                        ContentValue::Unavailable(_) => 8,
-                    })
-                    .unwrap_or_default()
-            };
-            content_size(output) + content_size(diff)
-        }
-        SessionEvent::ExecSessionStarted { session }
-        | SessionEvent::ExecSessionStateChanged { session }
-        | SessionEvent::ExecSessionFinished { session } => session.output_preview.len(),
-        SessionEvent::TimelineAppended { entry } => serde_json::to_string(entry)
-            .map(|json| json.len())
-            .unwrap_or_default(),
-        SessionEvent::TimelineTruncated {
-            removed_turn_ids, ..
-        } => removed_turn_ids
-            .iter()
-            .map(|turn| turn.as_ref().len())
-            .sum(),
-        _ => 0,
-    }
-}
-
-impl ReplayRing {
-    fn push(&self, frame: SessionEventFrame) {
-        let footprint = frame_footprint(&frame);
-        let mut ring = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        ring.bytes += footprint;
-        ring.frames.push_back(frame);
-        while ring.frames.len() > REPLAY_FRAME_CAP
-            || (ring.frames.len() > 1 && ring.bytes > REPLAY_BYTE_CAP)
-        {
-            let Some(evicted) = ring.frames.pop_front() else {
-                break;
-            };
-            ring.bytes = ring.bytes.saturating_sub(frame_footprint(&evicted));
-        }
-    }
-
-    /// `after_seq` = 客户端游标(exclusive 语义,同契约文档 SessionEventFrame
-    /// 头注:「跳过 `seq < state.seq`,处理 `seq >= state.seq`」)。
-    /// `None` = 无游标 live 直推(不回放既有帧)。
-    fn slice_after(&self, after_seq: Option<u64>) -> ReplaySlice {
-        let ring = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let Some(after) = after_seq else {
-            return ReplaySlice {
-                frames: Vec::new(),
-                watermark: None,
-                gap: false,
-            };
-        };
-        let (Some(head), Some(back)) = (ring.frames.front(), ring.frames.back()) else {
-            // 本 epoch 内一帧未发:无东西可补,live 直推。
-            return ReplaySlice {
-                frames: Vec::new(),
-                watermark: None,
-                gap: false,
-            };
-        };
-        if head.seq > after {
-            // 游标与环首之间的事件已被淘汰——回放尾兜不住,回到快照 resync。
-            return ReplaySlice {
-                frames: Vec::new(),
-                watermark: None,
-                gap: true,
-            };
-        }
-        let frames: Vec<SessionEventFrame> = ring
-            .frames
-            .iter()
-            .filter(|frame| frame.seq >= after)
-            .cloned()
-            .collect();
-        let watermark = frames.last().map(|frame| frame.seq);
-        debug_assert!(watermark.is_none_or(|last| last == back.seq));
-        ReplaySlice {
-            frames,
-            watermark,
-            gap: false,
-        }
-    }
-}
-
-pub struct ReplaySlice {
-    pub frames: Vec<SessionEventFrame>,
-    /// 本次补发的最大 seq;转发端跳过 `seq <= watermark` 的 receiver 重帧。
-    pub watermark: Option<u64>,
-    /// 游标早于回放尾覆盖范围——只能快照重同步。
-    pub gap: bool,
-}
-
-/// 读面原子 attach 结果:receiver 已先于环读取建立,补发与 live 无缝且无重。
-pub struct OwnerAttach {
-    pub replay: ReplaySlice,
-    pub receiver: tokio::sync::broadcast::Receiver<SessionEventFrame>,
-}
 
 /// 泵请求的 future 形态。`'static` + `Send`:请求闭包拿到的是
 /// `Arc<OwnerPump>`(泵字段本就全是 `Arc`/`Sender`),因此 future 不借调用方
@@ -323,6 +182,7 @@ impl SessionOwner {
             events: events.clone(),
             next_seq: Arc::clone(&next_seq),
             replay: Arc::clone(&replay),
+            exec_progress: ExecProgressGate::default(),
         });
         let pump_task = async_rt::runtime_handle().spawn(run_pump_loop(
             Arc::clone(&pump),
@@ -534,19 +394,44 @@ impl SessionOwner {
                         store::finish_turn(conn, &row_turn_id, status, Some(&outcome_json))
                     })
                     .await?;
-                let turn = TurnId::new(turn_id_owned);
-                pump.emit(SessionEvent::TurnEnded {
-                    turn_id: turn.clone(),
-                    outcome,
-                });
-                pump.emit(SessionEvent::ActivityChanged {
-                    activity: qaqh_ringing_contract::fact::ActivityState::Idle,
-                    current_turn_id: None,
-                });
+                emit_turn_ended(&pump, turn_id_owned, outcome);
                 Ok(())
             })
         })
         .await
+    }
+
+    /// 持久化终态写库失败时的显式内存广播口:按泵内单流序发布
+    /// `TurnEnded(Failed)` 与 `ActivityChanged(Idle)`,确保前端立即解锁并展示错误。
+    pub async fn emit_turn_persist_failed(
+        &self,
+        turn_id: &str,
+        usage: Option<qaqh_types::UsageInfo>,
+        code: &str,
+        message: String,
+    ) {
+        let turn_id_owned = turn_id.to_string();
+        let outcome = TurnOutcome::Finished {
+            terminal: qaqh_ringing_contract::fact::TurnTerminal::Failed,
+            usage,
+            error: Some(qaqh_ringing_contract::fact::TurnError {
+                code: code.to_string(),
+                message,
+                retryable: false,
+                details_ref: None,
+            }),
+        };
+        if let Err(error) = self
+            .submit_request(move |pump| {
+                Box::pin(async move {
+                    emit_turn_ended(&pump, turn_id_owned, outcome);
+                    Ok(())
+                })
+            })
+            .await
+        {
+            log::error!("[owner] emit_turn_persist_failed dropped for {turn_id}: {error}");
+        }
     }
 
     fn block_request(&self, entry: TimelineEntry) -> Result<OwnerRequest, DbError> {
@@ -951,8 +836,15 @@ impl SessionOwner {
     /// 泵成任务后 `async` 是硬要求——同步 `rx.recv()` 在 current_thread runtime
     /// 上就是把泵钉死。
     pub async fn flush(&self) -> Result<(), DbError> {
-        self.submit_request(move |_| Box::pin(async move { Ok(()) }))
-            .await
+        self.submit_request(move |pump| {
+            Box::pin(async move {
+                // v4.5.1 任务4 不变量2:屏障先同步冲刷**所有**待落库的 exec 进度,
+                // 再响应 Flush 完成——与既有 owner_tests 语义零漂移。
+                pump.exec_progress.drain(&pump.db).await;
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Commit a metadata patch on the same pump as turn and tool facts.
@@ -1053,6 +945,17 @@ fn emit(
     let _ = events.send(frame);
 }
 
+fn emit_turn_ended(pump: &OwnerPump, turn_id: String, outcome: TurnOutcome) {
+    pump.emit(SessionEvent::TurnEnded {
+        turn_id: TurnId::new(turn_id),
+        outcome,
+    });
+    pump.emit(SessionEvent::ActivityChanged {
+        activity: qaqh_ringing_contract::fact::ActivityState::Idle,
+        current_turn_id: None,
+    });
+}
+
 /// typed 列的 serde 形式;序列化失败按代码错误响(不静默降级为 NULL)。
 fn serialize_typed<T: serde::Serialize>(who: &str, label: &str, value: &T) -> Option<String> {
     serde_json::to_string(value)
@@ -1060,38 +963,37 @@ fn serialize_typed<T: serde::Serialize>(who: &str, label: &str, value: &T) -> Op
         .ok()
 }
 
-/// TimelineEntry → 业务行:kind/call_id/text 是查询用冗余列,与 wire 形式同写。
+/// TimelineEntry → 业务行:kind/call_id 是查询用冗余列,与 wire 形式同写。
+/// v4.5.1 任务2:**停写 `text` 冗余正文副本**(统一置 `None`)——生产读取
+/// 全走 `payload_json`(view 层 `parse_block_entry` 唯一权威),整段正文再抄一份
+/// 进 `text` 只是让 `qaqh.db` 无止境翻倍。`text` 列保留可空以维持 schema 13
+/// 零迁移,严禁在此回填任何正文。
 fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewBlock, DbError> {
-    let (block_id, turn_id, kind, call_id, text): (
+    let (block_id, turn_id, kind, call_id): (
         String,
         Option<String>,
         &'static str,
-        Option<String>,
         Option<String>,
     ) = match entry {
         TimelineEntry::Input {
             block_id,
             turn_id,
-            content,
             ..
         } => (
             block_id.as_ref().to_string(),
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "input",
             None,
-            inline_text(content),
         ),
         TimelineEntry::AssistantBlock {
             block_id,
             turn_id,
-            content,
             ..
         } => (
             block_id.as_ref().to_string(),
             Some(turn_id.as_ref().to_string()),
             "assistant",
             None,
-            inline_text(content),
         ),
         TimelineEntry::ToolCall { call_id, turn_id } => (
             // 块表主键全库唯一;调用身份本身仍只保存在 call_id 字段。
@@ -1099,12 +1001,10 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "tool_call",
             Some(call_id.as_ref().to_string()),
-            None,
         ),
         TimelineEntry::ToolResult {
             call_id,
             turn_id,
-            content,
             ..
         } => (
             // ToolCall 与 ToolResult 是两条独立的 RingingV2 timeline 事实,
@@ -1113,15 +1013,13 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "tool_result",
             Some(call_id.as_ref().to_string()),
-            inline_text(content),
         ),
-        TimelineEntry::Compaction { summary } => (
+        TimelineEntry::Compaction { .. } => (
             // 压缩块没有独立 block_id,按时间派生保证多次压缩不冲突。
             format!("compaction-{}", store::now_ms()),
             None,
             "compaction",
             None,
-            inline_text(summary),
         ),
     };
     let payload_json = serde_json::to_string(entry)
@@ -1131,17 +1029,11 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
         session_id: session_id.to_string(),
         turn_id,
         kind,
-        text,
+        // v4.5.1 任务2:text 冗余副本停写(schema 13 的可空列,零迁移保留)。
+        text: None,
         call_id,
         payload_json,
     })
-}
-
-fn inline_text(content: &ContentValue) -> Option<String> {
-    match content {
-        ContentValue::Inline { text } => Some(text.clone()),
-        _ => None,
-    }
 }
 
 /// 工具终态:落库行与 ToolFinished 事件的共同来源。契约 outcome 是唯一
@@ -1425,6 +1317,8 @@ struct OwnerPump {
     events: tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: Arc<AtomicU64>,
     replay: Arc<ReplayRing>,
+    /// v4.5.1 任务4:exec 进度 SQLite 落库节流闸(前端 20ms 合帧不变)。
+    exec_progress: ExecProgressGate,
 }
 
 impl OwnerPump {
@@ -1464,35 +1358,24 @@ impl OwnerPump {
         let last = entries
             .last()
             .expect("批由首条 entry 建立，批内不可能为空");
-        let row_id = exec_session_id.clone();
-        let next_offset = last.next_offset;
-        let preview = Arc::clone(&last.output_preview);
-        let preview_start_offset = last.preview_start_offset;
-        let capture_omitted_bytes = last.capture_omitted_bytes;
-        let stream_dropped_bytes = last.stream_dropped_bytes;
-        let updated = self
-            .db
-            .write(move |conn| {
-                store::update_exec_session_progress(
-                    conn,
-                    &row_id,
-                    next_offset,
-                    &preview,
-                    preview_start_offset,
-                    capture_omitted_bytes,
-                    stream_dropped_bytes,
-                )
-            })
+        // v4.5.1 任务4:DB 进度落库按 exec_session_id 节流(≥500ms),日志追加与
+        // 前端 emit 节奏不变(ADR-0030);节流/冲刷不变量收口在 exec_progress 子模块。
+        let outcome = self
+            .exec_progress
+            .observe(
+                &self.db,
+                &exec_session_id,
+                ExecProgressSnapshot::new(
+                    last.next_offset,
+                    Arc::clone(&last.output_preview),
+                    last.preview_start_offset,
+                    last.capture_omitted_bytes,
+                    last.stream_dropped_bytes,
+                ),
+            )
             .await;
-        match updated {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                log::error!(
-                    "[owner] exec session {exec_session_id} output progress failed: {error}"
-                );
-                return;
-            }
+        if matches!(outcome, ProgressOutcome::Skipped | ProgressOutcome::Failed) {
+            return;
         }
         let mut runs: Vec<(ExecOutputSource, u64, u64, String)> = Vec::new();
         for entry in entries {
@@ -1734,6 +1617,10 @@ impl OwnerPump {
             }
             OwnerMsg::ExecSessionSettle(settlement) => {
                 let exec_session_id = settlement.exec_session_id.clone();
+                // v4.5.1 任务4 不变量3:settle 先冲刷该 exec_session_id 的待落库
+                // 节流快照(终态水位的权威来源是行内 next_offset),再清理节流
+                // 状态,由下方 settle 事务收口终态。
+                self.exec_progress.drain_one(&self.db, &exec_session_id).await;
                 let logged_bytes =
                     exec_output_log_path(&self.db, &self.session_id, &exec_session_id)
                         .and_then(|path| std::fs::metadata(&path).ok())
@@ -2167,9 +2054,14 @@ impl OwnerDirectory {
 
     pub fn delete_session_tree(&self, session_id: &str) -> Result<Vec<String>, DbError> {
         let root = session_id.to_string();
-        let ids = self
-            .db
-            .write_blocking(move |conn| store::delete_session_tree(conn, &root))?;
+        let ids = self.db.write_blocking(move |conn| {
+            let ids = store::delete_session_tree(conn, &root)?;
+            // v4.5.1 任务3:删除会话树后封顶 -wal 并按碎片阈值回收主库空间
+            // (小删除不达阈值自动跳过全库 VACUUM)。删除事务已提交,维护失败
+            // 在 maintenance 内响亮记日志,不以维护错误掩盖已成功的删除。
+            maintenance::checkpoint_after_delete(conn, &root);
+            Ok::<Vec<String>, DbError>(ids)
+        })?;
         let mut owners = self
             .owners
             .lock()
@@ -2178,6 +2070,14 @@ impl OwnerDirectory {
             owners.remove(id);
         }
         Ok(ids)
+    }
+
+    /// 正常停机收口(修复单 §二.3.3):执行一次 `checkpoint_truncate` 封顶截断
+    /// `-wal`。失败响亮记日志,不阻断停机——截断只是体积卫生,不是停机前提。
+    pub fn shutdown_checkpoint(&self) {
+        if let Err(error) = self.db.write_blocking(maintenance::checkpoint_truncate) {
+            log::error!("[owner] shutdown wal checkpoint: {error}");
+        }
     }
 
     pub fn get_or_create(&self, session_id: &str) -> Arc<SessionOwner> {

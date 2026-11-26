@@ -5,7 +5,7 @@
 //! 失败直接返回数据库错误,不静默回退。
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 
 use rusqlite::{Connection, OpenFlags};
 use tokio::sync::oneshot;
@@ -20,6 +20,10 @@ pub mod store;
 pub mod team;
 pub mod todos;
 pub mod view;
+/// v4.5.1 任务2/3:WAL 封顶、空间回收与撤回孤儿 BLOB 清理(独立子模块)。
+pub(crate) mod maintenance;
+/// v4.5.1 任务4:有界只读连接池(独立子模块,替代单把 `Mutex<Connection>`)。
+mod read_pool;
 #[cfg(test)]
 mod view_tests;
 pub mod workspace;
@@ -43,6 +47,8 @@ pub enum DbError {
     WalNotEngaged { actual: Option<String> },
     #[error("synchronous is {actual}, expected FULL(2)")]
     SyncNotFull { actual: i64 },
+    #[error("journal_size_limit is {actual}, expected {expected}")]
+    JournalSizeLimit { actual: i64, expected: i64 },
     #[error("sqlite {found} is older than required {required:?}")]
     SqliteTooOld {
         found: String,
@@ -78,13 +84,35 @@ pub enum DbError {
     Workspace(String),
 }
 
+impl DbError {
+    /// v4.5.1 任务1:盘满判别。`SQLITE_FULL`(SQLite)与 `StorageFull`(宿主 OS)
+    /// 统一归为磁盘满,供回合收口 Fail-Closed 时产出用户可读的明确错误。
+    pub fn is_disk_full(&self) -> bool {
+        match self {
+            DbError::Sql(rusqlite::Error::SqliteFailure(error, _)) => {
+                error.code == rusqlite::ErrorCode::DiskFull
+            }
+            DbError::Open { source, .. } => matches!(
+                source,
+                rusqlite::Error::SqliteFailure(error, _)
+                    if error.code == rusqlite::ErrorCode::DiskFull
+            ),
+            DbError::Io(error) => error.kind() == std::io::ErrorKind::StorageFull,
+            DbError::CreateDir { source, .. } => {
+                source.kind() == std::io::ErrorKind::StorageFull
+            }
+            _ => false,
+        }
+    }
+}
+
 struct WriteJob(Box<dyn FnOnce(&mut Connection) + Send>);
 
-/// 唯一数据库句柄:一个串行写执行器线程 + 一个共享只读连接。
+/// 唯一数据库句柄:一个串行写执行器线程 + 一个有界只读连接池(v4.5.1 任务4)。
 pub struct Db {
     path: PathBuf,
     write_tx: mpsc::Sender<WriteJob>,
-    read_conn: Arc<Mutex<Connection>>,
+    read_pool: Arc<read_pool::ReadPool>,
 }
 
 impl Db {
@@ -113,6 +141,9 @@ impl Db {
             source,
         })?;
         read_conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // journal_size_limit 是连接级设置:预热只读连接与后续池内连接必须同律。
+        maintenance::configure_journal_size_limit(&read_conn)?;
+        let read_pool = Arc::new(read_pool::ReadPool::new(path.clone(), Some(read_conn)));
 
         // MUST 铁闸 2:schema 初始化(含 sidecar 吸入)以 db 文件父目录为
         // data_dir——生产路径恒为 `data_dir/qaqh.db`,parent 恒存在。
@@ -124,7 +155,7 @@ impl Db {
         Ok(Db {
             path,
             write_tx,
-            read_conn: Arc::new(Mutex::new(read_conn)),
+            read_pool,
         })
     }
 
@@ -150,17 +181,16 @@ impl Db {
         Ok(reply_rx.await.map_err(|_| DbError::ExecutorStopped)??)
     }
 
-    /// 只读查询:在阻塞线程上使用共享只读连接,查询必须尽快结束。
+    /// 只读查询:在阻塞线程上借用池中一条只读连接,查询必须尽快结束。
     pub async fn read<T, E, F>(&self, f: F) -> Result<T, DbError>
     where
         T: Send + 'static,
         E: Into<DbError> + Send + 'static,
         F: FnOnce(&Connection) -> Result<T, E> + Send + 'static,
     {
-        let conn = Arc::clone(&self.read_conn);
+        let pool = Arc::clone(&self.read_pool);
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|_| DbError::ReadLockPoisoned)?;
-            f(&conn).map_err(Into::into)
+            pool.with(f)
         })
         .await
         .map_err(|_| DbError::ExecutorStopped)?
@@ -189,11 +219,7 @@ impl Db {
         E: Into<DbError>,
         F: FnOnce(&Connection) -> Result<T, E>,
     {
-        let conn = self
-            .read_conn
-            .lock()
-            .map_err(|_| DbError::ReadLockPoisoned)?;
-        f(&conn).map_err(Into::into)
+        self.read_pool.with(f)
     }
 }
 
@@ -214,6 +240,8 @@ fn configure(conn: &mut Connection) -> Result<(), DbError> {
     }
 
     conn.pragma_update(None, "foreign_keys", "ON")?;
+    // v4.5.1 任务3:WAL 高水位封顶(读回校验 fail-closed)。
+    maintenance::configure_journal_size_limit(conn)?;
 
     let version: String = conn.query_row("SELECT sqlite_version()", [], |row| row.get(0))?;
     let parsed = parse_version(&version);

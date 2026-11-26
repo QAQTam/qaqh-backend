@@ -27,6 +27,7 @@ use qaqh_ringing_contract::state::{
     TurnOutcome,
 };
 use qaqh_ringing_contract::ulid::generate_ulid;
+use qaqh_session::db::DbError;
 use qaqh_session::owner::{SessionOwner, ToolSettlement};
 use qaqh_types::{ContentBlock, Message, ToolResult as ToolResultPayload, UsageInfo};
 use qaqh_workspace::ask_user::normalize_ask_user;
@@ -36,6 +37,9 @@ use tokio::time::sleep;
 use crate::progress::{AttemptBlocks, ProgressSink, ProgressStream, RetryingProgress};
 use crate::provider_job::{self, Evidence, ProviderOutcome, ProviderRequestSpec};
 use crate::session_agent::prompt;
+use crate::session_persist::{
+    self, RESPONSE_PERSIST_FAILED, TurnTerminalResolution, empty_assistant, persist_failure_message,
+};
 use crate::tool_job::{
     ToolAdmission, ToolApprovalGrant, ToolFailure, ToolRequest, WorkspaceToolPort,
 };
@@ -966,8 +970,13 @@ impl SessionLoop {
                         continue 'rounds;
                     }
                     outcome.usage = accrued_usage.take();
-                    self.seal_partial(&turn, &blocks, &outcome).await;
-                    if outcome.cancelled {
+                    // 任务1:seal 写库失败不得当正常中断收尾,严禁静默吞错。
+                    if let Err(error) =
+                        session_persist::seal_partial(&self.owner, &turn, &blocks, &outcome).await
+                    {
+                        self.finish_persist_failed(&turn, outcome.usage.clone(), &error)
+                            .await;
+                    } else if outcome.cancelled {
                         self.finish_cancelled(&turn, outcome.usage.clone()).await;
                     } else {
                         self.finish_failed(
@@ -1020,7 +1029,14 @@ impl SessionLoop {
                         continue 'rounds;
                     }
                     outcome.usage = accrued_usage.take();
-                    self.seal_response(&turn, &blocks, &outcome).await;
+                    // 任务1 Fail-Closed:seal 失败严禁假报完成,回合立即判死。
+                    if let Err(error) =
+                        session_persist::seal_response(&self.owner, &turn, &blocks, &outcome).await
+                    {
+                        self.finish_persist_failed(&turn, outcome.usage.clone(), &error)
+                            .await;
+                        break;
+                    }
                     match outcome.finish {
                         Some(ProviderFinish::Stop) => {
                             // ADR-0038 Stop 门:block = 拒绝停回合,理由回灌模型
@@ -2305,150 +2321,34 @@ impl SessionLoop {
         );
     }
 
-    /// 终态 seal:推理块 + 答案块,复用流式展示的 block 身份。
-    async fn seal_response(
+    /// 任务1:seal/收口写库失败即判死(`response_persist_failed`),盘满带明确提示。
+    async fn finish_persist_failed(&self, turn: &TurnId, usage: Option<UsageInfo>, error: &DbError) {
+        self.finish_failed(turn, usage, RESPONSE_PERSIST_FAILED, &persist_failure_message(error))
+            .await;
+    }
+
+    async fn settle_terminal(&self, turn: &TurnId, resolution: TurnTerminalResolution) {
+        if let Some((event, reason)) = resolution.stop_hook {
+            self.observe_stop_hook(turn, event, reason).await;
+        }
+        self.notify_terminal(turn, resolution.terminal, resolution.error);
+    }
+
+    /// ADR-0038:取消/失败终态 → StopCancelled/StopFailure 观察。
+    async fn observe_stop_hook(
         &self,
         turn: &TurnId,
-        blocks: &AttemptBlocks,
-        outcome: &ProviderOutcome,
+        event: qaqh_hooks::HookEventName,
+        reason: String,
     ) {
-        let message = outcome.message.clone().unwrap_or_else(empty_assistant);
-        let mut reasoning = String::new();
-        let mut answer = String::new();
-        for block in &message.content {
-            match block {
-                ContentBlock::Reasoning {
-                    reasoning: text, ..
-                } => reasoning.push_str(text),
-                ContentBlock::Text { text } => answer.push_str(text),
-                _ => {}
-            }
-        }
-        let reasoning = if reasoning.is_empty() {
-            outcome.partial_reasoning.clone().unwrap_or_default()
-        } else {
-            reasoning
-        };
-        let answer = if answer.is_empty() {
-            outcome.partial_text.clone().unwrap_or_default()
-        } else {
-            answer
-        };
-        if !reasoning.is_empty() {
-            self.owner
-                .append_block(TimelineEntry::AssistantBlock {
-                    block_id: BlockId::new(blocks.reasoning_block_id.clone()),
-                    turn_id: turn.clone(),
-                    ord: 0,
-                    block_kind: AssistantBlockKind::Reasoning,
-                    content: ContentValue::Inline { text: reasoning },
-                    model: blocks.model.clone(),
-                    usage: None,
-                    generated_ms: None,
-                    opaque: vec![],
-                })
-                .await
-                .ok();
-        }
-        // 纯工具调用轮 answer 恒空:空文本且无 opaque 锚点时不 seal,否则
-        // 每个工具轮都落库并广播一个空 assistant 块(UI 冒空气泡,快照
-        // bootstrap 也原样携带)。opaque 是 Responses 回放锚点,非空必须
-        // 照常落库。守卫与 seal_partial 的 answer 分支一致。
-        if !answer.is_empty() || !outcome.opaque_items.is_empty() {
-            self.owner
-                .append_block(TimelineEntry::AssistantBlock {
-                    block_id: BlockId::new(blocks.answer_block_id.clone()),
-                    turn_id: turn.clone(),
-                    ord: 0,
-                    block_kind: AssistantBlockKind::Answer,
-                    content: ContentValue::Inline { text: answer },
-                    model: blocks.model.clone(),
-                    usage: outcome.usage.clone(),
-                    generated_ms: outcome.generated_ms,
-                    opaque: outcome.opaque_items.clone(),
-                })
-                .await
-                .ok();
-        }
-    }
-
-    /// 中断路径的 seal:只保留已流出文本。
-    async fn seal_partial(&self, turn: &TurnId, blocks: &AttemptBlocks, outcome: &ProviderOutcome) {
-        let reasoning = outcome.partial_reasoning.clone().unwrap_or_default();
-        let answer = outcome.partial_text.clone().unwrap_or_default();
-        if !reasoning.is_empty() {
-            self.owner
-                .append_block(TimelineEntry::AssistantBlock {
-                    block_id: BlockId::new(blocks.reasoning_block_id.clone()),
-                    turn_id: turn.clone(),
-                    ord: 0,
-                    block_kind: AssistantBlockKind::Reasoning,
-                    content: ContentValue::Inline { text: reasoning },
-                    model: blocks.model.clone(),
-                    usage: None,
-                    generated_ms: None,
-                    opaque: vec![],
-                })
-                .await
-                .ok();
-        }
-        if !answer.is_empty() {
-            self.owner
-                .append_block(TimelineEntry::AssistantBlock {
-                    block_id: BlockId::new(blocks.answer_block_id.clone()),
-                    turn_id: turn.clone(),
-                    ord: 0,
-                    block_kind: AssistantBlockKind::Answer,
-                    content: ContentValue::Inline { text: answer },
-                    model: blocks.model.clone(),
-                    usage: outcome.usage.clone(),
-                    generated_ms: outcome.generated_ms,
-                    opaque: vec![],
-                })
-                .await
-                .ok();
-        }
-    }
-
-    async fn finish_completed(&self, turn: &TurnId, usage: Option<UsageInfo>) {
-        self.owner
-            .finish_turn(
-                turn.as_ref(),
-                "finished",
-                TurnOutcome::Finished {
-                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Completed,
-                    usage,
-                    error: None,
-                },
-            )
-            .await
-            .ok();
-        self.notify_terminal(turn, TurnTerminal::Completed, None);
-    }
-
-    async fn finish_cancelled(&self, turn: &TurnId, usage: Option<UsageInfo>) {
-        self.resolve_pending_interactions().await;
-        self.owner
-            .finish_turn(
-                turn.as_ref(),
-                "finished",
-                TurnOutcome::Finished {
-                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Cancelled,
-                    usage,
-                    error: None,
-                },
-            )
-            .await
-            .ok();
-        // ADR-0038:取消终态 → StopCancelled 观察。
         if let Some(hooks) = self.hooks_ref() {
             let cwd = self.current_cwd().to_string_lossy().to_string();
             hooks
                 .observe(
-                    qaqh_hooks::HookEventName::StopCancelled,
+                    event,
                     qaqh_hooks::HookPayload::Sparse {
                         source: None,
-                        reason: Some("cancelled".to_string()),
+                        reason: Some(reason),
                         trigger: None,
                         agent_type: None,
                     },
@@ -2458,7 +2358,17 @@ impl SessionLoop {
                 )
                 .await;
         }
-        self.notify_terminal(turn, TurnTerminal::Cancelled, None);
+    }
+
+    async fn finish_completed(&self, turn: &TurnId, usage: Option<UsageInfo>) {
+        let res = session_persist::persist_completed(&self.owner, turn, usage).await;
+        self.settle_terminal(turn, res).await;
+    }
+
+    async fn finish_cancelled(&self, turn: &TurnId, usage: Option<UsageInfo>) {
+        self.resolve_pending_interactions().await;
+        let res = session_persist::persist_cancelled(&self.owner, turn, usage).await;
+        self.settle_terminal(turn, res).await;
     }
 
     async fn finish_failed(
@@ -2468,46 +2378,8 @@ impl SessionLoop {
         code: &str,
         message: &str,
     ) {
-        self.owner
-            .finish_turn(
-                turn.as_ref(),
-                "finished",
-                TurnOutcome::Finished {
-                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Failed,
-                    usage,
-                    error: Some(qaqh_ringing_contract::fact::TurnError {
-                        code: code.to_string(),
-                        message: message.to_string(),
-                        retryable: false,
-                        details_ref: None,
-                    }),
-                },
-            )
-            .await
-            .ok();
-        // ADR-0038:失败终态 → StopFailure 观察。
-        if let Some(hooks) = self.hooks_ref() {
-            let cwd = self.current_cwd().to_string_lossy().to_string();
-            hooks
-                .observe(
-                    qaqh_hooks::HookEventName::StopFailure,
-                    qaqh_hooks::HookPayload::Sparse {
-                        source: None,
-                        reason: Some(format!("{code}: {message}")),
-                        trigger: None,
-                        agent_type: None,
-                    },
-                    &cwd,
-                    Some(turn.as_str()),
-                    None,
-                )
-                .await;
-        }
-        self.notify_terminal(
-            turn,
-            TurnTerminal::Failed,
-            Some(format!("{code}: {message}")),
-        );
+        let res = session_persist::persist_failed(&self.owner, turn, usage, code, message).await;
+        self.settle_terminal(turn, res).await;
     }
 
     async fn resolve_pending_interactions(&self) {
@@ -2821,15 +2693,6 @@ fn is_control_plane_tool(tool_name: &str) -> bool {
     tool_name == "ask"
         || tool_name == crate::handoff::TOOL_NAME
         || tool_name == crate::session_title::TOOL_NAME
-}
-
-fn empty_assistant() -> Message {
-    Message {
-        msg_id: None,
-        role: "assistant".into(),
-        name: None,
-        content: Vec::new(),
-    }
 }
 
 fn flush_assistant(messages: &mut Vec<Message>, group: Option<Message>) {

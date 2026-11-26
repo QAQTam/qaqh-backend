@@ -4,10 +4,13 @@
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
 pub mod db;
+/// v4.5.1 任务4:exec 进度 SQLite 落库节流(前端 20ms 合帧与日志频率不变)。
+pub(crate) mod exec_progress;
 pub mod grouping;
 pub mod owner;
 #[cfg(test)]
 mod owner_tests;
+pub mod replay_ring;
 
 /// Free-function epoch helper.
 pub fn now_epoch() -> u64 {

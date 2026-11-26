@@ -2,9 +2,11 @@
 //! 跨越 SQLite IO —— 慢库读只许在**自身**路径上排队，不许把纯内存的
 //! `session.activity` 一起钉死（`LOCK_AUDIT_REPORT` L-01.2 复合停摆）。
 //!
-//! 装置零 mock、零产品代码钩子：`Db::read_blocking` 的本体就是
-//! `read_conn.lock()` + 执行闭包，所以另起一个线程用它把只读连接占住
-//! `FUSE_HOLD_MS`，等价于一次慢盘 / WAL checkpoint 的持库窗口。
+//! 装置零 mock、零产品代码钩子：另起 `FUSE_COUNT` 个线程用 `Db::read_blocking`
+//! 把只读连接池的**全部**连接占住 `FUSE_HOLD_MS`（v4.5.1 任务4 起 `Db` 的读面
+//! 是 4 条 `SQLITE_OPEN_READ_ONLY` 连接的有界池），等价于一次慢盘 / WAL
+//! checkpoint 的持库窗口。容量若再调整，装置失配会被下方
+//! 「反证装置失效」断言当场暴露——不许默默变绿。
 //!
 //! - **旧实现红**：`list_sessions` 第一行就取 `registry` guard，随后卡在
 //!   `read_blocking` 上，guard 活过整个占库窗口 ⇒ 纯内存的 `session.activity`
@@ -31,6 +33,9 @@ const FAST_PATH_MAX_MS: u64 = 150;
 const LIST_QUEUED_MIN_MS: u64 = 100;
 /// 让 `session.list` 取完锁并停在 `read_blocking` 上的观察窗口，不参与断言。
 const DISPATCH_SETTLE_MS: u64 = 30;
+/// 引信数量 = v4.5.1 有界只读连接池的容量:全部占满才能逼 `session.list`
+/// 真正在 `read_blocking` 上排队。池容量变化时本用例会以「装置失效」响亮报红。
+const FUSE_COUNT: usize = 4;
 
 static SERVICE: std::sync::OnceLock<QaqhService> = std::sync::OnceLock::new();
 
@@ -52,17 +57,23 @@ fn service() -> &'static QaqhService {
     })
 }
 
-/// 把 SQLite 只读连接占住 `FUSE_HOLD_MS`。返回的 receiver 在闭包**已进入
-/// 持锁区间**时收到信号，测试据此决定何时让慢路径起跑。
-fn hold_read_connection(db: Arc<qaqh_session::db::Db>) -> mpsc::Receiver<()> {
+/// 把只读连接池的**每一条**连接各占住 `FUSE_HOLD_MS`(v4.5.1 任务4 起读面是
+/// 4 条连接的有界池)。返回的 receiver 在全部引信**都已进入持锁区间**时收到
+/// 信号,测试据此决定何时让慢路径起跑。
+fn hold_all_read_connections(db: Arc<qaqh_session::db::Db>) -> mpsc::Receiver<()> {
     let (engaged_tx, engaged_rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = db.read_blocking(move |_conn| {
-            let _ = engaged_tx.send(());
-            std::thread::sleep(Duration::from_millis(FUSE_HOLD_MS));
-            Ok::<(), qaqh_session::db::DbError>(())
+    for _ in 0..FUSE_COUNT {
+        let db = Arc::clone(&db);
+        let engaged_tx = engaged_tx.clone();
+        std::thread::spawn(move || {
+            let _ = db.read_blocking(move |_conn| {
+                let _ = engaged_tx.send(());
+                std::thread::sleep(Duration::from_millis(FUSE_HOLD_MS));
+                Ok::<(), qaqh_session::db::DbError>(())
+            });
         });
-    });
+    }
+    drop(engaged_tx);
     engaged_rx
 }
 
@@ -75,10 +86,12 @@ fn list_sessions_does_not_hold_registry_lock_across_db_io() {
         .expect("warmup session.list");
 
     let db = Arc::clone(service.owners().db());
-    let engaged = hold_read_connection(db);
-    engaged
-        .recv_timeout(Duration::from_secs(5))
-        .expect("read-connection fuse never engaged");
+    let engaged = hold_all_read_connections(db);
+    for _ in 0..FUSE_COUNT {
+        engaged
+            .recv_timeout(Duration::from_secs(5))
+            .expect("read-connection fuse never engaged");
+    }
 
     // 慢路径：只读连接被占住，`session.list` 必然卡在它自己的 `read_blocking`。
     let list_service = service.clone();

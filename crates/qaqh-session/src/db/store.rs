@@ -309,6 +309,8 @@ pub fn truncate_from_turn(
         params![session_id, target_seq],
         |row| row.get(0),
     )?;
+    // v4.5.1 任务2:删除三表**之前**收集被撤回合引用的 BLOB 候选(独立子模块)。
+    let dangling = super::maintenance::collect_dangling_candidates(&tx, session_id, target_seq)?;
     tx.execute(
         &format!("DELETE FROM tool_calls WHERE session_id = ?1 AND turn_id IN {doomed}"),
         params![session_id, target_seq],
@@ -329,6 +331,8 @@ pub fn truncate_from_turn(
         "DELETE FROM turns WHERE session_id = ?1 AND seq >= ?2",
         params![session_id, target_seq],
     )?;
+    // v4.5.1 任务2:同事务清理孤儿 BLOB,保留回合共用的 content_id 绝不误删。
+    super::maintenance::delete_orphan_session_contents(&tx, session_id, &dangling)?;
     tx.execute(
         "UPDATE sessions SET updated_at_ms = ?2 WHERE session_id = ?1",
         params![session_id, now_ms()],
