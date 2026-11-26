@@ -119,23 +119,23 @@
 
 | # | 对象 | 位置 | 事实与修复 | 归类 |
 |---|---|---|---|---|
-| L-13 | audit 锁族 fsync convoy | workspace/audit/mod.rs:38/362、v2.rs:42/45 | WRITER→{v1 APPEND, v2 APPEND→CHAIN} 单向无环；一次双写=2×fsync 全在 WRITER 内；v2 首次缓存未命中 recover_state 在 APPEND+CHAIN 双锁内整文件读（≤4MB×4 代）+截断重写（v2.rs:312→414-470）。工具链在 blocking pool，不卡 worker。缩边界：recover 读挪锁外；根治随 P1-3 | 2 |
+| L-13 | audit 锁族 fsync convoy | workspace/audit/mod.rs:38/362、v2.rs:42/45 | WRITER→{v1 APPEND, v2 APPEND→CHAIN} 单向无环；一次双写=2×fsync 全在 WRITER 内；v2 首次缓存未命中 recover_state 在 APPEND+CHAIN 双锁内整文件读（≤4MB×4 代）+截断重写（v2.rs:312→414-470）。工具链在 blocking pool，不卡 worker。**已缩边界（v4.5 P2-0 + P2-closeout）**：持 `APPEND_LOCK` 串行恢复但放开 `CHAIN` 锁再 IO，消除双锁嵌套与锁外写盘竞态 | 2 · 已修 |
 | L-14 | JOURNAL_IO | file-tools/journal.rs:68（唯一锁点 :198） | 持锁 fsync+root 变更 repair+全量重扫；**无 audit 回调**（全 crate grep 零命中）；全局 seq 是契约。可选缩边界（repair/rescan 锁外预备） | 4 |
-| L-15 | FileRuntime canonicalize 锁内 | file-tools/file_state.rs:309-326（insert:80、record_grep:231 等） | 已实例化（P0-2 完成）；网络盘/断连 SMB 可卡会话锁数秒。ledger_key 挪锁外计算 | 4 |
-| L-16 | REGISTRY captured_full 大 clone | process-tools/process_registry.rs:727-743 | 全局锁内 clone ≤5MB×2 文本；kill/tasklist/wait 全锁外（设计标杆）。锁内取 Arc、锁外 clone | 4 |
+| L-15 | FileRuntime canonicalize 锁内 | file-tools/file_state.rs:309-326（insert:80、record_grep:231 等） | 已实例化（P0-2 完成）；网络盘/断连 SMB 可卡会话锁数秒。**已修（v4.5 P2-0）**：`ledger_key` 全部挪会话锁外计算 | 4 · 已修 |
+| L-16 | REGISTRY captured_full 大 clone | process-tools/process_registry.rs:727-743 | 全局锁内 clone ≤5MB×2 文本；kill/tasklist/wait 全锁外（设计标杆）。**已修（v4.5 P2-0）**：全局锁内只取 Arc 句柄，大文本 clone 挪锁外 | 4 · 已修 |
 | L-17 | IMAGE_REGISTRY async 直达+相邻 worker 落盘 | file-tools/read_image/mod.rs:45；session_loop.rs:2601/2626/2631 | 锁本身干净（解码/读盘锁外）；**assemble_context 在 worker 做 MB 级 base64 落盘**（:2626）。IO 挪 spawn_blocking | 4 |
 | L-18 | exec env 热重载 secret IO 在 worker | runtime/service.rs:1029-1047（reloader :1052-1056） | SecretStore 读盘+解密在 worker，随后才拿 OVERLAY 写锁（锁内纯 CPU）。apply 整体 spawn_blocking | 4 |
 | L-19 | SSE 诊断 tick worker 多短锁 | daemon/v2.rs:1070-1072 → service.rs:317/323/336/349 | registry+MCP/LSP conns+IMAGE_REGISTRY 短锁串行，均无 IO 持锁；降频或 spawn_blocking | 4 |
 | L-20 | devices touch 全量覆写在鉴权热路径 | ringing-runtime/device_registry.rs:115-131；daemon/authz.rs:52-57 | 每设备请求 lookup+touch（60s 节流）持锁写盘。P1-3 根治 | 2 |
-| L-21 | **RetryHub.drain 持锁回调（潜在自死锁引信）** | gate/sdk_common.rs:639-648 | while-let 临时 guard 活到循环体末（edition 2024，Cargo.toml:67），持锁调 on_event；当前无重入触发路径（record 由 SDK 重试循环调，drain 由桥接循环调）。缩边界：锁内 mem::take 到本地 Vec，放锁再回调 | 4 |
+| L-21 | **RetryHub.drain 持锁回调（潜在自死锁引信）** | gate/sdk_common.rs:639-648 | while-let 临时 guard 活到循环体末（edition 2024，Cargo.toml:67），持锁调 on_event。**已修（v4.5 P2-0）**：锁内 `std::mem::take` 到本地 Vec，放锁再回调，重入反证绿 | 4 · 已修 |
 | L-22 | mcp try_runtime_handle 恒 None | mcp/bridge.rs:71-74 | checked 版读的是**另一个从未初始化的函数局部 static RT**（与 :47 不同 cell）⇒ Drop 兜底网络（manager.rs:360）永远走不到。RT 提模块级共享 cell；或随 P1-1 退场 | 2（先修则 1） |
-| L-23 | lsp evict conns→state 嵌套边 | lsp/manager.rs:340-345（retain 闭包内 conn.status()） | 全分组唯一 std 锁嵌套；反向边不存在（connection 无 manager 回指）⇒ 当前无环，未来 ABBA 引信。锁内集候选→锁外查状态→短锁 remove | 4 |
+| L-23 | lsp evict conns→state 嵌套边 | lsp/manager.rs:340-345（retain 闭包内 conn.status()） | **已消亡（`a7819f80` 物理移除 `qaqh-lsp`）** | 4 · 已消亡 |
 | L-24 | mcp 代际竞态+重拉无去抖；lsp watchdog 空转/begin_call 无闸 | mcp/connection.rs:949-952/979-982、manager.rs:166-180、connection.rs:793-806；lsp/connection.rs:525-526/206-211 | 旧 conn 按名 remove 误删新代 CONN_NOTIFY/取走新代 pid（窗口窄）；server spam list_changed 在 2-worker 专属 RT 堆无界重拉。注册随连接代所有权化；重拉单飞；watchdog return；begin_call 补闸 | 3（小修可先行） |
 | L-25 | PREFLIGHT 残留微扰 | sandbox/preflight.rs:253/309（is_process_elevated 持锁 Win32）、state_slot 初始化 detect（Linux bwrap 两次子进程 capability.rs:183/204-213） | 自死锁已消除（见总判定 1）；初始化经只读分派面发生在 worker。elevated 预计算挪锁外；分派面随 L-01 同刀；Linux 冷初始化可懒到后台 | 4 |
 | L-26 | DAEMON_SPAWN_GUARD 持锁同步探测 | client/client.rs:1087/1098-1112 | tokio Mutex，guard 不跨 await（握手等待在放锁后 ✓）；临界区含 TCP 探测≤300ms+CreateProcess+fs 读，全在 worker。决策段 spawn_blocking；同步版 ensure_daemon_running 不取 guard（靠 daemon.lock 兜底，注释明示） | 4 |
 | L-27 | tasklist.exe `.output()` 无超时 | types/platform.rs:413-438（Win 分支 :418-420） | 后代持管道写端 ⇒ EOF 永不来（registry/mod.rs:145-153 注记 BUG-2026-09-15-02 同款）。调用方仅启动期 main.rs:194 与客户端 discovery.rs:311，不在 async 热路径。换 OpenProcess 直查（与 MUST P2-2⑥ 重合，可先行）**——已清零（v4.5 P2-2b：`OpenProcess`+`GetExitCodeProcess` RAII / `libc::kill(pid,0)` 直查，client 复制版同刀收编单源，反证 756.3µs→1.1µs，见 ADR-0044）** | 1（小改）· 已修 |
 | L-28 | wait_agent 长占 blocking pool | runtime/host_impl.rs:650-695 | 25ms sleep 轮询+每目标 read_blocking，超时可达分钟级；经 spawn_blocking 执行不钉 worker，但挤占 db.read 的 blocking 池。改 async 轮询+快照读 | 2/3 |
-| L-29 | GLOBAL_TRUSTED worker 持锁文件写 | workspace/authorization.rs:558/562；session_loop.rs:1540（async fn 内 trust_folder） | 惰性 load+trust save 持锁 fs IO；Persistent 批准低频。调用点 spawn_blocking（一行级）；信任集随会话实例走 | 3（随 P1-2） |
+| L-29 | GLOBAL_TRUSTED worker 持锁文件写 | workspace/authorization.rs:558/562；session_loop.rs:1540（async fn 内 trust_folder） | 惰性 load+trust save 持锁 fs IO；Persistent 批准低频。**已修（v4.5 P2-0）**：`session_loop.rs` 调用点套 `tokio::task::spawn_blocking` | 3 · 已修 |
 | L-30 | session_hooks trust 持锁写文件 | agent-runtime/session_hooks.rs:132-134 | ToolPermissionRespond(trust_folder)→registry 锁→respond_permission→持锁写盘（worker）。写盘挪锁外 | 4 |
 | L-31 | owners map 锁内派生 OS 线程 | session/owner.rs:1900/1942-1945→:280 | get_or_create or_insert_with 内 SessionOwner::new spawn 线程（~几十µs 无 IO）。随 P1-2 退场 | 3 |
 | L-32 | ReplayRing 锁内 ≤4MB clone | session/owner.rs:64/132-135 | SSE attach/lagged 追赶在 worker，毫秒级有界。可保留 | 4 |
@@ -348,9 +348,8 @@ lsp：conns → conn.state（evict_recycled_conns, manager.rs:343）唯一嵌套
 - **`unload_idle_sessions` 句柄回收**：铁闸 3 验收由 #37 补交
   （`OwnerDirectory::take_session` 接线 + 回归测试）；`take_session` 只摘目录条目，
   不触碰 audit/journal 面。
-- **未动项**（顺延 v4.5，逐项处置见 `V4_4_EXECUTION_PLAN.md` §六）：
-  L-13/L-15/L-16/L-21/L-23/L-29（L-27 已于 P2-2b 清零）；`audit v1/v2` 与 `JOURNAL_IO` 按所有者裁定
-  未在 P1-3 收编。
+- **已消除（`v4.5` 收口）**：
+  `L-13`（`audit/v2` 持 `APPEND_LOCK` 恢复且放开 `CHAIN` 锁，P2-0 + P2-closeout）、`L-15`（`ledger_key` 锁外计算，P2-0）、`L-16`（`captured_full` 锁外 clone，P2-0）、`L-21`（`RetryHub::drain` 锁外回调，P2-0）、`L-23`（随 `qaqh-lsp` 移除消亡，`a7819f80`）、`L-27`（`OpenProcess`/`libc::kill` 原生判活，P2-2b）、`L-29`（`trust_folder` `spawn_blocking`，P2-0）；`audit v1/v2` 与 `JOURNAL_IO` 最终归属已纳入 `v4.6 P3-4` / `v4.10` ADR 排期。
 
 ---
 

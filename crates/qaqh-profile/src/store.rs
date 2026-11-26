@@ -135,7 +135,11 @@ impl ProfilesStore {
     /// 原子替换，失败自动清理）。
     pub fn save(&self) -> Result<(), ProfileStoreError> {
         let serialized = toml::to_string_pretty(&self.doc)?;
-        let parent = self.path.parent().unwrap_or(std::path::Path::new("."));
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
         let mut temp = tempfile::NamedTempFile::new_in(parent)?;
         std::io::Write::write_all(&mut temp, serialized.as_bytes())?;
         std::io::Write::flush(&mut temp)?;

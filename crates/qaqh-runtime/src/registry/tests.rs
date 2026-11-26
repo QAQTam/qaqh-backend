@@ -385,3 +385,42 @@ async fn idle_unload_reaps_descendant_session_owners() {
         "子代目录项已被回收，重复 take 应落空"
     );
 }
+
+#[test]
+fn shutdown_all_clears_tool_hosts_slot() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let owners = std::sync::Arc::new(
+        qaqh_session::owner::OwnerDirectory::open(dir.path().join("qaqh.db"))
+            .expect("open owners db"),
+    );
+    let weak_owners = std::sync::Arc::downgrade(&owners);
+    let registry = std::sync::Arc::new(std::sync::Mutex::new(AgentRegistry::new(owners.clone())));
+    let service = crate::service::QaqhService {
+        registry: std::sync::Arc::clone(&registry),
+        hub: std::sync::OnceLock::new(),
+        owners,
+        siwc: std::sync::OnceLock::new(),
+        dsaccount: std::sync::OnceLock::new(),
+    };
+    let hosts = crate::tool_hosts::SessionToolHosts::from_service(&service);
+    registry
+        .lock()
+        .expect("lock registry")
+        .set_tool_hosts(std::sync::Arc::clone(&hosts));
+    assert_eq!(std::sync::Arc::strong_count(&hosts), 2);
+
+    registry.lock().expect("lock registry").shutdown_all();
+    assert_eq!(
+        std::sync::Arc::strong_count(&hosts),
+        1,
+        "shutdown_all 必须清空 tool_hosts 断开 QaqhService <-> SessionToolHosts 强引用环"
+    );
+    drop(hosts);
+    drop(registry);
+    drop(service);
+    assert_eq!(
+        weak_owners.strong_count(),
+        0,
+        "断开环后 OwnerDirectory 与 QaqhService 必须可被完整释放"
+    );
+}

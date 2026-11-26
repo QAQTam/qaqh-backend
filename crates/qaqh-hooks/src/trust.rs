@@ -132,7 +132,11 @@ impl HookTrustStore {
         // v4.5 P2-2a（plan §三.4-3 同步清扫）：定名 `.json.tmp` + rename 的
         // 手写原子写（且**从不 fsync**）退役，改 `tempfile::NamedTempFile`：
         // 同目录唯一临时名、`sync_all` 后 `persist` 原子替换、失败即 drop 清理。
-        let parent = self.path.parent().unwrap_or(Path::new("."));
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
         std::fs::create_dir_all(parent).map_err(TrustStoreError::Io)?;
         let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(TrustStoreError::Io)?;
         std::io::Write::write_all(&mut temp, text.as_bytes()).map_err(TrustStoreError::Io)?;

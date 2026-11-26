@@ -64,7 +64,8 @@ impl Registry {
         let parent = self
             .file_path
             .parent()
-            .ok_or_else(|| GitxError::Io(std::io::Error::other("registry path has no parent")))?;
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
         std::fs::create_dir_all(parent)?;
         let mut temp = tempfile::NamedTempFile::new_in(parent)?;
         serde_json::to_writer_pretty(&mut temp, &self.records)?;

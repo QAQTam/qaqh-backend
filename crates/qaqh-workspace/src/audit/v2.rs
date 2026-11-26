@@ -300,32 +300,26 @@ pub fn append_event(root: &Path, event: Event) -> Result<Record, AuditError> {
 fn append_event_with_limit(root: &Path, event: Event, limit: u64) -> Result<Record, AuditError> {
     std::fs::create_dir_all(root)?;
     let path = active_path(root);
-    // L-13（P1-0d）：`recover_state` 的文件 IO 挪出 APPEND_LOCK/CHAIN 双锁。
-    // 先在锁外短查 CHAIN（纯 map 操作），未命中才在取 APPEND_LOCK 之前完成
-    // 恢复预备；并发 append 若已抢先入链，双锁临界区内以 CHAIN 权威值为准、
-    // 预备值整体作废（torn 尾修复幂等，预备期重叠读不影响正确性）。
-    let recovered = if CHAIN
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .contains_key(&path)
-    {
-        None
-    } else {
-        Some(recover_state(root, &path))
-    };
+    // L-13（P1-0d + P2-closeout 竞态修正）：`recover_state` 含 `.torn` 追加与
+    // `fs::write` 截断覆写，必须在 `APPEND_LOCK` 内串行执行；通过先在短锁内
+    // 查 `CHAIN`、放锁后再调 `recover_state`，既消除了 `APPEND→CHAIN` 嵌套
+    // 磁盘 IO，又彻底杜绝锁外并发恢复覆写他线程已落盘记录的竞态。
     let _guard = APPEND_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     rotate_if_needed(root, limit);
-    let state = {
-        let mut chain = CHAIN.lock().unwrap_or_else(|p| p.into_inner());
-        match chain.get(&path) {
-            Some(state) => state.clone(),
-            None => {
-                // 首查命中而二查落空的唯一通路是测试侧 CHAIN::clear——账本
-                // 清零后的正确重启态即 genesis。
-                let recovered = recovered.unwrap_or_else(ChainState::genesis);
-                chain.insert(path.clone(), recovered.clone());
-                recovered
-            }
+    let cached = CHAIN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .get(&path)
+        .cloned();
+    let state = match cached {
+        Some(state) => state,
+        None => {
+            let recovered = recover_state(root, &path);
+            CHAIN
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(path.clone(), recovered.clone());
+            recovered
         }
     };
 
@@ -959,5 +953,69 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o600, "audit ledger must be owner-only, got {mode:o}");
+    }
+
+    /// L-13 反证：首次冷启动恢复遇到 torn 尾且多线程并发 `append_event` 时，
+    /// 若 `recover_state`（含 `.torn` 追加与 `fs::write` 截断覆写）在 `APPEND_LOCK`
+    /// 外并发执行，多条线程会重复写 `.torn` 甚至用旧快照覆写抹掉他线程刚
+    /// 落盘的记录。修复后恢复在 `APPEND_LOCK` 内（`CHAIN` 锁外）串行执行，
+    /// `.torn` 恰 1 条、全部记录与哈希链 100% 完整。
+    #[test]
+    fn concurrent_first_append_with_torn_tail_preserves_all_records_and_chain() {
+        use std::sync::{Arc, Barrier};
+
+        const ROUNDS: usize = 16;
+        const THREADS: usize = 8;
+
+        for round in 0..ROUNDS {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let root = dir.path().to_path_buf();
+            append_event(&root, event(&format!("seed-{round}"))).expect("seed append");
+
+            let path = active_path(&root);
+            let mut bytes = std::fs::read(&path).expect("read seed");
+            bytes.extend_from_slice(b"{\"schema\":\"qaqh.audit/v2\",\"seq\":2");
+            std::fs::write(&path, bytes).expect("inject torn tail");
+
+            clear_chain_cache();
+
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let mut handles = Vec::with_capacity(THREADS);
+            for tid in 0..THREADS {
+                let root = root.clone();
+                let barrier = Arc::clone(&barrier);
+                handles.push(std::thread::spawn(move || {
+                    barrier.wait();
+                    append_event(&root, event(&format!("r{round}-t{tid}")))
+                }));
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("worker thread must not panic")
+                    .expect("concurrent append must succeed");
+            }
+
+            let report = verify_ledger(&root);
+            assert!(
+                report.ok,
+                "round {round}: ledger corrupted under concurrent recovery: {report:?}"
+            );
+            assert_eq!(
+                report.records,
+                (1 + THREADS) as u64,
+                "round {round}: lost records under concurrent recovery"
+            );
+
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(".torn");
+            let torn =
+                std::fs::read_to_string(PathBuf::from(sidecar)).expect("torn sidecar exists");
+            assert_eq!(
+                torn.lines().count(),
+                1,
+                "round {round}: torn tail must be repaired exactly once, got: {torn:?}"
+            );
+        }
     }
 }

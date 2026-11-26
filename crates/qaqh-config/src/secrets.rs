@@ -450,11 +450,13 @@ impl SecretStore {
     fn write_doc(&self, doc: &toml::map::Map<String, toml::Value>) -> Result<(), String> {
         let content = toml::to_string_pretty(doc)
             .map_err(|e| format!("secrets serialization failed: {e}"))?;
-        let parent = self.path.parent().unwrap_or(Path::new("."));
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("secrets create_dir_all failed: {e}"))?;
-        }
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("secrets create_dir_all failed: {e}"))?;
         // BUG-2026-09-13-11：临时文件必须与目标同目录（rename 同卷才原子）且
         // 逐次唯一（跨进程不互覆）。自 v4.5 P2-2a 起由 `tempfile::NamedTempFile`
         // 承担——内部以 `O_CREAT|O_EXCL` + 随机后缀创建（Unix 直接 0600），

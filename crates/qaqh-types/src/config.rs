@@ -248,10 +248,12 @@ impl ConfigStore {
     /// v4.5 P2-2a（plan §三.4-3 同步清扫）：定名 `.toml.tmp` 手写原子写改
     /// `tempfile::NamedTempFile`（同目录唯一临时名 + sync + persist 原子替换）。
     pub fn write_content(&self, content: &str) -> bool {
-        let parent = self.path.parent().unwrap_or(std::path::Path::new("."));
-        if !parent.as_os_str().is_empty()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
+        let parent = self
+            .path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!(
                 "ConfigStore: create_dir_all({}) failed: {e}",
                 parent.display()
