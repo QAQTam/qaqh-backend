@@ -371,11 +371,9 @@ fn fingerprint_message(msg: &Message) -> MessageFingerprint {
                 d.update_tag("text");
                 d.update(text.as_bytes());
             }
-            ContentBlock::Reasoning { reasoning, kind } => {
+            ContentBlock::Reasoning { reasoning, .. } => {
+                // `kind` 仅用于 UI 区分摘要/全文，不进入任何 wire 请求体，不纳入指纹。
                 d.update_tag("reasoning");
-                if let Some(k) = kind {
-                    d.update_tag(&format!("{k:?}"));
-                }
                 d.update(reasoning.as_bytes());
             }
             ContentBlock::ToolUse { id, name, input } => {
@@ -602,6 +600,20 @@ mod tests {
         let m1 = vec![
             sys_msg("intro\n[Environment]\nworkspace: /a\n[Skills]\ns1"),
             Message::user("hi"),
+            Message {
+                msg_id: None,
+                role: "assistant".into(),
+                name: None,
+                content: vec![
+                    ContentBlock::Reasoning {
+                        reasoning: "think".into(),
+                        kind: Some(qaqh_types::ReasoningKind::Text),
+                    },
+                    ContentBlock::Text {
+                        text: "hello".into(),
+                    },
+                ],
+            },
         ];
         let m2 = vec![
             sys_msg("intro\n[Environment]\nworkspace: /a\n[Skills]\ns1"),
@@ -610,9 +622,15 @@ mod tests {
                 msg_id: None,
                 role: "assistant".into(),
                 name: None,
-                content: vec![ContentBlock::Text {
-                    text: "hello".into(),
-                }],
+                content: vec![
+                    ContentBlock::Reasoning {
+                        reasoning: "think".into(),
+                        kind: None,
+                    },
+                    ContentBlock::Text {
+                        text: "hello".into(),
+                    },
+                ],
             },
             Message::user("next"),
         ];
@@ -620,7 +638,7 @@ mod tests {
         let fp2 = fingerprint_request(&p, &m2, Some(&tools), 1024, Some("high"));
         assert_eq!(
             diff_fingerprints(&fp1, &fp2),
-            PrefixDiff::Identical { prior_msgs: 1 }
+            PrefixDiff::Identical { prior_msgs: 2 }
         );
     }
 
