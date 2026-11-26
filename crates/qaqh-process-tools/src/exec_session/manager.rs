@@ -315,7 +315,7 @@ impl ExecSessionManager {
             argv: request.argv.clone(),
             env: request.env.clone(),
             cwd: request.cwd.as_deref().map(std::path::PathBuf::from),
-            cols: 80,
+            cols: 160,
             rows: 24,
         };
         #[cfg(windows)]

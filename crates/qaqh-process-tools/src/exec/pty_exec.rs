@@ -82,6 +82,7 @@ pub(crate) fn pty_exec(
     // 审计 M1 延续：env_clear + 最小白名单；PTY 需要 TERM 才有正常终端行为
     // （daemon 常无 TERM），缺省补 xterm-256color。
     let mut session_spec = qaqh_pty::SessionSpec::new(launch.argv);
+    session_spec.cols = 160;
     let mut env_pairs = super::direct::minimal_child_env();
     if !env_pairs.iter().any(|(key, _)| key == "TERM") {
         env_pairs.push(("TERM".to_string(), "xterm-256color".to_string()));
