@@ -5,7 +5,7 @@
 //! Ported surface (sync, std-fs, PathBuf instead of PathUri/ExecutorFileSystem):
 //! - `parser.rs`     — boundary checks + lenient heredoc stripping
 //! - `streaming_parser.rs` — hunk state machine (lines → Hunk list)
-//! - `seek_sequence.rs`    — 4-tier content matching (exact → rstrip → trim → Unicode-normalised)
+//! - `seek_sequence.rs`    — 4-tier content matching (exact → rstrip → trim → typographic-punctuation-normalised)
 //! - `file_update.rs`      — chunk → replacements → new contents
 //! - `text_file.rs`        — line-ending-preserving source file abstraction
 //!
@@ -54,10 +54,8 @@ pub enum EngineError {
         path: String,
         detail: String,
     },
-    /// `*** Add File:` targeted a path that already exists. Dry-run reports this
-    /// instead of a plain `[DRY RUN] … ok`; a real apply keeps the upstream
-    /// overwrite semantics (fixture `011_add_overwrites_existing_file`) but the
-    /// replaced contents are captured in [`FileDelta::old`].
+    /// `*** Add File:` targeted a path that already exists (refused atomically
+    /// in both real apply and dry-run; Fail-Closed).
     WouldOverwrite {
         path: String,
     },
@@ -327,7 +325,6 @@ fn check_duplicate_paths(hunks: &[Hunk], cwd: &Path) -> Result<(), EngineError> 
 fn prepare_hunks(
     hunks: &[Hunk],
     cwd: &Path,
-    dry_run: bool,
 ) -> Result<(Vec<PreparedHunk>, Vec<String>), EngineError> {
     check_duplicate_paths(hunks, cwd)?;
     let mut prepared = Vec::with_capacity(hunks.len());
@@ -349,16 +346,15 @@ fn prepare_hunks(
                         ),
                     });
                 }
-                if dry_run && std::fs::metadata(&resolved).is_ok() {
+                if std::fs::metadata(&resolved).is_ok() {
                     return Err(EngineError::WouldOverwrite {
                         path: resolved.to_string_lossy().to_string(),
                     });
                 }
-                let old = existing_file_contents(&resolved);
                 prepared.push(PreparedHunk::Add {
                     affected_path,
                     resolved,
-                    old,
+                    old: None,
                     contents: contents.clone(),
                 });
             }
@@ -392,6 +388,17 @@ fn prepare_hunks(
                 move_path,
                 chunks,
             } => {
+                if move_path.is_none()
+                    && chunks.iter().all(|c| {
+                        c.old_lines.len() == c.context_line_indices.len()
+                            && c.new_lines.len() == c.context_line_indices.len()
+                    })
+                {
+                    return Err(EngineError::Parse(ParseError::InvalidPatchError(format!(
+                        "No-op update for '{}': hunk contains only context lines with no '+' or '-' changes",
+                        src_path.display()
+                    ))));
+                }
                 let src_resolved = resolve_workspace_path(cwd, src_path)?;
                 let dest_resolved = match move_path {
                     Some(dest) => Some(resolve_workspace_path(cwd, dest)?),
@@ -428,7 +435,7 @@ pub fn apply_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Engin
     if hunks.is_empty() {
         return Err(EngineError::EmptyPatch);
     }
-    let (prepared, ambiguity_warnings) = prepare_hunks(&hunks, cwd, false)?;
+    let (prepared, ambiguity_warnings) = prepare_hunks(&hunks, cwd)?;
     let mut outcome = ApplyOutcome {
         ambiguity_warnings,
         ..ApplyOutcome::default()
@@ -531,7 +538,7 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
     if hunks.is_empty() {
         return Err(EngineError::EmptyPatch);
     }
-    let (prepared, ambiguity_warnings) = prepare_hunks(&hunks, cwd, true)?;
+    let (prepared, ambiguity_warnings) = prepare_hunks(&hunks, cwd)?;
     let mut outcome = ApplyOutcome {
         ambiguity_warnings,
         ..ApplyOutcome::default()
@@ -586,14 +593,6 @@ pub fn dry_run_patch_engine(patch: &str, cwd: &Path) -> Result<ApplyOutcome, Eng
     Ok(outcome)
 }
 
-/// Contents of `path` when it is an existing regular file, `None` otherwise
-/// (missing, a directory, or not valid UTF-8). Used by `*** Add File:` to keep
-/// the overwritten contents as rollback material.
-fn existing_file_contents(path: &Path) -> Option<String> {
-    std::fs::metadata(path).ok().filter(|m| m.is_file())?;
-    std::fs::read_to_string(path).ok()
-}
-
 fn write_file_with_missing_parent_retry(path: &Path, contents: &[u8]) -> Result<(), EngineError> {
     match std::fs::write(path, contents) {
         Ok(()) => Ok(()),
@@ -628,20 +627,20 @@ mod tests {
         format!("*** Begin Patch\n*** Add File: {path}\n+new\n*** End Patch\n")
     }
 
-    /// T-3-1 / BUG-2026-09-16-10：覆盖保持上游语义，但旧内容必须进
-    /// `FileDelta.old`（回滚素材），不再丢成 `None`。
+    /// `*** Add File:` targets an existing path: refused on real apply too,
+    /// leaving the existing file untouched.
     #[test]
-    fn add_file_overwrite_records_previous_contents() {
+    fn add_file_rejects_existing_target_without_writing() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "old one\nold two\n").unwrap();
-        let outcome = apply_patch_engine(&add_file_patch("a.txt"), dir.path())
-            .expect("overwrite keeps upstream semantics");
-        assert_eq!(outcome.deltas.len(), 1);
-        assert_eq!(outcome.deltas[0].old.as_deref(), Some("old one\nold two\n"));
-        assert_eq!(outcome.deltas[0].new.as_deref(), Some("new\n"));
+        let err = apply_patch_engine(&add_file_patch("a.txt"), dir.path()).unwrap_err();
+        assert!(
+            matches!(err, EngineError::WouldOverwrite { .. }),
+            "got: {err:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "new\n"
+            "old one\nold two\n"
         );
     }
 

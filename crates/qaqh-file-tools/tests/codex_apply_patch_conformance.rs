@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use qaqh_file_tools::apply_patch_engine::{
-    Hunk, StreamingPatchParser, apply_patch_engine, parse_patch,
+    EngineError, Hunk, StreamingPatchParser, apply_patch_engine, parse_patch,
 };
 
 const COMPLEX_PATCH: &str = "\
@@ -139,4 +139,77 @@ fn engine_applies_codex_move_and_delete() {
     assert!(!dir.path().join("gone.txt").exists());
     assert_eq!(outcome.affected.modified, vec!["renamed.txt"]);
     assert_eq!(outcome.affected.deleted, vec!["gone.txt"]);
+}
+
+#[test]
+fn add_file_rejects_existing_target_atomically_on_real_apply() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.txt"), "original\n").expect("fixture");
+    let patch = "\
+*** Begin Patch
+*** Add File: fresh.txt
++new file
+*** Add File: a.txt
++clobbered
+*** End Patch
+";
+    let err = apply_patch_engine(patch, dir.path()).expect_err("existing Add File target must fail");
+    assert!(
+        matches!(err, EngineError::WouldOverwrite { .. }),
+        "expected WouldOverwrite, got: {err:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("a.txt")).expect("read a.txt"),
+        "original\n"
+    );
+    assert!(
+        !dir.path().join("fresh.txt").exists(),
+        "atomic precheck must not create earlier Add File target"
+    );
+}
+
+#[test]
+fn update_file_rejects_context_only_noop_hunk_without_move() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.txt"), "alpha\nbeta\n").expect("fixture");
+    let patch = "\
+*** Begin Patch
+*** Update File: a.txt
+@@
+ alpha
+ beta
+*** End Patch
+";
+    let err = apply_patch_engine(patch, dir.path())
+        .expect_err("context-only Update File without Move to must fail");
+    assert!(
+        matches!(err, EngineError::Parse(_)),
+        "expected Parse error, got: {err:?}"
+    );
+    let msg = err.to_string().to_lowercase();
+    assert!(
+        msg.contains("context") || msg.contains("no-op"),
+        "error message should mention context/no-op: {msg}"
+    );
+}
+
+#[test]
+fn update_file_allows_context_only_hunk_when_moving() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("old.txt"), "alpha\n").expect("fixture");
+    let patch = "\
+*** Begin Patch
+*** Update File: old.txt
+*** Move to: renamed.txt
+@@
+ alpha
+*** End Patch
+";
+    let outcome = apply_patch_engine(patch, dir.path()).expect("move with context-only hunk");
+    assert!(!dir.path().join("old.txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("renamed.txt")).expect("read renamed"),
+        "alpha\n"
+    );
+    assert_eq!(outcome.affected.modified, vec!["renamed.txt"]);
 }

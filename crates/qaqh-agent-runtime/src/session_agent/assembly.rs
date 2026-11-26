@@ -129,10 +129,10 @@ fn apply_endpoint_compat(
 ///   回放走 `echo_reasoning_content`，无需 encrypted_content；
 /// - `web_search` 仅 `deepseek-v4-pro` 支持：flash 静默忽略，v4-pro 按次数计费
 ///   （`usage.server_tool_use`）；
-/// - `apply_patch` 以 **native custom tool**（freeform 裸文本）声明：官方唯一
-///   认的 custom 名称就是 `apply_patch`（其他名称 400），且官方 Codex 接入对
-///   两个模型均声明 `apply_patch_tool_type: "freeform"`。回程裸补丁由 gate 的
-    ///   `freeform_custom_blocks` 收口为 `{"input": raw}`，执行器零改动。
+/// - `apply_patch` 不再强制走 `freeform`（保留由 `EndpointCompat::apply_patch_input_format`
+///   决定的默认 `function_json`）：DeepSeek 底层 DSML 对普通 `function` 的
+///   string 参数本来就免 JSON 转义，而强制 `{"type":"custom","name":"apply_patch"}`
+///   会抹掉工具 `description` 与 `dry_run` 字段（连带 `confirm_apply` 预检流程）。
 ///
 /// 这些是端点事实而非用户偏好，且 OAuth 凭据被 origin 校验钉死在该端点上
 /// （`provider_job::resolve_provider_credential`），所以在 config.compat 之后
@@ -142,7 +142,6 @@ fn apply_deepseek_responses_facts(provider: &mut qaqh_gate::ProviderConfig, mode
     compat.effort_max = "max".into();
     compat.send_include = false;
     compat.web_search &= model.starts_with("deepseek-v4-pro");
-    compat.apply_patch_freeform = true;
 }
 
 /// Tool execution policy for the given permission tier and sandbox role.
@@ -373,8 +372,8 @@ mod tests {
         assert!(!flash.responses_compat.send_include);
         // flash：服务端 web_search 关（不支持）。
         assert!(!flash.responses_compat.web_search);
-        // OAuth 路由的 apply_patch 固定走 freeform custom（官方唯一认的形状）。
-        assert!(flash.responses_compat.apply_patch_freeform);
+        // 默认 EndpointCompat 保持 function_json（带 description 与 dry_run），不强制 freeform。
+        assert!(!flash.responses_compat.apply_patch_freeform);
 
         let pro = qaqh_gate::ProviderConfig::responses(
             "https://api.deepseek.com",

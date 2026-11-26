@@ -96,6 +96,18 @@ pub fn system_prompt(spec: &ProviderRequestSpec, cwd: &Path, session_id: &str) -
              列表实时可见；不调用不算错误，列表会回退到目录名。\n",
         );
     }
+    let has_apply_patch = spec
+        .tools
+        .as_ref()
+        .is_some_and(|list| list.iter().any(|tool| tool.function.name == "apply_patch"));
+    if has_apply_patch {
+        prompt.push_str(
+            "\n[Apply patch]\n\
+             Use `apply_patch` for multi-file or multi-hunk structured edits (`edit` stays better for single targeted replacements).\n\
+             Format: wrap the whole patch in `*** Begin Patch` ... `*** End Patch`; headers are `*** Update File: <path>` (optional `*** Move to: <new_path>`), `*** Add File: <path>`, and `*** Delete File: <path>`. Inside updates, use bare `@@` or `@@ <exact context line>` (never unified-diff `@@ -1,2 +1,2 @@` or `diff --git`), prefix lines with ` ` / `+` / `-`, and add `*** End of File` only when matching EOF.\n\
+             Rules: (1) Relative paths resolve from the workspace root; pre-check is atomic (zero partial writes on failure). (2) `*** Add File:` refuses existing targets (use `*** Update File:` or `write`); duplicate/alias file headers or Delete+Add on the same path are rejected. (3) Context-only `*** Update File:` hunks with no `+`/`-` changes (unless `*** Move to:`) are rejected. (4) First matching context wins; copy leading indentation and Unicode characters verbatim (tier-4 fallback only normalises typographic dashes/quotes/special spaces, not NFC/NFD or fullwidth). (5) `dry_run: true` returns `pending_id` for `confirm_apply`. (6) `*** Delete File:` targeting paths outside the workspace is blocked.\n",
+        );
+    }
     if let Some(agents) = read_agents_instructions(cwd) {
         prompt.push_str("\n[Project instructions]\n");
         prompt.push_str(&agents);
@@ -237,5 +249,39 @@ mod tests {
 
         let enabled = disabled.with_context(200_000, 0.75);
         assert!(system_prompt(&enabled, &cwd, "s1").contains("context_fold_threshold: 75%\n"));
+    }
+
+    #[test]
+    fn apply_patch_section_rides_with_tool_surface_and_is_static() {
+        let cwd = std::env::temp_dir();
+        let bare = ProviderRequestSpec::new(
+            qaqh_gate::ProviderConfig::responses("https://example.com", "", "m", None),
+            1024,
+        );
+        assert!(
+            !system_prompt(&bare, &cwd, "s1").contains("[Apply patch]"),
+            "[Apply patch] must not appear when apply_patch is absent"
+        );
+
+        let manager = qaqh_workspace::registration::build_tool_manager(
+            &[],
+            std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+        );
+        let mut with_tools = bare;
+        with_tools.tools = Some(manager.all_defs());
+        let p1 = system_prompt(&with_tools, &cwd, "s1");
+        let p2 = system_prompt(&with_tools, &cwd, "s2");
+        assert!(p1.contains("[Apply patch]"));
+        assert!(p1.contains("*** Move to:"));
+        assert!(p1.contains("*** End of File"));
+        let extract = |prompt: &str| {
+            prompt
+                .split("[Apply patch]")
+                .nth(1)
+                .and_then(|rest| rest.split("\n\n").next())
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(extract(&p1), extract(&p2));
     }
 }

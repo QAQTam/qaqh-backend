@@ -631,7 +631,7 @@ impl ToolManager {
         // 在工具 worker 线程上跑，per-call 视图退场后那里的 TLS 不再是调用上下文。
         let in_workspace =
             is_path_in_workspace(&args, workspace_root, &descriptor.risk, descriptor.category);
-        match crate::safety::SafetyPolicy::evaluate(descriptor.risk.clone(), in_workspace) {
+        match crate::safety::SafetyPolicy::evaluate_tool_call(name, &args, workspace_root, descriptor.risk.clone(), in_workspace) {
             SafetyVerdict::Block(reason) => {
                 let msg = format!("[ERROR] {}", reason);
                 return Err(ToolExecReport {

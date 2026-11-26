@@ -269,20 +269,7 @@ impl TypedTool for ApplyPatchTool {
         let files = outcome.affected.added.len()
             + outcome.affected.modified.len()
             + outcome.affected.deleted.len();
-        let overwritten: Vec<String> = outcome
-            .deltas
-            .iter()
-            .filter(|delta| {
-                delta.old.is_some()
-                    && delta.new.is_some()
-                    && outcome
-                        .affected
-                        .added
-                        .iter()
-                        .any(|path| path == &delta.path)
-            })
-            .map(|delta| delta.path.clone())
-            .collect();
+        let overwritten: Vec<String> = Vec::new();
         let touched: Vec<String> = if dry_run {
             outcome
                 .deltas
@@ -310,12 +297,6 @@ impl TypedTool for ApplyPatchTool {
             }
             for path in &outcome.affected.deleted {
                 text.push_str(&format!("D {path}\n"));
-            }
-            if !overwritten.is_empty() {
-                text.push_str(&format!(
-                    "OVERWROTE existing: {} (previous contents recorded for rollback)\n",
-                    overwritten.join(", ")
-                ));
             }
             for warn in &outcome.ambiguity_warnings {
                 text.push_str(&format!("WARNING: {warn}\n"));
@@ -372,7 +353,7 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
         ),
         EngineError::Compute(_) => (
             "no_match",
-            "The engine could not find the expected lines in the target file (4-tier matching: exact → trailing-whitespace → trimmed → Unicode-normalised). Check the 'old' lines against the file; use '@@ <context>' to anchor the chunk, or '*** End of File' for end-of-file hunks.".to_string(),
+            "The engine could not find the expected lines in the target file (4-tier matching: exact → trailing-whitespace → trimmed → typographic-punctuation-normalised; does not normalise NFC/NFD or fullwidth characters). Check the 'old' lines against the file; use '@@ <context>' to anchor the chunk, or '*** End of File' for end-of-file hunks.".to_string(),
         ),
         EngineError::EmptyPatch => (
             "empty_patch",
@@ -392,7 +373,7 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
         ),
         EngineError::WouldOverwrite { .. } => (
             "would_overwrite",
-            "dry-run finding: '*** Add File:' would replace an existing file wholesale. Use '*** Update File:' to edit it in place (or '*** Delete File:' first). To overwrite deliberately, re-send the same patch without dry_run — a real apply keeps the upstream overwrite semantics and records the replaced contents in the delta/journal for rollback.".to_string(),
+            "'*** Add File:' targets an existing file; refusing to overwrite. Use '*** Update File:' to edit it in place, or use the 'write' tool to replace the file wholesale.".to_string(),
         ),
         EngineError::DuplicatePath { .. } => (
             "duplicate_path",
@@ -404,10 +385,8 @@ fn error_code_and_hint(error: &EngineError) -> (&'static str, String) {
 
 /// 工具描述。**必须**保留「重复上下文取首个命中」的警示：匹配器按首命中应用
 /// （并在出现多处匹配时附带告警），上下文不够时提醒模型用额外行或 `@@ <context line>` 锚定。
-pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch ('*** Begin Patch' ... '*** End Patch'; headers '*** Update File:'/'*** Add File:'/'*** Delete File:'; lines prefixed with ' '/'+'/'-'). \
-     Put file paths directly in headers (use absolute paths when editing outside workspace; no workdir param). \
-     All hunks are pre-checked before writing (zero partial writes on no_match). Matching takes the FIRST hit; \
-     disambiguate repeated context with extra lines or '@@ <context line>'. dry_run previews.";
+pub(crate) const DESCRIPTION: &str = "Apply a Codex-format patch ('*** Begin Patch' ... '*** End Patch'; '*** Update File:' [optional '*** Move to:'] / '*** Add File:' / '*** Delete File:', optional '*** End of File'; lines prefixed ' '/'+'/'-'). \
+     Put paths in headers (use absolute paths outside workspace). Atomic pre-check (zero writes on no_match). Matching takes the FIRST hit; disambiguate with extra context or '@@ <context line>'. dry_run previews.";
 
 pub fn register(mgr: &mut impl qaqh_tool_core::tool_api::RegistersTyped, files: &crate::FileRuntime) {
     mgr.register_typed_tool(ApplyPatchTool {
@@ -638,11 +617,8 @@ mod tests {
         );
     }
 
-    /// 真 apply 保持上游覆盖语义（fixture `011_add_overwrites_existing_file`
-    /// 依赖它），但旧内容必须记入 `FileDelta.old` 并在响应里显式列出
-    /// `overwritten`——不再是一句 `applied: 1 file(s)` 了事。
     #[test]
-    fn add_file_overwrite_is_reported_with_old_contents() {
+    fn add_file_refuses_existing_file_on_real_apply() {
         let (dir, ws) = repo_with_commit(&[("a.txt", "one\ntwo\nthree\nfour\nfive\n")]);
         let patch = "\
 *** Begin Patch
@@ -651,55 +627,21 @@ mod tests {
 *** End Patch
 ";
         let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({}));
-        assert_eq!(out["status"], "ok", "got: {out}");
-        assert_eq!(out["overwritten"][0], "a.txt", "got: {out}");
+        assert_eq!(out["status"], "error", "got: {out}");
+        assert_eq!(out["code"], "would_overwrite", "got: {out}");
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "clobbered\n"
+            "one\ntwo\nthree\nfour\nfive\n"
         );
     }
 
-    // ── N-2②/N-2③（PR #87 评审建议项）：多文件覆盖逐条上报 + 账本同步 ──
-
-    /// N-2③：同批多个 `*** Add File:` 命中已存在路径时，`overwritten` 必须逐个列出。
-    /// （评审当时按 `ADD_FILE_MARKER` 全局匹配推断「只报第一个」；HEAD 已按 delta
-    /// 判定，本用例把多文件行为锁住。）
-    #[test]
-    fn multiple_add_file_overwrites_are_all_reported() {
-        let (dir, ws) = repo_with_commit(&[("a.txt", "old a\n"), ("b.txt", "old b\n")]);
-        let patch = "\
-*** Begin Patch
-*** Add File: a.txt
-+new a
-*** Add File: b.txt
-+new b
-*** End Patch
-";
-        let out = run_in(&crate::FileRuntime::default(), &ws, patch, serde_json::json!({}));
-        assert_eq!(out["status"], "ok", "got: {out}");
-        assert_eq!(
-            out["overwritten"],
-            serde_json::json!(["a.txt", "b.txt"]),
-            "every overwritten file must be listed: {out}"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "new a\n"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
-            "new b\n"
-        );
-    }
-
-    /// N-2②：覆盖后账本（`file_state`）必须同步到新内容——否则紧随其后的 `edit`
+    /// 更新后账本（`file_state`）必须同步到新内容——否则紧随其后的 `edit`
     /// 会拿旧指纹把本次写入判成漂移（STALE_FILE/HASH_MISMATCH）。
     #[test]
-    fn overwrite_refreshes_file_state_for_followup_edit() {
+    fn update_refreshes_file_state_for_followup_edit() {
         let (dir, ws) = repo_with_commit(&[("a.txt", "one\ntwo\n")]);
         let abs = dir.path().canonicalize().unwrap().join("a.txt");
-        let patch = "*** Begin Patch\n*** Add File: a.txt\n+clobbered\n*** End Patch\n";
-        // P0-2：apply_patch 与后续 edit/断言共享同一份 FileRuntime（账本实例化）。
+        let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-one\n+updated\n*** End Patch\n";
         let files = crate::FileRuntime::default();
         let out = run_in(&files, &ws, patch, serde_json::json!({}));
         assert_eq!(out["status"], "ok", "got: {out}");
@@ -707,15 +649,14 @@ mod tests {
         let abs = abs.to_string_lossy().to_string();
         assert_eq!(
             files.last_hash(&abs),
-            Some(crate::file_shared::content_hash("clobbered\n")),
-            "apply_patch must refresh the ledger key for the overwritten file"
+            Some(crate::file_shared::content_hash("updated\ntwo\n")),
+            "apply_patch must refresh the ledger key for the updated file"
         );
 
-        // 紧随其后的 edit：精确匹配必须看得见 apply_patch 写进去的新内容。
         let ok = crate::edit::exec_edit_with(&files, &serde_json::json!({
             "path": abs,
-            "old_str": "clobbered",
-            "new_str": "CLOBBERED",
+            "old_str": "updated",
+            "new_str": "UPDATED",
         }));
         assert!(
             ok.is_success(),
@@ -724,7 +665,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
-            "CLOBBERED\n"
+            "UPDATED\ntwo\n"
         );
     }
 

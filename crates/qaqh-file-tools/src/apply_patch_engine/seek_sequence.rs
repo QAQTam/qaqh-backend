@@ -1,20 +1,38 @@
-//! 4-tier content matching: exact → rstrip → trim → Unicode-normalised.
+//! 4-tier content matching: exact → rstrip → trim → typographic-punctuation-normalised.
 //! Ported from OpenAI `codex-rs/apply-patch` (Apache-2.0).
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MatchTier {
+    Exact,
+    TrailingWhitespace,
+    Trimmed,
+    TypographicPunctuation,
+}
 
 /// Find `pattern` inside `lines` starting at `start`.
 ///
 /// - `eof`: anchor the search at the end of the file (the hunk was marked
 ///   `*** End of File`).
 /// - Matching passes, in order: exact, trailing-whitespace-insensitive,
-///   fully-trimmed, and Unicode-normalised (typographic punctuation → ASCII).
+///   fully-trimmed, and typographic-punctuation-normalised (typographic
+///   dashes / quotes / special spaces → ASCII).
 pub(crate) fn seek_sequence(
     lines: &[String],
     pattern: &[String],
     start: usize,
     eof: bool,
 ) -> Option<usize> {
+    seek_sequence_with_tier(lines, pattern, start, eof).map(|(idx, _)| idx)
+}
+
+pub(crate) fn seek_sequence_with_tier(
+    lines: &[String],
+    pattern: &[String],
+    start: usize,
+    eof: bool,
+) -> Option<(usize, MatchTier)> {
     if pattern.is_empty() {
-        return Some(start);
+        return Some((start, MatchTier::Exact));
     }
 
     // When the pattern is longer than the available input there is no possible
@@ -33,7 +51,7 @@ pub(crate) fn seek_sequence(
     // Exact match first.
     for i in search_start..=lines.len().saturating_sub(pattern.len()) {
         if lines[i..i + pattern.len()] == *pattern {
-            return Some(i);
+            return Some((i, MatchTier::Exact));
         }
     }
     // Then rstrip match.
@@ -46,7 +64,7 @@ pub(crate) fn seek_sequence(
             }
         }
         if ok {
-            return Some(i);
+            return Some((i, MatchTier::TrailingWhitespace));
         }
     }
     // Finally, trim both sides to allow more lenience.
@@ -59,14 +77,13 @@ pub(crate) fn seek_sequence(
             }
         }
         if ok {
-            return Some(i);
+            return Some((i, MatchTier::Trimmed));
         }
     }
 
-    // Most permissive pass: match after normalising common Unicode punctuation
-    // to their ASCII equivalents, so patches authored with plain ASCII can be
-    // applied to source files that contain typographic dashes / quotes. This
-    // mirrors the fuzzy behaviour of `git apply` for context lines.
+    // Most permissive pass: match after normalising common typographic Unicode
+    // punctuation to ASCII equivalents, so patches authored with plain ASCII
+    // can match source files containing typographic dashes / quotes.
     for i in search_start..=lines.len().saturating_sub(pattern.len()) {
         let mut ok = true;
         for (p_idx, pat) in pattern.iter().enumerate() {
@@ -76,7 +93,7 @@ pub(crate) fn seek_sequence(
             }
         }
         if ok {
-            return Some(i);
+            return Some((i, MatchTier::TypographicPunctuation));
         }
     }
 

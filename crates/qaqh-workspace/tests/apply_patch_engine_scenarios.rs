@@ -49,6 +49,21 @@ fn run_scenario(dir: &Path) {
     // 023/024 的 CRLF / mixed line endings 期望不变——未改动行尾字节保真）。
     let result = apply_patch_engine(&patch, tmp.path());
 
+    // Intentional QAQH Fail-Closed divergence from upstream Codex:
+    // `*** Add File:` refuses to silently overwrite an existing target.
+    if name == "011_add_overwrites_existing_file" {
+        assert!(
+            result.is_err(),
+            "{name}: QAQH fail-closed Add File must reject existing target, got Ok({result:?})"
+        );
+        assert_eq!(
+            snapshot_dir(tmp.path()),
+            snapshot_dir(&input_dir),
+            "{name}: existing file must remain untouched"
+        );
+        return;
+    }
+
     let expects_error = name.contains("rejects")
         || name.contains("requires")
         || name.contains("fails")
