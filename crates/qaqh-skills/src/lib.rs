@@ -677,7 +677,7 @@ mod tests {
             "BETA",
         );
         let catalog = discover_with_home(temp.path(), Some(temp.path()));
-        assert_eq!(catalog.skills.len(), 12, "2 disk skills + 10 bundled");
+        assert_eq!(catalog.skills.len(), 13, "2 disk skills + 11 bundled");
         let alpha = catalog.skills.iter().find(|s| s.name == "alpha").unwrap();
         assert!(alpha.path.to_string_lossy().contains(".qaqh"));
         assert!(
