@@ -169,3 +169,41 @@ fn referenced_provider_and_model_cannot_be_deleted() {
         .provider_delete("acme-guard", None)
         .expect("delete after unreference");
 }
+
+#[test]
+fn deepseek_account_provider_upsert_enforces_responses_wire_and_official_origin() {
+    let _guard = catalog_guard();
+    let service = service();
+    let mut bad_wire = provider_dto("DeepSeek OAuth Bad Wire");
+    bad_wire.base_url = "https://api.deepseek.com".into();
+    bad_wire.wire = qaqh_types::Wire::Chat;
+    bad_wire.credential = qaqh_types::CredentialSource::DeepseekAccount;
+    assert!(
+        service
+            .provider_upsert("ds-bad-wire", &bad_wire, None)
+            .is_err(),
+        "DeepseekAccount 走 Chat wire 必须在提交侧被拒绝"
+    );
+
+    let mut bad_origin = provider_dto("DeepSeek OAuth Bad Origin");
+    bad_origin.base_url = "https://proxy.example.com".into();
+    bad_origin.wire = qaqh_types::Wire::Responses;
+    bad_origin.credential = qaqh_types::CredentialSource::DeepseekAccount;
+    assert!(
+        service
+            .provider_upsert("ds-bad-origin", &bad_origin, None)
+            .is_err(),
+        "DeepseekAccount 指向非官方推理 origin 必须在提交侧被拒绝"
+    );
+
+    let mut valid = provider_dto("DeepSeek OAuth");
+    valid.base_url = "https://api.deepseek.com/".into();
+    valid.wire = qaqh_types::Wire::Responses;
+    valid.credential = qaqh_types::CredentialSource::DeepseekAccount;
+    service
+        .provider_upsert("ds-valid-test", &valid, None)
+        .expect("合法 DeepseekAccount 配置必须放行");
+    service
+        .provider_delete("ds-valid-test", None)
+        .expect("cleanup");
+}

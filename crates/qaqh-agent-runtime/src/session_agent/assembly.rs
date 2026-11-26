@@ -68,6 +68,9 @@ pub fn provider_spec(
         }
     };
     let mut provider = apply_endpoint_compat(provider, &config.compat);
+    if config.wire == qaqh_types::Wire::Responses {
+        provider.responses_compat.web_search &= config.model_native_web_search;
+    }
     if deepseek_account && config.wire == qaqh_types::Wire::Responses {
         apply_deepseek_responses_facts(&mut provider, &config.model);
     }
@@ -382,6 +385,34 @@ mod tests {
         let mut pro = apply_endpoint_compat(pro, &qaqh_types::EndpointCompat::default());
         apply_deepseek_responses_facts(&mut pro, "deepseek-v4-pro");
         assert!(pro.responses_compat.web_search);
+    }
+
+    #[test]
+    fn provider_spec_respects_model_native_web_search_switch() {
+        let mut config = qaqh_config::Config::default();
+        config.provider_id = "deepseek-oauth".into();
+        config.wire = qaqh_types::Wire::Responses;
+        config.credential = qaqh_types::CredentialSource::DeepseekAccount;
+        config.max_tokens = 4096;
+        config.model = "deepseek-v4-pro".into();
+
+        config.model_native_web_search = false;
+        let disabled = provider_spec(&config, Vec::new()).expect("spec");
+        assert!(
+            !disabled.provider.responses_compat.web_search,
+            "关闭 native_web_search 时 deepseek-v4-pro 不得注入服务端 web_search"
+        );
+
+        config.model_native_web_search = true;
+        let enabled = provider_spec(&config, Vec::new()).expect("spec");
+        assert!(enabled.provider.responses_compat.web_search);
+
+        config.model = "deepseek-flash".into();
+        let flash = provider_spec(&config, Vec::new()).expect("spec");
+        assert!(
+            !flash.provider.responses_compat.web_search,
+            "deepseek-flash 不支持服务端 web_search，即便开关开启也必须保持关闭"
+        );
     }
 
     #[test]

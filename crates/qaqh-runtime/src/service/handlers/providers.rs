@@ -120,6 +120,19 @@ impl QaqhService {
             return Err(QaqhError::invalid("provider base_url must be non-empty"));
         }
         validate_base_url(&dto.base_url)?;
+        if dto.credential == qaqh_types::CredentialSource::DeepseekAccount {
+            if dto.wire != qaqh_types::Wire::Responses {
+                return Err(QaqhError::invalid(
+                    "DeepSeek account credential requires wire = responses",
+                ));
+            }
+            if !qaqh_dsaccount::is_known_inference_origin(dto.base_url.trim()) {
+                return Err(QaqhError::invalid(format!(
+                    "DeepSeek account credential requires base_url = {}",
+                    qaqh_dsaccount::protocol::INFERENCE_ORIGIN
+                )));
+            }
+        }
         let mut store = load_catalog()?;
         check_revision(&store, expected_revision)?;
 
