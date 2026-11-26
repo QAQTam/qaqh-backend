@@ -97,6 +97,7 @@ struct SessionExecHost {
     manager: Arc<ExecSessionManager>,
     publisher: Arc<OwnerExecPublisher>,
     origin_turn_id: String,
+    spill: Arc<crate::spill_gate::ExecSpillGate>,
 }
 
 impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
@@ -106,7 +107,7 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
         request: qaqh_workspace::tool_api::ExecCommandRequest,
     ) -> Result<qaqh_workspace::tool_api::ExecCommandResult, qaqh_workspace::tool_api::ToolError>
     {
-        let result = self
+        let mut result = self
             .manager
             .start(
                 ExecSessionStart {
@@ -129,6 +130,8 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                 self.publisher.clone(),
             )
             .map_err(exec_manager_error)?;
+        // ADR-0035 模型消费面泄洪闸（唯一闸口，薄调用）。
+        crate::spill_gate::admit_model_face(&self.spill, &self.publisher.lifecycle, &mut result);
         Ok(exec_result_to_tool_core(result))
     }
 
@@ -138,7 +141,7 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
         request: qaqh_workspace::tool_api::WriteStdinRequest,
     ) -> Result<qaqh_workspace::tool_api::ExecCommandResult, qaqh_workspace::tool_api::ToolError>
     {
-        let result = self
+        let mut result = self
             .manager
             .poll(ExecSessionPoll {
                 exec_session_id: request.exec_session_id,
@@ -149,6 +152,8 @@ impl qaqh_workspace::tool_api::ExecSessionHost for SessionExecHost {
                 cancellation: context.cancellation.shared_flag(),
             })
             .map_err(exec_manager_error)?;
+        // ADR-0035 模型消费面泄洪闸（唯一闸口，薄调用）。
+        crate::spill_gate::admit_model_face(&self.spill, &self.publisher.lifecycle, &mut result);
         Ok(exec_result_to_tool_core(result))
     }
 }
@@ -323,6 +328,8 @@ pub struct WorkspaceToolPort {
     session_approvals: Mutex<SessionApprovalStore>,
     lifecycle: ToolLifecycle,
     exec_sessions: Arc<ExecSessionManager>,
+    /// ADR-0035 模型消费面泄洪闸（会话级账本，exec 会话终结即释放）。
+    spill: Arc<crate::spill_gate::ExecSpillGate>,
 }
 
 impl WorkspaceToolPort {
@@ -341,6 +348,7 @@ impl WorkspaceToolPort {
             session_approvals: Mutex::new(SessionApprovalStore::default()),
             lifecycle,
             exec_sessions,
+            spill: Arc::new(crate::spill_gate::ExecSpillGate::new()),
         }
     }
 
@@ -618,6 +626,7 @@ impl WorkspaceToolPort {
                 lifecycle: self.lifecycle.clone(),
             }),
             origin_turn_id: request.turn_id.clone(),
+            spill: Arc::clone(&self.spill),
         });
         let context = qaqh_workspace::tool_api::ToolCallContext {
             call_id: request.call_id.clone(),

@@ -7,6 +7,8 @@ mod axum_impl;
 #[cfg(test)]
 mod dispatch_pool_tests;
 #[cfg(test)]
+mod exec_flood_smoke_tests;
+#[cfg(test)]
 mod route_table_tests;
 #[cfg(test)]
 mod shell_ws_tests;
