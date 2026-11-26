@@ -93,7 +93,7 @@ pub fn collapse_null_types(value: Value) -> Value {
                 map.into_iter()
                     .map(|(key, inner)| {
                         if key == "type" {
-                            (key, inner)
+                            (key, collapse_null_types(inner))
                         } else if key == "enum" && collapsed_null_type {
                             let filtered = match inner {
                                 Value::Array(items) => {
@@ -208,14 +208,18 @@ mod tests {
     #[allow(dead_code)]
     struct OptionalEnumArgs {
         mode: Option<SampleEnum>,
+        #[serde(rename = "type")]
+        kind: Option<SampleEnum>,
     }
 
     #[test]
     fn optional_enum_collapses_null_from_type_and_enum() {
         let schema = schema_of::<OptionalEnumArgs>();
-        let mode = &schema["properties"]["mode"];
-        assert_eq!(mode["type"], "string", "{schema}");
-        assert_eq!(mode["enum"], serde_json::json!(["alpha", "beta"]), "{schema}");
+        for field in ["mode", "type"] {
+            let prop = &schema["properties"][field];
+            assert_eq!(prop["type"], "string", "{schema}");
+            assert_eq!(prop["enum"], serde_json::json!(["alpha", "beta"]), "{schema}");
+        }
         let serialized = schema.to_string();
         assert!(!serialized.contains("oneOf"), "{serialized}");
         assert!(!serialized.contains("anyOf"), "{serialized}");
