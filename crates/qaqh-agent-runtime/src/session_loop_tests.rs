@@ -2605,8 +2605,7 @@ mod disk_full_fail_closed_tests {
         release.store(true, std::sync::atomic::Ordering::SeqCst);
 
         // 事件流收集到 TurnEnded 为止;盘满时严禁出现 assistant 块落库广播。
-        let mut terminal_outcome = None;
-        loop {
+        let outcome = loop {
             match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
                 Ok(Ok(frame)) => match frame.event {
                     SessionEvent::TimelineAppended { entry } => {
@@ -2615,17 +2614,13 @@ mod disk_full_fail_closed_tests {
                             "盘满时答案块 seal 失败,不得广播 assistant 块(旧实现假成功,必红)"
                         );
                     }
-                    SessionEvent::TurnEnded { outcome, .. } => {
-                        terminal_outcome = Some(outcome);
-                        break;
-                    }
+                    SessionEvent::TurnEnded { outcome, .. } => break outcome,
                     _ => {}
                 },
                 Ok(Err(error)) => panic!("event channel: {error}"),
                 Err(_) => panic!("盘满回合必须在时限内收到终态事件"),
             }
-        }
-        let outcome = terminal_outcome.expect("terminal outcome");
+        };
         let qaqh_ringing_contract::state::TurnOutcome::Finished {
             terminal,
             error: turn_error,
