@@ -3223,3 +3223,521 @@ mod disk_full_fail_closed_tests {
         assert!(matches!(notices[0].terminal, TurnTerminal::Failed));
     }
 }
+
+/// v4.6 P3-0 Fail-Closed 与回滚清理红→绿反证测试集（覆盖 interrupt / declare /
+/// inject_failed_tool_results / 交互回滚槽位清理 / interaction_resolved）。
+#[cfg(test)]
+mod p3_0_fail_closed_tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    use qaqh_ringing::ConversationSendMessage;
+    use qaqh_ringing_contract::events::{SessionEvent, SessionEventFrame};
+    use qaqh_ringing_contract::fact::{ActivityState, InputPurpose, TurnId, TurnTerminal};
+    use qaqh_ringing_contract::state::PermissionRequestDetails;
+    use qaqh_session::db::store;
+    use qaqh_session::owner::{OwnerDirectory, SessionOwner};
+
+    use crate::provider_job::ProviderRequestSpec;
+    use crate::session_loop::{PermissionAnswer, SessionLoop, TurnTerminalNotice};
+    use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
+
+    fn sse_server() -> (tiny_http::Server, String) {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let addr = format!("http://{}", server.server_addr());
+        (server, addr)
+    }
+
+    fn spawn_seq_sse(
+        server: tiny_http::Server,
+        bodies: Vec<String>,
+        requests: Arc<Mutex<Vec<String>>>,
+    ) {
+        std::thread::spawn(move || {
+            let header =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                    .expect("header");
+            let mut queue = bodies.into_iter();
+            for mut request in server.incoming_requests() {
+                let mut req_body = String::new();
+                let _ = std::io::Read::read_to_string(request.as_reader(), &mut req_body);
+                requests.lock().expect("lock").push(req_body);
+                let body = queue.next().unwrap_or_else(|| {
+                    concat!(
+                        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+                        "\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n",
+                        "data: [DONE]\n\n",
+                    )
+                    .to_string()
+                });
+                let _ = request
+                    .respond(tiny_http::Response::from_string(body).with_header(header.clone()));
+            }
+        });
+    }
+
+    fn spawn_gated_sse(
+        server: tiny_http::Server,
+        body: String,
+        release: Arc<AtomicBool>,
+    ) {
+        std::thread::spawn(move || {
+            let header =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                    .expect("header");
+            for request in server.incoming_requests() {
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let _ = request.respond(
+                    tiny_http::Response::from_string(body.clone()).with_header(header.clone()),
+                );
+            }
+        });
+    }
+
+    async fn setup_loop(
+        dir: &std::path::Path,
+        session_id: &str,
+        base_url: &str,
+    ) -> (Arc<SessionLoop>, Arc<OwnerDirectory>, Arc<SessionOwner>) {
+        let owners = Arc::new(OwnerDirectory::open(dir.join("qaqh.db")).expect("open"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: session_id.into(),
+                parent_session_id: None,
+                title: "p3-0".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let manager = Arc::new(Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            session_id,
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+        let mut provider = qaqh_gate::ProviderConfig::chat(
+            base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        provider.retry = Some(qaqh_types::RetrySpec {
+            max_retries: 1,
+            ..Default::default()
+        });
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        let loop_ = SessionLoop::new(session_id, Arc::clone(&owner), port, spec, dir.to_path_buf());
+        (loop_, owners, owner)
+    }
+
+    fn trigger_msg(id: &str, text: &str) -> ConversationSendMessage {
+        ConversationSendMessage {
+            message_id: Some(id.into()),
+            text: text.into(),
+            input_purpose: InputPurpose::TriggerTurn,
+            as_system: false,
+            attachments: None,
+            images: vec![],
+            inter_agent: None,
+            subagent_terminal: None,
+            widget_context: None,
+        }
+    }
+
+    async fn wait_failed_and_idle(
+        rx: &mut tokio::sync::broadcast::Receiver<SessionEventFrame>,
+    ) -> (String, String) {
+        let mut error_pair = None;
+        let mut got_idle = false;
+        while error_pair.is_none() || !got_idle {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Ok(frame)) => match frame.event {
+                    SessionEvent::TurnEnded { outcome, .. } => {
+                        if let qaqh_ringing_contract::state::TurnOutcome::Finished {
+                            terminal: TurnTerminal::Failed,
+                            error: Some(err),
+                            ..
+                        } = outcome
+                        {
+                            error_pair = Some((err.code, err.message));
+                        } else {
+                            panic!("expected TurnEnded(Failed), got {outcome:?}");
+                        }
+                    }
+                    SessionEvent::ActivityChanged {
+                        activity: ActivityState::Idle,
+                        current_turn_id: None,
+                    } => {
+                        got_idle = true;
+                    }
+                    _ => {}
+                },
+                Ok(Err(error)) => panic!("event channel: {error}"),
+                Err(_) => panic!("timed out waiting for TurnEnded(Failed) + ActivityChanged(Idle)"),
+            }
+        }
+        error_pair.expect("error pair")
+    }
+
+    /// P3-0 反证 1（A 类）：`interrupt()` 内 `finish_turn` 写库失败时，旧实现
+    /// `.await.ok()` 吞错导致前端永远收不到 `TurnEnded` 与 `Idle`（必红）；新实现
+    /// 经 `emit_turn_persist_failed` 广播 `TurnEnded(Failed)` + `ActivityChanged(Idle)`，
+    /// 且 `terminal_port` 精确触发 1 次。
+    #[tokio::test]
+    async fn interrupt_persist_failure_unlocks_ui_and_notifies_terminal_once() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (server, base_url) = sse_server();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        spawn_seq_sse(server, vec![], Arc::clone(&requests));
+        let (loop_, owners, owner) = setup_loop(dir.path(), "SES-INT-FAIL", &base_url).await;
+        let mut rx = owner.subscribe();
+
+        let notice_count = Arc::new(AtomicUsize::new(0));
+        let notices: Arc<Mutex<Vec<TurnTerminalNotice>>> = Arc::new(Mutex::new(Vec::new()));
+        let count_hook = Arc::clone(&notice_count);
+        let notices_hook = Arc::clone(&notices);
+        loop_.set_terminal_port(Arc::new(move |notice| {
+            count_hook.fetch_add(1, Ordering::SeqCst);
+            notices_hook.lock().expect("lock").push(notice);
+        }));
+
+        // input 落库失败触发 `self.interrupt(&turn, InterruptReason::Crash)`，
+        // 同时 turns UPDATE 失败让 `interrupt()` 内的 `finish_turn` 撞墙。
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER block_input_insert BEFORE INSERT ON blocks WHEN NEW.kind = 'input' \
+                     BEGIN SELECT RAISE(ABORT, 'simulated input persist failure'); END;\
+                     CREATE TRIGGER block_turn_update BEFORE UPDATE ON turns \
+                     BEGIN SELECT RAISE(ABORT, 'simulated interrupt finish_turn failure'); END;",
+                )
+                .map_err(qaqh_session::db::DbError::from)
+            })
+            .expect("inject triggers");
+
+        loop_
+            .send_input(trigger_msg("IN-INT-FAIL", "触发 interrupt 落库失败"))
+            .expect("send input");
+
+        let (code, message) = wait_failed_and_idle(&mut rx).await;
+        assert_eq!(code, "response_persist_failed");
+        assert!(
+            message.contains("Crash") && message.contains("simulated interrupt finish_turn failure"),
+            "必须保留中断原因与终态写库失败原因: {message}"
+        );
+
+        for _ in 0..200 {
+            if loop_.active_turn().is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(loop_.active_turn().is_none());
+        assert_eq!(notice_count.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            notices.lock().expect("lock")[0].terminal,
+            TurnTerminal::Failed
+        ));
+    }
+
+    /// P3-0 反证 2（D 类）：`declare()` 写 `ToolCall` 块失败时，旧实现 `.await.ok()`
+    /// 吞错继续派发执行工具并破坏历史配对（必红）；新实现立即中止派发、绝不执行
+    /// 命令，回合以 `response_persist_failed` 判死。
+    #[tokio::test]
+    async fn declare_persist_failure_aborts_tool_dispatch_and_fails_turn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("must-not-run.txt");
+        let tool_call = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-declare-fail",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": serde_json::json!({
+                                "cmd": format!("echo ran > {}", marker.display())
+                            }).to_string()
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+        let done = serde_json::json!({
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+        });
+        let sse = format!("data: {tool_call}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+        let (server, base_url) = sse_server();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        spawn_seq_sse(server, vec![sse], Arc::clone(&requests));
+        let (loop_, owners, owner) = setup_loop(dir.path(), "SES-DECL-FAIL", &base_url).await;
+        let mut rx = owner.subscribe();
+
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER block_tool_call_block BEFORE INSERT ON blocks WHEN NEW.kind = 'tool_call' \
+                     BEGIN SELECT RAISE(ABORT, 'simulated tool_call block failure'); END;",
+                )
+                .map_err(qaqh_session::db::DbError::from)
+            })
+            .expect("inject trigger");
+
+        loop_
+            .send_input(trigger_msg("IN-DECL-FAIL", "触发 declare 落库失败"))
+            .expect("send input");
+
+        let (code, message) = wait_failed_and_idle(&mut rx).await;
+        assert_eq!(code, "response_persist_failed");
+        assert!(message.contains("simulated tool_call block failure"), "{message}");
+        assert!(
+            !marker.exists(),
+            "declare 写库失败后严禁继续派发执行工具"
+        );
+        assert_eq!(requests.lock().expect("lock").len(), 1);
+    }
+
+    /// P3-0 反证 3（D 类）：`inject_failed_tool_results` 写 `ToolResult` 块失败时，
+    /// 旧实现 `.await.ok()` 吞错并把未落库消息塞入 `messages` 发起第二次请求（必红）；
+    /// 新实现立即中止重试、只发 1 次请求并以 `response_persist_failed` 判死。
+    #[tokio::test]
+    async fn inject_failed_tool_results_persist_failure_aborts_retry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let delta = serde_json::json!({"choices":[{"index":0,"delta":{"content":"我先看下"},"finish_reason":null}]});
+        let tool = serde_json::json!({"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_cut","type":"function","function":{"name":"read","arguments":"{\"path\":\"a"}}]}}]});
+        let err_frame = serde_json::json!({"error":{"code":"server_error","message":"upstream cut"}});
+        let sse = format!("data: {delta}\n\ndata: {tool}\n\ndata: {err_frame}\n\n");
+        let (server, base_url) = sse_server();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        spawn_seq_sse(server, vec![sse], Arc::clone(&requests));
+        let (loop_, owners, owner) = setup_loop(dir.path(), "SES-INJ-FAIL", &base_url).await;
+        let mut rx = owner.subscribe();
+
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER block_tool_result_block BEFORE INSERT ON blocks WHEN NEW.kind = 'tool_result' \
+                     BEGIN SELECT RAISE(ABORT, 'simulated inject tool_result failure'); END;",
+                )
+                .map_err(qaqh_session::db::DbError::from)
+            })
+            .expect("inject trigger");
+
+        loop_
+            .send_input(trigger_msg("IN-INJ-FAIL", "触发 B 路重试注入失败"))
+            .expect("send input");
+
+        let (code, message) = wait_failed_and_idle(&mut rx).await;
+        assert_eq!(code, "response_persist_failed");
+        assert!(message.contains("simulated inject tool_result failure"), "{message}");
+        assert_eq!(
+            requests.lock().expect("lock").len(),
+            1,
+            "inject_failed_tool_results 写库失败后严禁把未落库消息塞进 messages 发起重试"
+        );
+    }
+
+    /// P3-0 反证 4（回滚清理 ×2）：`request_permission` 与 `run_ask` 在
+    /// `interaction_requested` 失败回滚时，旧实现分别泄漏 `active.pending_interactions`
+    /// 与 `inner.asks + active.pending_interactions`（必红）；新实现在活跃回合仍在场时
+    /// 立即清零全部三处内存槽。
+    #[tokio::test]
+    async fn interaction_requested_rollback_clears_permission_and_ask_slots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sse_body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n",
+        )
+        .to_string();
+        let (server, base_url) = sse_server();
+        let release = Arc::new(AtomicBool::new(false));
+        spawn_gated_sse(server, sse_body, Arc::clone(&release));
+        let (loop_, owners, owner) = setup_loop(dir.path(), "SES-ROLLBACK", &base_url).await;
+        let mut rx = owner.subscribe();
+
+        loop_
+            .send_input(trigger_msg("IN-RB", "保活一个活跃回合"))
+            .expect("send input");
+        for _ in 0..200 {
+            if loop_.active_turn().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let turn_id = loop_.active_turn().expect("active turn");
+        let turn = TurnId::new(turn_id);
+
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER block_interaction_insert BEFORE INSERT ON interactions \
+                     BEGIN SELECT RAISE(ABORT, 'simulated interaction_requested failure'); END;",
+                )
+                .map_err(qaqh_session::db::DbError::from)
+            })
+            .expect("inject trigger");
+
+        let details = PermissionRequestDetails {
+            tool_name: "exec_command".into(),
+            action_summary: Some("echo hi".into()),
+            justification: None,
+            reason: "test".into(),
+            paths: vec![],
+            category: "exec".into(),
+            level: 2,
+            risk: "medium".into(),
+            consequence: "runs shell".into(),
+        };
+        let (_tx, cancel_rx) = tokio::sync::watch::channel(false);
+
+        let perm_res = loop_
+            .request_permission(&turn, "call-rb-perm", &details, &cancel_rx)
+            .await;
+        assert!(perm_res.is_err(), "interaction_requested 失败必须返回 Err");
+        assert_eq!(
+            loop_.test_pending_slot_counts(),
+            (0, 0, 0),
+            "request_permission 失败回滚不得泄漏 permissions 或 active.pending_interactions"
+        );
+
+        let ask_input = serde_json::json!({
+            "input": "ASK v1\nQuestion: 选哪一项？\nOptions:\n- A\n- B"
+        });
+        let ask_res = loop_
+            .run_ask(&turn, "call-rb-ask", &ask_input, &cancel_rx)
+            .await;
+        assert!(ask_res.is_err(), "run_ask interaction_requested 失败必须返回 Err");
+        assert_eq!(
+            loop_.test_pending_slot_counts(),
+            (0, 0, 0),
+            "run_ask 失败回滚不得泄漏 asks 或 active.pending_interactions"
+        );
+
+        release.store(true, Ordering::SeqCst);
+        loop {
+            if matches!(
+                tokio::time::timeout(Duration::from_secs(5), rx.recv()).await,
+                Ok(Ok(frame)) if matches!(frame.event, SessionEvent::TurnEnded { .. })
+            ) {
+                break;
+            }
+        }
+    }
+
+    /// P3-0 反证 5（B 类 + C 类）：`interaction_resolved` 写库失败时，旧实现
+    /// `.await.ok()` 吞错并继续批准执行工具，留下幽灵 pending 审批卡（必红）；
+    /// 新实现在审批结算失败时立即中止工具派发（绝不执行命令）并以
+    /// `response_persist_failed` 终止回合。
+    #[tokio::test]
+    async fn interaction_resolved_failure_aborts_permission_and_prevents_ghost_card() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("ghost-exec.txt");
+        let tool_call = serde_json::json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-resolve-fail",
+                        "type": "function",
+                        "function": {
+                            "name": "exec_command",
+                            "arguments": serde_json::json!({
+                                "cmd": format!("echo ghost > {}", marker.display()),
+                                "with_escalated_permissions": true,
+                                "justification": "test interaction_resolved fail-closed"
+                            }).to_string()
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+        let done = serde_json::json!({
+            "choices": [{ "index": 0, "delta": {}, "finish_reason": "tool_calls" }]
+        });
+        let sse = format!("data: {tool_call}\n\ndata: {done}\n\ndata: [DONE]\n\n");
+        let (server, base_url) = sse_server();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        spawn_seq_sse(server, vec![sse], Arc::clone(&requests));
+        let (loop_, owners, owner) = setup_loop(dir.path(), "SES-RES-FAIL", &base_url).await;
+        let mut rx = owner.subscribe();
+
+        loop_
+            .send_input(trigger_msg("IN-RES-FAIL", "触发权限应答写库失败"))
+            .expect("send input");
+
+        for _ in 0..500 {
+            let state = owner.snapshot().await.expect("snapshot");
+            let value = serde_json::to_value(state).expect("json");
+            if value["activity"] == "waiting_user"
+                && value["interactions"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER block_interaction_update BEFORE UPDATE ON interactions \
+                     BEGIN SELECT RAISE(ABORT, 'simulated interaction_resolved failure'); END;",
+                )
+                .map_err(qaqh_session::db::DbError::from)
+            })
+            .expect("inject trigger");
+
+        assert!(loop_.respond_permission(
+            "call-resolve-fail",
+            PermissionAnswer {
+                approved: true,
+                trust_folder: false,
+                scope: qaqh_ringing_contract::PermissionGrantScope::Once,
+            },
+        ));
+
+        let (code, message) = wait_failed_and_idle(&mut rx).await;
+        assert_eq!(code, "response_persist_failed");
+        assert!(message.contains("simulated interaction_resolved failure"), "{message}");
+        assert!(
+            !marker.exists(),
+            "interaction_resolved 失败后严禁继续执行工具制造幽灵审批卡"
+        );
+    }
+}

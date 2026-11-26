@@ -71,17 +71,44 @@ pub fn strip_provider_unsafe_format(value: Value) -> Value {
 #[must_use]
 pub fn collapse_null_types(value: Value) -> Value {
     match value {
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(key, inner)| {
-                    if key == "type" {
-                        (key, collapse_type_array(inner))
-                    } else {
-                        (key, collapse_null_types(inner))
-                    }
-                })
-                .collect(),
-        ),
+        Value::Object(mut map) => {
+            // schemars 对 `Option<Enum>` 会同时产出 `"type": ["string", "null"]` 与
+            // `"enum": [..., null]`；折叠掉 `"null"` 类型时必须同步清掉 `enum` 里的
+            // `null`，否则 `"type": "string"` 与 `"enum": [..., null]` 自相矛盾。
+            let collapsed_null_type = if let Some(ty) = map.get_mut("type") {
+                let had_null = ty
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|item| item.as_str() == Some("null")));
+                let collapsed = collapse_type_array(std::mem::replace(ty, Value::Null));
+                let now_non_null = collapsed.as_str().is_some_and(|s| s != "null")
+                    || collapsed
+                        .as_array()
+                        .is_some_and(|arr| arr.iter().all(|v| v.as_str() != Some("null")));
+                *ty = collapsed;
+                had_null && now_non_null
+            } else {
+                false
+            };
+            Value::Object(
+                map.into_iter()
+                    .map(|(key, inner)| {
+                        if key == "type" {
+                            (key, inner)
+                        } else if key == "enum" && collapsed_null_type {
+                            let filtered = match inner {
+                                Value::Array(items) => {
+                                    Value::Array(items.into_iter().filter(|v| !v.is_null()).collect())
+                                }
+                                other => collapse_null_types(other),
+                            };
+                            (key, filtered)
+                        } else {
+                            (key, collapse_null_types(inner))
+                        }
+                    })
+                    .collect(),
+            )
+        }
         Value::Array(items) => Value::Array(items.into_iter().map(collapse_null_types).collect()),
         scalar => scalar,
     }
@@ -166,6 +193,32 @@ mod tests {
         let start_line = &schema["properties"]["start_line"];
         assert!(start_line.get("format").is_none(), "{start_line}");
         assert_eq!(start_line["minimum"], serde_json::json!(0));
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(rename_all = "lowercase")]
+    #[allow(dead_code)]
+    enum SampleEnum {
+        Alpha,
+        Beta,
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct OptionalEnumArgs {
+        mode: Option<SampleEnum>,
+    }
+
+    #[test]
+    fn optional_enum_collapses_null_from_type_and_enum() {
+        let schema = schema_of::<OptionalEnumArgs>();
+        let mode = &schema["properties"]["mode"];
+        assert_eq!(mode["type"], "string", "{schema}");
+        assert_eq!(mode["enum"], serde_json::json!(["alpha", "beta"]), "{schema}");
+        let serialized = schema.to_string();
+        assert!(!serialized.contains("oneOf"), "{serialized}");
+        assert!(!serialized.contains("anyOf"), "{serialized}");
     }
 
     #[test]

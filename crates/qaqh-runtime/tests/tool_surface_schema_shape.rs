@@ -32,6 +32,20 @@ fn full_surface_schemas_are_object_shaped_without_composition_keys() {
             );
         }
     }
+    let exec_shell = &defs
+        .iter()
+        .find(|def| def.function.name == "exec_command")
+        .expect("exec_command tool must exist")
+        .function
+        .parameters["properties"]["shell"];
+    assert_eq!(exec_shell["type"], "string", "{exec_shell}");
+    let shell_enum = exec_shell["enum"]
+        .as_array()
+        .expect("exec_command.shell must keep string enum list");
+    assert!(
+        shell_enum.iter().all(|item| item.is_string()),
+        "exec_command.shell enum must not contain null: {exec_shell}"
+    );
 }
 
 #[test]

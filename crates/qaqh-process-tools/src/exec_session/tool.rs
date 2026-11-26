@@ -55,20 +55,23 @@ pub struct ExecCommandArgs {
 /// 模型面。任何 payload 解释器（node/bun/python）是 `cmd` 里运行的程序，
 /// 不是包装 shell（历史上模型把 shell 字段当「payload 解释器选择器」填
 /// node/python → unknown_shell）。
+///
+/// 变体说明使用 `//` 而非 `///`：schemars 1.x 会把带 doc comment 的 unit enum
+/// 展开成 `oneOf`（为每项塞 `description`），触发模型面禁用聚合键守卫。
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellName {
-    /// POSIX bash. On Windows resolves a native bash-compatible engine when
-    /// present, else Git-for-Windows/MSYS2 bash; never the WSL wrapper.
+    // POSIX bash. On Windows resolves a native bash-compatible engine when
+    // present, else Git-for-Windows/MSYS2 bash; never the WSL wrapper.
     Bash,
-    /// Explicit Windows alias of `bash` (same resolution; disambiguates when platform guessing is risky).
+    // Explicit Windows alias of `bash` (same resolution; disambiguates when platform guessing is risky).
     #[serde(rename = "bash4windows")]
     Bash4Windows,
-    /// zsh (macOS default).
+    // zsh (macOS default).
     Zsh,
-    /// POSIX sh.
+    // POSIX sh.
     Sh,
-    /// PowerShell 7+ (`pwsh.exe`).
+    // PowerShell 7+ (`pwsh.exe`).
     Pwsh,
 }
 

@@ -18,6 +18,8 @@ pub mod session_hooks;
 pub mod session_loop;
 /// v4.5.1 任务1:回合收口持久化失败 Fail-Closed 支撑件(独立子模块)。
 mod session_persist;
+/// v4.6 P3-0:回合交互落库与阶段流转 Fail-Closed 支撑件(独立子模块)。
+mod session_interaction;
 #[cfg(test)]
 mod session_loop_tests;
 pub mod session_title;
