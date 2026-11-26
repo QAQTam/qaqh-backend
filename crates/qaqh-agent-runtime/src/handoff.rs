@@ -319,37 +319,40 @@ pub fn ctx_footer(used_tokens: u32, window_tokens: u32) -> String {
     }
 }
 
-/// 软阈值提醒（会作为一条**可见**的 timeline Input 落库，不是暗箱）。
+/// 把配置里的 `auto_compact_threshold`（0.0–1.0；`<= 0.0` 或非有限数 = 关闭）
+/// 换算为整数百分比 `1..=100`。
 #[must_use]
-pub fn reminder(usage: ContextUsage) -> String {
-    format!(
-        "[系统] 上下文占用 {}%（{} / {} tokens）。本轮必须调用 handoff 写交接文档：\
-         超过硬阈值后请求会被拒发，届时没有交接文档就是交接失败，不静默降级。",
-        usage.used_pct(),
-        usage.used_tokens,
-        usage.window_tokens
-    )
+pub fn threshold_pct(auto_compact_threshold: f64) -> Option<u16> {
+    if !auto_compact_threshold.is_finite() || auto_compact_threshold <= 0.0 {
+        return None;
+    }
+    Some((auto_compact_threshold * 100.0).round().clamp(1.0, 100.0) as u16)
 }
 
 /// 交接失败（模型该调没调）的错误码，走现成 `TurnError{code,message,retryable}`。
 pub const ERR_MISSING_DOC: &str = "handoff_missing";
 
-/// 硬阈值（百分比）：到这儿不再赌模型自觉。它只在 `autoCompactThreshold > 0`
-/// 时生效——契约里 `0` = 关闭自动压缩，硬收口也一并停手，不替用户做主。
-pub const HARD_THRESHOLD_PCT: u16 = 95;
-
 /// 折叠占位文本。同时是幂等标记：已经是这条的结果不再重复计数。
-pub const FOLD_NOTE: &str = "[工具结果已折叠以腾出交接空间；完整事实仍在会话存档，无需在此复述]";
+pub const FOLD_NOTE: &str =
+    "[Tool result folded to reserve space for handoff; full output remains archived in session storage]";
 
-/// 折叠那一轮的强制要求（同样落库成可见 Input）。
+/// 达到用户配置的折叠阈值时注入的唯一强制交接指令（同样落库成可见 Input）。
 #[must_use]
-pub fn forced_reminder(folded: usize, usage: ContextUsage) -> String {
+pub fn forced_reminder(folded: usize, usage: ContextUsage, threshold_pct: u16) -> String {
+    let fold_note = if folded > 0 {
+        format!(" {folded} prior tool results were folded to reserve space for this turn.")
+    } else {
+        String::new()
+    };
     format!(
-        "[系统] 上下文占用 {}%（{} / {} tokens），已折叠 {folded} 条工具结果腾出这一轮。\
-         本轮唯一任务：调用 handoff 写交接文档。不写就没有下一次——请求会被拒发。",
+        "[SYSTEM · HANDOFF REQUIRED] Context usage reached {}% ({} / {} tokens; threshold {}%).{fold_note} \
+         MANDATORY ACTION: Call `handoff` NOW to write the handoff document. \
+         Do NOT call any other tool or reply with a prose summary. \
+         Failure to call `handoff` on this turn will immediately terminate the session—the next request will be rejected.",
         usage.used_pct(),
         usage.used_tokens,
-        usage.window_tokens
+        usage.window_tokens,
+        threshold_pct,
     )
 }
 
@@ -507,6 +510,26 @@ mod tests {
     fn ctx_footer_silent_without_window() {
         assert!(ctx_footer(1000, 0).is_empty());
         assert!(ctx_footer(80_000, 100_000).contains("80%"));
+    }
+
+    #[test]
+    fn threshold_pct_and_forced_reminder_are_strict_english() {
+        assert_eq!(threshold_pct(0.0), None);
+        assert_eq!(threshold_pct(-0.5), None);
+        assert_eq!(threshold_pct(f64::NAN), None);
+        assert_eq!(threshold_pct(0.75), Some(75));
+        assert_eq!(threshold_pct(0.58), Some(58));
+        assert_eq!(threshold_pct(1.5), Some(100));
+
+        let usage = ContextUsage::new(800, 1000).unwrap();
+        let with_fold = forced_reminder(12, usage, 75);
+        assert!(with_fold.contains("[SYSTEM · HANDOFF REQUIRED]"));
+        assert!(with_fold.contains("80% (800 / 1000 tokens; threshold 75%)"));
+        assert!(with_fold.contains("12 prior tool results were folded"));
+        assert!(with_fold.contains("MANDATORY ACTION: Call `handoff` NOW"));
+
+        let no_fold = forced_reminder(0, usage, 75);
+        assert!(!no_fold.contains("prior tool results were folded"));
     }
 
     #[test]

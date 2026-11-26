@@ -158,13 +158,22 @@ pub async fn run_round(
         outcome.cancelled = true;
         return outcome;
     }
-    let spec = match resolve_provider_credential(spec) {
+    let mut spec = match resolve_provider_credential(spec) {
         Ok(spec) => spec,
         Err(error) => {
             log::error!("[provider] credential resolution failed: {error}");
             return not_started(&error);
         }
     };
+    // Responses 线统一携带会话级 `prompt_cache_key`（对齐 Codex `client.rs:1049`）：
+    // 此前生产路径恒为 `None`，导致 `store: false` / 多副本集群跨回合失去路由亲和、
+    // 偶发缓存命中归 0。已显式配置则尊重原值。
+    if spec.provider.kind == qaqh_gate::ProviderKind::Responses
+        && spec.provider.prompt_cache_key.is_none()
+        && !user_id.is_empty()
+    {
+        spec.provider.prompt_cache_key = Some(user_id.clone());
+    }
     let cancel_flag = Arc::new(AtomicBool::new(*cancel.borrow()));
     let flag = cancel_flag.clone();
     let display = progress.clone();
