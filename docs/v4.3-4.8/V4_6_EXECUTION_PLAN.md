@@ -175,7 +175,9 @@ flowchart TD
 | 切片 | PR | 状态 | 备注 |
 |---|---|---|---|
 | `P3-0` | #47 (`bea000a2`) | **已合入 `main`** | Fast-Follow：`session_loop.rs` 16 处 `.await.ok()` + 2 处回滚泄漏清零（拆出 `session_interaction.rs`，降至 2,775 行）+ 修绿 `tool_surface_schema_shape` |
-| `P3-1` | — | **待开工（下一张）** | `ADR-0035` 泄洪闸（独立 `spill_gate.rs`）+ `ADR-0034` 真实洪峰冒烟 |
-| `P3-2` | — | 待开工（依赖 `P3-1`） | `crates/qaqh-core-vocab`（0 `serde_json`）+ `tool_mode.rs` 三档 + 只读 `ToolCatalog`（`1C′` 不碰 V2 crate，剥离 PTC） |
-| `P3-3` | — | 待开工（依赖 `P3-2`） | `crates/qaqh-ringing-v3` 强类型协议冻结（`postcard` 零禁区属性 / `daemon.endpoint` / `pinned_compaction` / 机器指纹） |
-| `P3-4` | — | 待开工（依赖 `P3-3`） | `v3_server` + `client/v3`（`yamux` + 细粒度泛型静态分发 Facade + `duplex` 闭环 + 6 条不变量（含量化延迟）+ 2 份前置 ADR） |
+| `P3-1` | #48（`0317baf5`） | **已开 PR 待验收**（栈基底＝`main`） | `ADR-0035` 泄洪闸（独立 `spill_gate.rs`，256 KiB 硬预算/开闸不恢复/通告带权威日志绝对路径 + 2 Ki 尾预览）+ `ADR-0034` daemon 级真实 32 MiB 洪峰冒烟 |
+| `P3-2` | #49（`17ebd996`） | **已开 PR 待验收**（stacked，base＝`P3-1` 分支） | `crates/qaqh-core-vocab`（0 `serde_json`）+ V3 工具模式三档（压测档 `minimal:b/c` 必拒）+ 只读 `ToolCatalog`（不带 schema）；`1C′`：`qaqh-types`/`qaqh-ringing-contract` 零改动 |
+| `P3-3` | #50（`5f4fc373`） | **已开 PR 待验收**（stacked，base＝`P3-2` 分支） | `crates/qaqh-ringing-v3` 强类型协议冻结（`postcard` / 机器生成指纹 / `daemon.endpoint` / `pinned_compaction` / 11 域全覆盖） |
+| `P3-4` | #51 | **已开 PR 待验收**（stacked，base＝`P3-3` 分支） | `crates/qaqh-v3-transport` + `v3_server`/`client/v3` 隔离骨架 + `duplex` 闭环 + 六大不变量守卫（含量化 P99 红线）+ `ADR-0046`/`0047` + 本文档状态回写 |
+
+> **状态口径（宪法 #10 诚实原则）**：`P3-1`～`P3-4` 四张 PR **都还没有 merge**，一律记作"已开 PR 待验收"，不写"已合入 `main`"。它们是一条 stacked 链（`#48` → `#49` → `#50` → `#51`）：每张的 base 指向前一张分支，按序合并时 GitHub 会自动把下一张的 base 重定向到 `main`；四张全部验收合并后，本表才改成"已合入 `main`"。

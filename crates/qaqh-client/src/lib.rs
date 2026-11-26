@@ -25,6 +25,9 @@ mod tls_pin;
 pub mod types;
 pub mod v2;
 pub mod v2_stream;
+/// `RingingV3` 客户端（物理隔离目录，`ADR-0042`）。V2 在 `v4.9` 物理处决后，
+/// 这一支成为唯一客户端；现在两支并存但**零转换层**。
+pub mod v3;
 
 pub use client::{
     Client, ClientHandlers, ClientOptions, PairScope, RemoteEndpoint, StopStatus, pair_remote,

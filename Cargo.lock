@@ -2704,9 +2704,12 @@ dependencies = [
  "futures-util",
  "hex",
  "log",
+ "qaqh-core-vocab",
  "qaqh-ringing",
  "qaqh-ringing-contract",
+ "qaqh-ringing-v3",
  "qaqh-types",
+ "qaqh-v3-transport",
  "rcgen",
  "reqwest",
  "rustls",
@@ -2775,6 +2778,7 @@ version = "4.2.0"
 dependencies = [
  "axum",
  "base64 0.23.1",
+ "bytes",
  "futures-util",
  "hex",
  "http-body-util",
@@ -2783,6 +2787,7 @@ dependencies = [
  "qaqh-acp",
  "qaqh-client",
  "qaqh-config",
+ "qaqh-core-vocab",
  "qaqh-gitx",
  "qaqh-marketplace",
  "qaqh-mcp",
@@ -2790,12 +2795,14 @@ dependencies = [
  "qaqh-ringing",
  "qaqh-ringing-contract",
  "qaqh-ringing-runtime",
+ "qaqh-ringing-v3",
  "qaqh-runtime",
  "qaqh-sandbox",
  "qaqh-session",
  "qaqh-siwc",
  "qaqh-subagent",
  "qaqh-types",
+ "qaqh-v3-transport",
  "rand 0.10.3",
  "rcgen",
  "rustls",
@@ -2805,6 +2812,7 @@ dependencies = [
  "sha2",
  "subtle",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
  "tokio-stream",
@@ -3255,6 +3263,17 @@ dependencies = [
  "toml",
  "ts-rs",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "qaqh-v3-transport"
+version = "4.2.0"
+dependencies = [
+ "log",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "yamux",
 ]
 
 [[package]]
@@ -4534,6 +4553,7 @@ checksum = "e464cf451ba96ebfc6f9b6542f17ee8b8956e33f1e40d9690624e59d7a7f8a4b"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "libc",
  "pin-project-lite",
@@ -5469,6 +5489,21 @@ dependencies = [
  "rusticata-macros",
  "thiserror 2.0.21",
  "time",
+]
+
+[[package]]
+name = "yamux"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f4e661d6ba6f09a768e31c6f3d88f9fac596ad5d376515d598a37b62d220b34"
+dependencies = [
+ "futures",
+ "log",
+ "nohash-hasher",
+ "parking_lot",
+ "pin-project",
+ "static_assertions",
+ "web-time",
 ]
 
 [[package]]

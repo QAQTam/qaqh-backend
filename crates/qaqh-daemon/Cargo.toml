@@ -22,6 +22,14 @@ qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-gitx = { path = "../qaqh-gitx" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
+# v4.6 P3-4：RingingV3 服务端骨架（物理隔离目录 `src/v3_server/`）。
+# 三件套严格分层：线缆形状（ringing-v3）→ 多路复用（v3-transport）→ 门面（本 crate）。
+qaqh-core-vocab = { path = "../qaqh-core-vocab" }
+qaqh-ringing-v3 = { path = "../qaqh-ringing-v3" }
+qaqh-v3-transport = { path = "../qaqh-v3-transport" }
+thiserror = "2"
+# V3 帧里的裸字节（`ShellRequest::Write.bytes` / `BlobChunkFrame.bytes`）就是本类型。
+bytes = "1"
 log = { version = "0.4", features = ["std"] }
 rand = "0.10"
 serde = { version = "1", features = ["derive"] }
