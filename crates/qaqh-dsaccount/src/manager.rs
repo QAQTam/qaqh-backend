@@ -338,25 +338,25 @@ impl DsAccountManager {
     /// 余额（充值 + 赠金 + 累计消费）。
     pub fn balance(&self) -> Result<Summary, DsError> {
         let token = self.token()?;
-        DsClient::new(self.inner.config.clone()).summary(&token)
+        self.clear_if_reauth(DsClient::new(self.inner.config.clone()).summary(&token))
     }
 
     /// 未读赠额。
     pub fn bonuses(&self) -> Result<Vec<Bonus>, DsError> {
         let token = self.token()?;
-        DsClient::new(self.inner.config.clone()).bonuses(&token)
+        self.clear_if_reauth(DsClient::new(self.inner.config.clone()).bonuses(&token))
     }
 
     /// 确认一笔赠额已展示。
     pub fn ack_bonus(&self, order_id: &str) -> Result<(), DsError> {
         let token = self.token()?;
-        DsClient::new(self.inner.config.clone()).ack_bonus(&token, order_id)
+        self.clear_if_reauth(DsClient::new(self.inner.config.clone()).ack_bonus(&token, order_id))
     }
 
     /// 在线读资料（刷新昵称/头像用；本地已存的投影不依赖它）。
     pub fn profile(&self) -> Result<AccountProfile, DsError> {
         let token = self.token()?;
-        DsClient::new(self.inner.config.clone()).current_user(&token)
+        self.clear_if_reauth(DsClient::new(self.inner.config.clone()).current_user(&token))
     }
 
     /// 账号额度可用的模型目录（`GET {inference_origin}/models`）。
@@ -366,7 +366,17 @@ impl DsAccountManager {
     /// 第二个真相源。调用方按需取值。
     pub fn models(&self) -> Result<serde_json::Value, DsError> {
         let token = self.token()?;
-        DsClient::new(self.inner.config.clone()).models(&token)
+        self.clear_if_reauth(DsClient::new(self.inner.config.clone()).models(&token))
+    }
+
+    fn clear_if_reauth<T>(&self, result: Result<T, DsError>) -> Result<T, DsError> {
+        if let Err(ref error) = result
+            && error.requires_reauth()
+            && self.inner.store.clear().is_ok()
+        {
+            log::info!("[dsaccount] 平台返回凭据失效，已自动清除本地凭据");
+        }
+        result
     }
 
     /// 验证凭据**现在**还有效吗——这是唯一能回答那个问题的动作。
@@ -727,5 +737,71 @@ mod tests {
         }
         assert!(FlowState::Authorizing.is_running());
         assert!(!FlowState::SignedIn.is_running());
+    }
+
+    #[test]
+    fn reauth_errors_on_account_calls_clear_local_credential_while_5xx_preserves_it() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let handle = std::thread::spawn(move || {
+            for (status, body) in [
+                (500, r#"{"code":50000,"msg":"server busy","data":null}"#),
+                (
+                    401,
+                    r#"{"code":40003,"msg":"Authorization Failed (invalid token)","data":null}"#,
+                ),
+            ] {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let reply = format!(
+                    "HTTP/1.1 {status} Done\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(reply.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let dir = TempDir::new().expect("tempdir");
+        let base = format!("http://127.0.0.1:{port}");
+        let manager = DsAccountManager::new(
+            AccountStore::new(dir.path().join("deepseek-account.json")),
+            DsClientConfig {
+                platform_origin: base.clone(),
+                inference_origin: base,
+                ..DsClientConfig::default()
+            },
+        );
+        let record = StoredAccount::new(
+            "user-1",
+            "测试用户",
+            None,
+            None,
+            manager.config().inference_origin.clone(),
+            "secret-token",
+        )
+        .expect("构造");
+        manager.store().save(&record).expect("落盘");
+
+        let err_500 = manager.balance().expect_err("500 必须报错");
+        assert!(!err_500.requires_reauth());
+        assert!(
+            manager.store().load().expect("读").is_some(),
+            "5xx 不得清本地凭据"
+        );
+
+        let err_401 = manager.balance().expect_err("401 必须报错");
+        assert!(err_401.requires_reauth());
+        assert!(
+            manager.store().load().expect("读").is_none(),
+            "401/40003 必须自动清除本地凭据"
+        );
+        let _ = handle.join();
     }
 }

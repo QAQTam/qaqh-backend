@@ -150,8 +150,15 @@ impl AccountStore {
 
     /// 读取。文件不存在 = `Ok(None)`（**没登录**）；文件损坏 = `Err`（**坏了**，两者不同）。
     pub fn load(&self) -> Result<Option<StoredAccount>, DsError> {
-        let Ok(text) = std::fs::read_to_string(&self.path) else {
-            return Ok(None);
+        let text = match std::fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(DsError::new(
+                    DsCode::Storage,
+                    format!("读取凭据文件失败: {error}"),
+                ));
+            }
         };
         if text.trim().is_empty() {
             return Ok(None);
@@ -339,6 +346,11 @@ mod tests {
         let (_dir, store) = store();
         std::fs::write(store.path(), "{ this is not json").expect("写坏");
         let error = store.load().expect_err("坏文件必须报错");
+        assert_eq!(error.code(), DsCode::Storage);
+
+        // 非 UTF-8 损坏同样必须报 Storage 错，不能吞成未登录。
+        std::fs::write(store.path(), [0xff, 0xfe]).expect("写非 UTF-8");
+        let error = store.load().expect_err("非 UTF-8 文件必须报错");
         assert_eq!(error.code(), DsCode::Storage);
     }
 }

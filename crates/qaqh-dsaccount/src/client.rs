@@ -175,8 +175,8 @@ impl DsClient {
 
     /// 作废一次**远端待授权**（本地取消后顺手清干净；失败只记日志）。
     pub fn auth_cancel(&self, body: &AuthCancelBody) -> Result<(), DsError> {
-        self.post_body(protocol::AUTH_CANCEL_PATH, None, &Self::to_value(body)?)
-            .map(|_| ())
+        let raw = self.post_body(protocol::AUTH_CANCEL_PATH, None, &Self::to_value(body)?)?;
+        envelope::parse_value(&raw).map(|_| ())
     }
 
     /// 资料（用户对象本体）。
@@ -200,8 +200,8 @@ impl DsClient {
     /// 确认一笔赠额已展示。
     pub fn ack_bonus(&self, token: &str, order_id: &str) -> Result<(), DsError> {
         let body = serde_json::json!({ "order_id": order_id });
-        self.post_body(protocol::ACK_BONUS_PATH, Some(token), &body)
-            .map(|_| ())
+        let raw = self.post_body(protocol::ACK_BONUS_PATH, Some(token), &body)?;
+        envelope::parse_value(&raw).map(|_| ())
     }
 
     /// 登出 = **撤销账号授权**（本地凭据由调用方在同一动作里清掉）。
@@ -216,7 +216,11 @@ impl DsClient {
             &self.url(protocol::USERS_LOGOUT_PATH),
             &Self::pairs(&headers),
         )?;
-        Self::ensure_success(&response)
+        Self::ensure_success(&response)?;
+        if !response.body.trim().is_empty() {
+            envelope::parse_value(&response.body)?;
+        }
+        Ok(())
     }
 
     /// 推理 origin 的模型目录（**不是**平台信封，是 OpenAI 风格 `{data:[…]}`）。
@@ -571,5 +575,41 @@ mod tests {
         assert!(!is_known_inference_origin(
             "https://api.deepseek.com.evil.example"
         ));
+    }
+
+    #[test]
+    fn http_200_envelope_errors_are_not_swallowed_on_cancel_ack_or_logout() {
+        let fake = FakePlatform::start(vec![
+            Reply::json(
+                200,
+                r#"{"code":0,"msg":"","data":{"biz_code":10001,"biz_msg":"order not found"}}"#,
+            ),
+            Reply::json(
+                200,
+                r#"{"code":40003,"msg":"Authorization Failed (invalid token)","data":null}"#,
+            ),
+            Reply::json(
+                200,
+                r#"{"code":0,"msg":"","data":{"biz_code":10002,"biz_msg":"cancel failed"}}"#,
+            ),
+        ]);
+        let client = DsClient::new(fake.config());
+        let ack_err = client
+            .ack_bonus(TOKEN, "order-missing")
+            .expect_err("ack_bonus 200 + biz_code!=0 必须报错");
+        assert_eq!(ack_err.code(), DsCode::Business(10001));
+
+        let logout_err = client
+            .logout(TOKEN)
+            .expect_err("logout 200 + 40003 必须识别为 Unauthorized");
+        assert_eq!(logout_err.code(), DsCode::Unauthorized);
+        assert!(logout_err.requires_reauth());
+
+        let pkce = crate::pkce::Pkce::new();
+        let cancel_err = client
+            .auth_cancel(&AuthCancelBody::new("auth-1", &pkce))
+            .expect_err("auth_cancel 200 + biz_code!=0 必须报错");
+        assert_eq!(cancel_err.code(), DsCode::Business(10002));
+        let _ = fake.finish();
     }
 }

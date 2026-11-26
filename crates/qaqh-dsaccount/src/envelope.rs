@@ -13,18 +13,16 @@ use crate::error::{DsCode, DsError, classify_biz_code};
 
 #[derive(Debug, Deserialize)]
 struct RawEnvelope {
-    #[serde(default)]
-    code: i64,
+    code: Option<i64>,
     #[serde(default)]
     msg: String,
     #[serde(default)]
     data: Option<RawData>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct RawData {
-    #[serde(default)]
-    biz_code: i64,
+    biz_code: Option<i64>,
     #[serde(default)]
     biz_msg: String,
     #[serde(default)]
@@ -45,12 +43,20 @@ pub fn parse<T: DeserializeOwned>(body: &str) -> Result<T, DsError> {
 pub fn parse_value(body: &str) -> Result<Value, DsError> {
     let raw: RawEnvelope = serde_json::from_str(body)
         .map_err(|error| DsError::new(DsCode::Protocol, format!("信封解析失败: {error}")))?;
-    if raw.code != 0 {
-        return Err(DsError::new(classify_biz_code(raw.code), raw.msg));
+    let Some(code) = raw.code else {
+        return Err(DsError::new(DsCode::Protocol, "信封缺少 code 字段"));
+    };
+    if code != 0 {
+        return Err(DsError::new(classify_biz_code(code), raw.msg));
     }
-    let data = raw.data.unwrap_or_default();
-    if data.biz_code != 0 {
-        return Err(DsError::new(classify_biz_code(data.biz_code), data.biz_msg));
+    let Some(data) = raw.data else {
+        return Err(DsError::new(DsCode::Protocol, "信封缺少 data 字段"));
+    };
+    let Some(biz_code) = data.biz_code else {
+        return Err(DsError::new(DsCode::Protocol, "信封缺少 data.biz_code 字段"));
+    };
+    if biz_code != 0 {
+        return Err(DsError::new(classify_biz_code(biz_code), data.biz_msg));
     }
     Ok(data.biz_data.unwrap_or(Value::Null))
 }
@@ -132,5 +138,19 @@ mod tests {
         assert_eq!(error.code(), DsCode::Unauthorized);
         assert!(error.requires_reauth(), "顶层 code 里的 40003 也要被认出来");
         assert_eq!(error.message(), "Authorization Failed (invalid token)");
+    }
+
+    #[test]
+    fn non_envelope_json_without_code_or_biz_code_fails_closed() {
+        for body in [
+            "{}",
+            r#"{"error":"upstream gateway error"}"#,
+            r#"{"code":0,"msg":""}"#,
+            r#"{"code":0,"msg":"","data":{"biz_msg":"missing biz_code"}}"#,
+        ] {
+            let error = parse_value(body).expect_err("缺字段必须 Fail-Closed");
+            assert_eq!(error.code(), DsCode::Protocol, "{body}");
+            assert!(!error.requires_reauth());
+        }
     }
 }
