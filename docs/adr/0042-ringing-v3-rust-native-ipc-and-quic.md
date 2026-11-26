@@ -1,6 +1,6 @@
 # ADR-0042 RingingV3：Rust Native 二进制多路流（本地 IPC + 远端纯 QUIC）与反腐迁移铁律
 
-状态: `已采纳 · 未实施` · 初始决策 2026-11-25 · **r2 修订 2026-11-26（纳入 5/14–7/31 创世初心与 9/21–10/30 V2 历史考古、七条零遗留设计铁律、六条反腐迁移纪律，并对齐 `v4.5`–`v4.12` → `v5.0` 路线）** · **决策人：仓库所有者**
+状态: `已采纳 · 未实施` · 初始决策 2026-11-25 · r2 修订 2026-11-26（纳入 5/14–7/31 创世初心与 9/21–10/30 V2 历史考古、七条零遗留设计铁律、六条反腐迁移纪律）· **r3 修订 2026-11-26（采纳 `V4_6_DECISION_PACK` 二审定案：1C′ 纯原语拆分、`skip_serializing_if` 零命中红线、Windows Named Pipe Owner-Only DACL、独立无版本 `daemon.endpoint`、尾窗 `pinned_compaction`/`timeline_epoch`、`yamux` 量化延迟与细粒度静态分发异步门面）** · **决策人：仓库所有者**
 
 > 一句话：随着默认桌面前端切换为纯原生 `../qaqh-gpui`（零 WebView、10k 时间线实测 RSS ~153 MiB）、移动端保持 Rust `qaqh-client` 核心 + FFI 薄壳，本仓决定在 **`v4.6`–`v4.9`** 落地 **RingingV3**——以零 `serde_json` 依赖的纯 Rust 强类型二进制多路流（`postcard`）彻底取代 HTTP + SSE + WebSocket 三拼及所有 `/v1` 孤岛端点；本地走 **Named Pipe（Windows）/ UDS（Linux）+ `yamux`**，远端与移动端走**纯 QUIC（`quinn`）**；冻结 `ADR-0008` C# 投影演进，并以硬性物理隔离与死刑倒计时在 **`v4.9` 物理立斩旧 V2 控制面**，为 `v4.12` 稳定封板与 `v5.0` 内核革命扫清一切协议债。
 
@@ -33,9 +33,12 @@
 
 ## 二、核心决策：RingingV3 七条零遗留设计铁律
 
-### 铁律 1：依赖级封杀 `serde_json::Value`（Rust 编译器即唯一契约闸门）
-- 新建独立契约 crate **`crates/qaqh-ringing-v3`**，**其 `Cargo.toml` 严禁依赖 `serde_json`**。
-- 线上传输统一使用 **`postcard`** + 长度前缀帧（直接复用既有 `serde` 强类型领域结构，零手写 schema 文件，二进制紧凑编码）；图片、附件、PTY 终端字节流透传原始 `Bytes`/`Vec<u8>`，彻底消灭 JSON 转义与 Base64 膨胀。
+### 铁律 1：`1C′` 纯原语拆分 + 依赖级封杀 `serde_json::Value` 与 `postcard` 禁区属性
+- **严禁直接依赖带有 `serde_json`、`#[serde(tag)]`、`#[serde(flatten)]`、`#[serde(skip_serializing_if)]` 的旧契约 crate**：实查确认 `qaqh-types` 与 `qaqh-ringing-contract` 含无条件 `serde_json`、18 处 `tag`（含 6 处 adjacently tagged）、2 处 `flatten` 及 **237 处 `skip_serializing_if`**（`postcard` 为位置编码，跳过字段会导致静默错位读垃圾）。因 V2 HTTP/SSE 与 SQLite JSON 列在双栈期必须保持既有 JSON 形状，采取 **`1C′` 方案**：
+  1. 在 `v4.6 P3-2` 新建零 `serde_json` 的底层纯原语 crate **`crates/qaqh-core-vocab`**（承载强类型 ID newtype、`ActivityState`、`TurnTerminal`、`UsageInfo`、`ToolCatalog` 等纯值类型），仅给 `P3-2`、`qaqh-ringing-v3`、`v3_server`、`client/v3` 使用；**冰封中的 `qaqh-types` 与 `qaqh-ringing-contract` 一行不动**（待 `v4.9` 处决 V2 时退役旧 contract 并按需收编）；
+  2. 新建独立二进制协议 crate **`crates/qaqh-ringing-v3`**，仅依赖 `qaqh-core-vocab`、`serde`、`postcard`、`bytes` 等纯粹基础 crate，所有 DTO 使用干净的 externally-tagged `enum`/`struct`（线上传输长度前缀 + `postcard`；图片/附件/PTY 透传原始 `Bytes`/`Vec<u8>`，零 JSON 转义与 Base64 膨胀）；极少数动态载荷以强类型 `JsonText(String)` / `Bytes` 表达，剥离内部 `opaque` 锚点不上客户端 wire；
+  3. **明确架构边界**：`v3_server` 将后端内部/存储态单向映射为 V3 DTO 属于**「单向后端→V3 投影层」**，**绝不等同于被宪法 #2/#5 禁止的「V2↔V3 转换层」**；
+  4. **机器编译与静态扫描红线**：`qaqh-core-vocab` 与 `qaqh-ringing-v3` 对 `serde_json`、`skip_serializing_if`、`serde(tag`、`untagged`、`flatten` 必须 **恒为 0 命中**，`cargo tree -p <crate> -e normal,build -i serde_json` 输出为空，且对全量 DTO（覆盖 `Option::None`/空 `Vec`）强制 `postcard` round-trip 属性测试。
 - 彻底取消字符串方法表与 `Value` 中转，从编译期物理封死 `pending_approvals() -> Value` 这类历史妥协口子。
 
 ### 铁律 2：协议一网打尽，零协议外 `/v1` 孤岛
@@ -45,39 +48,46 @@
 - `v4.9` 处决 V2 后，daemon 对外**零 HTTP/SSE/WS 端口、零 `/control/v1`、零 `/marketplace/v1`**。
 
 ### 铁律 3：单连接四流多路复用 + 原生多端联动一等语义
-一条物理连接上按用途划分独立逻辑流（QUIC 原生 `open_bi`/`open_uni`；本地 IPC 上叠轻量 `yamux` 多路复用）：
+一条物理连接上按用途划分独立逻辑流（QUIC 原生 `open_bi`/`open_uni`；本地 IPC 上经 `tokio-util::compat` 叠加 **`yamux` + 独立 driver task** 提供每逻辑流独立流控窗口与调度公平性，接入前按宪法 #16 核查最新官方 API）：
 - **控制流（BiStream）**：强类型 RPC 请求与响应；
-- **会话事件流（每订阅会话一条 UniStream）**：直推 `SessionEventFrame`，彻底消除跨会话、多端队头阻塞；
+- **会话事件流（每订阅会话一条 UniStream）**：直推 `SessionEventFrame`，消除跨会话、多端队头阻塞；
 - **Shell PTY 流（BiStream）**：原始终端字节透传 + 极简 `Resize`/`Closed` 控制帧，支持多端同时观看；
 - **二进制 Blob 流（UniStream / BiStream）**：附件、截图、大文件二进制分片直传，零 Base64 膨胀。
 - **原生多端联动下沉进协议层**：多设备同看同一会话/同一 Shell、Driver 席位变更主动广播、设备吊销即时踢流、移动端 `quinn` 0-RTT 与 Wi-Fi↔5G 连接迁移，不再靠 HTTP 轮询打补丁。
 
-### 铁律 4：去版本化命名 + 零别名墙 + Fail-Closed 握手
+### 铁律 4：去版本化命名 + 零别名墙 + Fail-Closed 握手与安全发现
 - 严禁创建 `ClientV3*` 重命名墙（客户端直接 `pub use qaqh_ringing_v3::*`），严禁任何 `#[serde(alias = ...)]`。
 - 业务域 DTO（`TimelineEntry`、`ToolCallView`、`CommandAck`、`ShellEvent`、`ToolCatalog`）**永久无版本前缀**；仅最外层线缆模块带 `v3`（`qaqh-ringing-v3`、`v3_server`、`client/v3`）。
-- 传输层抽象统一：
-  - **本地（`qaqh-gpui` ↔ `qaqh-daemon`）**：Windows `tokio::net::windows::named_pipe`（`\\.\pipe\qaqh-daemon-<user>`）与 Linux/macOS `UnixListener`/`UnixStream`（`$XDG_RUNTIME_DIR/qaqh-daemon.sock`，权限 `0600`），靠 OS 权限天然鉴权，免端口冲突与防火墙弹窗；
+- 传输层抽象与本地安全红线：
+  - **本地（`qaqh-gpui` ↔ `qaqh-daemon`）**：Linux/macOS `UnixListener`/`UnixStream`（`$XDG_RUNTIME_DIR/qaqh-daemon.sock`，权限 `0600`）；Windows `tokio::net::windows::named_pipe`（`\\.\pipe\qaqh-daemon-<user>`）**不得依赖默认 DACL（默认会给 `Everyone` 读权限），必须显式构造当前用户 SID 的 Owner-Only Security Descriptor 并开启 `reject_remote_clients(true)`**；
+  - **独立无版本发现文件（防 `v4.9` 留尾）**：V3 从第一天启用永久最终名 **`daemon.endpoint`**（固定单一非 JSON 格式避免 V3 客户端引入 `serde_json`），内置 `build_id` / `channel` Fail-Closed 校验；`v4.9` 处决 V2 时整块删除旧 `daemon.json` 与 `DaemonDiscovery`（含 `ts` 导出）；
   - **远端 / 移动端（PC / Android / OHOS ↔ `qaqh-daemon`）**：**纯 QUIC（`quinn`）**，底层 TLS 复用 `ADR-0039` 既定栈（host/桌面/服务端 `aws-lc-rs`，OHOS 交叉目标保留 `ring`），内置 TLS 1.3 + 证书指纹 pin + 首帧 Device Token 鉴权；
   - **测试 / 调试直连**：`tokio::io::duplex` 内存直连，免启进程免占端口。
-- 握手通过 **ALPN (`b"qaqh-ringing/3"`) + 显式 `PROTOCOL_REV: u32` / 契约指纹** 强校验，失配即当场拒绝（Fail-Closed，绝不协商降级）。
+- 握手通过 **ALPN (`b"qaqh-ringing/3"`) + `PROTOCOL_REV: u32` + 机器从协议类型定义自动生成的契约指纹**（严禁手改）强校验；`v4.6` 冻结后任何破坏性变更显式升级版本或最低支持端版本，失配当场 Fail-Closed 拒绝（绝不协商降级）。
 
 ### 铁律 5：跨代协议不变量守卫先于业务代码（根绝 11/10 P0 复发）
 在编写 V3 业务 handler 前，必须先用 `tokio::io::duplex` 建立并锁定 **`ringing_v3_invariants`** 六大红线守卫，且在 `v4.9` 删旧栈后保持 100% 绿灯：
 1. **原子订阅 + 有界回放尾**：先 grab 订阅接收器再读回放环，事件洪峰下 `resync_cycles == 0`（直接继承 11/10 P0 守卫语义）；
-2. **四流物理隔离零队头阻塞**：大 Blob 分片 + PTY 刷屏 + 会话 A 洪峰并发时，Control RPC 与会话 B 延迟 < 50ms；
+2. **多流背压隔离与延迟上界**：大 Blob 满载分片 + PTY 刷屏 + 会话 A 洪峰并发时，Control RPC 往返 **P99 < 50ms** 且会话 B 事件不被饿死；
 3. **断联不杀进程 + 幂等回执**：断开 UDS/QUIC 不杀 exec/shell，同 `command_id` 重放返回原回执；
-4. **身份单权威不可伪造**：鉴权身份唯一来自 OS Socket/Pipe 凭据或握手期 Device Token；**所有业务请求体禁止携带自报身份字段**；
+4. **身份单权威不可伪造**：鉴权身份唯一来自 OS Socket/Owner-Only Pipe 凭据或握手期 Device Token；**所有业务请求体禁止携带自报身份字段**；
 5. **多端联动原语**：双端同看会话/Shell、Driver 交接广播、设备吊销即时断流；
 6. **前端渲染预算保护（初心守卫）**：高频 `Replaceable` 增量洪峰经后端合帧/节流后不得拖慢同流 `Reliable` 审批/终态交付，大输出自动转 `BlobRef`/泄洪引用，快照尾窗分页可无全量加载拉取历史。
 
-### 铁律 6：存储隔离 + 异步门面解耦（为 `v5.0` 零返工铺路）
+### 铁律 6：存储隔离 + 细粒度泛型静态分发异步门面（为 `v5.0` 铺路）
 - **严禁把协议升级与存储换代混做**：`v4.6`–`v4.9` 全程复用 `v4.4` 已落地的 SQLite WAL 单权威，禁止新增磁盘格式或 `migrate-on-read`。
-- **绕开中央同步大锁**：`v3_server` 面向纯 `async` 服务门面编程，Shell PTY BiStream 直接持有独立 `Arc<ShellHandle>`（消灭 `LOCK_AUDIT_REPORT` `L-11`），Blob 流走异步 `Db::write`（消灭 `L-12`），确保 `v5.0` 切换 `Per-Root Actor` 时 V3 层零返工。
+- **细粒度并发隔离与静态分发**：
+  - `v3_server` 不得把 9 个域塞进单个“上帝 Facade trait”，必须按锁边界与生命周期细分为可组合的纯 `async` Facade Trait（`SystemFacade` / `ConfigAccountFacade` / `MarketplaceFacade` / `GitxFacade` / `FsFacade` / `SessionFacade` / `ShellFacade` / `BlobFacade`）；
+  - 采用**泛型静态分发**（`V3Server<B>`，配合 `duplex` 零装箱注入）避开原生 `async fn in trait` 非 `dyn`-safe 返工；
+  - `ShellFacade` 配合独立并发句柄表直接持有 `Arc<ShellHandle>`（消灭 `L-11`；注：`v5.0` 切 Per-Root Actor 时 Shell/Exec 归属将按需随 root 同步调整），`BlobFacade` 走全异步 `Db::write`（消灭 `L-12`）。
 
 ### 铁律 7：前端第一与用户体验至上（不忘 7/31 创世初心，绝不折磨前端开发）
-- **开箱即渲染（View-Ready Snapshot + 原生尾窗分页）**：`SessionSnapshot` 从 V3 第一天起原生内置尾部窗口与向上翻页参数（继承 8/08 `9767bb11` 初心，长会话首屏秒开、上滚按需加载）；`ToolCatalog`、`PendingApprovals`、`Diff` 与会话检索一次给齐强类型视图，禁止让前端拼多接口或硬编码规则。
-- **交付分级保护前端 60/120fps 帧率预算**：V3 事件帧显式区分 `DeliveryClass::Reliable`（必达终态/审批/错误）与 `DeliveryClass::Replaceable`（流式文本/思考/exec 进度/用量，允许后端按 16–33ms 预算合帧或尾窗截断），大输出转 `BlobRef`/权威日志引用，绝不把高频洪峰直砸 UI 主线程。
-- **消费端零胶水硬标尺**：`qaqh-client::v3` 吸收全部发现、重连、QUIC 迁移、回放尾追帧与命令幂等逻辑，对外只暴露极简原生 async Stream/Handle；`v4.7` 验收 `../qaqh-gpui` 切 V3 时，以 **`qaqh-gpui-wire/bridge.rs`（现 56 KB）体积腰斩以上** 为硬判据（沿用 `ADR-0028` 净行数判定纪律——让前端更难写的协议一律判失败）。
+- **开箱即渲染（View-Ready Snapshot + 严格无重复分页）**：
+  - `SessionSnapshot` 从 V3 第一天起原生内置尾部窗口（`tail_blocks` 回退回合边界），**保留的最近 compaction 摘要放入独立 `pinned_compaction` 字段**（绝不混入 `timeline`，免前端翻页重复去重），同时为 `turns` 列表设明确尾部窗口上限；
+  - 向上翻页走独立强类型 **`GetTranscriptPage { session_id, before_ord, limit, timeline_epoch }`**（一次性返回该页 `blocks` 与关联 `ToolCallView`，明确跨页工具调用归属；`truncate_from_turn` 递增 `timeline_epoch`，游标失配 Fail-Closed 返回 `StaleCursor` 触发重拉快照）；
+  - `ToolCatalog`、`PendingApprovals`、`Diff` 与会话检索一次给齐强类型视图，禁止让前端拼多接口或硬编码规则。
+- **交付分级保护前端 60/120fps 帧率预算**：V3 事件帧显式区分 `DeliveryClass::Reliable`（必达终态/审批/错误）与 `DeliveryClass::Replaceable`（流式文本/思考/exec 进度/用量，允许后端按 16–33ms 预算合帧或尾窗截断），大输出统一转 `BlobRef`/权威日志引用，绝不把高频洪峰直砸 UI 主线程。
+- **消费端零胶水硬标尺**：`qaqh-client::v3` 吸收全部发现（`daemon.endpoint`）、重连、QUIC 迁移、回放尾追帧与命令幂等逻辑，对外只暴露极简原生 async Stream/Handle；`v4.7` 验收 `../qaqh-gpui` 切 V3 时，以 **`qaqh-gpui-wire/bridge.rs`（现 1,316 行）体积腰斩以上** 与 **GPUI `Cargo.toml` 对 `qaqh-ringing-contract`/`qaqh-types` 引用清零** 为硬判据（沿用 `ADR-0028` 净行数判定纪律——让前端更难写的协议一律判失败）。
 - **顺应最先进原生前端范式**：原始 `Bytes` 图像直喂 GPU 纹理（零 Base64）、原样 PTY 字节直喂 `alacritty_terminal`、结构化原生组件取代 HTML iframe。
 - **内置轻量端到端延迟标尺**：事件帧头保留 `server_ts_ms: u64`（`postcard` varint 极简开销，继承 8/08 诊断初心），支撑前端精确观测模型/daemon/传输/渲染四段耗时。
 
@@ -86,14 +96,14 @@
 ## 三、反腐迁移纪律（6 条机器可执行红线）
 
 1. **物理隔离建新厂 + CI 反向隔离闸**：
-   - 新建独立目录 `crates/qaqh-ringing-v3/`、`crates/qaqh-daemon/src/v3_server/`、`crates/qaqh-client/src/v3/`；
-   - CI/本地提交前强制校验：上述目录内 `rg 'axum_server|RINGING_V2|v2_stream|serde_json|serde\(alias|legacy_|compat_'` **必须恒等于 0 命中**。
+   - 新建独立目录 `crates/qaqh-core-vocab/`、`crates/qaqh-ringing-v3/`、`crates/qaqh-daemon/src/v3_server/`、`crates/qaqh-client/src/v3/`；
+   - CI/本地提交前强制校验：上述目录内 `rg 'axum_server|RINGING_V2|v2_stream|serde_json|skip_serializing_if|serde\([^)]*(tag|flatten|untagged)|serde\(alias|legacy_|compat_'` **必须恒等于 0 命中**，且 `cargo tree -p qaqh-core-vocab -p qaqh-ringing-v3 -e normal,build -i serde_json` **输出为空**。
 2. **先冻协议（`v4.6`），再切端（`v4.7`–`v4.8`）**：`v4.6` 完成全量 V3 枚举 + `duplex` 闭环 + 6 条不变量绿灯后，迁移期禁止再推翻核心归属/席位/鉴权模型。
 3. **双栈期 V2 绝对冰封 + 2 版本死刑倒计时**：
    - 自 `v4.6` 起 V2 只读冰封，所有新功能只进 V3、严禁倒灌 V2；严禁写任何 `V2-over-V3` / `V3-to-V2` 转换层（宪法 #2/#5）；
    - 双栈仅允许在 `v4.7`（切 GPUI）与 `v4.8`（切移动端）两版存在，**绝不拖延到 `v4.12`**。
-4. **消费端单 PR 原子切换，零回退开关**：`v4.7` 切 `../qaqh-gpui`、`v4.8` 切 `qaqh-ffi`/`qaqh-harmony-napi` 时，同 PR 物理删除旧 V2 调用代码，禁止留 `QAQH_USE_V2=1` 类回退开关。
-5. **`v4.9` 首张 PR 整目录处决 V2**：物理 `git rm -rf` 删除 `crates/qaqh-daemon/src/axum_server/`、`crates/qaqh-ringing/src/v2/`、`crates/qaqh-client/src/{v2.rs,v2_stream.rs,sse_decoder.rs,shell_stream.rs}`、`tools/qaqh-contract-export/`；验收以两道机器闸为准：① `rg 'axum_server|RINGING_V2|/ringing/v2|/control/v1|/marketplace/v1|v2_stream' crates/` **0 命中**；② `ringing_v3_invariants` 全绿。
+4. **消费端单 PR 原子切换，零回退开关 + GPUI 零旧契约门禁**：`v4.7` 切 `../qaqh-gpui`、`v4.8` 切 `qaqh-ffi`/`qaqh-harmony-napi` 时，同 PR 物理删除旧 V2 调用代码，禁止留 `QAQH_USE_V2=1` 类回退开关；`v4.7` 合入后强制校验 `../qaqh-gpui/Cargo.toml` 对 `qaqh-ringing-contract` / `qaqh-types` 引用为 0。
+5. **`v4.9` 首张 PR 整目录处决 V2**：物理 `git rm -rf` 删除 `crates/qaqh-daemon/src/axum_server/`、`crates/qaqh-ringing/src/v2/`、`crates/qaqh-ringing-contract/`、`crates/qaqh-client/src/{v2.rs,v2_stream.rs,sse_decoder.rs,shell_stream.rs}`、`tools/qaqh-contract-export/` 与 `daemon.json`/`DaemonDiscovery`；验收以两道机器闸为准：① `rg 'axum_server|RINGING_V2|/ringing/v2|/control/v1|/marketplace/v1|v2_stream' crates/` **0 命中**；② `ringing_v3_invariants` 全绿。
 6. **冻结 `ADR-0008` 与旧跨语言仪式**：不再重写 `tools/qaqh-contract-export/src/cs_backend.rs`；旧前端留在既有冻结线（宪法 #11）。
 
 ---
@@ -103,17 +113,20 @@
 1. **在 QUIC 之上再套一层 HTTP/3（`h3`）**：两端均为自有 Rust 代码，套 HTTP/3 引入冗余 Header/QPACK/状态码转换层，违背宪法 #2/#5。
 2. **保留 HTTP+SSE+WS 与 RingingV3 长期双栈并存至 `v4.12`**：直接重演 9/21–10/30 的 40 天泥潭，制造双维护与行为分叉；双栈上限锁死为 2 个版本并在 `v4.9` 处决。
 3. **继续完成 `ADR-0008` 第 3 步重写 C# 投影机**：主前端已切 `qaqh-gpui`，属沉没成本陷阱。
-4. **在 `v4.6` 硬将 PTC 沙箱运行时接进旧 `session_loop.rs`（3,030 行）**：违背宪法 #8（上帝文件止血），且 `v5.0` 重写 Effect 状态机与全异步工具时必 100% 返工；改为 `v4.11` 独立选型验证、`v5.0` 一次性接入。
+4. **在 `v4.6` 硬将 PTC 沙箱运行时接进旧 `session_loop.rs`（`fc1ed287` 实测 2,887 行）**：违背宪法 #8（上帝文件止血），且 `v5.0` 重写 Effect 状态机与全异步工具时必 100% 返工；改为 `v4.11` 独立选型验证、`v5.0` 一次性接入。
+5. **本机跨进程共享内存直读后端可变消息上下文**：本机 UDS+`postcard` 为 10–50 µs 级，远低于渲染预算（8.3–16.6ms），直读内存堆指针却引入高危 `unsafe`、布局耦合与 `truncate_from_turn`/扩容 `SIGBUS` 撕裂风险，且与移动端双轨分叉。
+6. **在 `v4.6` 首版加入明文 `InspectModelContext` Control RPC**：调 `assemble_context()` 须在 2,887 行上帝文件 `session_loop.rs` 接线，且对外暴露明文 system prompt 与 PR #46 无明文 `cache_diag` 方向相悖；推迟至 `v5.0` Effect 状态机落地后再评估。
+7. **在 `BlobInfo` / `ExecLogRef` 预留仅本地生效的 `local_readonly_path: Option<PathBuf>` 后门**：同一字段语义随传输分支、破坏跨端一致性，且 `ADR-0035` exec 日志运行期持续增长并受 GC 竞态影响；本地与远端统一走 `BlobTransfer` 流。
 
 ---
 
 ## 五、与 `v4.5`–`v4.12` → `v5.0` 路线图的衔接
 
-- **`v4.5`（内核清债）**：推进 `P2-0`（已合入 #39）→ `P2-2b`（Crate 合并、消 `OnceLock` 反向槽、清剿手写轮子；`P2-1a` 合并 `qaqh-config-api → qaqh-profile` 时同步摘除 `../qaqh-gpui/Cargo.toml` 旧路径依赖）。
-- **`v4.6`（安全阀 + V3 协议冻结）**：落地 `ADR-0035` 泄洪闸（独立 `spill_gate.rs`）+ `ADR-0034` 洪峰冒烟；工具模式三档 + 强类型 `ToolCatalog`（剥离 PTC 沙箱）；**落地 `qaqh-ringing-v3` 强类型协议 + `v3_server`/`client/v3` 骨架 + `tokio::io::duplex` 闭环 + 6 条跨代不变量守卫**。
-- **`v4.7`（V3 本地 IPC + GPUI 首切 + 依赖收口）**：落地 Linux UDS + Windows Named Pipe + `yamux`；`../qaqh-gpui` 原子切换至 RingingV3（瘦身 `bridge.rs`、解决 `L-11`/`L-12`）；拔除 `v4.4` 临时 `sidecar.rs` 并统一 `ureq → reqwest` 与 SHA-256。
+- **`v4.5` / `v4.5.1`（已完成）**：内核清债（#39–#44）、SQLite 盘满防丢/瘦身/并发减负（#45）、前缀缓存修复与无明文 `cache_diag`（#46）已全量合入 `main`。
+- **`v4.6`（`P3-0` 清债 → 安全阀 + V3 协议冻结）**：`P3-0` 清剿 `session_loop.rs` 剩余 16 处 `.await.ok()` 与 2 处回滚泄漏 + 修绿 `tool_surface_schema_shape`；`P3-1` 落地 `ADR-0035` 泄洪闸（`spill_gate.rs`）+ `ADR-0034` 冒烟；`P3-2` 立 `qaqh-core-vocab`（0 `serde_json`）+ 收口 `tool_mode.rs` + `ToolCatalog`；`P3-3` 冻结 `qaqh-ringing-v3`；**`P3-4` 落地 `v3_server`/`client/v3` 骨架 + `tokio::io::duplex` 闭环 + 6 条跨代不变量守卫 + 2 份前置 ADR**。
+- **`v4.7`（V3 本地 IPC + GPUI 首切 + 依赖收口）**：落地 Linux UDS + Windows Named Pipe（Owner-Only DACL + `reject_remote_clients(true)`）+ `yamux` + `daemon.endpoint`；`../qaqh-gpui` 原子切换至 RingingV3（`bridge.rs` 腰斩、CI 强制零旧 contract/`qaqh-types` 依赖、解决 `L-11`/`L-12`）；拔除 `v4.4` 临时 `sidecar.rs` 并统一 `ureq → reqwest` 与 SHA-256。
 - **`v4.8`（V3 纯 QUIC + 原生多端联动 + 移动端切流）**：落地 `quinn` 纯 QUIC（0-RTT / 连接迁移 / ALPN / 指纹 pin）与多端同看会话/Shell/Driver 广播；Android `qaqh-ffi` 与 OHOS `qaqh-harmony-napi` 原子切换至 V3。
-- **`v4.9`（物理立斩 V2 · 纯血 Rust Native 里程碑）**：整目录物理删除 `axum_server`、旧 V2 路径与 `qaqh-contract-export`；补齐 `../qaqh-gpui` Linux + Windows 双桌面端一等交付。
+- **`v4.9`（物理立斩 V2 · 纯血 Rust Native 里程碑）**：整目录物理删除 `axum_server`、`qaqh-ringing-contract`、旧 V2 路径、`daemon.json` 与 `qaqh-contract-export`；补齐 `../qaqh-gpui` Linux + Windows 双桌面端一等交付。
 - **`v4.10`（纯原生富体验 & 历史 ADR 收账）**：无 WebView 原生可视化（取代 HTML iframe `widget-directive`）；接线 `ADR-0024` 硬件 MCP；落定 `audit`/`JOURNAL_IO` 归属；突破 256 条会话检索限制。
 - **`v4.11`（`rust-nightly` 烧机 + 8 GiB 级压测 + `v5.0` 边界预演）**：切换 `rust-nightly` 留足 2 版烧机期；8 GiB RAM 全链路压测；独立验证 PTC 沙箱选型（`rquickjs`/`Starlark`/`Monty`，不碰 `session_loop.rs`）；冻结 `v5.0` 内核架构 ADR。
 - **`v4.12`（4.x 终极稳定封板）**：全面功能冻结，全平台打包验收，确立 `v5.0` 内核大重写前的纯血 Rust Native 稳固基线。

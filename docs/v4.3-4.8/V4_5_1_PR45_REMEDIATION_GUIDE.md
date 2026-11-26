@@ -80,38 +80,49 @@
 
 ---
 
-## 二、Fast-Follow 独立修复单范围（`v4.5.2` / `v4.5.1b`，合入 PR #45 后再立项）
+## 二、Fast-Follow 独立修复单范围（`v4.6 P3-0` 前置清债，已按 `fc1ed287` 刷新精确行号）
 
-> 本节所列病灶**不塞入 PR #45**，避免范围膨胀；已按 worktree `7c7d1a71` 全量复核确认：`qaqh-session`、`qaqh-runtime` 生产代码零命中，其余 **16 处 `.await.ok()` 吞错**与 **2 处错误回滚内存态泄漏**全部集中在 `crates/qaqh-agent-runtime/src/session_loop.rs`。以下已修正原始严重度错判并给出清晰优先级：
+> 本节所列病灶于 PR #45 合入后单独立项为 **`v4.6 P3-0`**，先于 `P3-1` 执行（避免与 `P3-1` 争抢 `session_loop.rs` 并同步清零已知基线红灯）。已按 **`main @ fc1ed287`（`session_loop.rs` 现 2,887 行）** 刷新全部锚点：共 **16 处 `.await\n.ok()` 吞错**、**2 处错误回滚内存态泄漏**，外加 **1 项基线存量红灯修复**。
 
-### 优先级 1（高 / 中高危，防终态悬挂与上下文 / 历史结构损坏）
+### 优先级 1（高 / 中高危，防终态悬挂、历史结构损坏与已知红灯）
 1. **A 类（高危 ×1）**：
-   - `session_loop.rs:2578`：`interrupt()` 内 `self.owner.finish_turn(turn.as_ref(), "interrupted", TurnOutcome::Interrupted { reason }).await.ok()`。
-   - **后果**：与任务 1 已修掉的 `finish_completed`/`finish_cancelled` 同源——写库失败导致回合在数据库永久无终态，但 `L2597` 的 `notify_terminal(Failed)` 照常触发。
-2. **D 类（纠偏为中高危 ×3，绝非低危）**：
-   - `session_loop.rs:1314`（`inject_failed_tool_results` 写截断 assistant prefix 块）
-   - `session_loop.rs:1344`（`inject_failed_tool_results` 写截断 `ToolResult` 块）
-   - `session_loop.rs:1383`（`declare()` 写 `ToolCall` 块）
-   - **纠偏理由**：对照同文件 `L770` 不变量（「落库成功才并入 `messages`：保证发出的每个字节都能从历史重建」）与 `L2652`（`assemble_context()` 从 SQLite `blocks` 重建 provider 消息流）：
-     - `inject_failed_tool_results` 吞掉落库错却照旧把消息塞入内存 `messages`，导致下回合重启/重连上下文丢失 + 前缀缓存击穿；
-     - `declare()` 吞掉 `ToolCall` 块写库错误后若后续写入 `ToolResult`（或反之），下回合 `assemble_context()` 会拼出**缺配对的孤儿 `ToolResult` / `ToolUse`**，直接被上游模型 API 400 拒收，整条会话彻底报废。
+   - `session_loop.rs:2396`：`interrupt()` 内 `self.owner.finish_turn(turn.as_ref(), "interrupted", TurnOutcome::Interrupted { reason }).await.ok()`。
+   - **Fail-Closed 策略**：`finish_turn` 失败严禁吞错，必须响亮 `log::error!`，经 `owner.emit_turn_persist_failed` 向前端广播 `TurnEnded(Failed)` + `ActivityChanged(Idle)`，并单点上报 `notify_terminal(TurnTerminal::Failed, ...)`（与 PR #45 Blocker 1/2 完全同律，防库内永久无终态或 UI 挂死）。
+2. **D 类（中高危 ×3）**：
+   - `session_loop.rs:1331`（`inject_failed_tool_results` 写截断 assistant prefix 块）
+   - `session_loop.rs:1361`（`inject_failed_tool_results` 写截断 `ToolResult` 块）
+   - `session_loop.rs:1400`（`declare()` 写 `ToolCall` 块）
+   - **Fail-Closed 策略**：三处 `append_block` 均改为向上返回 `Result<..., DbError>`，任一写库失败立即中止工具派发/重试注入，**严禁将未落库消息塞入内存 `messages`**，交由主循环统一收口为 `finish_persist_failed`（守住 `L770`「落库成功才并入 `messages`」与 `assemble_context()` 配对不变量）。
+3. **基线存量红灯修绿（并入 `P3-0`）**：
+   - 锚点：[crates/qaqh-runtime/tests/tool_surface_schema_shape.rs](../../crates/qaqh-runtime/tests/tool_surface_schema_shape.rs)（`full_surface_schemas_are_object_shaped_without_composition_keys` 报告 `exec_command` schema 存在 `oneOf` 泄漏）。
+   - **策略**：定位并消除 `exec_command` 入参 schema 中的 `oneOf`/`anyOf`/`allOf` 聚合关键字生成，使 `P3-1` 开工前主线测试零已知红灯（宪法 #12）。
 
 ### 优先级 2（中危，防幽灵审批卡与内存态泄漏）
 1. **B 类（`interaction_resolved` 吞错 ×5）**：
-   - `session_loop.rs:1777`（权限取消）、`1798`（权限批准）、`1887`（ask 关闭/取消）、`1909`（ask 应答完成）、`2564`（`resolve_pending_interactions` 批量取消）。
-   - **后果**：内存已结算但库内交互仍处于未决态，重启/回放产生幽灵审批卡；同函数内 `interaction_requested`（`L1751`、`L1851`）均为 fail-closed，同一生命周期「开口守卫、收口吞错」。
+   - `session_loop.rs:1794`（权限取消）、`1815`（权限批准）、`1904`（ask 取消/关闭）、`1926`（ask 应答完成）、`2382`（`resolve_pending_interactions` 批量取消）。
+   - **Fail-Closed 策略**：取消 `.ok()` 吞错，写库失败必须显式 `log::error!` 并向调用方/回合终态传播持久化错误（不再「开口守卫、收口吞错」制造幽灵审批卡）。
 2. **错误回滚内存态泄漏（×2）**：
-   - `session_loop.rs:1751-1755`（`request_permission`）：`L1716` 压入了 `active.pending_interactions`，但 `interaction_requested` 失败回滚时仅清理了 `inner.permissions`，**漏清 `pending_interactions`**；
-   - `session_loop.rs:1851`（`run_ask`）：`L1836-1838` 压入了 `inner.asks` 与 `active.pending_interactions`，但 `interaction_requested(view).await?` 提前返回，**两处内存槽均漏清**。
+   - `session_loop.rs:1767`（`request_permission` @ `L1713`）：此前压入了 `active.pending_interactions`，但 `interaction_requested` 失败回滚时仅清理了 `inner.permissions`，必须同步清理 `active.pending_interactions`；
+   - `session_loop.rs:1867`（`run_ask` @ `L1826`）：此前压入了 `inner.asks` 与 `active.pending_interactions`，`interaction_requested(view).await?` 提前返回时必须清理这两处内存槽。
 
 ### 优先级 3（中低危，防阶段与状态机投影漂移）
 - **C 类（×7）**：
-  - `session_loop.rs:1709`（`tool_awaiting_interaction`——注释明确指出参与 owner 泵定序）
-  - `session_loop.rs:1592`（`tool_back_to_declared`）
-  - `session_loop.rs:1758, 1803, 1854, 1892, 1914`（`set_turn_phase` ×5）
+  - `session_loop.rs:1726`（`tool_awaiting_interaction`——参与 owner 泵定序与前端等待态展示，写库失败按交互路径回滚/报错不跳过）
+  - `session_loop.rs:1609`（`tool_back_to_declared`——显式 `log::error!` 并按路径返回错误/记故障，不静默吞错）
+  - `session_loop.rs:1775, 1820, 1871, 1909, 1931`（`set_turn_phase` ×5——取消 `.ok()`，写库失败显式 `log::error!` 并返回/记故障避免 `WaitingUser` 与 `Running` 状态漂移）
 
-### Fast-Follow 硬性施工纪律
-- 严禁靠“口头登记豁免”继续给 `session_loop.rs` 堆行：必须把交互落库 / 阶段流转 / 截断注入辅助逻辑同步拆出至独立子模块（如 `session_persist.rs` 或新增独立交互辅助子模块），**确保 `session_loop.rs` 净行数变更 `≤ 0`**（宪法 #8）。
+### Fast-Follow 硬性施工纪律与派工 Prompt
+- 严禁靠“口头登记豁免”继续给 `session_loop.rs` 堆行：必须把交互落库 / 阶段流转 / 截断注入辅助逻辑同步拆出至独立子模块（如 `session_persist.rs` 或新增交互辅助子模块），**确保 `session_loop.rs` 净行数变更 `≤ 0`**（宪法 #8）。
+- 本 PR 不引入新契约变化，铁闸 1（`qaqh-contract-export check --against docs/api-surface/v4.2`）必须仍为 `EXIT=0`。
+
+```markdown
+请在 `/home/qaqtam/项目/qaqh-backend` 推进 `v4.6 P3-0`（Fast-Follow：清剿 `session_loop.rs` 16 处 `.await.ok()`、2 处回滚泄漏与 `tool_surface_schema_shape` 基线红灯），依据 `docs/v4.3-4.8/V4_5_1_PR45_REMEDIATION_GUIDE.md` §二。
+
+1. 在 `../qaqh-wt-v4.6-p3-0` 从 `origin/main` 开分支 `fix/v4.6-p3-0-fail-closed-and-schema`（禁 `git checkout`，共享 `CARGO_TARGET_DIR="/home/qaqtam/项目/qaqh-backend/target"`）。
+2. 按 §二 优先级 1–3 与对应 Fail-Closed 策略清零 16 处 `.await.ok()` 与 2 处回滚泄漏，辅助函数拆入独立子模块保证 `session_loop.rs` 净行数 `≤ 0`；并修复 `tool_surface_schema_shape`（`exec_command` `oneOf` 泄漏）。
+3. 提供红→绿反证（覆盖 `interrupt()` / `declare()` / 回滚清理及 `tool_surface_schema_shape`），并跑 `/home/qaqtam/.cargo/bin/cargo test -j2 -p qaqh-session -p qaqh-agent-runtime -p qaqh-runtime`、clippy 及铁闸 1 `EXIT=0`。
+4. 提交（带 `Co-Authored-By:`）并 `gh pr create`（不自行 merge）。
+```
 
 ---
 
