@@ -1,8 +1,8 @@
 # QAQ-Harness `v4.6` 架构决策包（二审已定案）
 
 > **基线时间**：2026-11-26 · **代码基线**：`main @ fc1ed287`（已合入 `v4.5` PR #39–#44、`v4.5.1` PR #45、`wip/prompt-cache` PR #46；`../qaqh-gpui/Cargo.toml` 已摘除 `qaqh-config-api`；`../qaqh-gpui/crates/qaqh-gpui-wire/src/bridge.rs` 现 **1,316 行**）
-> **裁决状态**：**`已二审定案`**（2026-11-26，采纳独立红蓝对抗二审意见并完成 `fc1ed287` 代码实证复核）
-> **Companion 文档**：[AGENTS.md](../../AGENTS.md)（《项目宪法 v2 · 高质量发展修宪版》）· [ADR-0042 r3](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）· [ADR-0035](../adr/0035-exec-flood-model-spill-gate.md)（状态：`已采纳 · 未实施`）· [V4_6_EXECUTION_PLAN.md](./V4_6_EXECUTION_PLAN.md)
+> **裁决状态**：**`已二审定案 + r4 协议复核增补`**（2026-11-26，采纳独立红蓝对抗二审意见、完成 `fc1ed287` 代码实证复核，并增补对外 `iroh`、对内 `MuxTransport+yamux`、移动端严格同版 Fail-Closed 与四流因果分流纪律）
+> **Companion 文档**：[AGENTS.md](../../AGENTS.md)（《项目宪法 v2 · 高质量发展修宪版》）· [ADR-0042 r4](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）· [ADR-0035](../adr/0035-exec-flood-model-spill-gate.md)（状态：`已采纳 · 未实施`）· [V4_6_EXECUTION_PLAN.md](./V4_6_EXECUTION_PLAN.md)
 
 ---
 
@@ -59,8 +59,8 @@
 
 ### D3（P1 · 传输与双栈退场）：本地 IPC 多路复用栈 & 服务发现策略
 
-- **D3.1 本地 IPC 多路复用（定案：A · `yamux`）**：
-  - UDS / Named Pipe 之上叠 **`yamux`**（提供每逻辑流独立流控窗口与调度公平性，与 `quinn` 四流同构）；注意 Rust `yamux` crate 基于 `futures::io`，需 `tokio-util::compat` 与独立 driver task（开工时按宪法 #16 查最新官方 API）。
+- **D3.1 本地 IPC 多路复用（定案：A · `yamux` + 薄 `MuxTransport` 同构）**：
+  - UDS / Named Pipe 之上叠 **`yamux`**（提供每逻辑流独立流控窗口与调度公平性，经薄 `MuxTransport` 与远端 `iroh::Connection` 四流同构；已于 r4 正式否决 `remoc`）；注意 Rust `yamux` crate 基于 `futures::io`，需 `tokio-util::compat` 与独立 driver task（开工时按宪法 #16 查最新官方 API）。
   - 修正不变量②表述：单连接字节流上不存在传输层物理消除队头阻塞，不变量②以**可量化延迟指标**验收（大 Blob 满载 + PTY 刷屏时，Control RPC 往返 P99 < 50ms）。
 - **D3.2 双栈期服务发现（定案：A · 无版本最终名 `daemon.endpoint`）**：
   - 独立于现 `crates/qaqh-types/src/discovery.rs:15` 的 `DaemonDiscovery`（含 `endpoint`/`token`/`pid`/`server_epoch`/`protocol_version`/`daemon_version`/`build_id`/`channel`/`executable`/`lan_endpoint`/`tls_fingerprint` 及 `ts` 导出）；
@@ -93,7 +93,7 @@
 ## 三、二审盲区补丁定案（强制进 `ADR-0042 r3` 与 `v4.6`–`v4.7` 门禁）
 
 1. **Windows Named Pipe 安全红线**：Windows 默认 Named Pipe DACL 会授予 `Everyone` 读权限；本地管道监听必须显式构造当前用户 SID 的 **Owner-Only Security Descriptor**，并开启 `reject_remote_clients(true)`。
-2. **`postcard` 协议演进与机器指纹**：`PROTOCOL_REV` 之外的**协议指纹必须由机器从 `qaqh-ringing-v3` 类型定义生成**（严禁手改）；同时在 `ADR-0042 r3` 明确 `v4.7`–`v4.12` 的版本配对与移动端最低支持版本守卫。
+2. **`postcard` 协议演进与机器指纹**：`PROTOCOL_REV` 之外的**协议指纹必须由机器从 `qaqh-ringing-v3` 类型定义生成**（严禁手改）；并于 `ADR-0042 r4` 拍板桌面与移动端统一坚持裸 `postcard` + 机器指纹严格同版 Fail-Closed（方案 A，见 D7），不为旧移动端保留宽松解码。
 3. **`P3-2` 先依赖 D1**：`qaqh-core-vocab` 在 `P3-2` 开工建 crate 承载 `ToolCatalog` 与底层原语，`P3-3` 直接消费。
 4. **`v4.7` GPUI 切换后依赖红线**：切完 GPUI 后必须在 CI 强制 `../qaqh-gpui/Cargo.toml` 对 `qaqh-ringing-contract` / `qaqh-types` 的引用恒等于 0。
 
@@ -112,3 +112,6 @@
 | **D4** | `v3_server` 异步门面粒度 | **4A 细化版（已采纳）** | 按域拆分细粒度 trait + `ShellFacade` 独立并发句柄表 + 泛型静态分发 `V3Server<B>` |
 | **D5.1** | Fast-Follow 16 处 `.await.ok()` 排期 | **A（已采纳，立为 `P3-0`）** | 按 `fc1ed287` 新行号 + 先定 Fail-Closed 策略，优于 `P3-1` 前清完（净 `≤ 0`） |
 | **D5.2** | `tool_surface_schema_shape` 基线失败 | **B（已采纳，并入 `P3-0`）** | 不带已知红灯进入 `P3-1` |
+| **D6（r4 增补）** | 对外远端传输栈 & 对内 `yamux` vs `remoc` | **对外 `iroh` + 对内 `UDS/Pipe + yamux`（`MuxTransport` 同构）** | 否决 `remoc`（避免内外双轨或 Mux-over-QUIC）；`iroh` 提供 `EndpointId` 公钥寻址/NAT 打洞/加密 Relay（`v4.8` 前置核验 OHOS `ADR-0039` TLS 栈） |
+| **D7（r4 增补）** | 移动端经 `iroh` 接入后的版本编解码策略 | **方案 A · 统一严格同版 Fail-Closed（已采纳）** | 桌面与移动端共用裸 `postcard` + `build.rs` 机器指纹强校验，防遗忘同步更新客户端与隐性兼容债 |
+| **D8（r4 增补）** | 多流因果分流与跨流时序纪律 | **同会话单流单 `seq` + 跨流铁闸（已采纳）** | `Reliable`/`Replaceable` 严禁拆流（同流合帧遇 `Reliable` 前先 flush）；`SessionEvents` 为前端唯一真相源；`SwitchDriver` 由 `OwnerPump` 单点定序广播 `DriverChanged` |

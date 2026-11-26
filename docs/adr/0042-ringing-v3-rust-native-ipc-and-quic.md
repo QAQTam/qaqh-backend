@@ -1,8 +1,8 @@
 # ADR-0042 RingingV3：Rust Native 二进制多路流（本地 IPC + 远端纯 QUIC）与反腐迁移铁律
 
-状态: `已采纳 · 未实施` · 初始决策 2026-11-25 · r2 修订 2026-11-26（纳入 5/14–7/31 创世初心与 9/21–10/30 V2 历史考古、七条零遗留设计铁律、六条反腐迁移纪律）· **r3 修订 2026-11-26（采纳 `V4_6_DECISION_PACK` 二审定案：1C′ 纯原语拆分、`skip_serializing_if` 零命中红线、Windows Named Pipe Owner-Only DACL、独立无版本 `daemon.endpoint`、尾窗 `pinned_compaction`/`timeline_epoch`、`yamux` 量化延迟与细粒度静态分发异步门面）** · **决策人：仓库所有者**
+状态: `已采纳 · 未实施` · 初始决策 2026-11-25 · r2 修订 2026-11-26（纳入 5/14–7/31 创世初心与 9/21–10/30 V2 历史考古、七条零遗留设计铁律、六条反腐迁移纪律）· r3 修订 2026-11-26（采纳 `V4_6_DECISION_PACK` 二审定案：1C′ 纯原语拆分、`skip_serializing_if` 零命中红线、Windows Named Pipe Owner-Only DACL、独立无版本 `daemon.endpoint`、尾窗 `pinned_compaction`/`timeline_epoch`、`yamux` 量化延迟与细粒度静态分发异步门面）· **r4 修订 2026-11-26（协议深度复核定案：对外由裸 `quinn` 升级为 `iroh` 纯 QUIC + `EndpointId` 公钥寻址/NAT 打洞/加密 Relay；对内坚持 `UDS/Pipe + yamux` 并经薄 `MuxTransport` 与 `iroh::Connection` 同构、否决 `remoc`；桌面与移动端统一坚持裸 `postcard` + 机器指纹严格同版 Fail-Closed；显式钉死四流因果分流与跨流时序铁律）** · **决策人：仓库所有者**
 
-> 一句话：随着默认桌面前端切换为纯原生 `../qaqh-gpui`（零 WebView、10k 时间线实测 RSS ~153 MiB）、移动端保持 Rust `qaqh-client` 核心 + FFI 薄壳，本仓决定在 **`v4.6`–`v4.9`** 落地 **RingingV3**——以零 `serde_json` 依赖的纯 Rust 强类型二进制多路流（`postcard`）彻底取代 HTTP + SSE + WebSocket 三拼及所有 `/v1` 孤岛端点；本地走 **Named Pipe（Windows）/ UDS（Linux）+ `yamux`**，远端与移动端走**纯 QUIC（`quinn`）**；冻结 `ADR-0008` C# 投影演进，并以硬性物理隔离与死刑倒计时在 **`v4.9` 物理立斩旧 V2 控制面**，为 `v4.12` 稳定封板与 `v5.0` 内核革命扫清一切协议债。
+> 一句话：随着默认桌面前端切换为纯原生 `../qaqh-gpui`（零 WebView、10k 时间线实测 RSS ~153 MiB）、移动端保持 Rust `qaqh-client` 核心 + FFI 薄壳，本仓决定在 **`v4.6`–`v4.9`** 落地 **RingingV3**——以零 `serde_json` 依赖的纯 Rust 强类型二进制多路流（`postcard`）彻底取代 HTTP + SSE + WebSocket 三拼及所有 `/v1` 孤岛端点；本地走 **Named Pipe（Windows）/ UDS（Linux）+ `yamux`**，远端与移动端走 **`iroh` 纯 QUIC（`EndpointId` 公钥寻址 + 自动 NAT 打洞 + 端到端加密 Relay 兜底）**，两者在协议层经极薄 `MuxTransport` 100% 同构；冻结 `ADR-0008` C# 投影演进，并以硬性物理隔离与死刑倒计时在 **`v4.9` 物理立斩旧 V2 控制面**，为 `v4.12` 稳定封板与 `v5.0` 内核革命扫清一切协议债。
 
 ---
 
@@ -47,23 +47,23 @@
   - `Session` / `Command` / `Shell` / `Marketplace` / `Config` / `Account` / `Pairing` / `Gitx` / `Fs` / `ToolCatalog`
 - `v4.9` 处决 V2 后，daemon 对外**零 HTTP/SSE/WS 端口、零 `/control/v1`、零 `/marketplace/v1`**。
 
-### 铁律 3：单连接四流多路复用 + 原生多端联动一等语义
-一条物理连接上按用途划分独立逻辑流（QUIC 原生 `open_bi`/`open_uni`；本地 IPC 上经 `tokio-util::compat` 叠加 **`yamux` + 独立 driver task** 提供每逻辑流独立流控窗口与调度公平性，接入前按宪法 #16 核查最新官方 API）：
+### 铁律 3：单连接四流多路复用（按因果独立域分流）+ `MuxTransport` 同构 + 原生多端联动一等语义
+一条物理连接上按**因果独立域**划分四类独立逻辑流（`v3_server` 与 `client/v3` 经极薄 `MuxTransport` trait 统一抽象 `open_bi`/`accept_bi`/`open_uni`/`accept_uni`：远端直连 `iroh::Connection` 原生 QUIC 流；本地 IPC 与 `duplex` 测试在字节流上经 `tokio-util::compat` 叠加 **`yamux` + 独立 driver task**，单向流以半关闭双向流同构，接入前按宪法 #16 核查最新官方 API）：
 - **控制流（BiStream）**：强类型 RPC 请求与响应；
-- **会话事件流（每订阅会话一条 UniStream）**：直推 `SessionEventFrame`，消除跨会话、多端队头阻塞；
-- **Shell PTY 流（BiStream）**：原始终端字节透传 + 极简 `Resize`/`Closed` 控制帧，支持多端同时观看；
-- **二进制 Blob 流（UniStream / BiStream）**：附件、截图、大文件二进制分片直传，零 Base64 膨胀。
-- **原生多端联动下沉进协议层**：多设备同看同一会话/同一 Shell、Driver 席位变更主动广播、设备吊销即时踢流、移动端 `quinn` 0-RTT 与 Wi-Fi↔5G 连接迁移，不再靠 HTTP 轮询打补丁。
+- **会话事件流（每订阅会话一条 UniStream）**：按 `session_id` 隔离，消除跨会话队头阻塞。**因果定序铁律**：同一会话内的全部业务事实（含 `DeliveryClass::Reliable` 与 `Replaceable`）**必须死守同一条 FIFO 流并由 `OwnerPump` 单点分配单调递增 `seq`**，严禁将 `Reliable` 与 `Replaceable` 拆成两条独立流；合帧/节流仅在同流发送缓冲侧执行，遇到任意 `Reliable` 帧前必须先 flush 已合并的 `Replaceable` 增量再按序发出；`SessionEvents` 流是前端状态的唯一真相源，客户端严禁假设 `ControlResponse(CommandAck)` 与 `SessionEvents` 的跨流到达先后；
+- **Shell PTY 流（BiStream）**：原始终端字节按单调 `offset` 透传 + 极简 `Resize`/`Closed` 控制帧，支持多端同时观看；
+- **二进制 Blob 流（UniStream / BiStream）**：不可变内容寻址（`ContentHash` / `sha256`）附件、截图、大文件二进制分片直传，零 Base64 膨胀（因果靠“先落盘/上传完成、再在事件/控制流引用”保证）。
+- **原生多端联动下沉进协议层**：多设备同看同一会话/同一 Shell、Driver 席位变更由 `OwnerPump` 单点裁决并写入单调 `seq` 广播 `DriverChanged`（非 Driver 端发 `SendPrompt` 当场 Fail-Closed 拒绝）、设备吊销即时按 `EndpointId` 拒连并踢流、移动端 `iroh` QUIC 0-RTT 与 Wi-Fi↔5G 连接迁移（彻底断联后按 `since_seq` 追 `ReplayRing`，超环再拉尾窗快照），不再靠 HTTP 轮询打补丁。
 
-### 铁律 4：去版本化命名 + 零别名墙 + Fail-Closed 握手与安全发现
+### 铁律 4：去版本化命名 + 零别名墙 + Fail-Closed 握手（统一严格同版）与安全发现
 - 严禁创建 `ClientV3*` 重命名墙（客户端直接 `pub use qaqh_ringing_v3::*`），严禁任何 `#[serde(alias = ...)]`。
 - 业务域 DTO（`TimelineEntry`、`ToolCallView`、`CommandAck`、`ShellEvent`、`ToolCatalog`）**永久无版本前缀**；仅最外层线缆模块带 `v3`（`qaqh-ringing-v3`、`v3_server`、`client/v3`）。
 - 传输层抽象与本地安全红线：
   - **本地（`qaqh-gpui` ↔ `qaqh-daemon`）**：Linux/macOS `UnixListener`/`UnixStream`（`$XDG_RUNTIME_DIR/qaqh-daemon.sock`，权限 `0600`）；Windows `tokio::net::windows::named_pipe`（`\\.\pipe\qaqh-daemon-<user>`）**不得依赖默认 DACL（默认会给 `Everyone` 读权限），必须显式构造当前用户 SID 的 Owner-Only Security Descriptor 并开启 `reject_remote_clients(true)`**；
-  - **独立无版本发现文件（防 `v4.9` 留尾）**：V3 从第一天启用永久最终名 **`daemon.endpoint`**（固定单一非 JSON 格式避免 V3 客户端引入 `serde_json`），内置 `build_id` / `channel` Fail-Closed 校验；`v4.9` 处决 V2 时整块删除旧 `daemon.json` 与 `DaemonDiscovery`（含 `ts` 导出）；
-  - **远端 / 移动端（PC / Android / OHOS ↔ `qaqh-daemon`）**：**纯 QUIC（`quinn`）**，底层 TLS 复用 `ADR-0039` 既定栈（host/桌面/服务端 `aws-lc-rs`，OHOS 交叉目标保留 `ring`），内置 TLS 1.3 + 证书指纹 pin + 首帧 Device Token 鉴权；
-  - **测试 / 调试直连**：`tokio::io::duplex` 内存直连，免启进程免占端口。
-- 握手通过 **ALPN (`b"qaqh-ringing/3"`) + `PROTOCOL_REV: u32` + 机器从协议类型定义自动生成的契约指纹**（严禁手改）强校验；`v4.6` 冻结后任何破坏性变更显式升级版本或最低支持端版本，失配当场 Fail-Closed 拒绝（绝不协商降级）。
+  - **独立无版本发现文件（防 `v4.9` 留尾）**：V3 从第一天启用永久最终名 **`daemon.endpoint`**（固定单一非 JSON 格式避免 V3 客户端引入 `serde_json`），内置 `build_id` / `channel` Fail-Closed 校验，并预留 `iroh_endpoint_id` / `iroh_relay_url` 字段；`v4.9` 处决 V2 时整块删除旧 `daemon.json` 与 `DaemonDiscovery`（含 `ts` 导出）；
+  - **远端 / 移动端（PC / Android / OHOS ↔ `qaqh-daemon`）**：**`iroh` 纯 QUIC**（底层 `noq`，内置 TLS 1.3 + Ed25519 `EndpointId` 公钥双向认证 + 自动 NAT 打洞 + 端到端加密 Relay 兜底，默认支持 n0 公共 Relay 并允许配置自托管 Relay；配对二维码携带 `daemon_endpoint_id + relay_url + 一次性 pairing_token`，授权设备表直接绑定对端 `EndpointId` 与 `AuthScope`；`v4.8` 开工前置核验 `iroh` 在 OHOS 交叉目标下与 `ADR-0039` `aws-lc-rs`/`ring` 策略的兼容性）；
+  - **测试 / 调试直连**：`tokio::io::duplex` + `yamux` 内存直连，免启进程免占端口。
+- **统一严格同版 Fail-Closed 握手（桌面与移动端均选方案 A）**：握手通过 **ALPN (`b"qaqh-ringing/3"`) + `PROTOCOL_REV: u32` + 机器从协议类型定义自动生成的契约指纹 `PROTOCOL_FINGERPRINT: [u8; 32]`**（严禁手改）强校验；**无论本地桌面端还是经 `iroh` 接入的移动端，失配当场 Fail-Closed 拒绝（绝不协商降级、绝不为旧客户端维持向后兼容字段解码）**，强制协议改动与端侧升级同步闭环，防止遗忘更新和隐性兼容债。
 
 ### 铁律 5：跨代协议不变量守卫先于业务代码（根绝 11/10 P0 复发）
 在编写 V3 业务 handler 前，必须先用 `tokio::io::duplex` 建立并锁定 **`ringing_v3_invariants`** 六大红线守卫，且在 `v4.9` 删旧栈后保持 100% 绿灯：
@@ -117,15 +117,17 @@
 5. **本机跨进程共享内存直读后端可变消息上下文**：本机 UDS+`postcard` 为 10–50 µs 级，远低于渲染预算（8.3–16.6ms），直读内存堆指针却引入高危 `unsafe`、布局耦合与 `truncate_from_turn`/扩容 `SIGBUS` 撕裂风险，且与移动端双轨分叉。
 6. **在 `v4.6` 首版加入明文 `InspectModelContext` Control RPC**：调 `assemble_context()` 须在 2,887 行上帝文件 `session_loop.rs` 接线，且对外暴露明文 system prompt 与 PR #46 无明文 `cache_diag` 方向相悖；推迟至 `v5.0` Effect 状态机落地后再评估。
 7. **在 `BlobInfo` / `ExecLogRef` 预留仅本地生效的 `local_readonly_path: Option<PathBuf>` 后门**：同一字段语义随传输分支、破坏跨端一致性，且 `ADR-0035` exec 日志运行期持续增长并受 GC 竞态影响；本地与远端统一走 `BlobTransfer` 流。
+8. **对内采用 `remoc`（`chmux` + 过程宏远程 trait/channel 全家桶）替代 `UDS/Pipe + yamux`**：对外引入 `iroh` 后，`remoc` 要么导致内外分叉两套协议、要么在 QUIC 流内再叠 `chmux`（Mux-over-Mux）废掉 QUIC 原生独立流控；且远端 trait/channel 句柄绑定单次连接生命周期，不利于移动端断线重连追帧、FFI 边界控管与未来协议平滑演进。
+9. **为移动端引入可跳未知字段的宽松跨小版本编解码（如 `postbag` / 整数 tag CBOR）**：虽然允许移动端滞后发版，但容易在演进中遗忘同步更新客户端并滋生隐性兼容债；所有者明定桌面与移动端统一坚持裸 `postcard` + 源码级 `PROTOCOL_FINGERPRINT` 严格同版 Fail-Closed（方案 A）。
 
 ---
 
 ## 五、与 `v4.5`–`v4.12` → `v5.0` 路线图的衔接
 
 - **`v4.5` / `v4.5.1`（已完成）**：内核清债（#39–#44）、SQLite 盘满防丢/瘦身/并发减负（#45）、前缀缓存修复与无明文 `cache_diag`（#46）已全量合入 `main`。
-- **`v4.6`（`P3-0` 清债 → 安全阀 + V3 协议冻结）**：`P3-0` 清剿 `session_loop.rs` 剩余 16 处 `.await.ok()` 与 2 处回滚泄漏 + 修绿 `tool_surface_schema_shape`；`P3-1` 落地 `ADR-0035` 泄洪闸（`spill_gate.rs`）+ `ADR-0034` 冒烟；`P3-2` 立 `qaqh-core-vocab`（0 `serde_json`）+ 收口 `tool_mode.rs` + `ToolCatalog`；`P3-3` 冻结 `qaqh-ringing-v3`；**`P3-4` 落地 `v3_server`/`client/v3` 骨架 + `tokio::io::duplex` 闭环 + 6 条跨代不变量守卫 + 2 份前置 ADR**。
+- **`v4.6`（`P3-0` 清债 → 安全阀 + V3 协议冻结）**：`P3-0` 清剿 `session_loop.rs` 剩余 16 处 `.await.ok()` 与 2 处回滚泄漏 + 修绿 `tool_surface_schema_shape`；`P3-1` 落地 `ADR-0035` 泄洪闸（`spill_gate.rs`）+ `ADR-0034` 冒烟；`P3-2` 立 `qaqh-core-vocab`（0 `serde_json`）+ 收口 `tool_mode.rs` + `ToolCatalog`；`P3-3` 冻结 `qaqh-ringing-v3`；**`P3-4` 落地 `v3_server`/`client/v3` 骨架 + `MuxTransport`（对齐 `yamux` 与 `iroh::Connection`）+ `tokio::io::duplex` 闭环 + 6 条跨代不变量守卫 + 2 份前置 ADR**。
 - **`v4.7`（V3 本地 IPC + GPUI 首切 + 依赖收口）**：落地 Linux UDS + Windows Named Pipe（Owner-Only DACL + `reject_remote_clients(true)`）+ `yamux` + `daemon.endpoint`；`../qaqh-gpui` 原子切换至 RingingV3（`bridge.rs` 腰斩、CI 强制零旧 contract/`qaqh-types` 依赖、解决 `L-11`/`L-12`）；拔除 `v4.4` 临时 `sidecar.rs` 并统一 `ureq → reqwest` 与 SHA-256。
-- **`v4.8`（V3 纯 QUIC + 原生多端联动 + 移动端切流）**：落地 `quinn` 纯 QUIC（0-RTT / 连接迁移 / ALPN / 指纹 pin）与多端同看会话/Shell/Driver 广播；Android `qaqh-ffi` 与 OHOS `qaqh-harmony-napi` 原子切换至 V3。
+- **`v4.8`（V3 `iroh` 纯 QUIC + 原生多端联动 + 移动端切流）**：落地 **`iroh` 纯 QUIC**（`EndpointId` 公钥寻址 / 自动 NAT 打洞 / 端到端加密 Relay 兜底与自托管配置 / 0-RTT / 连接迁移 / ALPN + 严格同版指纹校验；前置核验 OHOS `ADR-0039` TLS 栈兼容）与多端同看会话/Shell/Driver 单点裁决广播；Android `qaqh-ffi` 与 OHOS `qaqh-harmony-napi` 原子切换至 V3。
 - **`v4.9`（物理立斩 V2 · 纯血 Rust Native 里程碑）**：整目录物理删除 `axum_server`、`qaqh-ringing-contract`、旧 V2 路径、`daemon.json` 与 `qaqh-contract-export`；补齐 `../qaqh-gpui` Linux + Windows 双桌面端一等交付。
 - **`v4.10`（纯原生富体验 & 历史 ADR 收账）**：无 WebView 原生可视化（取代 HTML iframe `widget-directive`）；接线 `ADR-0024` 硬件 MCP；落定 `audit`/`JOURNAL_IO` 归属；突破 256 条会话检索限制。
 - **`v4.11`（`rust-nightly` 烧机 + 8 GiB 级压测 + `v5.0` 边界预演）**：切换 `rust-nightly` 留足 2 版烧机期；8 GiB RAM 全链路压测；独立验证 PTC 沙箱选型（`rquickjs`/`Starlark`/`Monty`，不碰 `session_loop.rs`）；冻结 `v5.0` 内核架构 ADR。

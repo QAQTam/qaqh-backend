@@ -1,7 +1,7 @@
 # QAQ-Harness `v4.6`（`P3-0` ~ `P3-4`）开工总计划与施工卡
 
 > **基线时间**：2026-11-26 · **代码基线**：`main @ bea000a2`（已合入 `v4.5` PR #39–#44、`v4.5.1` PR #45、`wip/prompt-cache` PR #46、`v4.6 P3-0` PR #47）
-> **适用宪章**：[AGENTS.md](../../AGENTS.md)（《项目宪法 v2 · 高质量发展修宪版》）· [ADR-0042 r3](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）· [ADR-0035](../adr/0035-exec-flood-model-spill-gate.md)（状态：`已采纳 · 未实施`）· [V4_6_DECISION_PACK.md](./V4_6_DECISION_PACK.md)（已二审定案）· [MUST.md](./MUST.md)
+> **适用宪章**：[AGENTS.md](../../AGENTS.md)（《项目宪法 v2 · 高质量发展修宪版》）· [ADR-0042 r4](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）· [ADR-0035](../adr/0035-exec-flood-model-spill-gate.md)（状态：`已采纳 · 未实施`）· [V4_6_DECISION_PACK.md](./V4_6_DECISION_PACK.md)（已二审定案 + r4 协议复核增补）· [MUST.md](./MUST.md)
 > **前置状态**：`v4.5`、`v4.5.1` 与 **`v4.6 P3-0`（PR #47 · `bea000a2`）** 均已合入 `main`，`session_loop.rs` 已降至 2,775 行，`../qaqh-gpui/Cargo.toml` 已摘除 `qaqh-config-api`。当前下一张开工切片为 **`P3-1`**，随后按序推进 `P3-2` ~ `P3-4`。
 
 ---
@@ -20,7 +20,7 @@
 - 不在 `v4.6` 中途重写 `session_loop.rs` / `store.rs` / `owner.rs`（锁定 `v5.0`）；
 - 不在 `v4.6` 动 SQLite 存储引擎或新增任何磁盘 `migrate-on-read`（宪法 #6）；
 - 不在 `v4.6` 把 V3 任何新能力倒灌回旧 V2 `axum_server` 或改动冰封中的 `qaqh-types`/`qaqh-ringing-contract`（`1C′`）；
-- **不引入**跨进程共享内存直读消息上下文、`InspectModelContext`（推迟至 `v5.0` 后）与 `local_readonly_path` 后门（均记入 `ADR-0042 r3` §四）。
+- **不引入**跨进程共享内存直读消息上下文、`InspectModelContext`（推迟至 `v5.0` 后）、`local_readonly_path` 后门、对内 **`remoc`（`chmux` 全家桶）** 以及**移动端跨小版本宽松解码**（桌面与移动端统一坚持裸 `postcard` + 机器指纹严格同版 Fail-Closed，均记入 `ADR-0042 r4` §四）。
 
 ---
 
@@ -76,7 +76,7 @@ flowchart TD
 
 ### 2. `P3-2` — `crates/qaqh-core-vocab` 纯原语底座 + 工具模式三档收口 + 只读 `ToolCatalog`
 - **Worktree & 分支**：`../qaqh-wt-v4.6-p3-2` · `feat/v4.6-p3-2-core-vocab-and-tool-catalog`
-- **宪法与决策依据**：`V4_6_DECISION_PACK.md` D1 (`1C′`) · 宪法 #6、#7 · [ADR-0042 r3](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 1。
+- **宪法与决策依据**：`V4_6_DECISION_PACK.md` D1 (`1C′`) · 宪法 #6、#7 · [ADR-0042 r4](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 1。
 - **改动目标**：
   1. 新增 workspace member **`crates/qaqh-core-vocab`**（零 `serde_json`、`skip_serializing_if`、`#[serde(tag)]`、`flatten`、`untagged`）：
      - 承载强类型 ID newtype（`SessionId`/`TurnId`/`BlockId`/`ToolCallId`/`InputId`/`InteractionId`/`ExecSessionId`/`ContentHash`）、纯净域枚举（`ActivityState`/`TurnTerminal`/`UsageInfo`/`ContentRef`）及 **`ToolCatalog` / `ToolCatalogEntry` / `ToolAvailability`**；
@@ -93,18 +93,18 @@ flowchart TD
 
 ### 3. `P3-3` — 冻结 `crates/qaqh-ringing-v3` 强类型二进制协议 crate
 - **Worktree & 分支**：`../qaqh-wt-v4.6-p3-3` · `feat/v4.6-p3-3-ringing-v3-contract`
-- **宪法与决策依据**：宪法 #5、#6、#7 · `V4_6_DECISION_PACK.md` D1–D3 · [ADR-0042 r3](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 1–4、7。
+- **宪法与决策依据**：宪法 #5、#6、#7 · `V4_6_DECISION_PACK.md` D1–D3/增补 · [ADR-0042 r4](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 1–4、7。
 - **改动目标**：
   1. 在根 `Cargo.toml` 引入 `postcard` 与 `bytes`，新增 workspace member **`crates/qaqh-ringing-v3`**，仅依赖 `qaqh-core-vocab`、`serde`、`postcard`、`bytes`、`thiserror`（**严禁依赖 `serde_json`、`axum`、`qaqh-ringing`、`qaqh-types`、`qaqh-ringing-contract`**）；
   2. 定义统一线缆帧与握手契约：
-     - `RINGING_V3_ALPN = b"qaqh-ringing/3"`、`PROTOCOL_REV: u32` 及**由机器从 `qaqh-ringing-v3` 类型定义自动计算（或 `build.rs`/宏校验）的协议指纹 `PROTOCOL_FINGERPRINT: [u8; 32]`**（严禁手改字符串版本）；
-     - `ClientHello` / `ServerHello`（`client_instance_id`、`ClientKind`、能力位、鉴权凭据/本地 OS 标识、`min_supported_rev` 校验；失配即 `HandshakeReject` Fail-Closed）；
+     - `RINGING_V3_ALPN = b"qaqh-ringing/3"`、`PROTOCOL_REV: u32` 及**由机器从 `qaqh-ringing-v3` 类型定义自动计算（`build.rs`）的协议指纹 `PROTOCOL_FINGERPRINT: [u8; 32]`**（严禁手改字符串版本）；
+     - `ClientHello` / `ServerHello`（`client_instance_id`、`ClientKind`、本地 OS 凭据 / `iroh` `EndpointId` 鉴权凭据；**桌面与移动端统一执行严格同版 `PROTOCOL_REV` + `PROTOCOL_FINGERPRINT` Fail-Closed 校验**，失配即 `HandshakeReject`）；
      - 长度前缀 + `postcard` 编解码与单帧字节上限守卫（防恶意/异常超大帧 OOM）；
-     - 无版本最终名服务发现结构 **`DaemonEndpoint`**（对应磁盘 `daemon.endpoint`，固定单一非 JSON 格式，含 `build_id` / `channel` / 本地 IPC 路径 / QUIC 地址与指纹，0 `serde_json`）；
-  3. **一网打尽全量强类型 RPC 与四流帧**：
+     - 无版本最终名服务发现结构 **`DaemonEndpoint`**（对应磁盘 `daemon.endpoint`，固定单一非 JSON 格式，含 `build_id` / `channel` / 本地 IPC 路径 / `iroh_endpoint_id` 与 `iroh_relay_url` 预留字段，0 `serde_json`）；
+  3. **一网打尽全量强类型 RPC 与四流帧（按因果独立域分流）**：
      - `ControlRequest` / `ControlResponse` 完整覆盖：`System`（Health/Activity/Version/Stop/StopIfIdle）、`Session`（首屏 `GetSessionSnapshot` 支持 `tail_blocks`、独立 `pinned_compaction: Option<CompactionSummary>`、`turns` 窗口上限；向上翻页 `GetTranscriptPage { session_id, before_ord, limit, timeline_epoch }` 一次带齐关联 `ToolCallView` 与跨页工具归属规则，epoch 失配返回 `StaleCursor`）、`Command`、`Shell`、`Marketplace`、`Config`、`Account`、`Pairing`、`Gitx`、`Fs`、`ToolCatalog`；
      - **显式排除**：不纳入 `InspectModelContext`，不加入 `local_readonly_path: Option<PathBuf>`，不把后端 `opaque` 锚点带上客户端 wire；所有动态参数仅用强类型 `JsonText(String)` / `Bytes`；
-     - 四类逻辑流（`StreamKind::Control | SessionEvents { session_id, since_seq } | ShellPty { shell_id, from_offset } | BlobTransfer`）、`DeliveryClass`（`Reliable | Replaceable`）、`server_ts_ms: u64` 与原生多端联动帧。
+     - 四类逻辑流（`StreamKind::Control | SessionEvents { session_id, since_seq } | ShellPty { shell_id, from_offset } | BlobTransfer`）、`DeliveryClass`（`Reliable | Replaceable`，同会话死守单流单 `seq`，绝不按分级拆流）、`server_ts_ms: u64` 与原生多端联动帧（含单点定序 `DriverChanged`）。
   4. **全部 DTO 采用 externally-tagged `enum` / 无 `skip_serializing_if` `struct`**，命名永久无 `V3` 业务前缀、0 `#[serde(alias)]`、0 自报 `owner_id`/`client_id`。
 - **反证与验证（V3 双重反腐闸）**：
   - `cargo tree -p qaqh-ringing-v3 -e normal,build -i serde_json` **输出为空**；
@@ -116,12 +116,12 @@ flowchart TD
 
 ### 4. `P3-4` — `v3_server` + `client/v3` 隔离骨架 + `duplex` 闭环 + 6 条跨代不变量守卫 + 前置 ADR
 - **Worktree & 分支**：`../qaqh-wt-v4.6-p3-4` · `feat/v4.6-p3-4-v3-duplex-and-invariants`
-- **宪法与决策依据**：宪法 #5、#6、#7、#10 · `V4_6_DECISION_PACK.md` D3/D4 · [ADR-0042 r3](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 3–7。
+- **宪法与决策依据**：宪法 #5、#6、#7、#10 · `V4_6_DECISION_PACK.md` D3/D4/增补 · [ADR-0042 r4](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 3–7。
 - **改动目标**：
   1. 在 `crates/qaqh-daemon/src/v3_server/` 与 `crates/qaqh-client/src/v3/` 建立物理隔离的 V3 服务端与客户端骨架：
-     - 引入 `yamux` + `tokio-util::compat`（**按宪法 #16 开工前查最新官方 crate API**，配独立 `Connection` driver task），实现统一流传输抽象支持 `tokio::io::duplex` 内存多路复用闭环；
-     - `client/v3` 对消费端仅暴露极简原生 async Stream/Handle，并在 `daemon.endpoint` 读取校验层落地 `build_id` / `channel` Fail-Closed 拒绝过期守护进程逻辑；
-     - **同步记录 Windows Named Pipe 显式 Owner-Only DACL + `reject_remote_clients(true)` 与协议演进契约规则**，确保 `v4.7` 本地传输零返工；
+     - 定义极薄 **`MuxTransport` trait**（`open_bi`/`accept_bi`/`open_uni`/`accept_uni`，直接对齐 `v4.8` `iroh::Connection`），引入 `yamux` + `tokio-util::compat`（**按宪法 #16 开工前查最新官方 crate API**，配独立 `Connection` driver task），实现 `tokio::io::duplex` 内存多路复用闭环；
+     - `client/v3` 对消费端仅暴露极简原生 async Stream/Handle，固化 `SessionEvents` 为前端唯一状态真相源，并在 `daemon.endpoint` 读取校验层落地 `build_id` / `channel` / `fingerprint` Fail-Closed 拒绝过期守护进程逻辑；
+     - **同步记录 Windows Named Pipe 显式 Owner-Only DACL + `reject_remote_clients(true)` 与严格同版协议演进规则**，确保 `v4.7` 本地 IPC 与 `v4.8` `iroh` 传输零返工；
   2. **按域细分 `v3_server` 纯 `async` 门面 + 泛型静态分发**：
      - 拆出 `SystemFacade` / `ConfigAccountFacade` / `MarketplaceFacade` / `GitxFacade` / `FsFacade` / `SessionFacade` / `ShellFacade`（配独立并发句柄表，不碰中央 `registry` 锁）/ `BlobFacade`，统一通过 **`V3Server<B>` 泛型静态分发**接入（无 `dyn` 装箱妥协），明确 `v3_server` 内的后端→DTO 单向投影边界；
   3. **优先落地 `ringing_v3_invariants` 六大跨代不变量守卫测试集**（全部跑在 `duplex` 真多路流上）：
@@ -129,8 +129,8 @@ flowchart TD
      - ② **多流背压隔离与量化延迟上界**：大 Blob 满载分片 + PTY 刷屏 + 会话 A 洪峰并发时，Control RPC 往返 **P99 < 50ms** 且会话 B 不饿死；
      - ③ **断联不杀进程 + 幂等回执**：断开连接不终止 exec/shell，同 `command_id` 重放返回原回执；
      - ④ **身份单权威不可伪造**：越权访问他人会话/Shell 或低 scope 调 Admin RPC 当场拒绝；
-     - ⑤ **多端联动原语**：双内存客户端同时附着同一会话与 Shell、Driver 席位交接广播、设备吊销即时踢流；
-     - ⑥ **前端渲染预算保护（初心守卫）**：高频 `Replaceable` 洪峰不拖慢同流 `Reliable` 审批/终态，大输出走 `BlobRef`/泄洪引用，支持 `pinned_compaction` 分离与 `GetTranscriptPage` `StaleCursor` 校验。
+     - ⑤ **多端联动原语**：双内存客户端同时附着同一会话与 Shell、`SwitchDriver` 由 `OwnerPump` 单点定序广播 `DriverChanged` 且非 Driver 端发 `SendPrompt` 当场拒绝、设备吊销即时踢流；
+     - ⑥ **前端渲染预算保护（初心守卫）**：高频 `Replaceable` 洪峰经同流合帧后不拖慢同流 `Reliable` 审批/终态且**严格保序（`Reliable` 前先 flush 已合并增量，绝不终态早于尾增量乱序）**，大输出走 `BlobRef`/泄洪引用，支持 `pinned_compaction` 分离与 `GetTranscriptPage` `StaleCursor` 校验。
   4. **补齐两份轻量定案 ADR**（状态：`已采纳 · 未实施`）：
      - 无 WebView（`qaqh-gpui`）下的原生结构化可视化策略 ADR（处置 [widget-directive-protocol-2026-11-12.md](../widget-directive-protocol-2026-11-12.md)）；
      - `audit v1/v2` 与 `JOURNAL_IO` 最终归属 ADR。
@@ -149,7 +149,7 @@ flowchart TD
 请在 `/home/qaqtam/项目/qaqh-backend` 推进 `v4.6` 路线图的 **`<SLICE_ID>`** 切片。
 
 ### 开工前必读与现场核查（宪法 #14、#15、#16）
-1. 阅读 `AGENTS.md`（宪法 v2）、`docs/adr/0042-ringing-v3-rust-native-ipc-and-quic.md`（r3）、`docs/v4.3-4.8/V4_6_DECISION_PACK.md` 与 `docs/v4.3-4.8/V4_6_EXECUTION_PLAN.md` 中 `<SLICE_ID>` 小节（若做 `P3-0` 必读 `V4_5_1_PR45_REMEDIATION_GUIDE.md` §二）。
+1. 阅读 `AGENTS.md`（宪法 v2）、`docs/adr/0042-ringing-v3-rust-native-ipc-and-quic.md`（r4）、`docs/v4.3-4.8/V4_6_DECISION_PACK.md` 与 `docs/v4.3-4.8/V4_6_EXECUTION_PLAN.md` 中 `<SLICE_ID>` 小节（若做 `P3-0` 必读 `V4_5_1_PR45_REMEDIATION_GUIDE.md` §二）。
 2. 先运行只读检查：
    - 核查磁盘可用空间、可用内存、CPU 核数（8 逻辑核 / 7.7 GiB RAM，禁止本地全仓 `--release`）；
    - `git fetch origin && git status -sb && git worktree list`；
