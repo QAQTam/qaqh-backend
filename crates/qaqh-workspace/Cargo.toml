@@ -7,6 +7,7 @@ description = "QAQ-Harness in-process tool execution library"
 
 [dependencies]
 # Tool SDK 核心（P2 拆分）：typed 契约/描述符/投影/schema 的单一事实源。
+qaqh-core-vocab = { path = "../qaqh-core-vocab" }
 qaqh-tool-core = { path = "../qaqh-tool-core" }
 qaqh-dsaccount = { path = "../qaqh-dsaccount" }
 # 文件/进程工具组（P2(d) 拆分）：工具实现移入，门面经 re-export 保路径。
@@ -19,6 +20,8 @@ qaqh-sandbox = { path = "../qaqh-sandbox" }
 qaqh-types = { path = "../qaqh-types" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# 目录投影的契约错误类型（v4.6 P3-2；与全仓 `thiserror = "2"` 同一条）。
+thiserror = "2"
 # Tool SDK v1（09-15 spec Q1 已决策）：Args/Output schema 由类型生成。
 schemars = "1"
 # ToolError/FatalToolError 的诊断 source（base spec §7.1/§7.2，不序列化）。

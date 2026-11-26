@@ -1,0 +1,19 @@
+[package]
+name = "qaqh-core-vocab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RingingV3 纯原语底座：强类型 ID newtype、纯净域枚举与只读 ToolCatalog（零 serde_json）"
+
+# **依赖面是宪法级约束**（`ADR-0042` 铁律 1 / `V4_6_DECISION_PACK` D1 `1C′`）：
+# 本 crate 是 V3 线缆词汇表的唯一来源，必须能被 `postcard` 直接编码。任何引入
+# `serde_json` 的依赖都会把裸 `Value` 逃生口带回来——`cargo tree -e normal,build
+# -i serde_json` 必须恒为空，这是 CI 级红线，不是建议。
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+# ContentHash 的 hex 编解码（`workspace` 单源，v4.5 P2-2a 起全仓不再手写 hex）。
+hex = { workspace = true }
+
+[lints]
+workspace = true

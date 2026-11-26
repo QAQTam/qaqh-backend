@@ -22,6 +22,10 @@ use crate::{
     },
 };
 
+/// v4.6 P3-2：运行期能力 → `qaqh_core_vocab::ToolCatalog` 单向投影（独立子模块；
+/// 宪法 #8：本文件已过千行，投影实现不在此堆叠）。
+pub mod catalog;
+
 // ── Execution metadata ──
 
 #[derive(Clone, Debug)]

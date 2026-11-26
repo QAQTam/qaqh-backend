@@ -36,6 +36,13 @@ const READ_ONLY: ToolCapabilities = ToolCapabilities {
     idempotent: true,
     workspace_bound: true,
     interactive: false,
+    image_output: false,
+};
+
+/// 纯只读**且会产图**（模型不吃图时该工具在目录里不可用）。
+const READ_ONLY_IMAGE: ToolCapabilities = ToolCapabilities {
+    image_output: true,
+    ..READ_ONLY
 };
 
 /// 纯只读、非 workspace 绑定（会话内存 / 网络）。
@@ -46,6 +53,7 @@ const READ_ONLY_UNBOUND: ToolCapabilities = ToolCapabilities {
     idempotent: true,
     workspace_bound: false,
     interactive: false,
+    image_output: false,
 };
 
 /// 工作区变更（串行、非幂等、workspace 绑定）。
@@ -56,6 +64,13 @@ const MUTATING: ToolCapabilities = ToolCapabilities {
     idempotent: false,
     workspace_bound: true,
     interactive: false,
+    image_output: false,
+};
+
+/// 工作区变更**且可能把既有产图结果带回模型**（`confirm_apply` 透传 pending 图像）。
+const MUTATING_IMAGE: ToolCapabilities = ToolCapabilities {
+    image_output: true,
+    ..MUTATING
 };
 
 /// 会话内存变更（串行、非幂等、非 workspace 绑定）。
@@ -66,6 +81,7 @@ const SESSION_MUTATING: ToolCapabilities = ToolCapabilities {
     idempotent: false,
     workspace_bound: false,
     interactive: false,
+    image_output: false,
 };
 
 /// 阻塞交互（串行、非幂等、非 workspace 绑定）。
@@ -76,6 +92,7 @@ const INTERACTIVE: ToolCapabilities = ToolCapabilities {
     idempotent: false,
     workspace_bound: false,
     interactive: true,
+    image_output: false,
 };
 
 /// 执行会话工具：独占批次，poll 和输入共享每会话交互锁。
@@ -86,6 +103,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
     idempotent: false,
     workspace_bound: true,
     interactive: false,
+    image_output: false,
 };
 
 /// 迁移表：条目顺序与注册表词表一致（`registration.rs` 的
@@ -93,7 +111,7 @@ const EXEC: ToolCapabilities = ToolCapabilities {
 const TABLE: [(&str, ToolCapabilities); 20] = [
     ("apply_patch", MUTATING),
     ("ask", INTERACTIVE),
-    ("confirm_apply", MUTATING),
+    ("confirm_apply", MUTATING_IMAGE),
     ("copy_range", MUTATING),
     ("delete", MUTATING),
     ("edit", MUTATING),
@@ -101,7 +119,7 @@ const TABLE: [(&str, ToolCapabilities); 20] = [
     ("glob", READ_ONLY),
     ("grep", READ_ONLY),
     ("read", READ_ONLY),
-    ("read_image", READ_ONLY),
+    ("read_image", READ_ONLY_IMAGE),
     // search：官方 Search 端点（网络，不碰工作区）。与 `tool_search`（检索工具
     // 目录的元工具）不是一回事。
     ("search", READ_ONLY_UNBOUND),

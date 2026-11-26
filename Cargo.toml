@@ -4,6 +4,7 @@ members = [
     "crates/mutil-ai",
     "crates/qaqh-gate",
     "crates/qaqh-config",
+    "crates/qaqh-core-vocab",
     "crates/qaqh-profile",
     "crates/qaqh-skills",
     "crates/qaqh-hooks",

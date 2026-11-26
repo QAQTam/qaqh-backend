@@ -2725,6 +2725,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qaqh-core-vocab"
+version = "4.2.0"
+dependencies = [
+ "hex",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "qaqh-daemon"
 version = "4.2.0"
 dependencies = [
@@ -3210,6 +3219,7 @@ dependencies = [
  "image",
  "libc",
  "log",
+ "qaqh-core-vocab",
  "qaqh-dsaccount",
  "qaqh-file-tools",
  "qaqh-permission",
@@ -3224,6 +3234,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.21",
  "ureq",
  "winresource",
 ]
