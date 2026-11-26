@@ -18,7 +18,9 @@ pub(crate) use projection::project_responses_messages;
 use projection::provider_state_item;
 #[cfg(all(test, feature = "native-tool-plan"))]
 use projection::native_call_from_item;
-use reconcile::{freeform_custom_blocks, interpret_provider_stream, reconcile_streamed_tool_calls};
+#[cfg(test)]
+use reconcile::freeform_custom_blocks;
+use reconcile::{assemble_terminal_blocks, interpret_provider_stream, reconcile_streamed_tool_calls};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -50,7 +52,7 @@ use qaqh_types::{ContentBlock, Message, ToolDef, UsageInfo};
 /// （见下面的 `adapt_native` stub）。
 #[cfg(not(feature = "native-tool-plan"))]
 #[derive(Debug)]
-pub(crate) enum ModelToolPlan {}
+pub(super) enum ModelToolPlan {}
 
 use super::sdk_common::{
     CancelWatch, Outcome, REQUEST_TOTAL_TIMEOUT, RetryHub, adopt_identity,
@@ -95,7 +97,7 @@ fn provider_function_name<'a>(name: &'a str, compat: &'a ResponsesCompat) -> &'a
         .unwrap_or(name)
 }
 
-fn canonical_function_name(name: &str, compat: &ResponsesCompat) -> String {
+pub(super) fn canonical_function_name(name: &str, compat: &ResponsesCompat) -> String {
     match compat.search_function_alias.as_deref() {
         Some(alias) if !alias.is_empty() && name == alias => "search".into(),
         _ => name.to_string(),
@@ -551,7 +553,7 @@ fn plan_declarations(
 }
 
 #[cfg(feature = "native-tool-plan")]
-fn adapt_native(
+pub(super) fn adapt_native(
     call: &mutil_ai::NativeToolCall,
     plan: Option<&ModelToolPlan>,
 ) -> anyhow::Result<Vec<ContentBlock>> {
@@ -639,7 +641,7 @@ fn adapt_native(
 /// feature 关闭时的 fail-closed 实现：不解析原生调用，也不放行——与「provider 回来
 /// 了原生调用但没有人给过 plan」的错误语义完全一致。
 #[cfg(not(feature = "native-tool-plan"))]
-fn adapt_native(
+pub(super) fn adapt_native(
     _call: &mutil_ai::NativeToolCall,
     _plan: Option<&ModelToolPlan>,
 ) -> anyhow::Result<Vec<ContentBlock>> {
@@ -682,75 +684,6 @@ fn server_tool_status_name(state: ServerToolState) -> &'static str {
         ServerToolState::Failed => "failed",
         ServerToolState::Unknown => "in_progress",
     }
-}
-
-/// Done 收口的 raw_message：由 SDK 组装好的 assistant message parts 映射回
-/// harness 内容块（ProviderItem→ResponseOutputItem；web_search_call 额外派生
-/// WebSearchCall 块；工具名反转 alias）。
-fn response_message_to_blocks(msg: &WireMessage, compat: &ResponsesCompat) -> Vec<ContentBlock> {
-    let mut blocks: Vec<ContentBlock> = Vec::new();
-    for part in &msg.parts {
-        match part {
-            Part::Text { text, .. } => {
-                if !text.is_empty() {
-                    blocks.push(ContentBlock::text(text));
-                }
-            }
-            Part::Reasoning(r) => {
-                // 类别来自 SDK 的分类位：`Text` = 完整思考，`Summary` = 摘要。
-                // 非可展示类别（密文 / 被安全策略抹除）即使带了文本也不进历史与
-                // UI——UI 分不清这两者时会把摘要（或密文）当成模型的思考展示。
-                let kind = stored_reasoning_kind(r.kind.clone());
-                let t = r
-                    .text
-                    .clone()
-                    .or_else(|| r.summary.clone())
-                    .filter(|s| !s.is_empty());
-                if let (true, Some(reasoning)) = (kind.is_displayable(), t) {
-                    blocks.push(ContentBlock::Reasoning {
-                        reasoning,
-                        kind: Some(kind),
-                    });
-                }
-            }
-            Part::ToolCall(call) => {
-                let id = call.id.clone().unwrap_or_default();
-                let name = canonical_function_name(&call.name, compat);
-                blocks.push(ContentBlock::ToolUse {
-                    id,
-                    name,
-                    input: call.arguments.clone(),
-                });
-            }
-            Part::ProviderItem(item) => {
-                let data = item.provider_state.data.clone();
-                if data.get("type").and_then(|v| v.as_str()) == Some("web_search_call") {
-                    let id = data
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let action = data
-                        .get("action")
-                        .cloned()
-                        .unwrap_or_else(|| serde_json::json!({"type": "search"}));
-                    blocks.push(ContentBlock::WebSearchCall { id, action });
-                }
-                blocks.push(ContentBlock::ResponseOutputItem { item: data });
-            }
-            Part::ToolResult(result) => {
-                blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: result
-                        .call_id
-                        .clone()
-                        .unwrap_or_else(|| result.name.clone()),
-                    result: qaqh_types::ToolResult::ok(result.content.clone()),
-                });
-            }
-            _ => {}
-        }
-    }
-    blocks
 }
 
 #[derive(Default)]
@@ -1051,106 +984,16 @@ async fn consume(
                 {
                     resp.usage = Some(usage_to_info_responses(usage));
                 }
-                let mut mapping_compat = compat.clone();
-                if plan.is_some() {
-                    mapping_compat.search_function_alias = None;
-                }
-                let mut blocks = response_message_to_blocks(&response.message, &mapping_compat);
-                if let Some(output) = response
-                    .raw
-                    .get("output")
-                    .or_else(|| response.raw.get("response").and_then(|r| r.get("output")))
-                    .and_then(|o| o.as_array())
-                {
-                    for item in output {
-                        let has_encrypted = item.get("encrypted_content").is_some();
-                        let it_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                        if !has_encrypted
-                            && matches!(it_type, "function_call" | "custom_tool_call" | "message")
-                        {
-                            continue;
-                        }
-                        let already = blocks.iter().any(|b| {
-                            matches!(b, ContentBlock::ResponseOutputItem { item: existing } if existing == item)
-                        });
-                        if !already {
-                            blocks.push(ContentBlock::ResponseOutputItem { item: item.clone() });
-                        }
-                    }
-                }
-                // 终态没带回来的调用按流补（见 `reconcile_streamed_tool_calls`）。
-                let native_ids: std::collections::HashSet<&str> = response
-                    .message
-                    .parts
-                    .iter()
-                    .filter_map(|part| match part {
-                        Part::NativeToolCall(call) => Some(call.call_id.as_str()),
-                        _ => None,
-                    })
-                    .chain(native_calls.values().map(|call| call.call_id.as_str()))
-                    .collect();
-                let ordinary_streamed = resp
-                    .tools
-                    .iter()
-                    .filter(|(_, (id, _, _))| !native_ids.contains(id.as_str()))
-                    .map(|(index, value)| (*index, value.clone()))
-                    .collect();
-                reconcile_streamed_tool_calls(&mut blocks, &ordinary_streamed);
-                if plan.is_some() {
-                    // Re-admit every function through the frozen plan, including legacy flat calls.
-                    let mut admitted = Vec::new();
-                    for block in blocks {
-                        if let ContentBlock::ToolUse { id, name, input } = block {
-                            let native = mutil_ai::NativeToolCall {
-                                kind: mutil_ai::NativeToolKind::Function,
-                                namespace: None,
-                                name,
-                                call_id: id,
-                                item_id: None,
-                                payload: mutil_ai::NativeToolPayload::JsonArguments(
-                                    input.to_string(),
-                                ),
-                                completion: mutil_ai::NativeToolCompletion::Completed,
-                                provider_state: None,
-                            };
-                            match adapt_native(&native, plan) {
-                                Ok(v) => admitted.extend(v),
-                                Err(e) => return Outcome::Fatal(e),
-                            }
-                        } else {
-                            admitted.push(block);
-                        }
-                    }
-                    blocks = admitted;
-                }
-                for part in &response.message.parts {
-                    if let Part::NativeToolCall(call) = part {
-                        if !native_calls
-                            .values()
-                            .any(|known| known.call_id == call.call_id)
-                        {
-                            native_calls.insert(usize::MAX - native_calls.len(), call.clone());
-                        }
-                    }
-                }
-                let mut calls: Vec<_> = native_calls.into_iter().collect();
-                calls.sort_by_key(|(index, _)| *index);
-                let mut seen = std::collections::HashSet::new();
-                for (_, call) in calls {
-                    if !seen.insert(call.call_id.clone()) {
-                        continue;
-                    }
-                    if plan.is_none()
-                        && let Some(freeform) = freeform_custom_blocks(&call)
-                    {
-                        blocks.extend(freeform);
-                        continue;
-                    }
-                    match adapt_native(&call, plan) {
-                        Ok(v) => blocks.extend(v),
-                        Err(e) => return Outcome::Fatal(e),
-                    }
-                }
+                let blocks = match assemble_terminal_blocks(
+                    &response,
+                    &resp.tools,
+                    native_calls,
+                    &compat,
+                    plan,
+                ) {
+                    Ok(blocks) => blocks,
+                    Err(e) => return Outcome::Fatal(e),
+                };
                 on_event(StreamEvent::Done {
                     raw_message: Message {
                         msg_id: None,

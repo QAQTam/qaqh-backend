@@ -12,8 +12,9 @@ use super::{
     resolve_api_key, send_json_retry, send_stream_retry, validate_tool_choice,
 };
 use super::openai_responses_custom::{
-    backfill_custom_inputs, custom_event_index, custom_identity, parse_custom_item,
-    parse_custom_item_with_fallback, reconcile_custom_output_items,
+    accumulator_to_part, backfill_custom_inputs, custom_event_index, custom_identity,
+    parse_custom_item, parse_custom_item_with_fallback, reconcile_and_backfill_streamed_calls,
+    reconcile_custom_output_items,
 };
 use crate::error::{Error, Result};
 use crate::headers::{RequestOptions, TransportConfig};
@@ -622,7 +623,7 @@ fn responses_response_format(format: &ResponseFormat) -> Value {
     }
 }
 
-enum ResponsesPartAccumulator {
+pub(super) enum ResponsesPartAccumulator {
     Text(String),
     Reasoning {
         summary: String,
@@ -799,84 +800,12 @@ impl ResponsesStreamMapper {
                 ));
             }
         }
-        if normalized.message.parts.is_empty() && !self.parts.is_empty() {
-            // Compatible endpoints that omit the authoritative `output` array
-            // on `response.completed` still streamed their items through
-            // `output_item.done`; backfill them from the accumulator so the
-            // terminal response is never empty.
-            normalized.message = Message::new(Role::Assistant, self.accumulated_parts());
-        }
-        // A terminal response may omit one function item while still carrying
-        // text. Backfill completed `output_item.done` function items that are
-        // absent from the terminal output; namespaced calls keep their native
-        // identity instead of degrading to a flat legacy call.
-        let streamed_function_items: Vec<Value> = self
-            .parts
-            .values()
-            .filter_map(|part| match part {
-                ResponsesPartAccumulator::ToolCall {
-                    item: Some(item), ..
-                } => Some(item.clone()),
-                _ => None,
-            })
-            .collect();
-        for item in streamed_function_items {
-            if item
-                .get("status")
-                .and_then(Value::as_str)
-                .is_some_and(|status| status != "completed")
-            {
-                continue;
-            }
-            let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
-                continue;
-            };
-            if terminal_ids.contains(call_id) {
-                continue;
-            }
-            let mut extra = from_responses_response(json!({"output": [item]}))?;
-            for part in extra.message.parts.drain(..) {
-                let id = match &part {
-                    Part::NativeToolCall(call) => Some(call.call_id.clone()),
-                    Part::ToolCall(call) => call.id.clone(),
-                    _ => None,
-                };
-                if let Some(id) = id
-                    && terminal_ids.insert(id)
-                {
-                    normalized.message.parts.push(part);
-                }
-            }
-        }
-        let mut streamed_ids = std::collections::HashSet::new();
-        for call in self.custom_calls.values() {
-            let call = call.completed_call()?;
-            if !streamed_ids.insert(call.call_id.clone()) {
-                return Err(Error::StreamProtocol(
-                    "tool_identity_conflict: duplicate call_id".into(),
-                ));
-            }
-            if terminal_ids.contains(&call.call_id)
-                && !normalized.message.parts.iter().any(|part| matches!(part, Part::NativeToolCall(other) if other.call_id == call.call_id && other.kind == NativeToolKind::Custom)) {
-                return Err(Error::StreamProtocol("tool_identity_conflict: duplicate call_id".into()));
-            }
-            if let Some(other) = normalized.message.parts.iter().find_map(|part| match part {
-                Part::NativeToolCall(other) if other.call_id == call.call_id => Some(other),
-                _ => None,
-            }) && (other.namespace != call.namespace
-                || other.name != call.name
-                || other.item_id != call.item_id
-                || other.payload != call.payload)
-            {
-                return Err(Error::StreamProtocol(
-                    "tool_identity_conflict: terminal call differs from stream".into(),
-                ));
-            }
-            if !terminal_ids.contains(&call.call_id) {
-                terminal_ids.insert(call.call_id.clone());
-                normalized.message.parts.push(Part::NativeToolCall(call));
-            }
-        }
+        reconcile_and_backfill_streamed_calls(
+            &mut normalized,
+            &mut self.parts,
+            &self.custom_calls,
+            &mut terminal_ids,
+        )?;
         normalized.metadata = Some(self.metadata.clone());
         if !self.limits.retain_raw {
             normalized.raw = Value::Null;
@@ -902,65 +831,10 @@ impl ResponsesStreamMapper {
     }
 
     fn accumulated_parts(&mut self) -> Vec<Part> {
-        let mut parts = Vec::new();
-
-        for part in std::mem::take(&mut self.parts).into_values() {
-            match part {
-                ResponsesPartAccumulator::Text(text) => {
-                    if !text.is_empty() {
-                        parts.push(Part::text(text));
-                    }
-                }
-                ResponsesPartAccumulator::Reasoning {
-                    summary,
-                    text,
-                    item,
-                } => {
-                    if let Some(item) = item {
-                        parts.push(Part::reasoning(responses_reasoning_part(&item)));
-                    } else {
-                        parts.push(Part::reasoning(Reasoning {
-                            kind: if text.is_empty() {
-                                ReasoningKind::Summary
-                            } else {
-                                ReasoningKind::Text
-                            },
-                            summary: (!summary.is_empty()).then_some(summary),
-                            text: (!text.is_empty()).then_some(text),
-                            state: None,
-                        }));
-                    }
-                }
-                ResponsesPartAccumulator::ToolCall {
-                    call_id,
-                    name,
-                    arguments,
-                    item,
-                } => {
-                    let arguments = if arguments.trim().is_empty() {
-                        json!({})
-                    } else {
-                        parse_json_or_string(&arguments)
-                    };
-                    parts.push(Part::ToolCall(ToolCall {
-                        id: call_id.or_else(|| {
-                            item.as_ref()
-                                .and_then(|item| item.get("id"))
-                                .and_then(Value::as_str)
-                                .map(str::to_string)
-                        }),
-                        name,
-                        arguments,
-                        provider_state: None,
-                    }));
-                }
-                ResponsesPartAccumulator::ProviderItem(item) => {
-                    parts.push(Part::ProviderItem(responses_server_tool_item(&item)));
-                }
-            }
-        }
-
-        parts
+        std::mem::take(&mut self.parts)
+            .into_values()
+            .filter_map(accumulator_to_part)
+            .collect()
     }
 
     fn finish_events(&mut self) -> Result<Vec<StreamEvent>> {
@@ -1494,7 +1368,7 @@ fn is_responses_server_item(kind: &str) -> bool {
     )
 }
 
-fn responses_server_tool_item(item: &Value) -> crate::types::ServerToolItem {
+pub(super) fn responses_server_tool_item(item: &Value) -> crate::types::ServerToolItem {
     let kind = item.get("type").and_then(Value::as_str);
     let call_id = item
         .get("call_id")
@@ -1548,7 +1422,7 @@ fn responses_server_tool(tool: &crate::types::ServerTool) -> Value {
     }
 }
 
-fn responses_reasoning_part(item: &Value) -> Reasoning {
+pub(super) fn responses_reasoning_part(item: &Value) -> Reasoning {
     let summary = item
         .get("summary")
         .and_then(Value::as_array)
@@ -1609,7 +1483,7 @@ fn responses_usage(usage: &Value) -> Usage {
     }
 }
 
-fn parse_json_or_string(value: &str) -> Value {
+pub(super) fn parse_json_or_string(value: &str) -> Value {
     crate::lenient::value_or_string(value)
 }
 

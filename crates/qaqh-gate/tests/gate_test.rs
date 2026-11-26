@@ -2407,3 +2407,197 @@ async fn concurrent_sessions_stream_in_parallel() {
         "cancelled slow stream must surface as an error"
     );
 }
+
+#[test]
+fn responses_preserves_interleaved_custom_apply_patch_and_function_call_order() {
+    let sse = |event: &str, data: serde_json::Value| {
+        mock_server::SseChunk::Raw(format!("event: {event}\ndata: {data}\n\n"))
+    };
+    let patch_1 = "*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch";
+    let patch_2 = "*** Begin Patch\n*** Update File: b.txt\n@@\n-x\n+y\n*** End Patch";
+    let scenario = vec![
+        sse(
+            "response.output_item.added",
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 0,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_patch_1",
+                    "name": "apply_patch",
+                    "input": "",
+                    "status": "in_progress"
+                }
+            }),
+        ),
+        sse(
+            "response.custom_tool_call_input.done",
+            serde_json::json!({
+                "type": "response.custom_tool_call_input.done",
+                "output_index": 0,
+                "item_id": "ctc_1",
+                "input": patch_1
+            }),
+        ),
+        sse(
+            "response.output_item.done",
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 0,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_patch_1",
+                    "name": "apply_patch",
+                    "status": "completed"
+                }
+            }),
+        ),
+        sse(
+            "response.output_item.added",
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_read",
+                    "call_id": "call_read",
+                    "name": "read",
+                    "arguments": "",
+                    "status": "in_progress"
+                }
+            }),
+        ),
+        sse(
+            "response.function_call_arguments.delta",
+            serde_json::json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": 1,
+                "item_id": "fc_read",
+                "delta": "{\"path\":\"a.txt\"}"
+            }),
+        ),
+        sse(
+            "response.output_item.done",
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 1,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_read",
+                    "call_id": "call_read",
+                    "name": "read",
+                    "arguments": "{\"path\":\"a.txt\"}",
+                    "status": "completed"
+                }
+            }),
+        ),
+        sse(
+            "response.output_item.added",
+            serde_json::json!({
+                "type": "response.output_item.added",
+                "output_index": 2,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_2",
+                    "call_id": "call_patch_2",
+                    "name": "apply_patch",
+                    "input": "",
+                    "status": "in_progress"
+                }
+            }),
+        ),
+        sse(
+            "response.custom_tool_call_input.done",
+            serde_json::json!({
+                "type": "response.custom_tool_call_input.done",
+                "output_index": 2,
+                "item_id": "ctc_2",
+                "input": patch_2
+            }),
+        ),
+        sse(
+            "response.output_item.done",
+            serde_json::json!({
+                "type": "response.output_item.done",
+                "output_index": 2,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_2",
+                    "call_id": "call_patch_2",
+                    "name": "apply_patch",
+                    "status": "completed"
+                }
+            }),
+        ),
+        sse(
+            "response.completed",
+            serde_json::json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_interleaved",
+                    "status": "completed",
+                    "model": "test-model",
+                    "output": [
+                        {
+                            "type": "custom_tool_call",
+                            "id": "ctc_1",
+                            "call_id": "call_patch_1",
+                            "name": "apply_patch",
+                            "input": patch_1,
+                            "status": "completed"
+                        },
+                        {
+                            "type": "function_call",
+                            "id": "fc_read",
+                            "call_id": "call_read",
+                            "name": "read",
+                            "arguments": "{\"path\":\"a.txt\"}",
+                            "status": "completed"
+                        },
+                        {
+                            "type": "custom_tool_call",
+                            "id": "ctc_2",
+                            "call_id": "call_patch_2",
+                            "name": "apply_patch",
+                            "input": patch_2,
+                            "status": "completed"
+                        }
+                    ],
+                    "usage": {"input_tokens": 5, "output_tokens": 10, "total_tokens": 15}
+                }
+            }),
+        ),
+        mock_server::SseChunk::done(),
+    ];
+
+    let mock = MockServer::new(scenario);
+    let mut provider = make_responses_provider(&mock);
+    provider.responses_compat.apply_patch_freeform = true;
+    let events = collect_events(
+        &provider,
+        vec![Message::user("patch then read then patch")],
+        None,
+    );
+
+    let done = events.iter().find_map(event_done).expect("Done emitted");
+    let tool_uses: Vec<(String, String)> = done
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolUse { id, name, .. } => Some((id.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tool_uses,
+        vec![
+            ("call_patch_1".to_string(), "apply_patch".to_string()),
+            ("call_read".to_string(), "read".to_string()),
+            ("call_patch_2".to_string(), "apply_patch".to_string()),
+        ],
+        "interleaved custom_tool_call and function_call must keep original model order: {:?}",
+        done.content
+    );
+}

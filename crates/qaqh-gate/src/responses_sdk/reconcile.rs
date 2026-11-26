@@ -1,13 +1,16 @@
 //! Responses API 终态对账、截断流解释与 freeform custom 调用收口。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use mutil_ai::{
+    ChatResponse, NativeToolCall, NativeToolCompletion, NativeToolKind, NativeToolPayload, Part,
+};
 use qaqh_types::{ContentBlock, Message, UsageInfo};
 
 use crate::usage;
 
-use super::canonical_function_name;
-use super::super::types::ResponsesCompat;
+use super::super::types::{ResponsesCompat, stored_reasoning_kind};
+use super::{ModelToolPlan, adapt_native, canonical_function_name};
 
 /// 生产路径（无 plan）的 freeform `apply_patch` 收口：DeepSeek Responses 的
 /// custom 工具只认 `{"type":"custom","name":"apply_patch"}`，模型返回
@@ -60,6 +63,64 @@ fn ids_could_be_alias(a: &str, b: &str) -> bool {
     a.is_empty() || b.is_empty() || (a.starts_with("fc_") != b.starts_with("fc_"))
 }
 
+fn reconcile_one_streamed_tool_call(
+    blocks: &mut Vec<ContentBlock>,
+    id: String,
+    name: String,
+    args: String,
+) {
+    if name.is_empty() {
+        return;
+    }
+    let parsed: Option<serde_json::Value> = mutil_ai::lenient::parse(&args);
+    let input = match parsed {
+        // `null` / 非对象同样视为「参数不可还原」——不伪造。
+        Some(v) if v.is_object() => v,
+        _ => {
+            let covered = if !id.is_empty() && !id.starts_with("fc_") {
+                blocks.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { id: known_id, .. } if known_id == &id)
+                })
+            } else {
+                blocks.iter().any(|b| {
+                    matches!(b, ContentBlock::ToolUse { name: known_name, .. } if known_name == &name)
+                })
+            };
+            if covered {
+                // 终态已带对应调用：流内条目是同一调用的损坏副本，丢弃。
+                log::warn!(
+                    "Responses 收口流条目参数损坏(name={name:?},args_head={:?})且终态已带对应调用，按重复丢弃",
+                    args.chars().take(80).collect::<String>()
+                );
+                return;
+            }
+            log::warn!(
+                "Responses 收口流条目参数损坏(name={name:?},args_head={:?})，按 Null 参数收口交 runtime 如实报错",
+                args.chars().take(80).collect::<String>()
+            );
+            serde_json::Value::Null
+        }
+    };
+    let duplicate = blocks.iter().any(|block| match block {
+        ContentBlock::ToolUse {
+            id: known_id,
+            name: known_name,
+            input: known_input,
+        } => {
+            if known_name != &name {
+                return false;
+            }
+            known_id == &id || (ids_could_be_alias(known_id, &id) && known_input == &input)
+        }
+        _ => false,
+    });
+    if duplicate {
+        return;
+    }
+    log::warn!("Responses 收口缺 function_call(id={id:?},name={name:?})，按流补齐");
+    blocks.push(ContentBlock::ToolUse { id, name, input });
+}
+
 /// 收口对账：流里明明出现过 `function_call`，terminal 帧却没把它带回来。
 ///
 /// 兼容网关上这是真实形态：`response.output_item.done` 给了完整调用，
@@ -81,58 +142,230 @@ pub(super) fn reconcile_streamed_tool_calls(
         .collect();
     sorted.sort_by_key(|(index, _, _, _)| *index);
     for (_index, id, name, args) in sorted {
-        if name.is_empty() {
-            continue;
+        reconcile_one_streamed_tool_call(blocks, id, name, args);
+    }
+}
+
+fn adapt_or_freeform_native(
+    call: &NativeToolCall,
+    plan: Option<&ModelToolPlan>,
+) -> anyhow::Result<Vec<ContentBlock>> {
+    if plan.is_none()
+        && let Some(freeform) = freeform_custom_blocks(call)
+    {
+        return Ok(freeform);
+    }
+    adapt_native(call, plan)
+}
+
+fn readmit_new_tool_uses(
+    blocks: &mut Vec<ContentBlock>,
+    from_index: usize,
+    plan: Option<&ModelToolPlan>,
+) -> anyhow::Result<()> {
+    if plan.is_none() || from_index >= blocks.len() {
+        return Ok(());
+    }
+    let tail: Vec<ContentBlock> = blocks.drain(from_index..).collect();
+    for block in tail {
+        if let ContentBlock::ToolUse { id, name, input } = block {
+            let native = NativeToolCall {
+                kind: NativeToolKind::Function,
+                namespace: None,
+                name,
+                call_id: id,
+                item_id: None,
+                payload: NativeToolPayload::JsonArguments(input.to_string()),
+                completion: NativeToolCompletion::Completed,
+                provider_state: None,
+            };
+            blocks.extend(adapt_native(&native, plan)?);
+        } else {
+            blocks.push(block);
         }
-        let parsed: Option<serde_json::Value> = mutil_ai::lenient::parse(&args);
-        let input = match parsed {
-            // `null` / 非对象同样视为「参数不可还原」——不伪造。
-            Some(v) if v.is_object() => v,
-            _ => {
-                let covered = if !id.is_empty() && !id.starts_with("fc_") {
-                    blocks.iter().any(|b| {
-                        matches!(b, ContentBlock::ToolUse { id: known_id, .. } if known_id == &id)
-                    })
+    }
+    Ok(())
+}
+
+/// Assemble terminal `ContentBlock`s from a completed Responses `ChatResponse`
+/// while preserving the exact part order emitted by the model across
+/// `Part::ToolCall` (`function_call`) and `Part::NativeToolCall`
+/// (`custom_tool_call`), then reconcile any calls omitted from `output`.
+pub(super) fn assemble_terminal_blocks(
+    response: &ChatResponse,
+    streamed_tools: &HashMap<usize, (String, String, String)>,
+    native_calls: HashMap<usize, NativeToolCall>,
+    compat: &ResponsesCompat,
+    plan: Option<&ModelToolPlan>,
+) -> anyhow::Result<Vec<ContentBlock>> {
+    let mut mapping_compat = compat.clone();
+    if plan.is_some() {
+        mapping_compat.search_function_alias = None;
+    }
+
+    let mut blocks: Vec<ContentBlock> = Vec::new();
+    let mut seen_native_ids: HashSet<String> = HashSet::new();
+
+    for part in &response.message.parts {
+        match part {
+            Part::Text { text, .. } => {
+                if !text.is_empty() {
+                    blocks.push(ContentBlock::text(text));
+                }
+            }
+            Part::Reasoning(r) => {
+                let kind = stored_reasoning_kind(r.kind.clone());
+                let t = r
+                    .text
+                    .clone()
+                    .or_else(|| r.summary.clone())
+                    .filter(|s| !s.is_empty());
+                if let (true, Some(reasoning)) = (kind.is_displayable(), t) {
+                    blocks.push(ContentBlock::Reasoning {
+                        reasoning,
+                        kind: Some(kind),
+                    });
+                }
+            }
+            Part::ToolCall(call) => {
+                let id = call.id.clone().unwrap_or_default();
+                let name = canonical_function_name(&call.name, &mapping_compat);
+                if plan.is_some() {
+                    let native = NativeToolCall {
+                        kind: NativeToolKind::Function,
+                        namespace: None,
+                        name,
+                        call_id: id,
+                        item_id: None,
+                        payload: NativeToolPayload::JsonArguments(call.arguments.to_string()),
+                        completion: NativeToolCompletion::Completed,
+                        provider_state: None,
+                    };
+                    blocks.extend(adapt_native(&native, plan)?);
                 } else {
-                    blocks.iter().any(|b| {
-                        matches!(b, ContentBlock::ToolUse { name: known_name, .. } if known_name == &name)
-                    })
-                };
-                if covered {
-                    // 终态已带对应调用：流内条目是同一调用的损坏副本，丢弃。
-                    log::warn!(
-                        "Responses 收口流条目参数损坏(name={name:?},args_head={:?})且终态已带对应调用，按重复丢弃",
-                        args.chars().take(80).collect::<String>()
-                    );
+                    blocks.push(ContentBlock::ToolUse {
+                        id,
+                        name,
+                        input: call.arguments.clone(),
+                    });
+                }
+            }
+            Part::NativeToolCall(call) => {
+                if !seen_native_ids.insert(call.call_id.clone()) {
                     continue;
                 }
-                log::warn!(
-                    "Responses 收口流条目参数损坏(name={name:?},args_head={:?})，按 Null 参数收口交 runtime 如实报错",
-                    args.chars().take(80).collect::<String>()
-                );
-                serde_json::Value::Null
+                blocks.extend(adapt_or_freeform_native(call, plan)?);
             }
-        };
-        let duplicate = blocks.iter().any(|block| match block {
-            ContentBlock::ToolUse {
-                id: known_id,
-                name: known_name,
-                input: known_input,
-            } => {
-                if known_name != &name {
-                    return false;
+            Part::ProviderItem(item) => {
+                let data = item.provider_state.data.clone();
+                if data.get("type").and_then(|v| v.as_str()) == Some("web_search_call") {
+                    let id = data
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let action = data
+                        .get("action")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"type": "search"}));
+                    blocks.push(ContentBlock::WebSearchCall { id, action });
                 }
-                known_id == &id
-                    || (ids_could_be_alias(known_id, &id) && known_input == &input)
+                blocks.push(ContentBlock::ResponseOutputItem { item: data });
             }
-            _ => false,
-        });
-        if duplicate {
-            continue;
+            Part::ToolResult(result) => {
+                blocks.push(ContentBlock::ToolResult {
+                    tool_use_id: result
+                        .call_id
+                        .clone()
+                        .unwrap_or_else(|| result.name.clone()),
+                    result: qaqh_types::ToolResult::ok(result.content.clone()),
+                });
+            }
+            _ => {}
         }
-        log::warn!("Responses 收口缺 function_call(id={id:?},name={name:?})，按流补齐");
-        blocks.push(ContentBlock::ToolUse { id, name, input });
     }
+
+    if let Some(output) = response
+        .raw
+        .get("output")
+        .or_else(|| response.raw.get("response").and_then(|r| r.get("output")))
+        .and_then(|o| o.as_array())
+    {
+        for item in output {
+            let has_encrypted = item.get("encrypted_content").is_some();
+            let it_type = item.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if !has_encrypted
+                && matches!(it_type, "function_call" | "custom_tool_call" | "message")
+            {
+                continue;
+            }
+            let already = blocks.iter().any(|b| {
+                matches!(b, ContentBlock::ResponseOutputItem { item: existing } if existing == item)
+            });
+            if !already {
+                blocks.push(ContentBlock::ResponseOutputItem { item: item.clone() });
+            }
+        }
+    }
+
+    let native_ids: HashSet<&str> = response
+        .message
+        .parts
+        .iter()
+        .filter_map(|part| match part {
+            Part::NativeToolCall(call) => Some(call.call_id.as_str()),
+            _ => None,
+        })
+        .chain(native_calls.values().map(|call| call.call_id.as_str()))
+        .collect();
+    let ordinary_streamed: HashMap<usize, (String, String, String)> = streamed_tools
+        .iter()
+        .filter(|(_, (id, _, _))| !native_ids.contains(id.as_str()))
+        .map(|(index, value)| (*index, value.clone()))
+        .collect();
+    let mut unseen_native: Vec<(usize, NativeToolCall)> = native_calls
+        .into_iter()
+        .filter(|(_, call)| !seen_native_ids.contains(&call.call_id))
+        .collect();
+    unseen_native.sort_by_key(|(index, _)| *index);
+
+    if unseen_native.is_empty() {
+        let before = blocks.len();
+        reconcile_streamed_tool_calls(&mut blocks, &ordinary_streamed);
+        readmit_new_tool_uses(&mut blocks, before, plan)?;
+        return Ok(blocks);
+    }
+
+    enum StreamedFallback {
+        Ordinary(String, String, String),
+        Native(NativeToolCall),
+    }
+    let mut fallback: Vec<(usize, StreamedFallback)> = ordinary_streamed
+        .into_iter()
+        .map(|(index, (id, name, args))| (index, StreamedFallback::Ordinary(id, name, args)))
+        .chain(
+            unseen_native
+                .into_iter()
+                .map(|(index, call)| (index, StreamedFallback::Native(call))),
+        )
+        .collect();
+    fallback.sort_by_key(|(index, _)| *index);
+    for (_, entry) in fallback {
+        match entry {
+            StreamedFallback::Ordinary(id, name, args) => {
+                let before = blocks.len();
+                reconcile_one_streamed_tool_call(&mut blocks, id, name, args);
+                readmit_new_tool_uses(&mut blocks, before, plan)?;
+            }
+            StreamedFallback::Native(call) => {
+                if seen_native_ids.insert(call.call_id.clone()) {
+                    blocks.extend(adapt_or_freeform_native(&call, plan)?);
+                }
+            }
+        }
+    }
+
+    Ok(blocks)
 }
 
 /// `response.incomplete` 等价收口：SDK 把它当流错误抛出（事件原文在

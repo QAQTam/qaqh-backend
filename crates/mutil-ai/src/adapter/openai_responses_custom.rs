@@ -1,12 +1,17 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
+use super::openai_responses::{
+    ResponsesPartAccumulator, from_responses_response, parse_json_or_string,
+    responses_reasoning_part, responses_server_tool_item,
+};
 use crate::error::{Error, Result};
 use crate::native_tool_stream::{CustomToolAccumulator, NativeToolIdentity};
 use crate::types::{
-    NativeToolCall, NativeToolCompletion, NativeToolKind, NativeToolPayload, ProviderState,
-    ProviderStateFormat,
+    ChatResponse, Message, NativeToolCall, NativeToolCompletion, NativeToolKind,
+    NativeToolPayload, Part, ProviderState, ProviderStateFormat, Reasoning, ReasoningKind, Role,
+    ToolCall,
 };
 
 pub(super) fn find_custom_call_key(
@@ -181,6 +186,230 @@ pub(super) fn custom_event_index(event: &Value) -> Result<usize> {
         .and_then(Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| Error::StreamProtocol("tool_identity_conflict: missing output_index".into()))
+}
+
+pub(super) fn accumulator_to_part(part: ResponsesPartAccumulator) -> Option<Part> {
+    match part {
+        ResponsesPartAccumulator::Text(text) => (!text.is_empty()).then(|| Part::text(text)),
+        ResponsesPartAccumulator::Reasoning {
+            summary,
+            text,
+            item,
+        } => Some(if let Some(item) = item {
+            Part::reasoning(responses_reasoning_part(&item))
+        } else {
+            Part::reasoning(Reasoning {
+                kind: if text.is_empty() {
+                    ReasoningKind::Summary
+                } else {
+                    ReasoningKind::Text
+                },
+                summary: (!summary.is_empty()).then_some(summary),
+                text: (!text.is_empty()).then_some(text),
+                state: None,
+            })
+        }),
+        ResponsesPartAccumulator::ToolCall {
+            call_id,
+            name,
+            arguments,
+            item,
+        } => {
+            let arguments = if arguments.trim().is_empty() {
+                json!({})
+            } else {
+                parse_json_or_string(&arguments)
+            };
+            Some(Part::ToolCall(ToolCall {
+                id: call_id.or_else(|| {
+                    item.as_ref()
+                        .and_then(|item| item.get("id"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                }),
+                name,
+                arguments,
+                provider_state: None,
+            }))
+        }
+        ResponsesPartAccumulator::ProviderItem(item) => {
+            Some(Part::ProviderItem(responses_server_tool_item(&item)))
+        }
+    }
+}
+
+fn part_call_id(part: &Part) -> Option<&str> {
+    match part {
+        Part::NativeToolCall(call) => Some(call.call_id.as_str()),
+        Part::ToolCall(call) => call.id.as_deref(),
+        _ => None,
+    }
+}
+
+fn accumulator_part_for_complete(acc: ResponsesPartAccumulator) -> Result<Option<Part>> {
+    if let ResponsesPartAccumulator::ToolCall {
+        item: Some(ref item),
+        ..
+    } = acc
+        && item
+            .get("status")
+            .and_then(Value::as_str)
+            .is_none_or(|status| status == "completed")
+    {
+        let mut extra = from_responses_response(json!({ "output": [item] }))?;
+        if let Some(part) = extra.message.parts.drain(..).next() {
+            return Ok(Some(part));
+        }
+    }
+    Ok(accumulator_to_part(acc))
+}
+
+/// Validates streamed `custom_tool_call` records against terminal parts and
+/// backfills any omitted streamed items in `output_index` order.
+pub(super) fn reconcile_and_backfill_streamed_calls(
+    normalized: &mut ChatResponse,
+    parts: &mut BTreeMap<usize, ResponsesPartAccumulator>,
+    custom_calls: &BTreeMap<usize, CustomToolAccumulator>,
+    terminal_ids: &mut HashSet<String>,
+) -> Result<()> {
+    let mut streamed_ids = HashSet::new();
+    let mut validated_custom = Vec::with_capacity(custom_calls.len());
+    for (&output_index, call) in custom_calls {
+        let call = call.completed_call()?;
+        if !streamed_ids.insert(call.call_id.clone()) {
+            return Err(Error::StreamProtocol(
+                "tool_identity_conflict: duplicate call_id".into(),
+            ));
+        }
+        if terminal_ids.contains(&call.call_id)
+            && !normalized.message.parts.iter().any(|part| {
+                matches!(
+                    part,
+                    Part::NativeToolCall(other)
+                        if other.call_id == call.call_id && other.kind == NativeToolKind::Custom
+                )
+            })
+        {
+            return Err(Error::StreamProtocol(
+                "tool_identity_conflict: duplicate call_id".into(),
+            ));
+        }
+        if let Some(other) = normalized.message.parts.iter().find_map(|part| match part {
+            Part::NativeToolCall(other) if other.call_id == call.call_id => Some(other),
+            _ => None,
+        }) && (other.namespace != call.namespace
+            || other.name != call.name
+            || other.item_id != call.item_id
+            || other.payload != call.payload)
+        {
+            return Err(Error::StreamProtocol(
+                "tool_identity_conflict: terminal call differs from stream".into(),
+            ));
+        }
+        validated_custom.push((output_index, call));
+    }
+
+    if normalized.message.parts.is_empty() && (!parts.is_empty() || !validated_custom.is_empty()) {
+        // Compatible endpoints that omit the authoritative `output` array on
+        // `response.completed` still streamed their items through
+        // `output_item.done`; merge standard parts and custom calls by
+        // `output_index` so interleaved order is preserved.
+        let mut merged: BTreeMap<usize, Part> = BTreeMap::new();
+        for (idx, acc) in std::mem::take(parts) {
+            if let Some(part) = accumulator_part_for_complete(acc)? {
+                if let Some(id) = part_call_id(&part)
+                    && !terminal_ids.insert(id.to_owned())
+                {
+                    return Err(Error::StreamProtocol(
+                        "tool_identity_conflict: duplicate call_id".into(),
+                    ));
+                }
+                merged.insert(idx, part);
+            }
+        }
+        for (idx, call) in validated_custom {
+            if !terminal_ids.insert(call.call_id.clone()) {
+                return Err(Error::StreamProtocol(
+                    "tool_identity_conflict: duplicate call_id".into(),
+                ));
+            }
+            if merged.insert(idx, Part::NativeToolCall(call)).is_some() {
+                return Err(Error::StreamProtocol(
+                    "tool_identity_conflict: output index reused".into(),
+                ));
+            }
+        }
+        normalized.message = Message::new(Role::Assistant, merged.into_values().collect());
+        return Ok(());
+    }
+
+    let mut streamed_index_by_call_id: HashMap<String, usize> = HashMap::new();
+    for (&idx, acc) in parts.iter() {
+        if let ResponsesPartAccumulator::ToolCall { call_id, item, .. } = acc {
+            let id = call_id.as_deref().or_else(|| {
+                item.as_ref()
+                    .and_then(|item| item.get("call_id"))
+                    .and_then(Value::as_str)
+            });
+            if let Some(id) = id.filter(|s| !s.is_empty()) {
+                streamed_index_by_call_id.insert(id.to_owned(), idx);
+            }
+        }
+    }
+    for (idx, call) in &validated_custom {
+        streamed_index_by_call_id.insert(call.call_id.clone(), *idx);
+    }
+
+    let mut missing_by_index: BTreeMap<usize, Part> = BTreeMap::new();
+    for (&idx, acc) in parts.iter() {
+        let ResponsesPartAccumulator::ToolCall {
+            item: Some(item), ..
+        } = acc
+        else {
+            continue;
+        };
+        if item
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "completed")
+        {
+            continue;
+        }
+        let Some(call_id) = item.get("call_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if terminal_ids.contains(call_id) {
+            continue;
+        }
+        let mut extra = from_responses_response(json!({ "output": [item] }))?;
+        for part in extra.message.parts.drain(..) {
+            let id = part_call_id(&part).map(str::to_owned);
+            if let Some(id) = id
+                && terminal_ids.insert(id)
+            {
+                missing_by_index.insert(idx, part);
+            }
+        }
+    }
+    for (idx, call) in validated_custom {
+        if !terminal_ids.contains(&call.call_id) {
+            terminal_ids.insert(call.call_id.clone());
+            missing_by_index.insert(idx, Part::NativeToolCall(call));
+        }
+    }
+
+    for (missing_index, part) in missing_by_index {
+        let insert_at = normalized.message.parts.iter().position(|existing| {
+            part_call_id(existing)
+                .and_then(|id| streamed_index_by_call_id.get(id))
+                .is_some_and(|&idx| idx > missing_index)
+        });
+        match insert_at {
+            Some(pos) => normalized.message.parts.insert(pos, part),
+            None => normalized.message.parts.push(part),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -383,5 +612,219 @@ mod tests {
                 && delta == patch
                 && input_so_far == patch
         )));
+    }
+
+    fn send_event(mapper: &mut ResponsesStreamMapper, event: Value) -> Result<Vec<StreamEvent>> {
+        mapper.map(SseMessage {
+            event: None,
+            data: event.to_string(),
+            id: None,
+        })
+    }
+
+    fn new_mapper() -> ResponsesStreamMapper {
+        ResponsesStreamMapper::new(
+            "deepseek-v4-pro".into(),
+            ResponseMetadata {
+                status: 200,
+                request_id: None,
+                headers: HeaderMap::new(),
+            },
+        )
+    }
+
+    fn emit_custom_then_function(
+        mapper: &mut ResponsesStreamMapper,
+        include_text_at_0: bool,
+    ) {
+        let mut idx = 0usize;
+        if include_text_at_0 {
+            send_event(
+                mapper,
+                json!({
+                    "type": "response.output_text.delta",
+                    "output_index": 0,
+                    "content_index": 0,
+                    "delta": "patching first"
+                }),
+            )
+            .unwrap();
+            idx = 1;
+        }
+        let patch = "*** Begin Patch\n*** Add File: a.txt\n+ok\n*** End Patch";
+        send_event(
+            mapper,
+            json!({
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "",
+                    "status": "in_progress"
+                }
+            }),
+        )
+        .unwrap();
+        send_event(
+            mapper,
+            json!({
+                "type": "response.custom_tool_call_input.done",
+                "output_index": idx,
+                "item_id": "ctc_1",
+                "input": patch
+            }),
+        )
+        .unwrap();
+        send_event(
+            mapper,
+            json!({
+                "type": "response.output_item.done",
+                "output_index": idx,
+                "item": {
+                    "type": "custom_tool_call",
+                    "id": "ctc_1",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "status": "completed"
+                }
+            }),
+        )
+        .unwrap();
+
+        let fn_idx = idx + 1;
+        send_event(
+            mapper,
+            json!({
+                "type": "response.output_item.added",
+                "output_index": fn_idx,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_read",
+                    "name": "read",
+                    "arguments": "",
+                    "status": "in_progress"
+                }
+            }),
+        )
+        .unwrap();
+        send_event(
+            mapper,
+            json!({
+                "type": "response.function_call_arguments.delta",
+                "output_index": fn_idx,
+                "item_id": "fc_1",
+                "delta": "{\"path\":\"a.txt\"}"
+            }),
+        )
+        .unwrap();
+        send_event(
+            mapper,
+            json!({
+                "type": "response.output_item.done",
+                "output_index": fn_idx,
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_1",
+                    "call_id": "call_read",
+                    "name": "read",
+                    "arguments": "{\"path\":\"a.txt\"}",
+                    "status": "completed"
+                }
+            }),
+        )
+        .unwrap();
+    }
+
+    fn part_summary(part: &Part) -> String {
+        match part {
+            Part::Text { .. } => "text".to_string(),
+            Part::NativeToolCall(c) => format!("native:{}", c.call_id),
+            Part::ToolCall(c) => format!("tool:{}", c.id.as_deref().unwrap_or("")),
+            other => format!("other:{other:?}"),
+        }
+    }
+
+    #[test]
+    fn backfill_preserves_interleaved_order_when_completed_output_is_empty() {
+        let mut mapper = new_mapper();
+        emit_custom_then_function(&mut mapper, false);
+        let terminal = send_event(
+            &mut mapper,
+            json!({
+                "type": "response.completed",
+                "response": { "status": "completed", "output": [] }
+            }),
+        )
+        .unwrap();
+        let response = terminal
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { response, .. } => Some(response),
+                _ => None,
+            })
+            .expect("done");
+        let summary: Vec<String> = response.message.parts.iter().map(part_summary).collect();
+        assert_eq!(summary, vec!["native:call_patch", "tool:call_read"]);
+    }
+
+    #[test]
+    fn backfill_preserves_interleaved_order_when_completed_output_omits_tool_calls() {
+        let mut mapper = new_mapper();
+        emit_custom_then_function(&mut mapper, true);
+        let terminal = send_event(
+            &mut mapper,
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [
+                        {"type": "message", "content": [{"type": "output_text", "text": "patching first"}]}
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+        let response = terminal
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { response, .. } => Some(response),
+                _ => None,
+            })
+            .expect("done");
+        let summary: Vec<String> = response.message.parts.iter().map(part_summary).collect();
+        assert_eq!(summary, vec!["text", "native:call_patch", "tool:call_read"]);
+    }
+
+    #[test]
+    fn backfill_inserts_omitted_custom_call_before_later_terminal_function_call() {
+        let mut mapper = new_mapper();
+        emit_custom_then_function(&mut mapper, true);
+        let terminal = send_event(
+            &mut mapper,
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "status": "completed",
+                    "output": [
+                        {"type": "message", "content": [{"type": "output_text", "text": "patching first"}]},
+                        {"type": "function_call", "id": "fc_1", "call_id": "call_read", "name": "read", "arguments": "{\"path\":\"a.txt\"}", "status": "completed"}
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+        let response = terminal
+            .iter()
+            .find_map(|e| match e {
+                StreamEvent::Done { response, .. } => Some(response),
+                _ => None,
+            })
+            .expect("done");
+        let summary: Vec<String> = response.message.parts.iter().map(part_summary).collect();
+        assert_eq!(summary, vec!["text", "native:call_patch", "tool:call_read"]);
     }
 }

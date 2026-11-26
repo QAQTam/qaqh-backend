@@ -190,7 +190,9 @@ pub(crate) fn project_responses_messages(
                 // `function_call_output`，中间不许夹任何 item。
                 let mut calls: Vec<Part> = Vec::new();
                 let mut emitted_call_ids: HashSet<String> = HashSet::new();
-                // 1) 回放 provider 原生 items（非调用项保持原样，调用项统一走类型化 Part）。
+                let mut raw_call_parts: Vec<Part> = Vec::new();
+                let mut raw_call_by_id: HashMap<String, usize> = HashMap::new();
+                // 1) 回放 provider 原生 items（非调用项保持原样，调用项先暂存，再按 ToolUse 顺序落位）。
                 for item in &raw_items {
                     let sanitized = replay_item((*item).clone());
                     let kind = item_type(&sanitized);
@@ -198,14 +200,20 @@ pub(crate) fn project_responses_messages(
                         continue;
                     }
                     if let Some(call) = native_call_from_item(&sanitized) {
-                        emitted_call_ids.insert(call.call_id.clone());
-                        calls.push(Part::NativeToolCall(call));
+                        let id = call.call_id.clone();
+                        let idx = raw_call_parts.len();
+                        raw_call_parts.push(Part::NativeToolCall(call));
+                        if !id.is_empty() {
+                            raw_call_by_id.entry(id).or_insert(idx);
+                        }
                     } else if kind == "function_call" {
                         if let Some(call) = function_call_from_item(&sanitized, compat) {
-                            if let Some(id) = &call.id {
-                                emitted_call_ids.insert(id.clone());
+                            let id = call.id.clone();
+                            let idx = raw_call_parts.len();
+                            raw_call_parts.push(Part::ToolCall(call));
+                            if let Some(id) = id.filter(|s| !s.is_empty()) {
+                                raw_call_by_id.entry(id).or_insert(idx);
                             }
-                            calls.push(Part::ToolCall(call));
                         }
                     } else if matches!(
                         kind.as_str(),
@@ -217,6 +225,7 @@ pub(crate) fn project_responses_messages(
                         parts.push(provider_state_item(sanitized));
                     }
                 }
+                let mut consumed_raw = vec![false; raw_call_parts.len()];
                 // 2) 派生 reasoning（无回放 item 且开关开启时合成旧形态）。
                 if compat.echo_reasoning_content && !has_response_type("reasoning") {
                     for b in &msg.content {
@@ -245,9 +254,19 @@ pub(crate) fn project_responses_messages(
                         parts.push(Part::text(t));
                     }
                 }
-                // 4) 派生 function_call / freeform custom_tool_call（未被回放 item 覆盖的 call_id）。
+                // 4) 按 ToolUse 顺序落位调用（优先消费对应的回放 item，再补派生调用）。
                 for b in &msg.content {
                     if let ContentBlock::ToolUse { id, name, input } = b {
+                        if !id.is_empty()
+                            && let Some(&idx) = raw_call_by_id.get(id.as_str())
+                        {
+                            if !consumed_raw[idx] {
+                                consumed_raw[idx] = true;
+                                calls.push(raw_call_parts[idx].clone());
+                            }
+                            emitted_call_ids.insert(id.clone());
+                            continue;
+                        }
                         if !id.is_empty() && emitted_call_ids.contains(id.as_str()) {
                             continue;
                         }
@@ -281,9 +300,15 @@ pub(crate) fn project_responses_messages(
                         call.id = if id.is_empty() {
                             None
                         } else {
+                            emitted_call_ids.insert(id.clone());
                             Some(id.clone())
                         };
                         calls.push(Part::ToolCall(call));
+                    }
+                }
+                for (idx, part) in raw_call_parts.into_iter().enumerate() {
+                    if !consumed_raw[idx] {
+                        calls.push(part);
                     }
                 }
                 // 5) 派生 web_search_call 回放（未被覆盖的 id）。

@@ -1507,3 +1507,59 @@ fn resps_had_output_counts_native_tool_events() {
     resp.had_native_output = true;
     assert!(resp.had_output());
 }
+
+#[test]
+fn assistant_replay_preserves_tool_use_order_across_function_and_custom_calls() {
+    let mut compat = provider().responses_compat;
+    compat.apply_patch_freeform = true;
+    let patch = "*** Begin Patch\n*** Update File: a.txt\n@@\n-1\n+2\n*** End Patch";
+    let history = vec![
+        Message::user("read then patch"),
+        qa_msg(
+            "assistant",
+            vec![
+                ContentBlock::ToolUse {
+                    id: "call_1".into(),
+                    name: "read".into(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                },
+                ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "apply_patch".into(),
+                    input: serde_json::json!({"input": patch}),
+                },
+                ContentBlock::ResponseOutputItem {
+                    item: serde_json::json!({
+                        "type": "custom_tool_call",
+                        "id": "ctc_2",
+                        "call_id": "call_2",
+                        "name": "apply_patch",
+                        "input": patch,
+                        "status": "completed"
+                    }),
+                },
+            ],
+        ),
+        Message::tool_result("call_1", qaqh_types::ToolResult::ok("1")),
+        Message::tool_result("call_2", qaqh_types::ToolResult::ok("patched")),
+    ];
+
+    let projected = project_responses_messages(&history, &compat);
+    let call_order: Vec<String> = projected[1]
+        .parts
+        .iter()
+        .filter_map(|p| match p {
+            Part::ToolCall(c) => c.id.clone(),
+            Part::NativeToolCall(c) => Some(c.call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        call_order,
+        vec!["call_1".to_string(), "call_2".to_string()],
+        "outbound replay must preserve ToolUse order across function_call and custom_tool_call"
+    );
+    let chat_req = mutil_ai::ChatRequest::new(projected);
+    mutil_ai::normalize(&chat_req, mutil_ai::Protocol::OpenAiResponses)
+        .expect("replayed interleaved history must pass normalize");
+}
