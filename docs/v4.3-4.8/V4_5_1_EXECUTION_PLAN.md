@@ -140,4 +140,4 @@
 
 | 切片 | PR | 状态 | 备注 |
 |---|---|---|---|
-| `v4.5.1` | — | **待派工** | 存储盘满防丢、零 schema 瘦身与并发读写减负（挂牌待外部执行模型认领，验收后合入 `main` 再开 `v4.6`） |
+| `v4.5.1` | PR #45 | **已合入 (`df89e6b0`)** | 4 项任务全部落地并独立模块化（`session_persist.rs`、`db/maintenance.rs`、`db/read_pool.rs`、`exec_progress.rs`、`replay_ring.rs`）；宪法 #8 净减达标（`session_loop.rs` `+49/-186` 净 `-137`、`owner.rs` `+107/-207` 净 `-100`、`store.rs` `+4`）；终审复测：`qaqh-session --lib` 55 passed（1 ignored）、`disk_full_fail_closed_tests` + `session_persist::tests` 5 passed（0 failed）、`clippy --no-deps --lib` 三 crate 零错误且新增模块零警告、铁闸 1 `EXIT=0`、`SCHEMA_VERSION == 13` 未变（`qaqh-runtime --lib` 65 passed 等 PR 复测结果见 PR #45，存量基线失败 `tool_surface_schema_shape` 未改）；未验范围：真机物理盘满与 Windows 文件锁（模拟注入：盘满 `PRAGMA max_page_count`、`finish_turn` 失败触发器、并发流失败触发器）；[V4_5_1_PR45_REMEDIATION_GUIDE.md](./V4_5_1_PR45_REMEDIATION_GUIDE.md) §二 Fast-Follow（16 处 `.await.ok()` + 2 处回滚内存态泄漏）独立留待后续立项 |
