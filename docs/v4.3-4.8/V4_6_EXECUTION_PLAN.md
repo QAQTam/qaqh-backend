@@ -116,17 +116,18 @@ flowchart TD
 
 ### 4. `P3-4` — `v3_server` + `client/v3` 隔离骨架 + `duplex` 闭环 + 6 条跨代不变量守卫 + 前置 ADR
 - **Worktree & 分支**：`../qaqh-wt-v4.6-p3-4` · `feat/v4.6-p3-4-v3-duplex-and-invariants`
-- **宪法与决策依据**：宪法 #5、#6、#7、#10 · `V4_6_DECISION_PACK.md` D3/D4/增补 · [ADR-0042 r4](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 3–7。
+- **宪法与决策依据**：宪法 #5、#6、#7、#10 · `V4_6_DECISION_PACK.md` D3/D4/增补 · [ADR-0042 r5](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）铁律 3–7 与第四节第 10 条。
 - **改动目标**：
   1. 在 `crates/qaqh-daemon/src/v3_server/` 与 `crates/qaqh-client/src/v3/` 建立物理隔离的 V3 服务端与客户端骨架：
-     - 定义极薄 **`MuxTransport` trait**（`open_bi`/`accept_bi`/`open_uni`/`accept_uni`，直接对齐 `v4.8` `iroh::Connection`），引入 `yamux` + `tokio-util::compat`（**按宪法 #16 开工前查最新官方 crate API**，配独立 `Connection` driver task），实现 `tokio::io::duplex` 内存多路复用闭环；
+     - 定义极薄 **`MuxTransport` trait**（`open_bi`/`accept_bi`/`open_uni`/`accept_uni`，直接对齐 `v4.8` `iroh::Connection`），引入 `yamux` + `tokio-util::compat`（**按宪法 #16 开工前查最新官方 crate API**，配独立 `Connection` driver task），实现 `tokio::io::duplex` 内存多路复用闭环；严格遵守 ADR-0042 r5 `yamux` 工程约束（唯一 driver 持续推进、入站流上限、Blob 按窗口分块让出、仅用 `.compat()` 不得触发 `compat_` 闸）；
+     - **`MuxTransport` 双后端矩阵**：以 `dev-dependency` 引入 `iroh` 实现本机回环后端（不进生产依赖图），六大守卫按后端参数化、两后端均须全绿；
      - `client/v3` 对消费端仅暴露极简原生 async Stream/Handle，固化 `SessionEvents` 为前端唯一状态真相源，并在 `daemon.endpoint` 读取校验层落地 `build_id` / `channel` / `fingerprint` Fail-Closed 拒绝过期守护进程逻辑；
      - **同步记录 Windows Named Pipe 显式 Owner-Only DACL + `reject_remote_clients(true)` 与严格同版协议演进规则**，确保 `v4.7` 本地 IPC 与 `v4.8` `iroh` 传输零返工；
   2. **按域细分 `v3_server` 纯 `async` 门面 + 泛型静态分发**：
      - 拆出 `SystemFacade` / `ConfigAccountFacade` / `MarketplaceFacade` / `GitxFacade` / `FsFacade` / `SessionFacade` / `ShellFacade`（配独立并发句柄表，不碰中央 `registry` 锁）/ `BlobFacade`，统一通过 **`V3Server<B>` 泛型静态分发**接入（无 `dyn` 装箱妥协），明确 `v3_server` 内的后端→DTO 单向投影边界；
   3. **优先落地 `ringing_v3_invariants` 六大跨代不变量守卫测试集**（全部跑在 `duplex` 真多路流上）：
      - ① **原子订阅 + 有界回放尾**：事件洪峰期间 attach，`resync_cycles == 0` 且零丢帧（含破坏顺序必红反证）；
-     - ② **多流背压隔离与量化延迟上界**：大 Blob 满载分片 + PTY 刷屏 + 会话 A 洪峰并发时，Control RPC 往返 **P99 < 50ms** 且会话 B 不饿死；
+     - ② **多流背压隔离与量化延迟上界**：大 Blob 满载分片 + PTY 刷屏 + 会话 A 洪峰并发时，Control RPC 往返 **P99 < 50ms**、PTY 回显帧 **P99 ≤ 16.6ms** 且会话 B 不饿死（`yamux` 后端未达标即触发 ADR-0042 第四节第 10 条整体切换 `iroh` 回环，不调参续命）；
      - ③ **断联不杀进程 + 幂等回执**：断开连接不终止 exec/shell，同 `command_id` 重放返回原回执；
      - ④ **身份单权威不可伪造**：越权访问他人会话/Shell 或低 scope 调 Admin RPC 当场拒绝；
      - ⑤ **多端联动原语**：双内存客户端同时附着同一会话与 Shell、`SwitchDriver` 由 `OwnerPump` 单点定序广播 `DriverChanged` 且非 Driver 端发 `SendPrompt` 当场拒绝、设备吊销即时踢流；
@@ -136,7 +137,7 @@ flowchart TD
      - `audit v1/v2` 与 `JOURNAL_IO` 最终归属 ADR。
 - **反证与验证（V3 反腐闸）**：
   - `rg 'axum_server|RINGING_V2|v2_stream|serde_json|skip_serializing_if|serde\([^)]*(tag|flatten|untagged)|serde\(alias|legacy_|compat_' crates/qaqh-daemon/src/v3_server crates/qaqh-client/src/v3` **必须 0 命中**；
-  - `ringing_v3_invariants` 6 大守卫在 `duplex` 上全绿（且演示破坏守卫①先 grab 后读环顺序时必红）；
+  - `ringing_v3_invariants` 6 大守卫在 `yamux`(`duplex`) 与 `iroh` 本机回环双后端上全绿（且演示破坏守卫①先 grab 后读环顺序时必红）；
   - `cargo test -j2 -p qaqh-core-vocab -p qaqh-ringing-v3 -p qaqh-client -p qaqh-daemon -- v3` 与 clippy 全绿。
 
 ---
