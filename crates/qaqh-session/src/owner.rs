@@ -53,7 +53,8 @@ use qaqh_tool_core::{
 
 use qaqh_tool_core::async_rt;
 
-use crate::db::{Db, DbError, store, view};
+use crate::db::{Db, DbError, maintenance, store, view};
+use crate::exec_progress::{ExecProgressGate, ExecProgressSnapshot, ProgressOutcome};
 
 /// 每会话 SSE 事件缓冲;落后客户端经快照 + `seq` 水位重新同步(报告一 §194)。
 const EVENT_CHANNEL_CAPACITY: usize = 1024;
@@ -323,6 +324,7 @@ impl SessionOwner {
             events: events.clone(),
             next_seq: Arc::clone(&next_seq),
             replay: Arc::clone(&replay),
+            exec_progress: ExecProgressGate::default(),
         });
         let pump_task = async_rt::runtime_handle().spawn(run_pump_loop(
             Arc::clone(&pump),
@@ -951,8 +953,15 @@ impl SessionOwner {
     /// 泵成任务后 `async` 是硬要求——同步 `rx.recv()` 在 current_thread runtime
     /// 上就是把泵钉死。
     pub async fn flush(&self) -> Result<(), DbError> {
-        self.submit_request(move |_| Box::pin(async move { Ok(()) }))
-            .await
+        self.submit_request(move |pump| {
+            Box::pin(async move {
+                // v4.5.1 任务4 不变量2:屏障先同步冲刷**所有**待落库的 exec 进度,
+                // 再响应 Flush 完成——与既有 owner_tests 语义零漂移。
+                pump.exec_progress.drain(&pump.db).await;
+                Ok(())
+            })
+        })
+        .await
     }
 
     /// Commit a metadata patch on the same pump as turn and tool facts.
@@ -1060,38 +1069,37 @@ fn serialize_typed<T: serde::Serialize>(who: &str, label: &str, value: &T) -> Op
         .ok()
 }
 
-/// TimelineEntry → 业务行:kind/call_id/text 是查询用冗余列,与 wire 形式同写。
+/// TimelineEntry → 业务行:kind/call_id 是查询用冗余列,与 wire 形式同写。
+/// v4.5.1 任务2:**停写 `text` 冗余正文副本**(统一置 `None`)——生产读取
+/// 全走 `payload_json`(view 层 `parse_block_entry` 唯一权威),整段正文再抄一份
+/// 进 `text` 只是让 `qaqh.db` 无止境翻倍。`text` 列保留可空以维持 schema 13
+/// 零迁移,严禁在此回填任何正文。
 fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewBlock, DbError> {
-    let (block_id, turn_id, kind, call_id, text): (
+    let (block_id, turn_id, kind, call_id): (
         String,
         Option<String>,
         &'static str,
-        Option<String>,
         Option<String>,
     ) = match entry {
         TimelineEntry::Input {
             block_id,
             turn_id,
-            content,
             ..
         } => (
             block_id.as_ref().to_string(),
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "input",
             None,
-            inline_text(content),
         ),
         TimelineEntry::AssistantBlock {
             block_id,
             turn_id,
-            content,
             ..
         } => (
             block_id.as_ref().to_string(),
             Some(turn_id.as_ref().to_string()),
             "assistant",
             None,
-            inline_text(content),
         ),
         TimelineEntry::ToolCall { call_id, turn_id } => (
             // 块表主键全库唯一;调用身份本身仍只保存在 call_id 字段。
@@ -1099,12 +1107,10 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "tool_call",
             Some(call_id.as_ref().to_string()),
-            None,
         ),
         TimelineEntry::ToolResult {
             call_id,
             turn_id,
-            content,
             ..
         } => (
             // ToolCall 与 ToolResult 是两条独立的 RingingV2 timeline 事实,
@@ -1113,15 +1119,13 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
             turn_id.as_ref().map(|turn| turn.as_ref().to_string()),
             "tool_result",
             Some(call_id.as_ref().to_string()),
-            inline_text(content),
         ),
-        TimelineEntry::Compaction { summary } => (
+        TimelineEntry::Compaction { .. } => (
             // 压缩块没有独立 block_id,按时间派生保证多次压缩不冲突。
             format!("compaction-{}", store::now_ms()),
             None,
             "compaction",
             None,
-            inline_text(summary),
         ),
     };
     let payload_json = serde_json::to_string(entry)
@@ -1131,17 +1135,11 @@ fn timeline_block(session_id: &str, entry: &TimelineEntry) -> Result<store::NewB
         session_id: session_id.to_string(),
         turn_id,
         kind,
-        text,
+        // v4.5.1 任务2:text 冗余副本停写(schema 13 的可空列,零迁移保留)。
+        text: None,
         call_id,
         payload_json,
     })
-}
-
-fn inline_text(content: &ContentValue) -> Option<String> {
-    match content {
-        ContentValue::Inline { text } => Some(text.clone()),
-        _ => None,
-    }
 }
 
 /// 工具终态:落库行与 ToolFinished 事件的共同来源。契约 outcome 是唯一
@@ -1425,6 +1423,8 @@ struct OwnerPump {
     events: tokio::sync::broadcast::Sender<SessionEventFrame>,
     next_seq: Arc<AtomicU64>,
     replay: Arc<ReplayRing>,
+    /// v4.5.1 任务4:exec 进度 SQLite 落库节流闸(前端 20ms 合帧不变)。
+    exec_progress: ExecProgressGate,
 }
 
 impl OwnerPump {
@@ -1464,35 +1464,24 @@ impl OwnerPump {
         let last = entries
             .last()
             .expect("批由首条 entry 建立，批内不可能为空");
-        let row_id = exec_session_id.clone();
-        let next_offset = last.next_offset;
-        let preview = Arc::clone(&last.output_preview);
-        let preview_start_offset = last.preview_start_offset;
-        let capture_omitted_bytes = last.capture_omitted_bytes;
-        let stream_dropped_bytes = last.stream_dropped_bytes;
-        let updated = self
-            .db
-            .write(move |conn| {
-                store::update_exec_session_progress(
-                    conn,
-                    &row_id,
-                    next_offset,
-                    &preview,
-                    preview_start_offset,
-                    capture_omitted_bytes,
-                    stream_dropped_bytes,
-                )
-            })
+        // v4.5.1 任务4:DB 进度落库按 exec_session_id 节流(≥500ms),日志追加与
+        // 前端 emit 节奏不变(ADR-0030);节流/冲刷不变量收口在 exec_progress 子模块。
+        let outcome = self
+            .exec_progress
+            .observe(
+                &self.db,
+                &exec_session_id,
+                ExecProgressSnapshot::new(
+                    last.next_offset,
+                    Arc::clone(&last.output_preview),
+                    last.preview_start_offset,
+                    last.capture_omitted_bytes,
+                    last.stream_dropped_bytes,
+                ),
+            )
             .await;
-        match updated {
-            Ok(true) => {}
-            Ok(false) => return,
-            Err(error) => {
-                log::error!(
-                    "[owner] exec session {exec_session_id} output progress failed: {error}"
-                );
-                return;
-            }
+        if matches!(outcome, ProgressOutcome::Skipped | ProgressOutcome::Failed) {
+            return;
         }
         let mut runs: Vec<(ExecOutputSource, u64, u64, String)> = Vec::new();
         for entry in entries {
@@ -1734,6 +1723,10 @@ impl OwnerPump {
             }
             OwnerMsg::ExecSessionSettle(settlement) => {
                 let exec_session_id = settlement.exec_session_id.clone();
+                // v4.5.1 任务4 不变量3:settle 先冲刷该 exec_session_id 的待落库
+                // 节流快照(终态水位的权威来源是行内 next_offset),再清理节流
+                // 状态,由下方 settle 事务收口终态。
+                self.exec_progress.drain_one(&self.db, &exec_session_id).await;
                 let logged_bytes =
                     exec_output_log_path(&self.db, &self.session_id, &exec_session_id)
                         .and_then(|path| std::fs::metadata(&path).ok())
@@ -2167,9 +2160,14 @@ impl OwnerDirectory {
 
     pub fn delete_session_tree(&self, session_id: &str) -> Result<Vec<String>, DbError> {
         let root = session_id.to_string();
-        let ids = self
-            .db
-            .write_blocking(move |conn| store::delete_session_tree(conn, &root))?;
+        let ids = self.db.write_blocking(move |conn| {
+            let ids = store::delete_session_tree(conn, &root)?;
+            // v4.5.1 任务3:删除会话树后封顶 -wal 并按碎片阈值回收主库空间
+            // (小删除不达阈值自动跳过全库 VACUUM)。删除事务已提交,维护失败
+            // 在 maintenance 内响亮记日志,不以维护错误掩盖已成功的删除。
+            maintenance::checkpoint_after_delete(conn, &root);
+            Ok::<Vec<String>, DbError>(ids)
+        })?;
         let mut owners = self
             .owners
             .lock()
@@ -2178,6 +2176,14 @@ impl OwnerDirectory {
             owners.remove(id);
         }
         Ok(ids)
+    }
+
+    /// 正常停机收口(修复单 §二.3.3):执行一次 `checkpoint_truncate` 封顶截断
+    /// `-wal`。失败响亮记日志,不阻断停机——截断只是体积卫生,不是停机前提。
+    pub fn shutdown_checkpoint(&self) {
+        if let Err(error) = self.db.write_blocking(maintenance::checkpoint_truncate) {
+            log::error!("[owner] shutdown wal checkpoint: {error}");
+        }
     }
 
     pub fn get_or_create(&self, session_id: &str) -> Arc<SessionOwner> {

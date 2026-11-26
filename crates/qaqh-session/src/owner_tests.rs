@@ -13,8 +13,9 @@ mod tests {
     };
     use qaqh_ringing_contract::events::ExecOutputSource;
     use qaqh_ringing_contract::fact::{
-        ActorKind, ActorRef, BlockId, ContentValue, InputPurpose, InteractionDecision,
-        InteractionId, InteractionKind, ToolCallId, ToolCallOutcome, ToolMetrics, TurnId,
+        ActorKind, ActorRef, AssistantBlockKind, BlockId, ContentValue, InputPurpose,
+        InteractionDecision, InteractionId, InteractionKind, ToolCallId, ToolCallOutcome,
+        ToolMetrics, TurnId,
     };
     use qaqh_ringing_contract::state::{
         CodeDelta, InteractionView, TimelineEntry, ToolCallState, ToolEffectInfo, TurnOutcome,
@@ -1527,5 +1528,457 @@ mod tests {
                 "日志存在（哪怕有缺口）也不得把全文副本写进 content store"
             );
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // v4.5.1 任务2:零 schema 瘦身
+    // -----------------------------------------------------------------------
+
+    fn blob_session(id: &str) -> store::NewSession {
+        store::NewSession {
+            session_id: id.into(),
+            parent_session_id: None,
+            title: id.into(),
+            title_source: Some("user".into()),
+            cwd: None,
+            model: None,
+            tool_mode: None,
+            model_selection: None,
+            custom_tools: None,
+            frozen_annotation: None,
+            ephemeral: false,
+        }
+    }
+
+    /// v4.5.1 任务2 反证1:`append_block` 写入长文本块后直查 SQLite
+    /// `SELECT text FROM blocks` 必须为 `NULL`(旧实现冗余双写整段正文,必红),
+    /// 同时 `load_session_state` 还原的 `TimelineEntry` 内容逐字完整一致。
+    #[tokio::test]
+    async fn append_block_stops_duplicating_body_into_text_column() {
+        let (_dir, owners) = test_owner_dir();
+        let owner = owners
+            .create_session(blob_session("SES-TEXT"))
+            .await
+            .expect("create session");
+        let long_body = "盘满瘦身反证正文。".repeat(2_000);
+        // blocks.turn_id 外键指向 turns:先落一个真实回合再 append。
+        owner.start_turn("T1", None).await.expect("start turn");
+        owner
+            .append_block(TimelineEntry::AssistantBlock {
+                block_id: BlockId::new("B-ANSWER"),
+                turn_id: TurnId::new("T1"),
+                ord: 0,
+                block_kind: AssistantBlockKind::Answer,
+                content: ContentValue::Inline {
+                    text: long_body.clone(),
+                },
+                model: "test-model".into(),
+                usage: None,
+                generated_ms: None,
+                opaque: vec![],
+            })
+            .await
+            .expect("append block");
+        owner
+            .finish_turn(
+                "T1",
+                "finished",
+                TurnOutcome::Finished {
+                    terminal: qaqh_ringing_contract::fact::TurnTerminal::Completed,
+                    usage: None,
+                    error: None,
+                },
+            )
+            .await
+            .expect("finish turn");
+
+        owners
+            .db()
+            .read_blocking(|conn| {
+                let text: Option<String> = conn
+                    .query_row(
+                        "SELECT text FROM blocks WHERE block_id = 'B-ANSWER'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(crate::db::DbError::from)?;
+                assert!(
+                    text.is_none(),
+                    "blocks.text 冗余副本必须停写(旧实现为整段正文,必红)"
+                );
+                Ok::<(), crate::db::DbError>(())
+            })
+            .expect("query blocks.text");
+
+        let state = owner.snapshot().await.expect("snapshot");
+        let restored = state
+            .timeline
+            .iter()
+            .find_map(|entry| match entry {
+                TimelineEntry::AssistantBlock {
+                    block_id, content, ..
+                } if block_id.as_ref() == "B-ANSWER" => Some(content.clone()),
+                _ => None,
+            })
+            .expect("assistant block restored via payload_json");
+        match restored {
+            ContentValue::Inline { text } => {
+                assert_eq!(
+                    text, long_body,
+                    "payload_json 还原的正文必须逐字一致(全量快照/回放不变)"
+                );
+            }
+            other => panic!("unexpected content value: {other:?}"),
+        }
+    }
+
+    /// v4.5.1 任务2 反证2:同会话两回合各引用外置 BLOB——一条 `content_id`
+    /// 被保留回合(T1)与撤回回合(T2)共享,另一条由 T2 的 diff_ref 独占,
+    /// 第三条由 T2 的 exec 会话终态独占。`truncate_from_turn` 后:独占行必须
+    /// 清理(旧实现残留孤儿 BLOB,必红),共享行必须完好(严禁误删共用 BLOB)。
+    #[tokio::test]
+    async fn truncate_cleans_orphan_blobs_but_keeps_shared_ones() {
+        let (_dir, owners) = test_owner_dir();
+        let owner = owners
+            .create_session(blob_session("SES-BLOB"))
+            .await
+            .expect("create session");
+
+        for turn in ["T1", "T2"] {
+            owner.start_turn(turn, None).await.expect("start turn");
+            owner
+                .finish_turn(
+                    turn,
+                    "finished",
+                    TurnOutcome::Finished {
+                        terminal: qaqh_ringing_contract::fact::TurnTerminal::Completed,
+                        usage: None,
+                        error: None,
+                    },
+                )
+                .await
+                .expect("finish turn");
+        }
+
+        // 三条外置 BLOB:1KiB 足以验证引用记账,与体积无关。
+        let blob = vec![0u8; 1024];
+        let shared = "a".repeat(64);
+        let exclusive_diff = "b".repeat(64);
+        let exclusive_exec = "c".repeat(64);
+        let shared_for_seed = shared.clone();
+        let exclusive_diff_for_seed = exclusive_diff.clone();
+        let exclusive_exec_for_seed = exclusive_exec.clone();
+        owners
+            .db()
+            .write_blocking(move |conn| {
+                for (id, kind) in [
+                    (&shared_for_seed, "shared"),
+                    (&exclusive_diff_for_seed, "diff"),
+                    (&exclusive_exec_for_seed, "exec"),
+                ] {
+                    store::put_session_content(conn, "SES-BLOB", id, kind, &blob, false)?;
+                }
+                Ok::<(), crate::db::DbError>(())
+            })
+            .expect("put blobs");
+
+        let state_json = serde_json::to_string(&ToolCallState::Finished {
+            outcome: ToolCallOutcome::Completed,
+        })
+        .expect("state");
+        let shared_for_calls = shared.clone();
+        let exclusive_diff_for_calls = exclusive_diff.clone();
+        let exclusive_exec_for_calls = exclusive_exec.clone();
+        owners
+            .db()
+            .write_blocking(move |conn| {
+                // T1 引用 shared(保留回合);T2 也引用 shared + 独占 diff。
+                store::finish_tool_call(
+                    conn,
+                    &store::ToolCallFinish {
+                        call_id: "C1".into(),
+                        session_id: "SES-BLOB".into(),
+                        turn_id: Some("T1".into()),
+                        tool_name: "read".into(),
+                        state_json: state_json.clone(),
+                        exec_session_id: None,
+                        output_text: None,
+                        output_ref: Some(store::canonical_content_ref(&shared_for_calls)),
+                        output_truncated: false,
+                        diff_text: None,
+                        diff_ref: None,
+                        meta_json: None,
+                        effects_json: None,
+                        code_delta_json: None,
+                    },
+                )?;
+                store::finish_tool_call(
+                    conn,
+                    &store::ToolCallFinish {
+                        call_id: "C2".into(),
+                        session_id: "SES-BLOB".into(),
+                        turn_id: Some("T2".into()),
+                        tool_name: "edit".into(),
+                        state_json: state_json.clone(),
+                        exec_session_id: Some("EX2".into()),
+                        output_text: None,
+                        output_ref: Some(store::canonical_content_ref(&shared_for_calls)),
+                        output_truncated: false,
+                        diff_text: None,
+                        diff_ref: Some(store::canonical_content_ref(&exclusive_diff_for_calls)),
+                        meta_json: None,
+                        effects_json: None,
+                        code_delta_json: None,
+                    },
+                )?;
+                store::upsert_exec_session(
+                    conn,
+                    &store::ExecSessionRow {
+                        exec_session_id: "EX2".into(),
+                        session_id: "SES-BLOB".into(),
+                        origin_turn_id: Some("T2".into()),
+                        origin_call_id: Some("C2".into()),
+                        tty: false,
+                        command: "cargo build".into(),
+                        cwd: None,
+                        state_json: "{}".into(),
+                        state_kind: "running".into(),
+                        started_at_ms: store::now_ms(),
+                        finished_at_ms: None,
+                        next_offset: 0,
+                        output_complete: false,
+                        capture_omitted_bytes: 0,
+                        stream_dropped_bytes: 0,
+                        output_content_id: Some(store::canonical_content_ref(
+                            &exclusive_exec_for_calls,
+                        )),
+                        output_preview: String::new(),
+                        preview_start_offset: 0,
+                    },
+                )?;
+                Ok::<(), crate::db::DbError>(())
+            })
+            .expect("seed tool calls + exec row");
+
+        owner.truncate_from_turn("T2").await.expect("truncate T2");
+
+        let counts = |id: String| -> bool {
+            owners
+                .db()
+                .read_blocking(move |conn| {
+                    store::get_session_content(conn, "SES-BLOB", &id)
+                        .map(|row| row.is_some())
+                        .map_err(crate::db::DbError::from)
+                })
+                .expect("content lookup")
+        };
+        assert!(counts(shared.clone()), "保留回合共用的 BLOB 必须完好(严禁误删)");
+        assert!(
+            !counts(exclusive_diff.clone()),
+            "撤回回合独占的 diff BLOB 必须清理(旧实现残留,必红)"
+        );
+        assert!(
+            !counts(exclusive_exec.clone()),
+            "撤回回合独占的 exec 终态 BLOB 必须清理(旧实现残留,必红)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // v4.5.1 任务4:exec 进度 SQLite 落库节流(前端 20ms 合帧不变)
+    // -----------------------------------------------------------------------
+
+    fn exec_next_offset(owners: &Arc<OwnerDirectory>, exec_session_id: &str) -> u64 {
+        owners
+            .db()
+            .read_blocking(move |conn| {
+                conn.query_row(
+                    "SELECT next_offset FROM exec_sessions WHERE exec_session_id = ?1",
+                    [exec_session_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|value| value as u64)
+                .map_err(crate::db::DbError::from)
+            })
+            .expect("exec offset query")
+    }
+
+    fn seed_running_exec_row(owners: &Arc<OwnerDirectory>, exec_session_id: &str, session: &str) {
+        let exec_session_id = exec_session_id.to_string();
+        let session = session.to_string();
+        owners
+            .db()
+            .write_blocking(move |conn| {
+                store::upsert_exec_session(
+                    conn,
+                    &store::ExecSessionRow {
+                        exec_session_id,
+                        session_id: session,
+                        origin_turn_id: None,
+                        origin_call_id: None,
+                        tty: false,
+                        command: "cargo test".into(),
+                        cwd: None,
+                        state_json: "{}".into(),
+                        state_kind: "running".into(),
+                        started_at_ms: store::now_ms(),
+                        finished_at_ms: None,
+                        next_offset: 0,
+                        output_complete: false,
+                        capture_omitted_bytes: 0,
+                        stream_dropped_bytes: 0,
+                        output_content_id: None,
+                        output_preview: String::new(),
+                        preview_start_offset: 0,
+                    },
+                )
+                .map_err(crate::db::DbError::from)
+            })
+            .expect("seed exec row");
+    }
+
+    /// v4.5.1 任务4 反证2:150ms 内向同一 `exec_session_id` 连投 5 批递进 offset。
+    /// 前端事件接收端仍收到全部输出增量(ADR-0030 实时性不变);SQLite 进度
+    /// 落库被节流——窗口内只有首批立即写,后续批次挂起(旧实现逐批落库必红);
+    /// `owner.flush()` 屏障后,`next_offset` / `output_preview` 必须精确等于
+    /// 第 5 批最新值(不变量2)。
+    #[tokio::test]
+    async fn exec_output_progress_writes_are_throttled_and_flush_is_exhaustive() {
+        let (_dir, owners) = test_owner_dir();
+        owners.ensure_session("SES-EXEC", None, false).expect("ensure");
+        let owner = owners.get_or_create("SES-EXEC");
+        seed_running_exec_row(&owners, "EX1", "SES-EXEC");
+        let lifecycle = owner.lifecycle();
+        let mut rx = owner.subscribe();
+
+        // 第 1 批:距上次落库 >= 500ms → 立即写(不变量1)。
+        lifecycle.exec_session_output(
+            "EX1",
+            0,
+            100,
+            ExecOutputSource::Stdout,
+            "one".into(),
+            100,
+            Arc::from("one"),
+            0,
+            0,
+            0,
+        );
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            exec_next_offset(&owners, "EX1"),
+            100,
+            "首批必须立即落库(不变量1)"
+        );
+
+        // 第 2-5 批:150ms 内连投,全部落入节流窗口。
+        for (end, text) in [(200u64, "two"), (300, "three"), (400, "four"), (500, "five")] {
+            lifecycle.exec_session_output(
+                "EX1",
+                end - 100,
+                end,
+                ExecOutputSource::Stdout,
+                text.into(),
+                end,
+                Arc::from(text),
+                0,
+                0,
+                0,
+            );
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert_eq!(
+            exec_next_offset(&owners, "EX1"),
+            100,
+            "节流窗口内 SQLite 不得被连续打(旧实现逐批落库 5 次,必红)"
+        );
+
+        // 前端增量一条不少:offset 覆盖必须连续到 500(节流只作用于 SQLite)。
+        let mut covered_end = 0u64;
+        while let Ok(frame) = rx.try_recv() {
+            if let SessionEvent::ExecSessionOutputDelta { end_offset, .. } = frame.event {
+                covered_end = covered_end.max(end_offset);
+            }
+        }
+        assert_eq!(
+            covered_end, 500,
+            "5 批输出增量必须全部送达前端(ADR-0030 实时性不变)"
+        );
+
+        // flush 屏障:先冲刷全部待落库进度,再响应屏障完成。
+        owner.flush().await.expect("barrier");
+        assert_eq!(
+            exec_next_offset(&owners, "EX1"),
+            500,
+            "屏障后 next_offset 必须精确等于第 5 批最新值(不变量2)"
+        );
+        let preview: String = owners
+            .db()
+            .read_blocking(|conn| {
+                conn.query_row(
+                    "SELECT output_preview FROM exec_sessions WHERE exec_session_id = 'EX1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(crate::db::DbError::from)
+            })
+            .expect("preview query");
+        assert_eq!(preview, "five", "output_preview 必须等于第 5 批最新值");
+    }
+
+    /// v4.5.1 任务4 不变量3 反证:中间 `update_exec_session_progress` 失败时
+    /// 必须保留待冲刷标记,屏障重试补齐。触发器注入 UPDATE 故障(确定性);
+    /// 旧实现失败即丢弃、屏障后 offset 永远落后(必红)。
+    #[tokio::test]
+    async fn exec_progress_write_failure_keeps_pending_until_barrier_retry() {
+        let (_dir, owners) = test_owner_dir();
+        owners.ensure_session("SES-EXEC2", None, false).expect("ensure");
+        let owner = owners.get_or_create("SES-EXEC2");
+        seed_running_exec_row(&owners, "EX2", "SES-EXEC2");
+
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch(
+                    "CREATE TRIGGER exec_progress_fault BEFORE UPDATE ON exec_sessions
+                     BEGIN SELECT RAISE(ABORT, 'injected exec progress fault'); END;",
+                )
+                .map_err(crate::db::DbError::from)
+            })
+            .expect("create fault trigger");
+
+        let lifecycle = owner.lifecycle();
+        lifecycle.exec_session_output(
+            "EX2",
+            0,
+            100,
+            ExecOutputSource::Stdout,
+            "one".into(),
+            100,
+            Arc::from("one"),
+            0,
+            0,
+            0,
+        );
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert_eq!(
+            exec_next_offset(&owners, "EX2"),
+            0,
+            "故障注入期落库必须失败"
+        );
+
+        // 拆除故障,屏障重试必须把保留的待冲刷快照补齐。
+        owners
+            .db()
+            .write_blocking(|conn| {
+                conn.execute_batch("DROP TRIGGER exec_progress_fault;")
+                    .map_err(crate::db::DbError::from)
+            })
+            .expect("drop fault trigger");
+        owner.flush().await.expect("barrier");
+        assert_eq!(
+            exec_next_offset(&owners, "EX2"),
+            100,
+            "屏障重试必须补齐保留的待冲刷快照(旧实现失败即丢、永远落后,必红)"
+        );
     }
 }

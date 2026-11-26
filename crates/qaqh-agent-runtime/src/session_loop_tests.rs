@@ -2453,3 +2453,228 @@ fn effective_workspace_follows_resolver_at_turn_boundary() {
     assert_eq!(loop_.effective_workspace(), wt);
     assert_eq!(port.workspace_root(), wt);
 }
+
+#[cfg(test)]
+mod disk_full_fail_closed_tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use qaqh_ringing_contract::events::SessionEvent;
+    use qaqh_ringing_contract::fact::InputPurpose;
+    use qaqh_ringing_contract::state::TimelineEntry;
+    use qaqh_session::db::store;
+    use qaqh_session::owner::OwnerDirectory;
+
+    use crate::provider_job::ProviderRequestSpec;
+    use crate::session_loop::SessionLoop;
+    use crate::tool_job::{ToolPolicySnapshot, WorkspaceToolPort};
+    use qaqh_ringing::ConversationSendMessage;
+
+    fn sse_server() -> (tiny_http::Server, String) {
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("bind");
+        let addr = format!("http://{}", server.server_addr());
+        (server, addr)
+    }
+
+    /// 盘满故障注入式 SSE 响应:请求到达后先等 `release` 翻真再回放,
+    /// 给测试留出「回合已启动 → 注入盘满 → 放行响应」的确定性窗口。
+    fn spawn_gated_sse_response(
+        server: tiny_http::Server,
+        body: String,
+        release: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        std::thread::spawn(move || {
+            let header =
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"text/event-stream"[..])
+                    .expect("header");
+            for request in server.incoming_requests() {
+                while !release.load(std::sync::atomic::Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let _ = request.respond(
+                    tiny_http::Response::from_string(body.clone()).with_header(header.clone()),
+                );
+            }
+        });
+    }
+
+    /// v4.5.1 任务1(P0)红→绿反证:盘满(SQLITE_FULL)时答案块 seal 写库失败。
+    /// 旧实现 `.await.ok()` 吞错并广播 `TurnTerminal::Completed`(必红);新实现
+    /// 中止回合、事件流广播 `TurnTerminal::Failed`,错误码 `response_persist_failed`
+    /// 且盘满错误文本明确提示「磁盘空间不足，上下文未保存」,库内无 assistant 块。
+    #[tokio::test]
+    async fn disk_full_seal_fails_closed_instead_of_lying_completed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let owners =
+            Arc::new(OwnerDirectory::open(dir.path().join("qaqh.db")).expect("open"));
+        let owner = owners
+            .create_session(store::NewSession {
+                session_id: "SES-DISKFULL".into(),
+                parent_session_id: None,
+                title: "diskfull".into(),
+                title_source: Some("user".into()),
+                cwd: None,
+                model: None,
+                tool_mode: None,
+                model_selection: None,
+                custom_tools: None,
+                frozen_annotation: None,
+                ephemeral: false,
+            })
+            .await
+            .expect("create session");
+        let mut rx = owner.subscribe();
+        let manager = Arc::new(std::sync::Mutex::new(
+            qaqh_workspace::registration::build_tool_manager(
+                &[],
+                std::sync::Arc::new(qaqh_workspace::todo::MemoryTodoHost::default()),
+            ),
+        ));
+        let port = Arc::new(WorkspaceToolPort::new(
+            "SES-DISKFULL",
+            manager,
+            ToolPolicySnapshot::workspace_write(dir.path().join("ws")),
+            owner.lifecycle(),
+            Arc::new(qaqh_process_tools::exec_session::ExecSessionManager::new()),
+        ));
+
+        // 2 MiB 答案:答案块的溢出页需求远超任何小行,是撞 `max_page_count`
+        // 天花板的确定性素材(小行不会撞,2 MiB 必撞)。
+        let big_answer = "x".repeat(2 * 1024 * 1024);
+        let sse_body = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{big_answer}\"}},\"finish_reason\":null}}]}}\n\n\
+             data: {{\"choices\":[{{\"delta\":{{}},\"finish_reason\":\"stop\"}}],\"usage\":{{\"prompt_tokens\":10,\"completion_tokens\":5,\"total_tokens\":15}}}}\n\n\
+             data: [DONE]\n\n"
+        );
+        let (server, base_url) = sse_server();
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        spawn_gated_sse_response(server, sse_body, Arc::clone(&release));
+
+        let mut provider = qaqh_gate::ProviderConfig::chat(
+            &base_url,
+            "sk-test",
+            "test-model",
+            None,
+            None,
+            qaqh_types::ThinkingParamMode::OpenAi,
+            qaqh_types::CacheTokenField::PromptCacheHitTokens,
+            true,
+            None,
+        );
+        provider.retry = Some(qaqh_types::RetrySpec {
+            max_retries: 1,
+            ..Default::default()
+        });
+        let spec = ProviderRequestSpec::new(provider, 1024);
+        let loop_ = SessionLoop::new("SES-DISKFULL", owner, port, spec, dir.path().to_path_buf());
+
+        loop_
+            .send_input(ConversationSendMessage {
+                message_id: Some("IN-DISK".into()),
+                text: "写一篇长文".into(),
+                input_purpose: InputPurpose::TriggerTurn,
+                as_system: false,
+                attachments: None,
+                images: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
+                widget_context: None,
+            })
+            .expect("send input");
+        for _ in 0..200 {
+            if loop_.active_turn().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(loop_.active_turn().is_some(), "回合必须已启动");
+
+        // 盘满故障注入:写连接的页数上限钉在当前页数 + 4 页。小行(输入块、turn 行)
+        // 照常落库,2 MiB 答案块的溢出页必然撞墙 → SQLITE_FULL → DbError::DiskFull。
+        owners
+            .db()
+            .write_blocking(|conn| {
+                let pages: i64 = conn
+                    .query_row("PRAGMA page_count", [], |row| row.get(0))
+                    .map_err(qaqh_session::db::DbError::from)?;
+                conn.execute_batch(&format!("PRAGMA max_page_count = {}", pages + 4))
+                    .map_err(qaqh_session::db::DbError::from)?;
+                Ok::<(), qaqh_session::db::DbError>(())
+            })
+            .expect("squeeze max_page_count");
+        release.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // 事件流收集到 TurnEnded 为止;盘满时严禁出现 assistant 块落库广播。
+        let mut terminal_outcome = None;
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                Ok(Ok(frame)) => match frame.event {
+                    SessionEvent::TimelineAppended { entry } => {
+                        assert!(
+                            !matches!(entry, TimelineEntry::AssistantBlock { .. }),
+                            "盘满时答案块 seal 失败,不得广播 assistant 块(旧实现假成功,必红)"
+                        );
+                    }
+                    SessionEvent::TurnEnded { outcome, .. } => {
+                        terminal_outcome = Some(outcome);
+                        break;
+                    }
+                    _ => {}
+                },
+                Ok(Err(error)) => panic!("event channel: {error}"),
+                Err(_) => panic!("盘满回合必须在时限内收到终态事件"),
+            }
+        }
+        let outcome = terminal_outcome.expect("terminal outcome");
+        let qaqh_ringing_contract::state::TurnOutcome::Finished {
+            terminal,
+            error: turn_error,
+            ..
+        } = &outcome
+        else {
+            panic!("expected finished outcome, got {outcome:?}");
+        };
+        assert!(
+            matches!(terminal, qaqh_ringing_contract::fact::TurnTerminal::Failed),
+            "盘满必须广播 Failed,严禁假报 Completed(旧实现必红): {terminal:?}"
+        );
+        let turn_error = turn_error.as_ref().expect("failed turn must carry error");
+        assert_eq!(turn_error.code, "response_persist_failed");
+        assert!(
+            turn_error.message.contains("磁盘空间不足，上下文未保存"),
+            "盘满错误文本必须明确提示上下文未保存: {}",
+            turn_error.message
+        );
+
+        // 库内直查:turn 按 failed 收口,assistant 块从未落盘。
+        owners
+            .db()
+            .read_blocking(|conn| {
+                let assistant: Option<String> = conn
+                    .query_row(
+                        "SELECT kind FROM blocks WHERE session_id = 'SES-DISKFULL' AND kind = 'assistant'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(qaqh_session::db::DbError::from)
+                    .unwrap_or(None);
+                assert!(
+                    assistant.is_none(),
+                    "盘满时答案块不得落盘(seal 失败必须如实判死,不是假成功)"
+                );
+                let outcome_json: String = conn
+                    .query_row(
+                        "SELECT outcome_json FROM turns WHERE session_id = 'SES-DISKFULL' LIMIT 1",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(qaqh_session::db::DbError::from)?;
+                assert!(
+                    outcome_json.contains("response_persist_failed"),
+                    "turn 终态必须携带持久化失败码: {outcome_json}"
+                );
+                Ok::<(), qaqh_session::db::DbError>(())
+            })
+            .expect("verify db state");
+    }
+}

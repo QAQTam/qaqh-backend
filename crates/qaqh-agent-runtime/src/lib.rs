@@ -16,6 +16,8 @@ pub mod quota_ledger;
 pub mod session_agent;
 pub mod session_hooks;
 pub mod session_loop;
+/// v4.5.1 任务1:回合收口持久化失败 Fail-Closed 支撑件(独立子模块)。
+mod session_persist;
 #[cfg(test)]
 mod session_loop_tests;
 pub mod session_title;
