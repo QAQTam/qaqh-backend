@@ -138,3 +138,69 @@
 - **`v4.11`（`rust-nightly` 烧机 + 8 GiB 级压测 + `v5.0` 边界预演）**：切换 `rust-nightly` 留足 2 版烧机期；8 GiB RAM 全链路压测；独立验证 PTC 沙箱选型（`rquickjs`/`Starlark`/`Monty`，不碰 `session_loop.rs`）；冻结 `v5.0` 内核架构 ADR。
 - **`v4.12`（4.x 终极稳定封板）**：全面功能冻结，全平台打包验收，确立 `v5.0` 内核大重写前的纯血 Rust Native 稳固基线。
 - **`v5.0`（内核革命）**：一次性完成 `SessionLoop` Effect 驱动状态机 + 全异步工具 + Per-Root Actor + PTC 正式接入。
+
+---
+
+## 六、实施进度（按切片滚动登记；状态字段仍为 `已采纳 · 未实施`）
+
+> **纪律提醒（宪法 #10）**：协议**契约**冻结 ≠ 协议**已实施**。在 `P3-4` 的
+> `v3_server` / `client/v3` 与 `duplex` 自闭环全绿之前，本 ADR 的状态**不得**
+> 写成"已实施"。以下逐条只登记"已冻结/已落地"的事实与其验证命令。
+
+### `v4.6 P3-2`（2026-11-27）：原语底座
+
+- `crates/qaqh-core-vocab` 落地：依赖面 `serde`/`thiserror`/`hex`；
+  `cargo tree -e normal,build -i serde_json` → `did not match any packages`。
+- 三档 `ToolMode`（`Core`/`Standard`/`Custom`）+ 压测档 `minimal:b/c` 当场拒绝；
+  只读 `ToolCatalog`（**不带任何 JSON Schema**，分组＝权限类别，禁用原因判定顺序固定）。
+- 详见 [ADR-0045](0045-core-vocab-tool-mode-and-catalog.md)。
+
+### `v4.6 P3-3`（2026-11-27）：协议契约冻结
+
+- `crates/qaqh-ringing-v3` 落地，依赖面仅
+  `qaqh-core-vocab` + `serde` + `postcard` + `bytes` + `thiserror`（+ build-dep `sha2`）：
+  ```
+  cargo tree -p qaqh-ringing-v3 -e normal,build --depth 1
+  ├── bytes v1.12.1   ├── postcard v1.2.0   ├── qaqh-core-vocab
+  ├── serde v1.0.229  └── thiserror v2.0.21  [build] sha2 v0.11.1
+  ```
+  **无** `serde_json` / `axum` / `qaqh-ringing` / `qaqh-types` / `qaqh-ringing-contract`。
+- **线缆帧**：`u32_le(len) ++ postcard(payload)`，单帧上限
+  `MAX_FRAME_BYTES = 16 MiB`（超限在**分配前**拒绝）；一帧恰好一载荷
+  （尾随字节＝`LengthMismatch`，杜绝"一帧走私两帧"）。
+- **机器指纹**：`build.rs` 读 `protocol_rev.txt` 得 `PROTOCOL_REV`，并对
+  `src/**/*.rs`（**排除测试文件**）的归一化文本（剥注释 + 折叠空白）算 sha256 →
+  `PROTOCOL_FINGERPRINT: [u8; 32]`。源码里没有可手改的字面量。
+  **反证实测**：新增一个 `struct` → 指纹变化（`3a5e87d4…` → `cbcfbc50…`）；
+  只改注释 → 指纹不变（回到 `3a5e87d4…`）。
+- **握手**：`ClientHello`（`client_instance_id`/`ClientKind`/凭据/`protocol_rev`/指纹）
+  ↔ `ServerHello`；版本或指纹任一失配 → `HandshakeReject`（`RevMismatch` /
+  `FingerprintMismatch`），**桌面与移动端同一口径，无跨小版本宽松解码**。
+  凭据只有三类：本地 OS 用户 / `iroh` EndpointId / 已配对设备令牌——DTO 里没有
+  "自报 client_id" 字段（铁律 5）。
+- **四流**：`StreamKind::{Control, SessionEvents{session_id,since_seq},
+  ShellPty{shell_id,from_offset}, BlobTransfer}`；`DeliveryClass` 是**帧属性**
+  （同会话单流单 `seq`，绝不按分级拆流）；`FrameMeta{seq, server_ts_ms, delivery}`
+  的服务端时钟是唯一时间权威。
+- **多端联动**：`SessionEvent::DriverChanged{session_id, driver_client_instance_id, ordinal}`
+  ——单点定序，`delivery()` 恒为 `Reliable`（丢了就是两台设备同时发指令）。
+- **一网打尽 11 域**：`System` / `Session` / `Command` / `Shell` / `Marketplace` /
+  `Config` / `Account` / `Pairing` / `Gitx` / `Fs` / `ToolCatalog`；
+  `ControlCall.command_id` 是幂等键（断线重放返回原回执，铁律 4）。
+- **显式排除**：无 `InspectModelContext`，无 `local_readonly_path`，无后端
+  `opaque` 锚点；动态参数只有 `JsonText(String)` 与 `Bytes` 两条出路。
+- **会话首屏/翻页**：`GetSessionSnapshot{tail_blocks}` 带
+  `pinned_compaction: Option<CompactionSummary>`（**独立于 `turns` 窗口**）与
+  `turns` 窗口；`TranscriptPage{before_ord, limit, timeline_epoch}` 一次带齐
+  关联 `tool_calls`（跨页归属规则＝同 `tool_call_id` 同视图），
+  `timeline_epoch` 失配一律 `ErrorCode::StaleCursor`。
+- **验证**：`cargo test -p qaqh-ringing-v3` 17/17 绿
+  （全量 DTO round-trip、`Option`/`Vec` 混合序列位置漂移反证、超限帧/失配版本/
+  陈旧代际 Fail-Closed、`daemon.endpoint` 往返与过期守护进程拒绝）；
+  `cargo clippy --no-deps -p qaqh-ringing-v3 --all-targets` 零告警。
+
+### 仍未实施（留给后续切片，保持诚实）
+
+- `P3-4`：`v3_server/` + `client/v3/` 物理隔离骨架、`MuxTransport`（`yamux` + 双后端
+  矩阵）、`daemon.endpoint` 读写接线、六大跨代不变量守卫（含量化 P99 红线）、
+  以及两份前置 ADR。**在该切片全绿之前，协议不得宣称"已实施"。**

@@ -474,6 +474,9 @@ name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "camino"
@@ -615,6 +618,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c0f78a02292a74a88ac736019ab962ece0bc380e3f977bf72e376c5d78ff0678"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "cobs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
+dependencies = [
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -955,6 +967,18 @@ name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
+
+[[package]]
+name = "embedded-io"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1a6892d9eef45c8fa6b9e0086428a2cca8491aca8f787c534a3d6d0bcb3ced"
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "encoding_rs"
@@ -2558,6 +2582,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "postcard"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5431b3dcfdf6d1985c87d11f267a171c0dec0a8cd544c6727b747d36365f1fca"
+dependencies = [
+ "cobs",
+ "embedded-io 0.4.0",
+ "embedded-io 0.6.1",
+ "serde",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3052,6 +3088,19 @@ dependencies = [
  "tempfile",
  "tokio",
  "ts-rs",
+]
+
+[[package]]
+name = "qaqh-ringing-v3"
+version = "4.2.0"
+dependencies = [
+ "bytes",
+ "postcard",
+ "qaqh-core-vocab",
+ "serde",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
