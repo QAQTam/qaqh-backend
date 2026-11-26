@@ -27,13 +27,14 @@ pub enum StoreFailure {
 /// provider 层做逐字文案映射（siwc `写临时文件失败 {temp}: {reason}` 等），
 /// 本函数只保证 `reason` 是底层 IO 错误原文。
 pub fn atomic_write_json(path: &Path, text: &str) -> Result<(), StoreFailure> {
-    let parent = path.parent().unwrap_or(Path::new("."));
-    if !parent.as_os_str().is_empty() {
-        std::fs::create_dir_all(parent).map_err(|e| StoreFailure::CreateDir {
-            parent: parent.display().to_string(),
-            reason: e.to_string(),
-        })?;
-    }
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|e| StoreFailure::CreateDir {
+        parent: parent.display().to_string(),
+        reason: e.to_string(),
+    })?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| StoreFailure::WriteTemp {
         temp: path.display().to_string(),
         reason: e.to_string(),

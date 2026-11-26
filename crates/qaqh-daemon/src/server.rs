@@ -494,7 +494,10 @@ fn write_discovery(discovery: &DaemonDiscovery) -> Result<(), String> {
     // 再 rename」的手写原子写退役，改 `tempfile::NamedTempFile`——同目录唯一
     // 临时名（Unix 直接 0600），`persist` 内部即原子替换（Windows 带
     // MOVEFILE_REPLACE_EXISTING，无需预删）。
-    let parent = target.parent().unwrap_or(std::path::Path::new("."));
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(stringify)?;
     serde_json::to_writer_pretty(&mut temp, discovery).map_err(stringify)?;
     std::io::Write::flush(&mut temp).map_err(stringify)?;

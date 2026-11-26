@@ -134,6 +134,9 @@ impl AgentRegistry {
             self.close(&session_id);
         }
         self.exec_sessions.shutdown();
+        // 断开 QaqhService -> AgentRegistry -> SessionToolHosts -> QaqhService
+        // 强引用环，确保服务停机后 OwnerDirectory 与 QaqhService 可被完整析构。
+        self.tool_hosts = None;
     }
 
     /// ADR-0014：回合终态路由——子会话的 inter-agent 触发回合终态时，向父

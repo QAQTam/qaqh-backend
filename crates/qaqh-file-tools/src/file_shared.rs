@@ -30,11 +30,25 @@ pub fn content_hash(content: &str) -> String {
 /// 特性随之下架）。
 pub fn atomic_write(path: &str, content: &str) -> std::io::Result<()> {
     let target = Path::new(path);
-    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.write_all(content.as_bytes())?;
     temp.flush()?;
     temp.as_file().sync_all()?;
+    // `NamedTempFile` 在 Unix 下默认以 0600 创建，面向工作区源码/脚本落盘时
+    // 必须保留既有文件权限（含 0755 可执行位），新建文件按常规源码 0644。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode_perms = match std::fs::metadata(target) {
+            Ok(meta) => meta.permissions(),
+            Err(_) => std::fs::Permissions::from_mode(0o644),
+        };
+        temp.as_file().set_permissions(mode_perms)?;
+    }
     temp.persist(target).map_err(|error| error.error)?;
     Ok(())
 }
@@ -609,5 +623,46 @@ mod atomic_write_tests {
         assert!(
             ensure_writable_regular_target(&dir.path().join("new.txt").to_string_lossy()).is_ok()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_existing_mode_and_defaults_new_file_to_0644() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        atomic_write(&script.to_string_lossy(), "#!/bin/sh\necho new\n").unwrap();
+        let existing_mode = std::fs::metadata(&script).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            existing_mode, 0o755,
+            "existing executable script must preserve 0755, got {existing_mode:o}"
+        );
+
+        let fresh = dir.path().join("fresh.rs");
+        atomic_write(&fresh.to_string_lossy(), "pub fn ok() {}\n").unwrap();
+        let fresh_mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            fresh_mode, 0o644,
+            "newly created workspace file must not silently drop to 0600, got {fresh_mode:o}"
+        );
+    }
+
+    #[test]
+    fn atomic_write_bare_filename_normalizes_empty_parent_to_dot() {
+        // 裸文件名的 Path::parent() 在 std 中返回 Some("")，归一化后必须映射到 "."。
+        assert_eq!(Path::new("foo.txt").parent(), Some(Path::new("")));
+
+        fn normalize(p: &Path) -> &Path {
+            p.parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."))
+        }
+        assert_eq!(normalize(Path::new("foo.txt")), Path::new("."));
+        assert_eq!(normalize(Path::new("dir/foo.txt")), Path::new("dir"));
+        assert_eq!(normalize(Path::new("/abs/foo.txt")), Path::new("/abs"));
     }
 }
