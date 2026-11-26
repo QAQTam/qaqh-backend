@@ -1,8 +1,8 @@
 # QAQ-Harness `v4.6`（`P3-0` ~ `P3-4`）开工总计划与施工卡
 
-> **基线时间**：2026-11-26 · **代码基线**：`main @ fc1ed287`（已合入 `v4.5` PR #39–#44、`v4.5.1` PR #45、`wip/prompt-cache` PR #46）
+> **基线时间**：2026-11-26 · **代码基线**：`main @ bea000a2`（已合入 `v4.5` PR #39–#44、`v4.5.1` PR #45、`wip/prompt-cache` PR #46、`v4.6 P3-0` PR #47）
 > **适用宪章**：[AGENTS.md](../../AGENTS.md)（《项目宪法 v2 · 高质量发展修宪版》）· [ADR-0042 r3](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md)（状态：`已采纳 · 未实施`）· [ADR-0035](../adr/0035-exec-flood-model-spill-gate.md)（状态：`已采纳 · 未实施`）· [V4_6_DECISION_PACK.md](./V4_6_DECISION_PACK.md)（已二审定案）· [MUST.md](./MUST.md)
-> **前置状态**：`v4.5`、`v4.5.1` 已合入 `main`，`../qaqh-gpui/Cargo.toml` 已摘除 `qaqh-config-api`。按二审定案 D5.1/D5.2，先执行前置清债 `P3-0` 再按序推进 `P3-1` ~ `P3-4`。
+> **前置状态**：`v4.5`、`v4.5.1` 与 **`v4.6 P3-0`（PR #47 · `bea000a2`）** 均已合入 `main`，`session_loop.rs` 已降至 2,775 行，`../qaqh-gpui/Cargo.toml` 已摘除 `qaqh-config-api`。当前下一张开工切片为 **`P3-1`**，随后按序推进 `P3-2` ~ `P3-4`。
 
 ---
 
@@ -173,8 +173,8 @@ flowchart TD
 
 | 切片 | PR | 状态 | 备注 |
 |---|---|---|---|
-| `P3-0` | — | **待开工（下一张）** | Fast-Follow：`session_loop.rs` 16 处 `.await.ok()` + 2 处回滚泄漏 + 修绿 `tool_surface_schema_shape`（`session_loop.rs` 净 `≤ 0`） |
-| `P3-1` | — | 待开工（依赖 `P3-0`） | `ADR-0035` 泄洪闸（独立 `spill_gate.rs`）+ `ADR-0034` 真实洪峰冒烟 |
+| `P3-0` | #47 (`bea000a2`) | **已合入 `main`** | Fast-Follow：`session_loop.rs` 16 处 `.await.ok()` + 2 处回滚泄漏清零（拆出 `session_interaction.rs`，降至 2,775 行）+ 修绿 `tool_surface_schema_shape` |
+| `P3-1` | — | **待开工（下一张）** | `ADR-0035` 泄洪闸（独立 `spill_gate.rs`）+ `ADR-0034` 真实洪峰冒烟 |
 | `P3-2` | — | 待开工（依赖 `P3-1`） | `crates/qaqh-core-vocab`（0 `serde_json`）+ `tool_mode.rs` 三档 + 只读 `ToolCatalog`（`1C′` 不碰 V2 crate，剥离 PTC） |
 | `P3-3` | — | 待开工（依赖 `P3-2`） | `crates/qaqh-ringing-v3` 强类型协议冻结（`postcard` 零禁区属性 / `daemon.endpoint` / `pinned_compaction` / 机器指纹） |
 | `P3-4` | — | 待开工（依赖 `P3-3`） | `v3_server` + `client/v3`（`yamux` + 细粒度泛型静态分发 Facade + `duplex` 闭环 + 6 条不变量（含量化延迟）+ 2 份前置 ADR） |
