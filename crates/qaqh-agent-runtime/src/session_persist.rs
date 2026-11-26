@@ -11,15 +11,18 @@
 
 use qaqh_hooks::HookEventName;
 use qaqh_ringing_contract::fact::{
-    AssistantBlockKind, BlockId, ContentValue, TurnError, TurnId, TurnTerminal,
+    AssistantBlockKind, BlockId, ContentValue, InterruptReason, ToolCallId, TurnError, TurnId,
+    TurnTerminal,
 };
 use qaqh_ringing_contract::state::{TimelineEntry, TurnOutcome};
+use qaqh_ringing_contract::ulid::generate_ulid;
 use qaqh_session::db::DbError;
 use qaqh_session::owner::SessionOwner;
 use qaqh_types::{ContentBlock, Message, UsageInfo};
 
 use crate::progress::AttemptBlocks;
 use crate::provider_job::ProviderOutcome;
+use crate::session_loop::tool_result_message;
 
 /// 持久化失败统一错误码(修复单 §二.1.2 / §二.1.4)。
 pub(crate) const RESPONSE_PERSIST_FAILED: &str = "response_persist_failed";
@@ -174,11 +177,12 @@ fn finished_outcome(
 async fn persist_turn_or_emit_failure(
     owner: &SessionOwner,
     turn: &TurnId,
+    status: &'static str,
     outcome: TurnOutcome,
     usage: Option<UsageInfo>,
     original_failure: Option<(&str, &str)>,
 ) -> Result<(), String> {
-    if let Err(error) = owner.finish_turn(turn.as_ref(), "finished", outcome).await {
+    if let Err(error) = owner.finish_turn(turn.as_ref(), status, outcome).await {
         log::error!("[session] finish_turn persist failed: {error}");
         let persist_msg = persist_failure_message(&error);
         let merged_msg = match original_failure {
@@ -207,7 +211,7 @@ pub(crate) async fn persist_completed(
     usage: Option<UsageInfo>,
 ) -> TurnTerminalResolution {
     let outcome = finished_outcome(TurnTerminal::Completed, usage.clone(), None);
-    match persist_turn_or_emit_failure(owner, turn, outcome, usage, None).await {
+    match persist_turn_or_emit_failure(owner, turn, "finished", outcome, usage, None).await {
         Ok(()) => TurnTerminalResolution {
             terminal: TurnTerminal::Completed,
             error: None,
@@ -230,7 +234,7 @@ pub(crate) async fn persist_cancelled(
     usage: Option<UsageInfo>,
 ) -> TurnTerminalResolution {
     let outcome = finished_outcome(TurnTerminal::Cancelled, usage.clone(), None);
-    match persist_turn_or_emit_failure(owner, turn, outcome, usage, None).await {
+    match persist_turn_or_emit_failure(owner, turn, "finished", outcome, usage, None).await {
         Ok(()) => TurnTerminalResolution {
             terminal: TurnTerminal::Cancelled,
             error: None,
@@ -267,6 +271,7 @@ pub(crate) async fn persist_failed(
     let detail = match persist_turn_or_emit_failure(
         owner,
         turn,
+        "finished",
         outcome,
         usage,
         Some((code, message)),
@@ -281,6 +286,156 @@ pub(crate) async fn persist_failed(
         error: Some(detail.clone()),
         stop_hook: Some((HookEventName::StopFailure, detail)),
     }
+}
+
+/// 中断路径 Fail-Closed 收口（v4.6 P3-0）：
+/// 若此前清理挂起交互已失败则直接按 `response_persist_failed` 判死；否则写入
+/// `Interrupted` 终态，写库失败时广播 `TurnEnded(Failed)` + `Idle` 并单点返回
+/// 供调用方触发一次 `notify_terminal`。
+pub(crate) async fn persist_interrupted(
+    owner: &SessionOwner,
+    turn: &TurnId,
+    reason: InterruptReason,
+    interaction_error: Option<DbError>,
+) -> TurnTerminalResolution {
+    let detail = format!("{reason:?}");
+    if let Some(error) = interaction_error {
+        let merged = format!("interrupted: {detail}; {}", persist_failure_message(&error));
+        return persist_failed(owner, turn, None, RESPONSE_PERSIST_FAILED, &merged).await;
+    }
+    let outcome = TurnOutcome::Interrupted { reason };
+    match persist_turn_or_emit_failure(
+        owner,
+        turn,
+        "interrupted",
+        outcome,
+        None,
+        Some(("interrupted", &detail)),
+    )
+    .await
+    {
+        Ok(()) => TurnTerminalResolution {
+            terminal: TurnTerminal::Failed,
+            error: Some(format!("interrupted: {detail}")),
+            stop_hook: Some((HookEventName::StopCancelled, detail)),
+        },
+        Err(merged_msg) => {
+            let detail = format!("{RESPONSE_PERSIST_FAILED}: {merged_msg}");
+            TurnTerminalResolution {
+                terminal: TurnTerminal::Failed,
+                error: Some(detail.clone()),
+                stop_hook: Some((HookEventName::StopFailure, detail)),
+            }
+        }
+    }
+}
+
+/// 声明工具调用并落库 `ToolCall` 时间线块（v4.6 P3-0 Fail-Closed）：
+/// 任一步写库失败立即报错中止派发/重试注入，严禁在未落库状态下继续修改 `messages`。
+pub(crate) async fn declare_tool_call(
+    owner: &SessionOwner,
+    turn: &TurnId,
+    call_id: &str,
+    tool_name: &str,
+    input: &serde_json::Value,
+) -> Result<(), DbError> {
+    let call = ToolCallId::new(call_id);
+    owner
+        .declare_tool_call(&call, turn, tool_name, Some(input.clone()))
+        .await
+        .inspect_err(|error| log::error!("[loop] declare {call_id} failed: {error}"))?;
+    owner
+        .append_block(TimelineEntry::ToolCall {
+            call_id: call,
+            turn_id: Some(turn.clone()),
+        })
+        .await
+        .inspect_err(|error| {
+            log::error!("[loop] append ToolCall block {call_id} failed: {error}");
+        })
+}
+
+/// B 路重发的公共落盘/组消息逻辑（v4.6 P3-0 Fail-Closed）：
+/// 截断的文本前缀、`declare_tool_call` 与失败 `ToolResult` 块全部落库成功后才
+/// 并入 `messages`，任一写库失败立即返回 `Err(DbError)`，交由主循环统一收口为
+/// `finish_persist_failed`。
+pub(crate) async fn inject_failed_tool_results(
+    owner: &SessionOwner,
+    turn: &TurnId,
+    outcome: &ProviderOutcome,
+    blocks: &AttemptBlocks,
+    messages: &mut Vec<Message>,
+) -> Result<(), DbError> {
+    let prefix = outcome
+        .partial_text
+        .clone()
+        .filter(|t| !t.trim().is_empty());
+    if let Some(prefix) = &prefix {
+        // 前缀是被截断消息的已产出部分，下一 attempt 的新消息不含它。
+        owner
+            .append_block(TimelineEntry::AssistantBlock {
+                block_id: BlockId::new(format!("block_{}", generate_ulid())),
+                turn_id: turn.clone(),
+                ord: 0,
+                block_kind: AssistantBlockKind::Answer,
+                content: ContentValue::Inline {
+                    text: prefix.clone(),
+                },
+                model: blocks.model.clone(),
+                usage: None,
+                generated_ms: outcome.generated_ms,
+                opaque: vec![],
+            })
+            .await
+            .inspect_err(|error| {
+                log::error!("[loop] inject partial prefix append_block failed: {error}");
+            })?;
+    }
+    let mut reply = Vec::new();
+    if let Some(prefix) = prefix {
+        reply.push(ContentBlock::Text { text: prefix });
+    }
+    let mut tool_messages = Vec::new();
+    for tool in &outcome.partial_tools {
+        let input = serde_json::from_str::<serde_json::Value>(&tool.args_text)
+            .unwrap_or(serde_json::Value::Object(Default::default()));
+        reply.push(ContentBlock::ToolUse {
+            id: tool.call_id.clone(),
+            name: tool.name.clone(),
+            input: input.clone(),
+        });
+        declare_tool_call(owner, turn, &tool.call_id, &tool.name, &input).await?;
+        let failure = format!(
+            "tool call was cut off mid-generation ({} bytes of arguments received); call the tool again with complete arguments",
+            tool.args_text.len()
+        );
+        owner
+            .append_block(TimelineEntry::ToolResult {
+                call_id: ToolCallId::new(tool.call_id.clone()),
+                turn_id: Some(turn.clone()),
+                content: ContentValue::Inline {
+                    text: failure.clone(),
+                },
+                images: Vec::new(),
+            })
+            .await
+            .inspect_err(|error| {
+                log::error!(
+                    "[loop] inject failed tool_result {} append_block failed: {error}",
+                    tool.call_id
+                );
+            })?;
+        tool_messages.push(tool_result_message(&tool.call_id, &failure, false, &[]));
+    }
+    // 落库全部成功后才并入 messages，与正常 ToolUse 分支同形。
+    messages.push(Message {
+        msg_id: None,
+        role: "assistant".into(),
+        name: None,
+        content: reply,
+    });
+    messages.extend(tool_messages);
+    Ok(())
 }
 
 #[cfg(test)]
