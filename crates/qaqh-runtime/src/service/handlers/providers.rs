@@ -7,12 +7,15 @@
 //! 凭据纪律：API key 明文只进 `secrets.toml` 加密槽（`providers.<id>`），
 //! `providers.toml` 只落 `"set"` 标记；任何路径不得把明文写进目录、日志或回执。
 
-use qaqh_profile::{ModelDef, ModelSelection, ProfilesStore, ProviderDef};
+use qaqh_dsaccount::service::DsAccountModel;
+use qaqh_profile::{ModelDef, ModelDefaults, ModelSelection, ProfilesDocument, ProfilesStore, ProviderDef};
 use qaqh_ringing::{
     ProviderUpsertDto, RingingCommand, SecretWrite, SessionSettingsPatch, SettingValue,
     ToolsSettingPatch,
 };
+use qaqh_types::{CredentialSource, ModelCapabilities, Wire};
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 
 use crate::error::{QaqhError, QaqhResult};
 use crate::service::QaqhService;
@@ -341,6 +344,295 @@ impl QaqhService {
         self.send_ringing_cmd(session_id.to_string(), RingingCommand::AgentReloadConfig)?;
         Ok(revision)
     }
+
+    /// 把 DeepSeek 账号模型目录原子收敛进 `providers.toml`。
+    /// 失败只记日志，不阻断 `dsaccount.models` / `dsaccount.sign_in.status` 正常返回。
+    pub(crate) fn reconcile_dsaccount_catalog(
+        &self,
+        inference_origin: &str,
+        models: &[DsAccountModel],
+    ) {
+        let mut store = match load_catalog() {
+            Ok(store) => store,
+            Err(error) => {
+                log::warn!("[providers] load catalog for dsaccount reconcile failed: {error:?}");
+                return;
+            }
+        };
+        match store.mutate_if_changed(|doc| reconcile_dsaccount_document(doc, inference_origin, models))
+        {
+            Ok(true) => {
+                let revision = store.document().revision;
+                if let Err(error) = refresh_config(self, revision) {
+                    log::warn!("[providers] refresh config after dsaccount reconcile failed: {error:?}");
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                log::warn!("[providers] save catalog after dsaccount reconcile failed: {error}");
+            }
+        }
+    }
+
+    /// best-effort 拉取 DeepSeek 账号远端 `/models` 并原子收敛目录；
+    /// 即使远端拉取失败，仍保证 `DeepseekAccount` Provider 骨架先落盘。
+    pub(crate) fn sync_dsaccount_catalog_best_effort(&self) {
+        let Ok(manager) = self.dsaccount() else {
+            return;
+        };
+        let origin = manager.config().inference_origin.clone();
+        let models: Vec<DsAccountModel> = match manager.models() {
+            Ok(catalog) => {
+                let data = catalog
+                    .get("data")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new()));
+                match serde_json::from_value::<Vec<DsAccountModel>>(data) {
+                    Ok(models) => models,
+                    Err(error) => {
+                        log::warn!("[providers] parse dsaccount models during auto-sync failed: {error}");
+                        Vec::new()
+                    }
+                }
+            }
+            Err(error) => {
+                log::warn!("[providers] fetch dsaccount models during auto-sync failed: {error}");
+                Vec::new()
+            }
+        };
+        self.reconcile_dsaccount_catalog(&origin, &models);
+    }
+}
+
+fn positive_u32(value: &Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .filter(|&n| n > 0)
+}
+
+fn strict_string_array(value: &Value) -> Option<Vec<String>> {
+    value
+        .as_array()?
+        .iter()
+        .map(|item| item.as_str().map(ToOwned::to_owned))
+        .collect()
+}
+
+/// 将 DeepSeek 账号 `/models` 条目与现有目录 [`ModelDef`] 合并；
+/// 缺关键上下文/输出上限时返回 `None`，绝不猜测或虚构上限。
+pub(crate) fn merge_dsaccount_model(
+    raw: &DsAccountModel,
+    existing: Option<&ModelDef>,
+) -> Option<ModelDef> {
+    let model_id = raw.id.trim();
+    if model_id.is_empty() {
+        return None;
+    }
+    let context_window = raw
+        .metadata
+        .get("context_window")
+        .or_else(|| raw.metadata.get("context_length"))
+        .and_then(positive_u32)
+        .or_else(|| existing.map(|m| m.context_window).filter(|&n| n > 0))?;
+    let max_output_tokens = raw
+        .metadata
+        .get("max_output_tokens")
+        .or_else(|| raw.metadata.get("max_tokens"))
+        .and_then(positive_u32)
+        .or_else(|| existing.map(|m| m.max_output_tokens).filter(|&n| n > 0))?;
+
+    let display_name = raw
+        .metadata
+        .get("display_name")
+        .or_else(|| raw.metadata.get("name"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != model_id)
+        .map(ToOwned::to_owned)
+        .or_else(|| existing.and_then(|m| m.display_name.clone()));
+
+    let effort_obj = raw.metadata.get("effort").and_then(|v| v.as_object());
+    let declared_levels = effort_obj
+        .and_then(|o| o.get("supported_levels"))
+        .or_else(|| raw.metadata.get("reasoning_levels"))
+        .and_then(strict_string_array);
+    let reasoning_levels = declared_levels
+        .clone()
+        .unwrap_or_else(|| existing.map(|m| m.reasoning_levels.clone()).unwrap_or_default());
+
+    let default_level = effort_obj
+        .and_then(|o| o.get("default_level"))
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let existing_effort = existing
+        .and_then(|m| m.defaults.reasoning_effort.as_deref())
+        .filter(|level| reasoning_levels.iter().any(|item| item == level))
+        .map(ToOwned::to_owned);
+    let reasoning_effort = existing_effort.or_else(|| {
+        default_level
+            .filter(|level| reasoning_levels.iter().any(|item| item == level))
+            .map(ToOwned::to_owned)
+    });
+
+    let caps_obj = raw.metadata.get("capabilities").and_then(|v| v.as_object());
+    let cap_bool = |key: &str| caps_obj.and_then(|o| o.get(key)).and_then(|v| v.as_bool());
+    let modalities = raw
+        .metadata
+        .get("input_modalities")
+        .and_then(strict_string_array);
+
+    let image_input = modalities
+        .map(|items| items.iter().any(|item| item == "image"))
+        .or_else(|| cap_bool("image_input"))
+        .unwrap_or_else(|| existing.is_some_and(|m| m.capabilities.image_input));
+    let tool_calls = cap_bool("tool_calls")
+        .unwrap_or_else(|| existing.map(|m| m.capabilities.tool_calls).unwrap_or(true));
+    let native_web_search = cap_bool("native_web_search").unwrap_or_else(|| {
+        existing
+            .map(|m| m.capabilities.native_web_search)
+            .unwrap_or_else(|| model_id.starts_with("deepseek-v4-pro"))
+    });
+    let reasoning = if declared_levels.is_some() {
+        !reasoning_levels.is_empty()
+    } else {
+        cap_bool("reasoning").unwrap_or_else(|| {
+            existing
+                .map(|m| m.capabilities.reasoning)
+                .unwrap_or_else(|| model_id.contains("reasoner"))
+        })
+    };
+
+    Some(ModelDef {
+        enabled: existing.map(|m| m.enabled).unwrap_or(true),
+        display_name,
+        context_window,
+        max_output_tokens,
+        reasoning_levels,
+        capabilities: ModelCapabilities {
+            tool_calls,
+            image_input,
+            native_web_search,
+            reasoning,
+        },
+        defaults: ModelDefaults {
+            max_output_tokens: existing
+                .and_then(|m| m.defaults.max_output_tokens)
+                .map(|v| v.min(max_output_tokens)),
+            reasoning_effort,
+            native_web_search: existing
+                .is_some_and(|m| m.defaults.native_web_search && native_web_search),
+        },
+    })
+}
+
+fn allocate_dsaccount_provider_id(providers: &BTreeMap<String, ProviderDef>) -> String {
+    for candidate in ["deepseek-oauth", "deepseek-account"] {
+        if !providers.contains_key(candidate) {
+            return candidate.to_string();
+        }
+    }
+    for index in 2.. {
+        let candidate = format!("deepseek-oauth-{index}");
+        if !providers.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    unreachable!()
+}
+
+/// 幂等把 DeepSeek OAuth 服务商与可用模型列表写入 [`ProfilesDocument`]。
+/// 返回 `true` 表示文档发生实质变更，需要递增 `revision` 并落盘。
+pub(crate) fn reconcile_dsaccount_document(
+    doc: &mut ProfilesDocument,
+    inference_origin: &str,
+    models: &[DsAccountModel],
+) -> bool {
+    let origin = if qaqh_dsaccount::is_known_inference_origin(inference_origin) {
+        inference_origin.trim().trim_end_matches('/').to_string()
+    } else {
+        qaqh_dsaccount::protocol::INFERENCE_ORIGIN.to_string()
+    };
+
+    let mut changed = false;
+    let existing_id = doc
+        .providers
+        .iter()
+        .find(|(_, provider)| provider.credential == CredentialSource::DeepseekAccount)
+        .map(|(id, _)| id.clone());
+
+    let provider_id = if let Some(id) = existing_id {
+        id
+    } else {
+        let id = allocate_dsaccount_provider_id(&doc.providers);
+        let name = qaqh_profile::provider_preset("deepseek-oauth")
+            .map(|preset| preset.name)
+            .unwrap_or("DeepSeek 官方（OAuth 套餐）")
+            .to_string();
+        doc.providers.insert(
+            id.clone(),
+            ProviderDef {
+                name,
+                base_url: origin.clone(),
+                wire: Wire::Responses,
+                credential: CredentialSource::DeepseekAccount,
+                api_key: None,
+                headers: BTreeMap::new(),
+                compat: None,
+                models: BTreeMap::new(),
+            },
+        );
+        changed = true;
+        id
+    };
+
+    if let Some(provider) = doc.providers.get_mut(&provider_id) {
+        if provider.base_url != origin {
+            provider.base_url = origin;
+            changed = true;
+        }
+        if provider.wire != Wire::Responses {
+            provider.wire = Wire::Responses;
+            changed = true;
+        }
+        for raw in models {
+            let model_id = raw.id.trim();
+            if model_id.is_empty() {
+                continue;
+            }
+            let existing_model = provider.models.get(model_id);
+            if let Some(merged) = merge_dsaccount_model(raw, existing_model)
+                && existing_model != Some(&merged)
+            {
+                provider.models.insert(model_id.to_string(), merged);
+                changed = true;
+            }
+        }
+    }
+
+    if doc.default_model_selection.is_none() {
+        let first_valid = models.iter().find_map(|raw| {
+            let model_id = raw.id.trim();
+            if model_id.is_empty() {
+                return None;
+            }
+            let sel = ModelSelection {
+                provider_id: provider_id.clone(),
+                model_id: model_id.to_string(),
+                options: Default::default(),
+            };
+            qaqh_profile::resolve_model_selection(doc, &sel)
+                .is_ok()
+                .then_some(sel)
+        });
+        if let Some(selection) = first_valid {
+            doc.default_model_selection = Some(selection);
+            changed = true;
+        }
+    }
+
+    changed
 }
 
 /// tools patch → tool_mode/custom_tools 映射。词表真源是
@@ -378,4 +670,127 @@ fn apply_tools_patch(meta: &mut SessionMetadataPatch, tools: &ToolsSettingPatch)
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ds_model(id: &str, name: &str, ctx: u64, out: u64, levels: &[&str], default: &str) -> DsAccountModel {
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("name".into(), json!(name));
+        metadata.insert("context_window".into(), json!(ctx));
+        metadata.insert("max_output_tokens".into(), json!(out));
+        metadata.insert("input_modalities".into(), json!(["text", "image"]));
+        metadata.insert(
+            "effort".into(),
+            json!({ "supported_levels": levels, "default_level": default }),
+        );
+        DsAccountModel {
+            id: id.into(),
+            metadata: metadata.into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn reconcile_dsaccount_creates_provider_and_is_idempotent() {
+        let mut doc = ProfilesDocument::default();
+        let models = vec![
+            ds_model("deepseek-flash", "DeepSeek Flash", 1_048_576, 393_216, &["low", "high", "max"], "high"),
+            ds_model("deepseek-v4-pro", "DeepSeek V4 Pro", 1_048_576, 393_216, &["low", "high", "max"], "high"),
+            DsAccountModel {
+                id: "incomplete-model".into(),
+                metadata: BTreeMap::new(),
+            },
+        ];
+
+        assert!(reconcile_dsaccount_document(&mut doc, "https://api.deepseek.com/", &models));
+        let provider = doc.providers.get("deepseek-oauth").expect("provider created");
+        assert_eq!(provider.credential, CredentialSource::DeepseekAccount);
+        assert_eq!(provider.wire, Wire::Responses);
+        assert_eq!(provider.base_url, "https://api.deepseek.com");
+        assert!(!provider.models.contains_key("incomplete-model"));
+
+        let flash = &provider.models["deepseek-flash"];
+        assert_eq!(flash.display_name.as_deref(), Some("DeepSeek Flash"));
+        assert_eq!(flash.context_window, 1_048_576);
+        assert_eq!(flash.max_output_tokens, 393_216);
+        assert_eq!(flash.defaults.reasoning_effort.as_deref(), Some("high"));
+        assert!(flash.capabilities.image_input);
+        assert!(flash.capabilities.tool_calls);
+        assert!(!flash.capabilities.native_web_search);
+        assert!(provider.models["deepseek-v4-pro"].capabilities.native_web_search);
+
+        assert_eq!(
+            doc.default_model_selection.as_ref().map(|s| (s.provider_id.as_str(), s.model_id.as_str())),
+            Some(("deepseek-oauth", "deepseek-flash"))
+        );
+
+        assert!(!reconcile_dsaccount_document(&mut doc, "https://api.deepseek.com", &models));
+    }
+
+    #[test]
+    fn reconcile_dsaccount_reuses_existing_provider_preserves_preferences_and_clamps_limits() {
+        let mut doc = ProfilesDocument::default();
+        doc.default_model_selection = Some(ModelSelection {
+            provider_id: "byok".into(),
+            model_id: "custom".into(),
+            options: Default::default(),
+        });
+        doc.providers.insert(
+            "deepseek-account".into(),
+            ProviderDef {
+                name: "My DS".into(),
+                base_url: "https://old.invalid".into(),
+                wire: Wire::Chat,
+                credential: CredentialSource::DeepseekAccount,
+                api_key: None,
+                headers: BTreeMap::new(),
+                compat: None,
+                models: BTreeMap::from([(
+                    "deepseek-flash".into(),
+                    ModelDef {
+                        enabled: false,
+                        display_name: Some("Old".into()),
+                        context_window: 128_000,
+                        max_output_tokens: 64_000,
+                        reasoning_levels: vec!["low".into(), "high".into()],
+                        capabilities: ModelCapabilities {
+                            tool_calls: true,
+                            image_input: false,
+                            native_web_search: false,
+                            reasoning: true,
+                        },
+                        defaults: ModelDefaults {
+                            max_output_tokens: Some(32_000),
+                            reasoning_effort: Some("low".into()),
+                            native_web_search: false,
+                        },
+                    },
+                )]),
+            },
+        );
+
+        let models = vec![ds_model(
+            "deepseek-flash",
+            "DeepSeek Flash",
+            1_048_576,
+            16_384,
+            &["low", "high", "max"],
+            "high",
+        )];
+        assert!(reconcile_dsaccount_document(&mut doc, "https://api.deepseek.com", &models));
+        assert!(!doc.providers.contains_key("deepseek-oauth"));
+        let provider = &doc.providers["deepseek-account"];
+        assert_eq!(provider.base_url, "https://api.deepseek.com");
+        assert_eq!(provider.wire, Wire::Responses);
+        let flash = &provider.models["deepseek-flash"];
+        assert!(!flash.enabled);
+        assert_eq!(flash.defaults.max_output_tokens, Some(16_384));
+        assert_eq!(flash.defaults.reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(
+            doc.default_model_selection.as_ref().map(|s| s.provider_id.as_str()),
+            Some("byok")
+        );
+    }
 }

@@ -77,6 +77,20 @@ impl ProfilesStore {
         self.doc.revision = self.doc.revision.saturating_add(1);
     }
 
+    /// 原子批量修订：闭包修改文档并返回是否发生实质变化；
+    /// 仅当 `changed == true` 时递增一次 `revision` 并原子落盘。
+    pub fn mutate_if_changed<F>(&mut self, mutate: F) -> Result<bool, ProfileStoreError>
+    where
+        F: FnOnce(&mut ProfilesDocument) -> bool,
+    {
+        let changed = mutate(&mut self.doc);
+        if changed {
+            self.touch();
+            self.save()?;
+        }
+        Ok(changed)
+    }
+
     pub fn upsert_model(
         &mut self,
         provider_id: &str,

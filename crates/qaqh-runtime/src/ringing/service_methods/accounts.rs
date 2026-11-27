@@ -233,6 +233,20 @@ pub(super) fn dispatch(
     Some(dispatch_account(service, method, params))
 }
 
+static RECONCILED_DS_ATTEMPT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn mark_ds_attempt_reconciled(attempt_id: Option<&str>) -> bool {
+    let key = attempt_id.unwrap_or_default();
+    let mut guard = RECONCILED_DS_ATTEMPT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if guard.as_deref() == Some(key) {
+        return false;
+    }
+    *guard = Some(key.to_string());
+    true
+}
+
 fn dispatch_account(service: &QaqhService, method: &str, params: &Value) -> Result<Value, String> {
     match method {
         "siwc.status" => project::<SiwcStatusResult>(service.siwc()?.status()),
@@ -398,7 +412,14 @@ fn dispatch_account(service: &QaqhService, method: &str, params: &Value) -> Resu
             })
         }
         "dsaccount.sign_in.status" => {
-            project::<DsAccountSignInStatusResult>(service.dsaccount()?.sign_in_status())
+            let flow: DsAccountSignInStatusResult =
+                decode(&service.dsaccount()?.sign_in_status())?;
+            if matches!(flow.state, DsAccountFlowState::SignedIn)
+                && mark_ds_attempt_reconciled(flow.attempt_id.as_deref())
+            {
+                service.sync_dsaccount_catalog_best_effort();
+            }
+            encode(flow)
         }
         "dsaccount.sign_in.cancel" => {
             let params: DsAccountAttemptParams = decode(params)?;
@@ -424,15 +445,17 @@ fn dispatch_account(service: &QaqhService, method: &str, params: &Value) -> Resu
             encode(())
         }
         "dsaccount.models" => {
-            let catalog = service
-                .dsaccount()?
+            let manager = service.dsaccount()?;
+            let catalog = manager
                 .models()
                 .map_err(|error| error.message().to_string())?;
             let data = catalog
                 .get("data")
                 .cloned()
                 .unwrap_or_else(|| Value::Array(Vec::new()));
-            project::<Vec<DsAccountModel>>(data)
+            let models: Vec<DsAccountModel> = decode(&data)?;
+            service.reconcile_dsaccount_catalog(&manager.config().inference_origin, &models);
+            encode(models)
         }
         "dsaccount.verify" => project::<DsAccountVerifyResult>(service.dsaccount()?.verify()),
         _ => Err(format!("unknown account service method: {method}")),
