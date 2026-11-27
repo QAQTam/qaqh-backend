@@ -108,6 +108,13 @@ impl ServerState {
         runtime
     }
 
+    /// 注册既有业务会话（创建者设备获得访问权）。
+    pub(crate) fn register_session(&self, id: SessionId, owner: &DeviceKey) -> Arc<SessionRuntime> {
+        let runtime = Arc::new(SessionRuntime::new(id.clone(), owner, &self.config));
+        lock(&self.sessions).insert(id, Arc::clone(&runtime));
+        runtime
+    }
+
     /// 查会话。
     pub(crate) fn session(&self, id: &SessionId) -> Option<Arc<SessionRuntime>> {
         lock(&self.sessions).get(id).cloned()

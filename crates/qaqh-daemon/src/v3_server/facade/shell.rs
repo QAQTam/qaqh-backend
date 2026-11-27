@@ -124,8 +124,8 @@ impl SkeletonShell {
 #[cfg(test)]
 mod smoke {
     use super::*;
-    use bytes::Bytes;
     use crate::v3_server::facade::test_support;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn shell_open_write_and_list_touch_only_the_shell_table() {

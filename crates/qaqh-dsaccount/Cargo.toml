@@ -10,7 +10,7 @@ license.workspace = true
 qaqh-config = { path = "../qaqh-config" }
 # `platform::config_path()`（凭据文件落在 config 同目录）。
 qaqh-types = { path = "../qaqh-types" }
-# OAuth 原生应用机械层（回环监听/PKCE 随机量/base64url/ureq 超时/
+# OAuth 原生应用机械层（回环监听/PKCE 随机量/base64url/异步 HTTP 超时/
 # 原子落盘）——与 qaqh-siwc 的公共归宿，v4.5 P2-1b（MUST 复制粘贴清剿）。
 qaqh-oauth-core = { path = "../qaqh-oauth-core" }
 serde = { version = "1", features = ["derive"] }

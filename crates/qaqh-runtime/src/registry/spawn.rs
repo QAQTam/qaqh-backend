@@ -39,9 +39,7 @@ pub(crate) fn session_cwd(
 pub(crate) fn workspace_resolver(
     owners: std::sync::Arc<qaqh_session::owner::OwnerDirectory>,
 ) -> qaqh_agent_runtime::session_loop::WorkspaceResolver {
-    std::sync::Arc::new(move |session_id: &str| {
-        ensure_session_workspace(&owners, session_id).ok()
-    })
+    std::sync::Arc::new(move |session_id: &str| ensure_session_workspace(&owners, session_id).ok())
 }
 
 /// Resolve the directory a session's tools run in.
@@ -466,7 +464,9 @@ impl AgentRegistry {
             .read_blocking({
                 let root = root_session_id.clone();
                 move |conn| {
-                    Ok::<_, qaqh_session::db::DbError>(qaqh_session::db::store::session_team_mode(&conn, &root))
+                    Ok::<_, qaqh_session::db::DbError>(qaqh_session::db::store::session_team_mode(
+                        &conn, &root,
+                    ))
                 }
             })
             .unwrap_or(false);
@@ -486,9 +486,7 @@ impl AgentRegistry {
         }
         // ADR-0041：回合边界 workspace 重解析——绑定会话的下一回合自动落到
         // worktree 根（或解绑/移除后回到源工作区），无需 AgentReloadConfig 广播。
-        loop_.set_workspace_resolver(workspace_resolver(std::sync::Arc::clone(
-            &self.owners,
-        )));
+        loop_.set_workspace_resolver(workspace_resolver(std::sync::Arc::clone(&self.owners)));
 
         self.instances.insert(
             session_id.to_string(),
@@ -566,11 +564,7 @@ mod tests {
         ) -> Result<qaqh_subagent::InterruptedAgent, String> {
             Err("stub".into())
         }
-        fn send_ringing(
-            &self,
-            _s: &str,
-            _c: qaqh_ringing::RingingCommand,
-        ) -> Result<(), String> {
+        fn send_ringing(&self, _s: &str, _c: qaqh_ringing::RingingCommand) -> Result<(), String> {
             Err("stub".into())
         }
     }
@@ -654,10 +648,7 @@ mod tests {
     fn manager_for(is_child: bool, team_mode: bool) -> qaqh_workspace::ToolManager {
         let hosts = stub_hosts();
         let registrars = hosts.registrars(is_child, team_mode);
-        qaqh_workspace::registration::build_tool_manager(
-            &registrars,
-            Arc::clone(&hosts.todo),
-        )
+        qaqh_workspace::registration::build_tool_manager(&registrars, Arc::clone(&hosts.todo))
     }
 
     /// ADR-0033 闸门：基础面 = agent 五件 + worktree 面（ADR-0041）；

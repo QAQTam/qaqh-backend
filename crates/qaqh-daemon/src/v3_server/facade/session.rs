@@ -22,15 +22,14 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use qaqh_core_vocab::{
-    ActivityState, ContentRef, InputId, SessionId, ToolAvailability,
-    ToolCapabilityConstraints, ToolCallId, ToolCatalog, ToolCatalogEntry, ToolConcurrency,
-    ToolGroup, ToolMode, ToolOrigin, ToolRiskLevel, TurnTerminal, ToolUnavailableReason,
+    ActivityState, ContentRef, InputId, SessionId, ToolAvailability, ToolCallId,
+    ToolCapabilityConstraints, ToolCatalog, ToolCatalogEntry, ToolConcurrency, ToolGroup, ToolMode,
+    ToolOrigin, ToolRiskLevel, ToolUnavailableReason, TurnTerminal,
 };
 use qaqh_ringing_v3::{
-    BlockKind, CommandInteractionResolution, CommandRequest, CommandResponse,
-    ExecSessionSnapshot, InteractionResolution, RpcError, SessionEvent, SessionRequest,
-    SessionResponse, ToolCallStatus, ToolCallView, ToolCatalogRequest, ToolCatalogResponse,
-    WorkspaceRequest, WorkspaceResponse,
+    BlockKind, CommandInteractionResolution, CommandRequest, CommandResponse, ExecSessionSnapshot,
+    InteractionResolution, RpcError, SessionEvent, SessionRequest, SessionResponse, ToolCallStatus,
+    ToolCallView, ToolCatalogRequest, ToolCatalogResponse, WorkspaceRequest, WorkspaceResponse,
 };
 
 use super::super::error::{denied, not_found, not_wired};
@@ -147,9 +146,9 @@ impl SkeletonSession {
                     "该 Session 域子能力随 v4.7 P3-5d 接 QaqhService/Db",
                 ))
             }
-            SessionRequest::GetSkillsCatalog { cwd: _ } => Err(not_wired(
-                "SkillsCatalog 扫描随 v4.7 P3-5d 接 QaqhService",
-            )),
+            SessionRequest::GetSkillsCatalog { cwd: _ } => {
+                Err(not_wired("SkillsCatalog 扫描随 v4.7 P3-5d 接 QaqhService"))
+            }
             SessionRequest::Delete { session_id } => {
                 let session = self.session_for(context, &session_id)?;
                 // 先广播再摘表：订阅者要能收到"它没了"，而不是静默消失。
@@ -263,11 +262,9 @@ impl SkeletonSession {
                 });
                 Ok(CommandResponse::InteractionAccepted)
             }
-            CommandRequest::ExecInterrupt { .. } | CommandRequest::ExecTerminate { .. } => {
-                Err(not_wired(
-                    "ExecSession 控制随 v4.7 P3-5d 接 ExecSessionManager",
-                ))
-            }
+            CommandRequest::ExecInterrupt { .. } | CommandRequest::ExecTerminate { .. } => Err(
+                not_wired("ExecSession 控制随 v4.7 P3-5d 接 ExecSessionManager"),
+            ),
         }
     }
 
@@ -348,8 +345,8 @@ impl SkeletonSession {
         // ③ 工具调用视图（`Running` → `Succeeded`），跨页归属靠 `tool_call_id`。
         let exec_ordinal = session.metrics.exec_sessions.fetch_add(1, Ordering::SeqCst) + 1;
         let exec_id = skeleton_exec_id(exec_ordinal);
-        let tool_call_id = ToolCallId::new(format!("tool-call-{exec_ordinal:04}"))
-            .expect("tool call id 形状固定");
+        let tool_call_id =
+            ToolCallId::new(format!("tool-call-{exec_ordinal:04}")).expect("tool call id 形状固定");
         let running_view = ToolCallView {
             tool_call_id: tool_call_id.clone(),
             tool_name: "exec_command".to_string(),
@@ -699,7 +696,10 @@ mod smoke {
         let names: Vec<&str> = catalog.entries.iter().map(|e| e.name.as_str()).collect();
         let mut sorted = names.clone();
         sorted.sort_unstable();
-        assert_eq!(names, sorted, "目录条目必须按名字升序（同一状态产生同一份字节）");
+        assert_eq!(
+            names, sorted,
+            "目录条目必须按名字升序（同一状态产生同一份字节）"
+        );
     }
 
     #[tokio::test]

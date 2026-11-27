@@ -248,18 +248,12 @@ impl SessionLoop {
     }
 
     fn hooks_ref(&self) -> Option<Arc<crate::session_hooks::SessionHooks>> {
-        self.hooks
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        read_clone(&self.hooks)
     }
 
     /// 当前工作目录(hook 信封 cwd / trust 判据)。
     fn current_cwd(&self) -> PathBuf {
-        self.cwd
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        read_clone(&self.cwd)
     }
 
     pub fn session_id(&self) -> &str {
@@ -282,6 +276,15 @@ impl SessionLoop {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(resolver);
     }
 
+    /// 当前会话实时工具目录（模型能力由调用方解析后传入）。
+    pub fn tool_catalog(
+        &self,
+        mode: qaqh_core_vocab::ToolMode,
+        capabilities: &qaqh_types::ModelCapabilities,
+    ) -> Result<qaqh_core_vocab::ToolCatalog, qaqh_workspace::CatalogError> {
+        self.port.tool_catalog(mode, capabilities)
+    }
+
     /// 本回合生效的工作区根：注册表绑定落 worktree 时热切换端口快照与环境块
     /// cwd（ADR-0041 决策 3/4 的派生式同步）。
     ///
@@ -290,17 +293,8 @@ impl SessionLoop {
     /// 解析为 `None` / 与当前相同 / 未注入钩子时保持现状，绝不静默沿用失效
     /// 路径——失效回退的响亮 warn 在 `ensure_session_workspace` 里。
     pub(crate) fn effective_workspace(&self) -> PathBuf {
-        let current = self
-            .cwd
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let resolver = self
-            .workspace_resolver
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
-        let Some(resolver) = resolver else {
+        let current = read_clone(&self.cwd);
+        let Some(resolver) = read_clone(&self.workspace_resolver) else {
             return current;
         };
         let Some(resolved) = resolver(&self.session_id) else {
@@ -2715,6 +2709,10 @@ impl ProgressSink for OwnerSink {
     fn attempt_finished(&self, _turn_id: &str, _block_ids: &[String], _call_ids: &[String]) {
         // owner 无在飞身份登记;快照 + seq 水位自愈。
     }
+}
+
+fn read_clone<T: Clone>(lock: &RwLock<T>) -> T {
+    lock.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
 }
 
 #[cfg(test)]

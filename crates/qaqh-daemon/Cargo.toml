@@ -22,6 +22,8 @@ qaqh-subagent = { path = "../qaqh-subagent" }
 qaqh-gitx = { path = "../qaqh-gitx" }
 qaqh-session = { path = "../qaqh-session" }
 qaqh-types = { path = "../qaqh-types" }
+qaqh-workspace = { path = "../qaqh-workspace" }
+rusqlite = { version = "0.41", features = ["bundled"] }
 # v4.6 P3-4：RingingV3 服务端骨架（物理隔离目录 `src/v3_server/`）。
 # 三件套严格分层：线缆形状（ringing-v3）→ 多路复用（v3-transport）→ 门面（本 crate）。
 qaqh-core-vocab = { path = "../qaqh-core-vocab" }

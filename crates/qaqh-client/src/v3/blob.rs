@@ -144,7 +144,12 @@ async fn read_and_verify_chunks<R: AsyncRead + Unpin>(
     let Some(hash) = hash else {
         return Err(ClientError::StreamRejected);
     };
-    let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let (bytes, actual_digest) = tokio::task::spawn_blocking(move || {
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        (bytes, digest)
+    })
+    .await
+    .map_err(|error| ClientError::Protocol(format!("blob sha256 校验任务异常退出：{error}")))?;
     if actual_digest != *hash.as_bytes() {
         return Err(ClientError::Protocol(format!(
             "blob `{}` sha256 校验失败（内容篡改或损坏）",

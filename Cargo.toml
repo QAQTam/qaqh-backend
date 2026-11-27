@@ -65,6 +65,7 @@ rmcp = { version = "=3.10.0", default-features = false, features = ["client", "t
 # 这些成熟实现；版本用 ^ 区间即可（无 rmcp 那样的精确锁需求，接口面小）。
 base64 = "0.23"
 hex = "0.4"
+sha2 = "0.11"
 tempfile = "3"
 dunce = "1"
 path-clean = "1"

@@ -202,7 +202,12 @@ impl EventBus {
 
     /// **反证原语之二**：只注册 receiver、不读回放环（仅测试可见）。
     #[cfg(test)]
-    pub(crate) fn register_only(&self) -> (mpsc::Receiver<Arc<SessionEventFrame>>, watch::Receiver<bool>) {
+    pub(crate) fn register_only(
+        &self,
+    ) -> (
+        mpsc::Receiver<Arc<SessionEventFrame>>,
+        watch::Receiver<bool>,
+    ) {
         let mut inner = lock(&self.inner);
         let (tx, live) = mpsc::channel(self.subscriber_queue);
         let (lag, lagged) = watch::channel(false);
@@ -448,7 +453,13 @@ impl DeltaLedger {
 mod tests {
     use super::*;
 
-    fn exec_frame(seq: u64, start: u64, end: u64, text: &str, spilled: bool) -> Arc<SessionEventFrame> {
+    fn exec_frame(
+        seq: u64,
+        start: u64,
+        end: u64,
+        text: &str,
+        spilled: bool,
+    ) -> Arc<SessionEventFrame> {
         Arc::new(SessionEventFrame {
             meta: FrameMeta {
                 seq,

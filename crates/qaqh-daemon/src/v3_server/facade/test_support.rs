@@ -25,9 +25,10 @@ pub(crate) fn rig() -> Rig {
     let state = ServerState::new(ServerConfig::default(), "qaqh-test");
     let backend = SkeletonBackend::new(Arc::clone(&state));
     // 两条身份都先经真凭据表认证，保证单测走的是与生产同一条路径。
+    let digest = qaqh_ringing_runtime::device_registry::token_digest("phone");
     state
         .identity
-        .register_device("phone", "手机", Scope::Device);
+        .register_device_digest(&digest, "test-phone", "手机", Scope::Device, 0);
     let owner = state
         .identity
         .authenticate(&ClientHello::new(

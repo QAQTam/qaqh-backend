@@ -228,11 +228,7 @@ impl ShellTable {
     }
 
     /// 本设备/指定会话的 shell 列表（按 id 升序）。
-    pub(crate) fn list(
-        &self,
-        owner: &DeviceKey,
-        session_id: Option<&SessionId>,
-    ) -> Vec<ShellView> {
+    pub(crate) fn list(&self, owner: &DeviceKey, session_id: Option<&SessionId>) -> Vec<ShellView> {
         lock(&self.inner)
             .values()
             .filter(|handle| match session_id {

@@ -118,6 +118,7 @@ flowchart LR
 5. **接入 `crates/qaqh-daemon/src/{main.rs,server.rs}` + 端到端测试**：
    - 移除 `main.rs` 的 `#[allow(dead_code)]`；`server::run_with` 启动绑定 `LocalIpcListener`、发布 `daemon.endpoint`、优雅退出清理端点与 `.sock`；
    - 新增真 `QaqhService` + 真 SQLite + 真 UDS + `V3Client::connect_local` 集成测试，以及 `L-11`（持有 `registry.lock()` 时并发 Shell 写入延迟 `< 10ms`）与 `L-12`（异步大 Blob 读写不阻塞控制面心跳）红→绿反证测试。
+   - `v3-ci.yml` 追加 `v3_bridge` 真后端本地 IPC 测试，以及 `L-11`/`L-12`/`PairingTable`/`Gitx` 定向门禁；生产连接与逻辑流任务在停机时统一取消并等待收摊。
 
 ---
 
@@ -139,8 +140,8 @@ flowchart LR
 
 | 切片 | PR | 状态 | 备注 |
 |---|---|---|---|
-| `P3-5a` | 待开 PR | **本地完成待验收** | 本文档落盘 + `V4_6_EXECUTION_PLAN.md` §五回写 + `qaqh-core-vocab`/`qaqh-ringing-v3` 契约补齐 + `v3_server`/`client/v3` 对齐 |
-| `P3-5b` | 待定 | **待开工** | 删 `sidecar.rs` + 全仓 `ureq → reqwest`（异步防 `spawn_blocking` panic）+ `sha2` 统一 |
-| `P3-5c` | 待定 | **待开工** | `local_ipc`（Unix `0600`/`peer_cred` + Win Owner-Only DACL）+ 三后端 18 条守卫 + `.github/workflows/v3-ci.yml` |
-| `P3-5d` | 待定 | **待开工** | `L-11`/`L-12` 根治 + `PairingTable` 抽离 + `v3_bridge/` 真门面接线 + `daemon` 生产上线 |
-| `P3-5e` | 待定（`qaqh-gpui`） | **待开工** | `../qaqh-gpui` 单 PR 原子切 V3（`bridge.rs <= 650` + 清零旧契约） |
+| `P3-5a` | #52 `5d8f2f49` | **已合入 main** | 本文档落盘 + `V4_6_EXECUTION_PLAN.md` §五回写 + `qaqh-core-vocab`/`qaqh-ringing-v3` 契约补齐 + `v3_server`/`client/v3` 对齐 |
+| `P3-5b` | 待合并 PR | **已完成 / 门禁通过** | `sidecar` 已删除、`ureq` 依赖图清零、异步 `reqwest` 未启用 `blocking`（含 `CurrentThread` 运行时安全桥接）、`sha2 0.11` 收口；新增 `spawn_blocking` / `current_thread` / `v11→v12` 回归通过，Clippy 零新告警 |
+| `P3-5c` | 待合并 PR | **已完成 / 跨平台 CI 验收中** | `local_ipc`（Unix `0600`/`peer_cred` + Win 当前用户 SID Owner-Only DACL）+ `V3Client::connect_local` + 三后端 18 条守卫 + Ubuntu/Windows CI；已加 `iroh` 流优先级与 Blob 512 KiB 喘息节流，`v3_server` 45/45 与 `iroh guard_02` 连续三次全绿 |
+| `P3-5d` | 待合并 PR | **已完成 / Review 修复收口** | `L-11`/`L-12` 根治 + `PairingTable` 抽离 + Gitx `diff`/`commit` + `v3_bridge/` 真门面 + daemon 本地 IPC 生产上线；已修复 Account 强类型投影、`ask_user` 字段对齐、运行期动态会话注册、二进制/截断 Blob 投影、直连 `attach_session`、Compaction 与 Timeline 隔离及 `Fs`/`Gitx` 健壮性 |
+| `P3-5e` | 待定（`qaqh-gpui`） | **待开工（前置后端 PR 合入 `main` 后即达标）** | `../qaqh-gpui` 单 PR 原子切 V3（`bridge.rs <= 650` + 清零旧契约） |

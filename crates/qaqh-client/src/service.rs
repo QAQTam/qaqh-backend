@@ -15,7 +15,7 @@
 //! ## 白名单的真源
 //!
 //! 真源是 `qaqh_siwc::methods::ALL` ∪ `qaqh_dsaccount::methods::ALL`。
-//! 本 crate **不**直接依赖那两个 crate（它们会拖进 `ureq` / `ring` / `qaqh-config`，
+//! 本 crate **不**直接依赖那两个 crate（它们会拖进 `reqwest` / `aws-lc-rs` / `qaqh-config`，
 //! 而 `qaqh-client` 是壳层的传输层，理应只有 HTTP/SSE 那点东西），
 //! 所以这里是字面量——但**不是无人看守的字面量**：
 //! `qaqh-runtime` 的 `client_service_whitelist_mirrors_account_methods` 测试
@@ -73,10 +73,7 @@ pub const SHELL_METHODS: &[&str] = &[
 ];
 
 /// 沙箱启动自检服务面两条（ADR-0040：前端启动动画轮询沙箱自检进度与修复建议）。
-pub const SANDBOX_METHODS: &[&str] = &[
-    "sandbox.preflight.start",
-    "sandbox.preflight.status",
-];
+pub const SANDBOX_METHODS: &[&str] = &["sandbox.preflight.start", "sandbox.preflight.status"];
 
 /// gitx worktree 写面四条（ADR-0041：worktree 隔离的变更操作）。
 ///
@@ -178,7 +175,10 @@ mod tests {
     #[test]
     fn shell_methods_are_allowed_and_input_is_not_an_rpc() {
         for method in SHELL_METHODS {
-            assert!(is_allowed(method), "{method} 应被放行（桌面壳的 shell 服务面）");
+            assert!(
+                is_allowed(method),
+                "{method} 应被放行（桌面壳的 shell 服务面）"
+            );
         }
         assert_eq!(SHELL_METHODS.len(), 3, "{SHELL_METHODS:?}");
         let mut sorted = SHELL_METHODS.to_vec();

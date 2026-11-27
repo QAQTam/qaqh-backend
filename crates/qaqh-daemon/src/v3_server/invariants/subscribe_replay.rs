@@ -37,7 +37,9 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
                 let piece = format!("d{index:05};");
                 published.push_str(&piece);
                 session.emit(harness::answer(&session_id, &block_id, piece));
-                if index % 32 == 0 {
+                if index % 128 == 127 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                } else if index % 32 == 0 {
                     tokio::task::yield_now().await;
                 }
             }
@@ -77,7 +79,11 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
             .expect("事件流 30s 无进展（订阅死锁或写侧卡住）")
             .expect("帧必须可读");
         match &frame.event {
-            SessionEvent::AnswerDelta { block_id: bid, text, .. } if bid == &block_id => {
+            SessionEvent::AnswerDelta {
+                block_id: bid,
+                text,
+                ..
+            } if bid == &block_id => {
                 answer_accum.push_str(text);
             }
             SessionEvent::CatalogChanged { .. } => sentinel = true,
@@ -144,9 +150,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
     race.emit(harness::answer(&race_id, &race_block, "seam-2"));
     match race.bus.subscribe(since) {
         SubscribeOutcome::Attached {
-            replay,
-            mut live,
-            ..
+            replay, mut live, ..
         } => {
             assert_eq!(replay.len(), 1);
             assert_eq!(replay[0].meta.seq, since + 1);

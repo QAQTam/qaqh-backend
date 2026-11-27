@@ -10,7 +10,7 @@
 //!
 //! 设备令牌是可以冒充整台设备的等价物。`Pairing::ListDevices` 这类读接口一旦回
 //! 令牌，任何能调它的人都拿到了永久的冒充能力。所以对外一律用与令牌无关的
-//! [`DeviceSnapshot::device_id`]，令牌只留在表内。
+//! [`DeviceSnapshot::device_id`]，明文令牌只存在于握手入参，身份表只保存摘要。
 //!
 //! ## 两种作用域
 //!
@@ -35,7 +35,7 @@ use super::error::denied;
 use super::lock;
 use super::now_ms;
 
-/// 设备键：授权的唯一依据（`os:<user>` 或 `device:<token>`）。
+/// 设备键：授权的唯一依据（`os:<user>` 或 `device-digest:<sha256>`）。
 pub(crate) type DeviceKey = String;
 
 /// 作用域。
@@ -120,7 +120,6 @@ pub(crate) struct DeviceSnapshot {
 
 struct DeviceRecord {
     id: String,
-    token: Option<String>,
     scope: Scope,
     label: String,
     paired_at_ms: u64,
@@ -156,26 +155,31 @@ impl IdentityTable {
         lock(&self.inner).os_user.clone()
     }
 
-    /// 登记一台已配对设备（幂等：同 token 重复登记只更新标签/作用域）。
-    pub(crate) fn register_device(&self, token: &str, label: &str, scope: Scope) -> DeviceKey {
-        let key = format!("device:{token}");
+    /// 登记持久设备表的摘要身份；明文令牌只出现在握手入参，不进入身份表。
+    pub(crate) fn register_device_digest(
+        &self,
+        digest: &str,
+        device_id: &str,
+        label: &str,
+        scope: Scope,
+        paired_at_ms: u64,
+    ) -> DeviceKey {
+        let key = format!("device-digest:{digest}");
         let mut inner = lock(&self.inner);
         if let Some(record) = inner.devices.get_mut(&key) {
+            record.id = device_id.to_string();
             record.label = label.to_string();
             record.scope = scope;
             return key;
         }
         let (revoker, _) = watch::channel(false);
-        let id = inner.next_device_id;
-        inner.next_device_id += 1;
         inner.devices.insert(
             key.clone(),
             DeviceRecord {
-                id: format!("dev-{id:04}"),
-                token: Some(token.to_string()),
+                id: device_id.to_string(),
                 scope,
                 label: label.to_string(),
-                paired_at_ms: now_ms(),
+                paired_at_ms,
                 revoker,
                 revoked: false,
             },
@@ -198,37 +202,6 @@ impl IdentityTable {
     /// 按对外设备 id 吊销：置真 + 唤醒所有持该设备哨兵的连接（**即时踢流**）。
     pub(crate) fn revoke_device(&self, device_id: &str) -> bool {
         self.revoke_device_with_key(device_id).is_some()
-    }
-
-    /// 按令牌吊销（内部/测试用：令牌是对内概念，不对外暴露）。
-    pub(crate) fn revoke_token(&self, token: &str) -> bool {
-        let key = format!("device:{token}");
-        let mut inner = lock(&self.inner);
-        let Some(record) = inner.devices.get_mut(&key) else {
-            return false;
-        };
-        record.revoked = true;
-        record.revoker.send_replace(true);
-        true
-    }
-
-    /// 设备是否已被吊销。
-    pub(crate) fn is_revoked(&self, token: &str) -> bool {
-        let key = format!("device:{token}");
-        lock(&self.inner)
-            .devices
-            .get(&key)
-            .map(|record| record.revoked)
-            .unwrap_or(false)
-    }
-
-    /// 设备对外 id（测试/守卫用）。
-    pub(crate) fn device_id_for_token(&self, token: &str) -> Option<String> {
-        let key = format!("device:{token}");
-        lock(&self.inner)
-            .devices
-            .get(&key)
-            .map(|record| record.id.clone())
     }
 
     /// 列出设备（**不含令牌**）。
@@ -272,7 +245,6 @@ impl IdentityTable {
                         key.clone(),
                         DeviceRecord {
                             id: format!("dev-{id:04}"),
-                            token: None,
                             scope: Scope::Owner,
                             label: "local-os-user".to_string(),
                             paired_at_ms: now_ms(),
@@ -290,7 +262,8 @@ impl IdentityTable {
                 )
             }
             ClientCredential::PairedDevice { token } => {
-                let key = format!("device:{token}");
+                let digest = qaqh_ringing_runtime::device_registry::token_digest(token);
+                let key = format!("device-digest:{digest}");
                 let Some(record) = inner.devices.get(&key) else {
                     // 不区分"令牌不存在"与"令牌被吊销"：任何可枚举的细节都是泄漏。
                     return Err(HandshakeRejectReason::CredentialRejected {
@@ -334,6 +307,11 @@ mod tests {
         ClientHello::new("instance-1", ClientKind::Desktop, credential)
     }
 
+    fn register_device(table: &IdentityTable, token: &str, label: &str, scope: Scope) -> String {
+        let digest = qaqh_ringing_runtime::device_registry::token_digest(token);
+        table.register_device_digest(&digest, &format!("test-{digest}"), label, scope, 0)
+    }
+
     #[test]
     fn same_os_user_is_owner_and_others_are_rejected() {
         let table = IdentityTable::new("qaqh");
@@ -361,9 +339,14 @@ mod tests {
                 token: "nope".into(),
             }))
             .expect_err("未知令牌必须被拒");
-        let key = table.register_device("phone", "手机", Scope::Device);
-        assert_eq!(key, "device:phone");
-        assert!(table.revoke_token("phone"));
+        let key = register_device(&table, "phone", "手机", Scope::Device);
+        assert!(key.starts_with("device-digest:"));
+        let identity = table
+            .authenticate(&hello(ClientCredential::PairedDevice {
+                token: "phone".into(),
+            }))
+            .expect("认证");
+        assert!(table.revoke_device(&identity.device_id));
         let revoked = table
             .authenticate(&hello(ClientCredential::PairedDevice {
                 token: "phone".into(),
@@ -380,7 +363,7 @@ mod tests {
     #[test]
     fn revocation_wakes_every_live_connection_of_that_device() {
         let table = IdentityTable::new("qaqh");
-        table.register_device("phone", "手机", Scope::Device);
+        register_device(&table, "phone", "手机", Scope::Device);
         let first = table
             .authenticate(&hello(ClientCredential::PairedDevice {
                 token: "phone".into(),
@@ -392,30 +375,31 @@ mod tests {
             }))
             .expect("认证");
         assert!(!*first.revoked.borrow());
-        let device_id = table.device_id_for_token("phone").expect("设备 id");
-        assert!(table.revoke_device(&device_id));
+        assert!(table.revoke_device(&first.device_id));
         assert!(*first.revoked.borrow(), "第一连接必须被通知");
         assert!(*second.revoked.borrow(), "第二连接也必须被通知");
-        assert!(table.is_revoked("phone"));
     }
 
     #[test]
     fn device_list_never_leaks_tokens() {
         let table = IdentityTable::new("qaqh");
-        table.register_device("super-secret-token", "手机", Scope::Device);
+        register_device(&table, "super-secret-token", "手机", Scope::Device);
         let devices = table.devices();
         assert_eq!(devices.len(), 1);
         for device in &devices {
             assert!(!device.device_id.contains("super-secret-token"));
             assert!(!device.label.contains("super-secret-token"));
-            assert!(!device.key.contains("super-secret-token") || device.key.starts_with("device:"));
+            assert!(
+                !device.key.contains("super-secret-token")
+                    && device.key.starts_with("device-digest:")
+            );
         }
     }
 
     #[test]
     fn device_scope_cannot_touch_admin_surface() {
         let table = IdentityTable::new("qaqh");
-        table.register_device("phone", "手机", Scope::Device);
+        register_device(&table, "phone", "手机", Scope::Device);
         let device = table
             .authenticate(&hello(ClientCredential::PairedDevice {
                 token: "phone".into(),

@@ -1,8 +1,7 @@
 //! 同步 HTTP 的 **siwc 产品层**（v4.5 P2-1b）。
 //!
-//! ureq 超时封装（`timeout_global` + `http_status_as_error(false)`、body 读取、
-//! request id 提取）已抽进 [`qaqh_oauth_core::http`]（与 `qaqh-dsaccount` 的
-//! 同构拷贝合一）；本层只剩 siwc 的产品语义：`Bearer` 注入、错误码映射
+//! 异步 `reqwest` 的同步产品封装（超时、非 2xx body、request id 提取）
+//! 已抽进 [`qaqh_oauth_core::http`]（与 `qaqh-dsaccount` 的同构拷贝合一）；本层只剩 siwc 的产品语义：`Bearer` 注入、错误码映射
 //! （一切传输失败记 `Transport`）与 provider 错误形状解读（`error.code` /
 //! `error.message` / `detail`——直连路由可能返回 `{"detail":...}`）。
 //!
