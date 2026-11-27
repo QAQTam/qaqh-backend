@@ -19,6 +19,7 @@ members = [
     "crates/qaqh-ringing",
     "crates/qaqh-ringing-contract",
     "crates/qaqh-ringing-v3",
+    "crates/qaqh-v3-transport",
     "crates/qaqh-daemon",
     "crates/qaqh-permission",
     "crates/qaqh-file-tools",

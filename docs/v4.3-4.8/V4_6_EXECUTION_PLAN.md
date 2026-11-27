@@ -175,7 +175,9 @@ flowchart TD
 | 切片 | PR | 状态 | 备注 |
 |---|---|---|---|
 | `P3-0` | #47 (`bea000a2`) | **已合入 `main`** | Fast-Follow：`session_loop.rs` 16 处 `.await.ok()` + 2 处回滚泄漏清零（拆出 `session_interaction.rs`，降至 2,775 行）+ 修绿 `tool_surface_schema_shape` |
-| `P3-1` | — | **待开工（下一张）** | `ADR-0035` 泄洪闸（独立 `spill_gate.rs`）+ `ADR-0034` 真实洪峰冒烟 |
-| `P3-2` | — | 待开工（依赖 `P3-1`） | `crates/qaqh-core-vocab`（0 `serde_json`）+ `tool_mode.rs` 三档 + 只读 `ToolCatalog`（`1C′` 不碰 V2 crate，剥离 PTC） |
-| `P3-3` | — | 待开工（依赖 `P3-2`） | `crates/qaqh-ringing-v3` 强类型协议冻结（`postcard` 零禁区属性 / `daemon.endpoint` / `pinned_compaction` / 机器指纹） |
-| `P3-4` | — | 待开工（依赖 `P3-3`） | `v3_server` + `client/v3`（`yamux` + 细粒度泛型静态分发 Facade + `duplex` 闭环 + 6 条不变量（含量化延迟）+ 2 份前置 ADR） |
+| `P3-1` | #48（`fa57c3dd`） | **已开 PR 待验收**（栈基底＝`main`） | `ADR-0035` 泄洪闸（独立 `spill_gate.rs` + 当前帧 UTF-8 尾预览兜底；`exec_log.rs` 下沉，`owner.rs` 净减 5 行）+ `ADR-0034` daemon 级真实 32 MiB 洪峰冒烟 |
+| `P3-2` | #49（`3cc2e4ce`） | **已开 PR 待验收**（stacked，base＝`P3-1` 分支） | `crates/qaqh-core-vocab`（0 `serde_json`、`Deserialize` 走 `Self::new` Fail-Closed、字面 `rg == 0`）+ V3 工具模式三档 + 只读 `ToolCatalog`；`1C′`：`qaqh-types`/`qaqh-ringing-contract` 零改动 |
+| `P3-3` | #50（`e817b24b`） | **已开 PR 待验收**（stacked，base＝`P3-2` 分支） | `crates/qaqh-ringing-v3` 强类型协议冻结（`postcard` / 同时覆盖 `core-vocab`+`v3` 的机器指纹与 `normalize()` / `daemon.endpoint` 双传输 + `0o600` / `ClientFetch`+`ClientUpload` / `SessionCreate`+View-Ready 视图 / 11 域全覆盖 / 字面 `rg == 0`） |
+| `P3-4` | #51 | **已开 PR 待验收**（stacked，base＝`P3-3` 分支） | `crates/qaqh-v3-transport`（含单源 `framing`）+ `v3_server`（8 门面 trait + 状态模块 `< 1000` 行拆分 + 设备级幂等 + 推送鉴权）/`client/v3`（SHA-256 校验与去重缓存清理）+ `yamux` / `iroh 1.5` 双后端六大不变量守卫 + `ADR-0046`/`0047` + 字面 `rg == 0` |
+
+> **状态口径（宪法 #10 诚实原则）**：`P3-1`～`P3-4` 四张 PR **都还没有 merge**，一律记作"已开 PR 待验收"，不写"已合入 `main`"。它们是一条 stacked 链（`#48` → `#49` → `#50` → `#51`）：每张的 base 指向前一张分支，按序合并时 GitHub 会自动把下一张的 base 重定向到 `main`；四张全部验收合并后，本表才改成"已合入 `main`"。

@@ -10,6 +10,10 @@ bytes = "1"
 qaqh-ringing = { path = "../qaqh-ringing" }
 qaqh-ringing-contract = { path = "../qaqh-ringing-contract" }
 qaqh-types = { path = "../qaqh-types" }
+# v4.6 P3-4：RingingV3 客户端（物理隔离 `src/v3/`）。线缆形状与多路复用分层同服务端。
+qaqh-core-vocab = { path = "../qaqh-core-vocab" }
+qaqh-ringing-v3 = { path = "../qaqh-ringing-v3" }
+qaqh-v3-transport = { path = "../qaqh-v3-transport" }
 futures-util = "0.3"
 log = "0.4"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "rustls-no-provider", "query"] }
@@ -18,7 +22,7 @@ serde_json = { version = "1", features = ["preserve_order"] }
 sha2 = "0.11"
 hex = { workspace = true }
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process"] }
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync", "macros", "process", "io-util"] }
 uuid = { version = "1", features = ["v4"] }
 # 用户 shell 的 ws 数据面（feature `shell-stream`，ADR-0028 §D3 裁定=候选 B）。
 # `base64` 与 qaqh-daemon / qaqh-file-tools 同版（0.23），不引入新条目。
