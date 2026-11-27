@@ -75,6 +75,8 @@ pub use manager::{
     DYNAMIC_DESCRIPTION_LIMIT, DynamicTool, MCP_DYNAMIC_PREFIX, ToolExecMeta, ToolExecReport,
     ToolManager, ToolStats, build_dynamic_tool,
 };
+/// v4.6 P3-2：运行期能力 → `qaqh_core_vocab::ToolCatalog` 单向投影（V3 目录唯一入口）。
+pub use manager::catalog::{CatalogError, project_tool_catalog};
 // PR-1-1 / B1: authorization & permission vocabulary at the crate root —
 // loop-side references stay `qaqh_workspace::X` without naming submodules.
 pub use authorization::{

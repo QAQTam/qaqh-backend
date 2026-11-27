@@ -36,6 +36,12 @@ pub struct ToolCapabilities {
     /// 交互工具可以声明 `default_timeout = 0` 表示“无默认超时”；
     /// 非交互工具仍必须给出正数默认超时。
     pub interactive: bool,
+    /// 是否可能向模型返回图片（`read_image` 等）。
+    ///
+    /// 这是**能力声明**，不是"按名字猜"：模型不具备视觉输入
+    /// （`ModelCapabilities::image_input == false`）时，产图工具的产物是不可渲染的，
+    /// 必须在工具目录里如实标成不可用（v4.6 P3-2 的 `ToolCatalog` 投影消费）。
+    pub image_output: bool,
 }
 
 impl Default for ToolCapabilities {
@@ -47,6 +53,7 @@ impl Default for ToolCapabilities {
             idempotent: false,
             workspace_bound: true,
             interactive: false,
+            image_output: false,
         }
     }
 }
