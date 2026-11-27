@@ -22,8 +22,7 @@
 //! panic 而不是静默僵死。
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::future::Future;
@@ -230,6 +229,7 @@ impl SessionOwner {
     pub fn lifecycle(&self) -> ToolLifecycle {
         ToolLifecycle {
             session_id: self.session_id.clone(),
+            data_dir: self.db.path().parent().map(std::path::Path::to_path_buf),
             tx: self.lifecycle_tx.clone(),
         }
     }
@@ -1131,12 +1131,23 @@ async fn set_turn_phase_in_pump(
 #[derive(Clone)]
 pub struct ToolLifecycle {
     session_id: String,
+    /// 业务库所在数据目录：exec 权威日志路径的派生根（ADR-0035 泄洪通告要用）。
+    data_dir: Option<PathBuf>,
     tx: mpsc::UnboundedSender<OwnerMsg>,
 }
 
 impl ToolLifecycle {
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    /// 该 exec 会话**权威日志**路径（ADR-0035 泄洪通告把模型指到这里；与泵写入口共用 [`crate::exec_log`] 单源规则）。
+    pub fn exec_output_log_path(&self, exec_session_id: &str) -> Option<PathBuf> {
+        Some(crate::exec_log::exec_output_log_path_in(
+            self.data_dir.as_deref()?,
+            &self.session_id,
+            exec_session_id,
+        ))
     }
 
     /// 工具进入实际执行:登记 running 行(即 tool_state_changed(running)),
@@ -1830,26 +1841,10 @@ async fn run_pump_loop(pump: Arc<OwnerPump>, mut rx: mpsc::UnboundedReceiver<Own
 /// owner pump 写入与 runtime `exec_session.output` 区间读共用此定位。
 pub fn exec_output_log_path(db: &Db, session_id: &str, exec_session_id: &str) -> Option<PathBuf> {
     let data_dir = db.path().parent()?;
-    Some(
-        data_dir
-            .join("sessions")
-            .join(session_id)
-            .join("exec")
-            .join(format!("{exec_session_id}.log")),
-    )
+    Some(crate::exec_log::exec_output_log_path_in(data_dir, session_id, exec_session_id))
 }
 
-/// 追加一块输出到日志。定序不变量(ADR-0017 决策 1):先写日志、再更新 DB 水位、
-/// 再发 delta ⇒「客户端见过 offset X 的 delta ⇒ 日志必可以读到 X」。
-/// 失败只响亮报错、不阻断实时流;完整性由 settle 侧「日志字节 vs 水位」对账
-/// 如实标 `output_truncated`(宪规 5:不假装完整)。
-pub(crate) fn append_exec_log(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(text.as_bytes())
-}
+pub(crate) use crate::exec_log::append_exec_log;
 
 /// 区间读 exec 输出日志(ADR-0017 决策 2)。读取上界钳制到 `watermark`(DB 行
 /// `next_offset`:pump 先写文件后写库 ⇒ 库水位 ≤ 文件长度,永不读到半块);

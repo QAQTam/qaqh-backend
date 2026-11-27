@@ -23,6 +23,10 @@ mod session_interaction;
 #[cfg(test)]
 mod session_loop_tests;
 pub mod session_title;
+/// v4.6 P3-1:ADR-0035 exec 洪峰模型消费面泄洪闸(独立子模块)。
+pub mod spill_gate;
+#[cfg(test)]
+mod spill_gate_tests;
 pub mod tool_job;
 
 pub use progress::{AttemptBlocks, ProgressSink, ProgressStream};

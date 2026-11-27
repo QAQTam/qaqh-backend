@@ -86,3 +86,9 @@
 - [x] `cargo test -p qaqh-session owner_tests` 14/14 绿；`cargo check` 三面绿
 - [ ] CI 全量绿（`qaqh-process-tools` unix 面 manager tests 由 CI 覆盖；本机两处
       `exec::tests` 环境性预存红与本改动无关，见提交说明）
+- [x] **daemon 级真实洪峰端到端验证**（`v4.6 P3-1` 补齐，见
+      [ADR-0035](0035-exec-flood-model-spill-gate.md) 落地清单末项）：
+      `qaqh-daemon::axum_server::exec_flood_smoke_tests` —— 32 MiB 真子进程经真 manager /
+      owner 泵 / SQLite / append-only 日志 / 区间读全程：客户端事件面合帧零丢帧、
+      日志字节 == 全量、库水位 `next_offset` 追平、`output_content_id IS NULL`、
+      `stream_dropped_bytes == 0`、daemon 堆高水位增量有界（6× 洪峰内）。
