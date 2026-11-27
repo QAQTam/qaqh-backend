@@ -117,7 +117,7 @@ pub(crate) async fn push<W: AsyncWrite + Unpin>(
         .await
         .map_err(|error| super::internal(format!("write blob chunk: {error}")))?;
         offset = end;
-        if seq.is_multiple_of(8) {
+        if seq.is_multiple_of(4) {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         } else {
             tokio::task::yield_now().await;
@@ -153,7 +153,14 @@ pub(crate) async fn receive_upload<R: AsyncRead + Unpin>(
     if bytes.len() as u64 != expected_len {
         return false;
     }
-    let actual: [u8; 32] = Sha256::digest(&bytes).into();
+    let Ok((bytes, actual)) = tokio::task::spawn_blocking(move || {
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        (bytes, digest)
+    })
+    .await
+    else {
+        return false;
+    };
     if actual != *expected_hash.as_bytes() {
         return false;
     }

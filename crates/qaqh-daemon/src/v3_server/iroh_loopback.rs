@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use iroh::Endpoint;
-use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, VarInt, presets};
+use iroh::endpoint::{
+    Connection, ConnectionError, QuicTransportConfig, RecvStream, SendStream, VarInt, presets,
+};
 use qaqh_ringing_v3::RINGING_V3_ALPN;
 use qaqh_v3_transport::{MuxError, MuxTransport};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -134,14 +136,21 @@ impl MuxTransport for IrohTransport {
 /// 在 `127.0.0.1:0` 建立一对已握手完毕的 `iroh` 回环连接 `(client, server)`。
 pub(crate) async fn iroh_loopback_pair() -> (IrohTransport, IrohTransport) {
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let transport_config = QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(128 * 1024))
+        .receive_window(VarInt::from_u32(512 * 1024))
+        .send_window(256 * 1024)
+        .build();
     let server_ep = Endpoint::builder(presets::Minimal)
         .alpns(vec![RINGING_V3_ALPN.to_vec()])
+        .transport_config(transport_config.clone())
         .bind_addr(loopback)
         .expect("server bind_addr")
         .bind()
         .await
         .expect("bind iroh server endpoint");
     let client_ep = Endpoint::builder(presets::Minimal)
+        .transport_config(transport_config)
         .bind_addr(loopback)
         .expect("client bind_addr")
         .bind()

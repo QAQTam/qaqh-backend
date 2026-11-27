@@ -204,7 +204,10 @@ async fn blob_pump<T: MuxTransport, B: V3Backend>(
             .push_blob(&mut stream, push.hash, push.len)
             .await
         {
-            Ok(bytes) => log::debug!("v3_blob: 推送 {} 字节", bytes),
+            Ok(bytes) => {
+                let _ = tokio::io::AsyncWriteExt::shutdown(&mut stream).await;
+                log::debug!("v3_blob: 推送 {} 字节", bytes);
+            }
             Err(error) => log::warn!("v3_blob: 推送失败：{error:?}"),
         }
     }

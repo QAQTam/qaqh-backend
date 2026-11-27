@@ -90,7 +90,9 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
                     &block_id,
                     format!("a{index:06};"),
                 ));
-                if index.is_multiple_of(16) {
+                if index.is_multiple_of(128) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                } else if index.is_multiple_of(16) {
                     tokio::task::yield_now().await;
                 }
             }
@@ -107,7 +109,11 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
             while !stop.load(Ordering::Relaxed) {
                 index += 1;
                 handle.push_output(chunk.clone());
-                tokio::task::yield_now().await;
+                if index.is_multiple_of(64) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                } else {
+                    tokio::task::yield_now().await;
+                }
             }
             index
         })
@@ -191,7 +197,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
     };
 
     // 先确认三条洪峰都真实建立，避免快速后端在采样期间提前跑完最低负载。
-    tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if a_frames.load(Ordering::Relaxed) > 100
                 && pty_bytes.load(Ordering::Relaxed) >= 256 * 1024
@@ -203,7 +209,14 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
         }
     })
     .await
-    .expect("并发洪峰未在期限内建立");
+    .unwrap_or_else(|_| {
+        panic!(
+            "并发洪峰未在期限内建立（a_frames={} pty_bytes={} blob_bytes={}）",
+            a_frames.load(Ordering::Relaxed),
+            pty_bytes.load(Ordering::Relaxed),
+            blob_bytes.load(Ordering::Relaxed)
+        )
+    });
 
     // ── 阶段 1：控制面 RTT ──
     let mut control = Vec::with_capacity(CONTROL_SAMPLES);

@@ -37,7 +37,9 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
                 let piece = format!("d{index:05};");
                 published.push_str(&piece);
                 session.emit(harness::answer(&session_id, &block_id, piece));
-                if index % 32 == 0 {
+                if index % 128 == 127 {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                } else if index % 32 == 0 {
                     tokio::task::yield_now().await;
                 }
             }

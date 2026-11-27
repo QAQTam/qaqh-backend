@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use qaqh_core_vocab::{ContentHash, SessionId};
 use qaqh_ringing_v3::{
     BlobChunkFrame, BlobTransferRole, DeliveryClass, FrameMeta, ResyncReason, SessionEvent,
@@ -285,17 +286,46 @@ async fn shell_pty<S: AsyncWrite + Unpin>(
     }
     let mut live = attach.live;
     let mut lagged = attach.lagged;
+    let mut pending: Option<(u64, Bytes)> = None;
     loop {
-        let chunk = tokio::select! {
-            biased;
-            _ = wait_true(cancel) => break,
-            _ = wait_true(&mut lagged) => break,
-            maybe = live.recv() => match maybe {
-                Some(chunk) => chunk,
-                None => break,
-            },
+        let (start, first_bytes) = if let Some(chunk) = pending.take() {
+            chunk
+        } else {
+            tokio::select! {
+                biased;
+                _ = wait_true(cancel) => break,
+                _ = wait_true(&mut lagged) => break,
+                maybe = live.recv() => match maybe {
+                    Some(chunk) => chunk,
+                    None => break,
+                },
+            }
         };
-        let (start, bytes) = chunk;
+        let mut end = start + first_bytes.len() as u64;
+        let mut coalesced: Option<Vec<u8>> = None;
+        const MAX_PTY_COALESCE_BYTES: usize = 16 * 1024;
+        while coalesced.as_ref().map_or(first_bytes.len(), Vec::len) < MAX_PTY_COALESCE_BYTES {
+            match live.try_recv() {
+                Ok((next_start, next_bytes)) => {
+                    if next_start == end {
+                        let buf = coalesced.get_or_insert_with(|| {
+                            let mut combined = Vec::with_capacity(
+                                (first_bytes.len() + next_bytes.len()).min(MAX_PTY_COALESCE_BYTES),
+                            );
+                            combined.extend_from_slice(&first_bytes);
+                            combined
+                        });
+                        buf.extend_from_slice(&next_bytes);
+                        end += next_bytes.len() as u64;
+                    } else {
+                        pending = Some((next_start, next_bytes));
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let bytes = coalesced.map_or(first_bytes, Bytes::from);
         seq += 1;
         if write_frame(
             stream,
@@ -306,7 +336,7 @@ async fn shell_pty<S: AsyncWrite + Unpin>(
                     delivery: DeliveryClass::Reliable,
                 },
                 start_offset: start,
-                end_offset: start + bytes.len() as u64,
+                end_offset: end,
                 bytes,
             },
         )
@@ -378,7 +408,14 @@ async fn receive_upload<S: AsyncRead + Unpin>(
     if bytes.len() as u64 != expected_len {
         return false;
     }
-    let actual: [u8; 32] = Sha256::digest(&bytes).into();
+    let Ok((bytes, actual)) = tokio::task::spawn_blocking(move || {
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        (bytes, digest)
+    })
+    .await
+    else {
+        return false;
+    };
     if actual != *expected_hash.as_bytes() {
         return false;
     }
