@@ -33,10 +33,13 @@ pub mod ids;
 pub mod tool_catalog;
 pub mod tool_mode;
 
-pub use domain::{ActivityState, ContentRef, TurnTerminal, UsageInfo};
+pub use domain::{
+    ActivityState, ContentRef, GoalStatus, ModelSelection, ModelSelectionOptions,
+    PermissionGrantScope, SettingOverride, TurnPhase, TurnTerminal, UsageInfo,
+};
 pub use ids::{
     BlockId, ContentHash, ExecSessionId, IdError, InputId, InteractionId, SessionId, ToolCallId,
-    TurnId,
+    TurnId, WorkspaceId,
 };
 pub use tool_catalog::{
     JsonText, ToolAvailability, ToolCapabilityConstraints, ToolCatalog, ToolCatalogEntry,

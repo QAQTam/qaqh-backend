@@ -30,9 +30,10 @@ use qaqh_ringing_v3::{
     BlockKind, CommandInteractionResolution, CommandRequest, CommandResponse,
     ExecSessionSnapshot, InteractionResolution, RpcError, SessionEvent, SessionRequest,
     SessionResponse, ToolCallStatus, ToolCallView, ToolCatalogRequest, ToolCatalogResponse,
+    WorkspaceRequest, WorkspaceResponse,
 };
 
-use super::super::error::{denied, not_found};
+use super::super::error::{denied, not_found, not_wired};
 use super::super::session_runtime::{
     SessionRuntime, empty_usage, skeleton_block_id, skeleton_exec_id, skeleton_turn_id,
 };
@@ -80,6 +81,9 @@ impl SkeletonSession {
                 title,
                 cwd: _,
                 tool_mode,
+                model_selection: _,
+                custom_tools: _,
+                handoff_from: _,
             } => {
                 let session = self.state.create_session(&context.identity.device);
                 if let Some(title) = title {
@@ -113,7 +117,9 @@ impl SkeletonSession {
                     timeline_epoch,
                 )?)))
             }
-            SessionRequest::List => {
+            SessionRequest::List {
+                include_archived: _,
+            } => {
                 let sessions = self
                     .state
                     .sessions()
@@ -128,6 +134,22 @@ impl SkeletonSession {
                 session.rename(title);
                 Ok(SessionResponse::Ack)
             }
+            SessionRequest::Archive { session_id }
+            | SessionRequest::Unarchive { session_id }
+            | SessionRequest::PatchSettings { session_id, .. }
+            | SessionRequest::Truncate { session_id, .. }
+            | SessionRequest::SetGoal { session_id, .. }
+            | SessionRequest::ClearGoal { session_id }
+            | SessionRequest::GetTodos { session_id }
+            | SessionRequest::GetTeam { session_id } => {
+                let _session = self.session_for(context, &session_id)?;
+                Err(not_wired(
+                    "该 Session 域子能力随 v4.7 P3-5d 接 QaqhService/Db",
+                ))
+            }
+            SessionRequest::GetSkillsCatalog { cwd: _ } => Err(not_wired(
+                "SkillsCatalog 扫描随 v4.7 P3-5d 接 QaqhService",
+            )),
             SessionRequest::Delete { session_id } => {
                 let session = self.session_for(context, &session_id)?;
                 // 先广播再摘表：订阅者要能收到"它没了"，而不是静默消失。
@@ -223,13 +245,16 @@ impl SkeletonSession {
                 let session = self.session_for(context, &session_id)?;
                 session.resolve_interaction(&interaction_id);
                 let resolution = match resolution {
-                    CommandInteractionResolution::Approve => InteractionResolution::Approved,
+                    CommandInteractionResolution::Approve { scope } => {
+                        InteractionResolution::Approved { scope }
+                    }
                     CommandInteractionResolution::Reject { text } => {
                         InteractionResolution::Denied { reason: text }
                     }
-                    CommandInteractionResolution::Answer { text } => {
-                        InteractionResolution::Answered { answer: text }
+                    CommandInteractionResolution::Answer { answers } => {
+                        InteractionResolution::Answered { answers }
                     }
+                    CommandInteractionResolution::Dismiss => InteractionResolution::Dismissed,
                 };
                 session.emit(SessionEvent::InteractionResolved {
                     session_id,
@@ -238,7 +263,31 @@ impl SkeletonSession {
                 });
                 Ok(CommandResponse::InteractionAccepted)
             }
+            CommandRequest::ExecInterrupt { .. } | CommandRequest::ExecTerminate { .. } => {
+                Err(not_wired(
+                    "ExecSession 控制随 v4.7 P3-5d 接 ExecSessionManager",
+                ))
+            }
         }
+    }
+
+    /// 处理一条 Workspace 请求（骨架期：Owner 权限先验，真实现随 `v4.7 P3-5d` 接盘）。
+    pub(crate) async fn handle_workspace(
+        &self,
+        context: &CallContext,
+        request: WorkspaceRequest,
+    ) -> Result<WorkspaceResponse, RpcError> {
+        if matches!(
+            request,
+            WorkspaceRequest::Create { .. }
+                | WorkspaceRequest::Rename { .. }
+                | WorkspaceRequest::Delete { .. }
+        ) {
+            context.identity.require_owner("Workspace::Mutate")?;
+        }
+        Err(not_wired(
+            "Workspace 域在骨架期如实拒绝；真实现随 v4.7 P3-5d 接 Db",
+        ))
     }
 
     /// 处理一条 ToolCatalog 请求。
@@ -558,9 +607,11 @@ pub(crate) fn permission_interaction(
     qaqh_ringing_v3::InteractionView {
         interaction_id,
         kind: qaqh_ringing_v3::InteractionKind::Permission,
+        tool_call_id: None,
         title: title.into(),
         body: body.into(),
         options: Vec::new(),
+        questions: Vec::new(),
         expires_at_ms: None,
     }
 }

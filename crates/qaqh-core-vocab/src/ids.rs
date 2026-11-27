@@ -148,6 +148,11 @@ string_id!(
     ExecSessionId,
     "ExecSessionId"
 );
+string_id!(
+    /// 工作区 id（会话分组根键）。
+    WorkspaceId,
+    "WorkspaceId"
+);
 
 /// 内容哈希（sha256，线上 32 字节裸字节，不是 64 字符 hex）。
 ///

@@ -145,6 +145,11 @@ impl<T: MuxTransport, B: V3Backend> V3Server<T, B> {
                 .handle_catalog(context, request)
                 .await
                 .map(ControlResponse::ToolCatalog),
+            ControlRequest::Workspace(request) => self
+                .backend
+                .handle_workspace(context, request)
+                .await
+                .map(ControlResponse::Workspace),
         };
         match outcome {
             Ok(response) => response,

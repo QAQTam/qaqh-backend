@@ -23,15 +23,17 @@
 
 use bytes::Bytes;
 use qaqh_core_vocab::{
-    ContentRef, ExecSessionId, InputId, JsonText, SessionId, ToolCallId, ToolCatalog, ToolMode,
-    TurnTerminal,
+    ContentRef, ExecSessionId, InputId, PermissionGrantScope, SessionId, ToolCatalog,
 };
 use serde::{Deserialize, Serialize};
 
+use crate::account::{AccountRequest, AccountResponse};
+use crate::config::{ConfigRequest, ConfigResponse};
+use crate::session::{SessionRequest, SessionResponse};
 use crate::stream::{
-    CompactionSummary, ExecSessionSnapshot, InteractionView, SessionEvent, ToolCallStatus,
-    ToolCallView,
+    AskAnswer, ExecSessionSnapshot, SessionEvent, ToolCallStatus, ToolCallView,
 };
+use crate::workspace::{WorkspaceRequest, WorkspaceResponse};
 
 /// 控制面请求信封（`command_id` 是幂等键，**不可省略**）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,6 +112,8 @@ pub enum ControlRequest {
     Fs(FsRequest),
     /// 工具目录域。
     ToolCatalog(ToolCatalogRequest),
+    /// 工作区分组域。
+    Workspace(WorkspaceRequest),
 }
 
 /// 控制面回执。
@@ -137,6 +141,8 @@ pub enum ControlResponse {
     Fs(FsResponse),
     /// 工具目录域。
     ToolCatalog(ToolCatalogResponse),
+    /// 工作区分组域。
+    Workspace(WorkspaceResponse),
     /// 失败（任何域共用一个错误通道，前端不需要逐域写错误处理）。
     Error(RpcError),
 }
@@ -194,196 +200,7 @@ pub enum SystemResponse {
     },
 }
 
-// ── Session ──
-
-/// 会话域请求。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionRequest {
-    /// 新建会话。
-    Create {
-        /// 可选标题。
-        title: Option<String>,
-        /// 工作目录（`None` = 默认工作区）。
-        cwd: Option<String>,
-        /// 初始工具模式（`None` = `Standard`）。
-        tool_mode: Option<ToolMode>,
-    },
-    /// 首屏快照（`tail_blocks`/`tail_turns` 控制尾部窗口；向上翻页走 [`SessionRequest::TranscriptPage`]）。
-    GetSessionSnapshot {
-        /// 会话 id。
-        session_id: SessionId,
-        /// 尾部块窗口上限。
-        tail_blocks: u32,
-        /// 尾部回合窗口上限。
-        tail_turns: u32,
-    },
-    /// 向上翻页。
-    ///
-    /// `timeline_epoch` 由快照给出；失配一律 `StaleCursor`（客户端必须重取快照，
-    /// 不允许"尽量拼一下"——拼出来的时间线是错位的假历史）。
-    TranscriptPage {
-        /// 会话 id。
-        session_id: SessionId,
-        /// 早于该 `ord` 的块（`0` = 最新）。
-        before_ord: u64,
-        /// 本页块数上限。
-        limit: u32,
-        /// 时间线代际。
-        timeline_epoch: u64,
-    },
-    /// 列出会话。
-    List,
-    /// 重命名。
-    Rename {
-        /// 会话 id。
-        session_id: SessionId,
-        /// 新标题。
-        title: String,
-    },
-    /// 删除。
-    Delete {
-        /// 会话 id。
-        session_id: SessionId,
-    },
-    /// 切换工具模式。
-    SetToolMode {
-        /// 会话 id。
-        session_id: SessionId,
-        /// 目标模式（三档，压测档解析不到这里）。
-        mode: ToolMode,
-    },
-    /// 附着会话事件流（打开 `SessionEvents` 逻辑流的控制面入口）。
-    Attach {
-        /// 会话 id。
-        session_id: SessionId,
-        /// 已收到的最后序号。
-        since_seq: u64,
-    },
-    /// 让出/取得驱动权（多端联动）。
-    SwitchDriver {
-        /// 会话 id。
-        session_id: SessionId,
-        /// 目标客户端实例 id（`None` = 让出给自己之外的下一个申请者）。
-        target_client_instance_id: Option<String>,
-    },
-}
-
-/// 时间线块。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct BlockView {
-    /// 时间线内的定序号（跨页唯一）。
-    pub ord: u64,
-    /// 块种类。
-    pub kind: BlockKind,
-    /// 内容引用（大内容走 blob/窗口）。
-    pub content: ContentRef,
-    /// 关联的工具调用（**跨页归属规则**：同 `tool_call_id` 的块在任一页都带同一 id）。
-    pub tool_call_id: Option<ToolCallId>,
-    /// 产生该块的时间（毫秒）。
-    pub created_at_ms: u64,
-}
-
-/// 块种类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum BlockKind {
-    /// 用户输入。
-    User,
-    /// 模型答案。
-    Answer,
-    /// 模型推理。
-    Reasoning,
-    /// 工具调用。
-    ToolCall,
-    /// 工具结果。
-    ToolResult,
-    /// 系统提示（压缩摘要、错误横幅等）。
-    System,
-}
-
-/// 回合摘要（首屏 `turns` 窗口）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TurnSummary {
-    /// 回合定序号。
-    pub ordinal: u64,
-    /// 终态（未结束为 `None`）。
-    pub terminal: Option<TurnTerminal>,
-    /// 开始时刻（毫秒）。
-    pub started_at_ms: u64,
-}
-
-/// 首屏快照（开箱即渲染：一次带齐块、工具调用、未决交互、执行会话与驱动权）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSnapshot {
-    /// 会话 id。
-    pub session_id: SessionId,
-    /// 标题。
-    pub title: Option<String>,
-    /// 当前活动状态。
-    pub activity: qaqh_core_vocab::ActivityState,
-    /// 时间线代际（翻页校验用）。
-    pub timeline_epoch: u64,
-    /// 事件流当前序号（客户端从此续订）。
-    pub seq: u64,
-    /// 回合窗口。
-    pub turns: Vec<TurnSummary>,
-    /// 尾部块窗口（`ord` 升序）。
-    pub tail_blocks: Vec<BlockView>,
-    /// 尾部窗口里出现的工具调用（一次给齐，前端不必二次请求）。
-    pub tool_calls: Vec<ToolCallView>,
-    /// 当前等待用户处置的交互（审批 / Ask）。
-    pub pending_interactions: Vec<InteractionView>,
-    /// 关联的 exec 执行会话快照。
-    pub exec_sessions: Vec<ExecSessionSnapshot>,
-    /// 当前驱动权客户端实例 id（无驱动端为 `None`）。
-    pub driver_client_instance_id: Option<String>,
-    /// 当前驱动权定序序号。
-    pub driver_ordinal: u64,
-    /// **独立于 `turns` 窗口**的固定压缩摘要。
-    pub pinned_compaction: Option<CompactionSummary>,
-    /// 当前工具模式。
-    pub tool_mode: ToolMode,
-}
-
-/// 翻页结果。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TranscriptPage {
-    /// 本页块（`ord` 升序）。
-    pub blocks: Vec<BlockView>,
-    /// 本页关联的工具调用（跨页工具归属：同 id 同视图）。
-    pub tool_calls: Vec<ToolCallView>,
-    /// 下一页的 `before_ord`（`None` = 到头了）。
-    pub next_before_ord: Option<u64>,
-    /// 时间线代际（与请求一致）。
-    pub timeline_epoch: u64,
-}
-
-/// 会话摘要（列表用）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionSummary {
-    /// 会话 id。
-    pub session_id: SessionId,
-    /// 标题。
-    pub title: Option<String>,
-    /// 活动状态。
-    pub activity: qaqh_core_vocab::ActivityState,
-    /// 最后活动时刻（毫秒）。
-    pub updated_at_ms: u64,
-}
-
-/// 会话域回执。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SessionResponse {
-    /// 已新建会话。
-    Created(SessionSummary),
-    /// 首屏快照。
-    Snapshot(Box<SessionSnapshot>),
-    /// 翻页结果。
-    Page(Box<TranscriptPage>),
-    /// 会话列表。
-    Sessions(Vec<SessionSummary>),
-    /// 驱动权变更已受理（真正的广播走 `DriverChanged` 事件）。
-    Ack,
-}
+// Session 域已拆分到独立模块 `session`，在根 crate 统一重导出。
 
 // ── Command ──
 
@@ -415,23 +232,38 @@ pub enum CommandRequest {
         /// 处置结果。
         resolution: CommandInteractionResolution,
     },
+    /// 中断正在运行的 `exec` 执行会话（发送 SIGINT/Ctrl-C）。
+    ExecInterrupt {
+        /// 执行会话 id。
+        exec_session_id: ExecSessionId,
+    },
+    /// 强行终止正在运行的 `exec` 执行会话。
+    ExecTerminate {
+        /// 执行会话 id。
+        exec_session_id: ExecSessionId,
+    },
 }
 
-/// 交互处置（覆盖审批批准/拒绝与 Ask 回答）。
+/// 交互处置（覆盖审批作用域批准/拒绝、多题 Ask 回答与忽略关闭）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandInteractionResolution {
-    /// 批准。
-    Approve,
+    /// 批准（携带授予作用域：`Once` / `Session` / `Persistent`）。
+    Approve {
+        /// 批准作用域。
+        scope: PermissionGrantScope,
+    },
     /// 拒绝（带理由）。
     Reject {
         /// 拒绝理由。
         text: String,
     },
-    /// Ask 问答回答。
+    /// Ask 多题回答。
     Answer {
-        /// 回答文本。
-        text: String,
+        /// 各题回答列表。
+        answers: Vec<AskAnswer>,
     },
+    /// 忽略/关闭 Ask 交互。
+    Dismiss,
 }
 
 /// 命令域回执。
@@ -442,7 +274,7 @@ pub enum CommandResponse {
         /// 回显的输入 id。
         input_id: InputId,
     },
-    /// 取消已受理。
+    /// 取消或 exec 控制指令已受理。
     CancelAccepted,
     /// 交互已处置。
     InteractionAccepted,
@@ -453,16 +285,20 @@ pub enum CommandResponse {
 /// Shell 域请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShellRequest {
-    /// 在指定会话下打开一个 PTY（**独立并发句柄表**，不碰中央会话锁）。
+    /// 打开一个交互 PTY（**独立并发句柄表**，不碰中央会话锁）。
+    ///
+    /// 既可显式绑定某会话（`Some(session_id)`），也可由桌面终端坞全局打开（`None`）。
     Open {
-        /// 所属会话 id（显式绑定，不猜"当前会话"）。
-        session_id: SessionId,
+        /// 可选关联会话 id（`None` = 全局终端坞）。
+        session_id: Option<SessionId>,
         /// 列数。
         cols: u16,
         /// 行数。
         rows: u16,
-        /// 工作目录（`None` = 会话工作区）。
+        /// 工作目录（`None` = 关联会话工作区或默认目录）。
         cwd: Option<String>,
+        /// 可选指定 shell 程序路径/档案（`None` = 宿主默认）。
+        shell: Option<String>,
     },
     /// 写入字节（原始 PTY 字节，不是 UTF-8 文本）。
     Write {
@@ -485,18 +321,28 @@ pub enum ShellRequest {
         /// shell id。
         shell_id: String,
     },
-    /// 列出指定会话的 shell。
+    /// 列出 PTY 句柄（`Some(session_id)` 按会话过滤；`None` 列当前设备全部句柄）。
     List {
-        /// 会话 id。
-        session_id: SessionId,
+        /// 可选会话过滤键。
+        session_id: Option<SessionId>,
     },
 }
 
-/// Shell 视图。
+/// Shell 视图（对齐前端终端坞标签与状态栏信息）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellView {
     /// shell id。
     pub shell_id: String,
+    /// 所属子进程 PID。
+    pub pid: u32,
+    /// Shell 可执行程序名称/路径。
+    pub shell: String,
+    /// 初始工作目录。
+    pub cwd: String,
+    /// 当前列数。
+    pub cols: u16,
+    /// 当前行数。
+    pub rows: u16,
     /// 进程已产生的总字节数（客户端续读偏移的权威水位）。
     pub output_offset: u64,
     /// 是否已结束。
@@ -573,104 +419,7 @@ pub enum MarketplaceResponse {
     Ack,
 }
 
-// ── Config ──
-
-/// 配置分区。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConfigSection {
-    /// 模型与端点。
-    Providers,
-    /// 工具与权限。
-    Tools,
-    /// 沙箱。
-    Sandbox,
-    /// 界面偏好。
-    Ui,
-    /// 钩子。
-    Hooks,
-}
-
-/// 配置域请求。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConfigRequest {
-    /// 读一个分区（值以原始 JSON 文本搬运，不解释）。
-    Get {
-        /// 分区。
-        section: ConfigSection,
-    },
-    /// 写一个分区。
-    Set {
-        /// 分区。
-        section: ConfigSection,
-        /// 原始 JSON 文本。
-        value: JsonText,
-    },
-    /// 重新加载磁盘配置。
-    Reload,
-}
-
-/// 配置域回执。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ConfigResponse {
-    /// 分区取值（原始 JSON 文本）。
-    Value {
-        /// 分区。
-        section: ConfigSection,
-        /// 原始 JSON 文本。
-        value: JsonText,
-    },
-    /// 已写入。
-    Stored,
-    /// 已重载。
-    Reloaded,
-}
-
-// ── Account ──
-
-/// 账号域请求。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AccountRequest {
-    /// 列出账号。
-    List,
-    /// 当前账号。
-    Current,
-    /// 切换账号。
-    Select {
-        /// 账号 id。
-        account_id: String,
-    },
-    /// 登出（清本地凭据）。
-    Logout {
-        /// 账号 id。
-        account_id: String,
-    },
-}
-
-/// 账号视图。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AccountView {
-    /// 账号 id。
-    pub account_id: String,
-    /// 供应商 id。
-    pub provider: String,
-    /// 展示名。
-    pub label: String,
-    /// 是否是当前账号。
-    pub current: bool,
-}
-
-/// 账号域回执。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AccountResponse {
-    /// 账号列表。
-    Accounts(Vec<AccountView>),
-    /// 当前账号（未登录为 `None`）。
-    Current(Option<AccountView>),
-    /// 已切换。
-    Selected,
-    /// 已登出。
-    LoggedOut,
-}
+// Config 与 Account 域已拆分到独立模块 `config` 与 `account`，在根 crate 统一重导出。
 
 // ── Pairing ──
 

@@ -36,8 +36,19 @@ impl SkeletonConfigAccount {
         context: &CallContext,
         request: ConfigRequest,
     ) -> Result<ConfigResponse, RpcError> {
-        if matches!(request, ConfigRequest::Set { .. } | ConfigRequest::Reload) {
-            context.identity.require_owner("Config::Set/Reload")?;
+        if matches!(
+            request,
+            ConfigRequest::Set { .. }
+                | ConfigRequest::Reload
+                | ConfigRequest::PatchFull { .. }
+                | ConfigRequest::UpsertProvider { .. }
+                | ConfigRequest::DeleteProvider { .. }
+                | ConfigRequest::UpsertProviderModel { .. }
+                | ConfigRequest::DeleteProviderModel { .. }
+                | ConfigRequest::SetDefaultModel { .. }
+                | ConfigRequest::ReloadAgents
+        ) {
+            context.identity.require_owner("Config::Write/Reload")?;
         }
         Err(not_wired(
             "Config 域在 v4.6 P3-4 只落地签名与拒绝语义；真实现随 v4.7 接 qaqh-config",
@@ -52,9 +63,17 @@ impl SkeletonConfigAccount {
     ) -> Result<AccountResponse, RpcError> {
         if matches!(
             request,
-            AccountRequest::Select { .. } | AccountRequest::Logout { .. }
+            AccountRequest::Select { .. }
+                | AccountRequest::Logout { .. }
+                | AccountRequest::SiwcSignInStart
+                | AccountRequest::SiwcSignInCancel { .. }
+                | AccountRequest::SiwcSignOut { .. }
+                | AccountRequest::DsSignInStart { .. }
+                | AccountRequest::DsSignInCancel { .. }
+                | AccountRequest::DsSignOut
+                | AccountRequest::DsAckBonus { .. }
         ) {
-            context.identity.require_owner("Account::Select/Logout")?;
+            context.identity.require_owner("Account::Mutate")?;
         }
         Err(not_wired(
             "Account 域在 v4.6 P3-4 只落地签名与拒绝语义；真实现随 v4.7 接 qaqh-dsaccount",
