@@ -77,7 +77,11 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
             .expect("事件流 30s 无进展（订阅死锁或写侧卡住）")
             .expect("帧必须可读");
         match &frame.event {
-            SessionEvent::AnswerDelta { block_id: bid, text, .. } if bid == &block_id => {
+            SessionEvent::AnswerDelta {
+                block_id: bid,
+                text,
+                ..
+            } if bid == &block_id => {
                 answer_accum.push_str(text);
             }
             SessionEvent::CatalogChanged { .. } => sentinel = true,
@@ -144,9 +148,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
     race.emit(harness::answer(&race_id, &race_block, "seam-2"));
     match race.bus.subscribe(since) {
         SubscribeOutcome::Attached {
-            replay,
-            mut live,
-            ..
+            replay, mut live, ..
         } => {
             assert_eq!(replay.len(), 1);
             assert_eq!(replay[0].meta.seq, since + 1);

@@ -16,7 +16,6 @@ mod shell_ws_tests;
 mod v2_storm_tests;
 
 pub(crate) use axum_impl::challenge::ChallengeStore;
-pub(crate) use axum_impl::pairing::PairingTable;
 pub(crate) use axum_impl::test_hooks::TestHooks;
 pub use axum_impl::{AppState, build_router};
 
@@ -57,7 +56,9 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
         })
         .clone();
     let pending = std::sync::Arc::new(std::sync::Mutex::new(
-        qaqh_ringing_runtime::PendingCommandStore::new(std::sync::Arc::clone(service.owners().db())),
+        qaqh_ringing_runtime::PendingCommandStore::new(std::sync::Arc::clone(
+            service.owners().db(),
+        )),
     ));
     let hub = std::sync::Arc::new(qaqh_ringing_runtime::RingingHub::with_database(
         String::from("test-epoch"),
@@ -74,7 +75,7 @@ pub(crate) fn test_state() -> crate::axum_server::axum_impl::AppState {
         admin_token: String::from("test-token"),
         devices: std::sync::Arc::new(qaqh_ringing_runtime::DeviceRegistry::new(test_db)),
         pairings: std::sync::Arc::new(std::sync::Mutex::new(
-            crate::axum_server::PairingTable::new(),
+            qaqh_ringing_runtime::pairing::PairingTable::new(),
         )),
         tls_fingerprint: None,
         challenges: std::sync::Arc::new(crate::axum_server::ChallengeStore::default()),

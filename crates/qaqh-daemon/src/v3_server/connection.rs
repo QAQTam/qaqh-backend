@@ -3,28 +3,22 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use qaqh_core_vocab::{ContentHash, SessionId};
+use qaqh_core_vocab::SessionId;
 use qaqh_ringing_v3::{
-    BlobChunkFrame, BlobTransferRole, ClientHello, ControlCall, ControlReply, ControlResponse,
-    DeliveryClass, ErrorCode, FrameMeta, HandshakeReject, PROTOCOL_FINGERPRINT, PROTOCOL_REV,
-    ResyncReason, ServerHello, SessionEvent, SessionEventFrame, ShellOutputFrame, StreamAttach,
-    StreamKind, verify_handshake,
+    BlobTransferRole, ClientHello, ControlCall, ControlReply, ControlRequest, ControlResponse,
+    ErrorCode, HandshakeReject, PROTOCOL_FINGERPRINT, PROTOCOL_REV, ServerHello, StreamKind,
+    SystemResponse, verify_handshake,
 };
 use qaqh_v3_transport::{MuxError, MuxTransport, read_frame, write_frame};
-use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinSet;
 
 use super::V3Server;
-use super::bus::{DeltaCoalescer, SubscribeOutcome};
 use super::error::{ServerError, rpc};
 use super::facade::{BlobPush, CallContext, V3Backend};
 use super::identity::ConnectionIdentity;
 use super::receipts::ReceiptStart;
-use super::state::ServerState;
-use super::util::{lock, now_ms};
-
-/// 客户端上传单条 Blob 上限（64 MiB）。
-const MAX_CLIENT_UPLOAD_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+use super::util::lock;
 
 async fn wait_true(rx: &mut watch::Receiver<bool>) {
     let _ = rx.wait_for(|&flag| flag).await;
@@ -89,16 +83,11 @@ impl ConnectionState {
     }
 
     /// 收摊：把本连接留下的附着与驱动权全部撤掉。
-    fn teardown(&self, state: &ServerState) {
+    fn teardown<B: V3Backend>(&self, backend: &B) {
         let Some(identity) = self.identity() else {
             return;
         };
-        for session_id in lock(&self.attached_sessions).iter() {
-            if let Some(session) = state.session(session_id) {
-                session.detach(&identity.device, &identity.client_instance_id);
-                session.release_driver(&identity.device, &identity.client_instance_id);
-            }
-        }
+        backend.teardown(&identity, &lock(&self.attached_sessions));
     }
 }
 
@@ -107,16 +96,23 @@ impl<T: MuxTransport, B: V3Backend> V3Server<T, B> {
     pub(crate) async fn serve(self: Arc<Self>) -> Result<(), ServerError> {
         self.state.peers.fetch_add(1, Ordering::Relaxed);
         let (connection, cancel_rx, blob_rx) = ConnectionState::new();
-        let pump = tokio::spawn(blob_pump(
+        let mut tasks = JoinSet::new();
+        tasks.spawn(blob_pump(
             Arc::clone(&self),
             Arc::clone(&connection),
             blob_rx,
             connection.subscribe_cancel(),
         ));
-        let result = accept_loop(Arc::clone(&self), Arc::clone(&connection), cancel_rx).await;
+        let result = accept_loop(
+            Arc::clone(&self),
+            Arc::clone(&connection),
+            cancel_rx,
+            &mut tasks,
+        )
+        .await;
         connection.cancel();
-        connection.teardown(&self.state);
-        let _ = pump.await;
+        tasks.shutdown().await;
+        connection.teardown(&self.backend);
         self.state.peers.fetch_sub(1, Ordering::Relaxed);
         result
     }
@@ -126,6 +122,7 @@ async fn accept_loop<T: MuxTransport, B: V3Backend>(
     server: Arc<V3Server<T, B>>,
     connection: Arc<ConnectionState>,
     mut cancel: watch::Receiver<bool>,
+    tasks: &mut JoinSet<()>,
 ) -> Result<(), ServerError> {
     loop {
         let accepted = tokio::select! {
@@ -137,7 +134,7 @@ async fn accept_loop<T: MuxTransport, B: V3Backend>(
             Ok(stream) => {
                 let server = Arc::clone(&server);
                 let connection = Arc::clone(&connection);
-                tokio::spawn(async move { serve_stream(server, stream, connection).await });
+                tasks.spawn(async move { serve_stream(server, stream, connection).await });
             }
             Err(MuxError::Closed) => return Ok(()),
             Err(error) => return Err(ServerError::Mux(error)),
@@ -202,7 +199,11 @@ async fn blob_pump<T: MuxTransport, B: V3Backend>(
             log::warn!("v3_blob: 写流头失败：{error}");
             return;
         }
-        match server.backend.push_blob(&mut stream, push.hash, push.len).await {
+        match server
+            .backend
+            .push_blob(&mut stream, push.hash, push.len)
+            .await
+        {
             Ok(bytes) => log::debug!("v3_blob: 推送 {} 字节", bytes),
             Err(error) => log::warn!("v3_blob: 推送失败：{error:?}"),
         }
@@ -255,15 +256,16 @@ async fn serve_stream<T: MuxTransport, B: V3Backend>(
             if identity.is_revoked() {
                 return;
             }
-            serve_session_events(
-                &server,
-                stream,
-                identity,
-                session_id,
-                since_seq,
-                connection.subscribe_cancel(),
-            )
-            .await;
+            server
+                .backend
+                .serve_session_events(
+                    stream,
+                    identity,
+                    session_id,
+                    since_seq,
+                    connection.subscribe_cancel(),
+                )
+                .await;
         }
         StreamKind::ShellPty {
             shell_id,
@@ -276,15 +278,16 @@ async fn serve_stream<T: MuxTransport, B: V3Backend>(
             if identity.is_revoked() {
                 return;
             }
-            serve_shell_pty(
-                &server,
-                stream,
-                identity,
-                shell_id,
-                from_offset,
-                connection.subscribe_cancel(),
-            )
-            .await;
+            server
+                .backend
+                .serve_shell_pty(
+                    stream,
+                    identity,
+                    shell_id,
+                    from_offset,
+                    connection.subscribe_cancel(),
+                )
+                .await;
         }
         StreamKind::BlobTransfer { role } => {
             let Some(identity) = connection.identity() else {
@@ -294,92 +297,12 @@ async fn serve_stream<T: MuxTransport, B: V3Backend>(
             if identity.is_revoked() {
                 return;
             }
-            serve_client_blob(&server, stream, &identity, role).await;
-        }
-    }
-}
-
-async fn serve_client_blob<T: MuxTransport, B: V3Backend>(
-    server: &V3Server<T, B>,
-    mut stream: T::BiStream,
-    identity: &Arc<ConnectionIdentity>,
-    role: BlobTransferRole,
-) {
-    match role {
-        BlobTransferRole::ServerPush => {
-            log::warn!("v3_conn: 客户端不得以 ServerPush 打开 BlobTransfer 流");
-        }
-        BlobTransferRole::ClientFetch { hash } => {
-            let Some(blob) = server.state.blobs.get(&hash) else {
-                log::warn!("v3_blob: 客户端拉取不存在的 blob `{}`", hash.to_hex());
-                return;
-            };
-            if let Err(error) = server
+            server
                 .backend
-                .push_blob(&mut stream, hash, blob.len() as u64)
-                .await
-            {
-                log::warn!("v3_blob: ClientFetch 推送失败：{error:?}");
-            }
-        }
-        BlobTransferRole::ClientUpload {
-            session_id,
-            hash,
-            len,
-        } => {
-            let Some(session) = server.state.session(&session_id) else {
-                log::warn!("v3_blob: 上传目标会话 `{session_id}` 不存在");
-                let _ = write_frame(&mut stream, &false).await;
-                return;
-            };
-            if !session.can_access(&identity.device) {
-                log::warn!("v3_blob: 设备越权向会话 `{session_id}` 上传 blob");
-                let _ = write_frame(&mut stream, &false).await;
-                return;
-            }
-            if len > MAX_CLIENT_UPLOAD_BLOB_BYTES {
-                log::warn!("v3_blob: 上传字节 {len} 超过上限 {MAX_CLIENT_UPLOAD_BLOB_BYTES}");
-                let _ = write_frame(&mut stream, &false).await;
-                return;
-            }
-            let ok = receive_upload(&server.state, &mut stream, hash, len).await;
-            let _ = write_frame(&mut stream, &ok).await;
+                .serve_client_blob(stream, identity, role)
+                .await;
         }
     }
-}
-
-async fn receive_upload<S: tokio::io::AsyncRead + Unpin>(
-    state: &ServerState,
-    stream: &mut S,
-    expected_hash: ContentHash,
-    expected_len: u64,
-) -> bool {
-    let mut bytes = Vec::with_capacity(expected_len as usize);
-    loop {
-        let Ok(frame) = read_frame::<_, BlobChunkFrame>(stream).await else {
-            return false;
-        };
-        if frame.hash != expected_hash || frame.offset != bytes.len() as u64 {
-            return false;
-        }
-        let next_len = (bytes.len() as u64).saturating_add(frame.bytes.len() as u64);
-        if next_len > expected_len {
-            return false;
-        }
-        bytes.extend_from_slice(&frame.bytes);
-        if frame.last {
-            break;
-        }
-    }
-    if bytes.len() as u64 != expected_len {
-        return false;
-    }
-    let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
-    if actual_digest != *expected_hash.as_bytes() {
-        return false;
-    }
-    state.blobs.put(bytes);
-    true
 }
 
 async fn handshake<T: MuxTransport, B: V3Backend>(
@@ -457,6 +380,14 @@ async fn serve_control<T: MuxTransport, B: V3Backend>(
             connection.cancel();
             return;
         }
+        if matches!(
+            &reply.response,
+            ControlResponse::System(SystemResponse::StopAck { accepted: true, .. })
+        ) {
+            server.backend.request_shutdown();
+            connection.cancel();
+            return;
+        }
     }
 }
 
@@ -468,12 +399,47 @@ async fn execute<T: MuxTransport, B: V3Backend>(
 ) -> ControlReply {
     let device = &context.identity.device;
     let command_id = call.command_id.clone();
+    let fingerprint = request_fingerprint(&call.request);
+    let pairing_secret = matches!(
+        &call.request,
+        ControlRequest::Pairing(
+            qaqh_ringing_v3::PairingRequest::CreateInvite { .. }
+                | qaqh_ringing_v3::PairingRequest::Redeem { .. }
+        )
+    );
+    let replayable_pairing_secret = matches!(
+        &call.request,
+        ControlRequest::Pairing(qaqh_ringing_v3::PairingRequest::CreateInvite { .. })
+    );
     let mut request = Some(call.request);
     let mut retries = 0u32;
     loop {
         match server.state.receipts.begin(device, &command_id) {
             ReceiptStart::Duplicate(reply) => return (*reply).clone(),
             ReceiptStart::Fresh { publish } => {
+                match server
+                    .backend
+                    .lookup_receipt(device, &command_id, &fingerprint)
+                    .await
+                {
+                    Ok(Some(reply)) => {
+                        return (*server.state.receipts.finish(
+                            device,
+                            &command_id,
+                            reply,
+                            &publish,
+                        ))
+                        .clone();
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        server.state.receipts.abandon(device, &command_id);
+                        return ControlReply {
+                            command_id,
+                            response: ControlResponse::Error(error),
+                        };
+                    }
+                }
                 let Some(request) = request.take() else {
                     return ControlReply {
                         command_id,
@@ -483,11 +449,47 @@ async fn execute<T: MuxTransport, B: V3Backend>(
                         )),
                     };
                 };
+                if let Err(error) = server
+                    .backend
+                    .reserve_receipt(device, &command_id, &fingerprint)
+                    .await
+                {
+                    server.state.receipts.abandon(device, &command_id);
+                    return ControlReply {
+                        command_id,
+                        response: ControlResponse::Error(error),
+                    };
+                }
                 let response = server.dispatch(context, request).await;
                 let reply = ControlReply {
                     command_id: command_id.clone(),
                     response,
                 };
+                if pairing_secret {
+                    // Pairing credentials never enter durable receipts; only invite creation is replayable in memory.
+                    if replayable_pairing_secret {
+                        return (*server.state.receipts.finish(
+                            device,
+                            &command_id,
+                            reply,
+                            &publish,
+                        ))
+                        .clone();
+                    }
+                    server.state.receipts.abandon(device, &command_id);
+                    return reply;
+                }
+                if let Err(error) = server
+                    .backend
+                    .persist_receipt(device, &command_id, &reply)
+                    .await
+                {
+                    server.state.receipts.abandon(device, &command_id);
+                    return ControlReply {
+                        command_id,
+                        response: ControlResponse::Error(error),
+                    };
+                }
                 return (*server
                     .state
                     .receipts
@@ -518,230 +520,69 @@ async fn execute<T: MuxTransport, B: V3Backend>(
     }
 }
 
-async fn serve_session_events<T: MuxTransport, B: V3Backend>(
-    server: &V3Server<T, B>,
-    mut stream: T::BiStream,
-    identity: Arc<ConnectionIdentity>,
-    session_id: SessionId,
-    since_seq: u64,
-    mut cancel: watch::Receiver<bool>,
-) {
-    let Some(session) = server.state.session(&session_id) else {
-        log::warn!("v3_session_events: 没有会话 `{session_id}`");
-        return;
-    };
-    if !session.can_access(&identity.device) {
-        log::warn!("v3_session_events: 设备越权访问会话 `{session_id}`");
-        return;
-    }
-    let kind = StreamKind::SessionEvents {
-        session_id: session_id.clone(),
-        since_seq,
-    };
-    let epoch = session.epoch();
-
-    let outcome = session.bus.subscribe(since_seq);
-    let (replay, mut live, mut lagged, attach_seq) = match outcome {
-        SubscribeOutcome::CursorGap {
-            requested_since,
-            oldest_available,
-            newest,
-        } => {
-            log::info!(
-                "v3_session_events: 游标 {requested_since} 跌出回放尾（可用 {oldest_available}..{newest}）"
-            );
-            let attach = StreamAttach {
-                stream: kind,
-                seq: newest,
-                timeline_epoch: epoch,
-            };
-            if write_frame(&mut stream, &attach).await.is_err() {
-                return;
-            }
-            let frame = SessionEventFrame {
-                meta: FrameMeta {
-                    seq: newest,
-                    server_ts_ms: now_ms(),
-                    delivery: DeliveryClass::Reliable,
-                },
-                event: SessionEvent::ResyncRequired {
-                    session_id,
-                    reason: ResyncReason::CursorGap,
-                    timeline_epoch: session.epoch(),
-                },
-            };
-            let _ = write_frame(&mut stream, &frame).await;
-            return;
-        }
-        SubscribeOutcome::Attached {
-            replay,
-            live,
-            lagged,
-            attach_seq,
-        } => (replay, live, lagged, attach_seq),
-    };
-
-    let attach = StreamAttach {
-        stream: kind,
-        seq: attach_seq,
-        timeline_epoch: epoch,
-    };
-    if write_frame(&mut stream, &attach).await.is_err() {
-        return;
-    }
-
-    let mut coalescer = DeltaCoalescer::new();
-    for frame in replay {
-        for out in coalescer.push(frame) {
-            if write_frame(&mut stream, out.as_ref()).await.is_err() {
-                return;
-            }
-        }
-    }
-    for out in coalescer.flush() {
-        if write_frame(&mut stream, out.as_ref()).await.is_err() {
-            return;
-        }
-    }
-
-    loop {
-        let next = tokio::select! {
-            biased;
-            _ = wait_true(&mut cancel) => return,
-            _ = wait_true(&mut lagged) => {
-                let frame = SessionEventFrame {
-                    meta: FrameMeta {
-                        seq: session.bus.last_seq(),
-                        server_ts_ms: now_ms(),
-                        delivery: DeliveryClass::Reliable,
-                    },
-                    event: SessionEvent::ResyncRequired {
-                        session_id,
-                        reason: ResyncReason::CursorGap,
-                        timeline_epoch: session.epoch(),
-                    },
-                };
-                let _ = write_frame(&mut stream, &frame).await;
-                return;
-            }
-            maybe = live.recv() => match maybe {
-                Some(frame) => frame,
-                None => return,
-            },
-        };
-
-        let mut batch = vec![next];
-        while let Ok(frame) = live.try_recv() {
-            batch.push(frame);
-            if batch.len() >= 64 {
-                break;
-            }
-        }
-        let mut out = Vec::new();
-        for frame in batch {
-            out.extend(coalescer.push(frame));
-        }
-        out.extend(coalescer.flush());
-        for frame in out {
-            if write_frame(&mut stream, frame.as_ref()).await.is_err() {
-                return;
-            }
-        }
-    }
+fn request_fingerprint(request: &ControlRequest) -> String {
+    qaqh_types::sha256_hex(format!("{request:?}").as_bytes())
 }
 
-async fn serve_shell_pty<T: MuxTransport, B: V3Backend>(
-    server: &V3Server<T, B>,
-    mut stream: T::BiStream,
-    identity: Arc<ConnectionIdentity>,
-    shell_id: String,
-    from_offset: u64,
-    mut cancel: watch::Receiver<bool>,
-) {
-    let Some(handle) = server.state.shells.get(&shell_id) else {
-        log::warn!("v3_shell_pty: 没有 shell `{shell_id}`");
-        return;
-    };
-    if let Some(session_id) = &handle.session_id {
-        let Some(session) = server.state.session(session_id) else {
-            log::warn!("v3_shell_pty: shell `{shell_id}` 的会话已不存在");
-            return;
-        };
-        if !session.can_access(&identity.device) {
-            log::warn!("v3_shell_pty: 设备越权访问 shell `{shell_id}`");
-            return;
-        }
-    } else if handle.owner != identity.device {
-        log::warn!("v3_shell_pty: 设备越权访问全局 shell `{shell_id}`");
-        return;
-    }
-    let attach_parts = handle.attach(from_offset, &server.state.config);
-    let replay = attach_parts.replay;
-    let mut live = attach_parts.live;
-    let mut lagged = attach_parts.lagged;
-    let attach_offset = attach_parts.attach_offset;
-    let gap = attach_parts.gap;
-    let generation = attach_parts.generation;
-    if gap {
-        log::info!("v3_shell_pty: shell `{shell_id}` 请求偏移 {from_offset} 已跌出历史");
-    }
-    let kind = StreamKind::ShellPty {
-        shell_id: shell_id.clone(),
-        from_offset,
-    };
-    let attach = StreamAttach {
-        stream: kind,
-        seq: attach_offset,
-        timeline_epoch: 0,
-    };
-    if write_frame(&mut stream, &attach).await.is_err() {
-        handle.detach(generation);
-        return;
-    }
-    let mut seq = 0u64;
-    for (start, chunk) in replay {
-        seq += 1;
-        let frame = ShellOutputFrame {
-            meta: FrameMeta {
-                seq,
-                server_ts_ms: now_ms(),
-                delivery: DeliveryClass::Reliable,
-            },
-            start_offset: start,
-            end_offset: start + chunk.len() as u64,
-            bytes: chunk,
-        };
-        if write_frame(&mut stream, &frame).await.is_err() {
-            handle.detach(generation);
-            return;
-        }
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use qaqh_v3_transport::{MuxConfig, duplex::duplex_pair_with_buffer};
+
+    use super::*;
+    use crate::v3_server::harness;
+
+    #[test]
+    fn request_fingerprint_is_a_digest_without_plaintext_secrets() {
+        let request = ControlRequest::Pairing(qaqh_ringing_v3::PairingRequest::Redeem {
+            code: "one-time-secret".into(),
+            client_kind: qaqh_ringing_v3::ClientKind::Mobile,
+        });
+        let fingerprint = request_fingerprint(&request);
+        assert_eq!(fingerprint.len(), 64);
+        assert!(!fingerprint.contains("one-time-secret"));
+        assert_eq!(
+            fingerprint,
+            qaqh_types::sha256_hex(format!("{request:?}").as_bytes())
+        );
     }
 
-    loop {
-        let chunk = tokio::select! {
-            biased;
-            _ = wait_true(&mut cancel) => break,
-            _ = wait_true(&mut lagged) => break,
-            maybe = live.recv() => match maybe {
-                Some(chunk) => chunk,
-                None => break,
-            },
-        };
-        let (start, bytes) = chunk;
-        seq += 1;
-        let frame = ShellOutputFrame {
-            meta: FrameMeta {
-                seq,
-                server_ts_ms: now_ms(),
-                delivery: DeliveryClass::Reliable,
-            },
-            start_offset: start,
-            end_offset: start + bytes.len() as u64,
-            bytes,
-        };
-        if write_frame(&mut stream, &frame).await.is_err() {
-            break;
+    #[tokio::test]
+    async fn closing_control_joins_backpressured_stream_tasks() {
+        let (client_transport, server_transport) =
+            duplex_pair_with_buffer(MuxConfig::default(), 8 * 1024);
+        let state = harness::state();
+        let session = harness::session_for(&state, &harness::owner_device());
+        let (server, server_task) =
+            harness::spawn_server(server_transport, Arc::clone(&state)).await;
+        let client = harness::connect(client_transport, harness::owner_hello("stream-join")).await;
+        let transport = client.transport().clone();
+        let events = client
+            .attach_session(&session.id, 0)
+            .await
+            .expect("attach event stream");
+        let block = harness::block(99);
+        let payload = "x".repeat(2048);
+        for _ in 0..4096 {
+            session.emit(harness::answer(&session.id, &block, payload.clone()));
         }
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+        }
+
+        drop(client);
+        tokio::time::timeout(Duration::from_secs(2), server_task)
+            .await
+            .expect("server must stop after control closes")
+            .expect("server task")
+            .expect("server loop");
+        assert_eq!(
+            Arc::strong_count(&server),
+            1,
+            "a backpressured stream survived connection teardown"
+        );
+        drop(events);
+        drop(transport);
     }
-    handle.detach(generation);
 }

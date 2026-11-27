@@ -26,7 +26,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use qaqh_ringing_contract::{
-    GitSnapshot, GitStatusSnapshot, WorktreeCreateParams, WorktreeView, GITX_SCHEMA,
+    GITX_SCHEMA, GitSnapshot, GitStatusSnapshot, WorktreeCreateParams, WorktreeView,
 };
 
 /// 会话绑定结果：双锚点（worktree 代码路径 ↔ source_root 工件锚点）。
@@ -79,9 +79,8 @@ impl WorktreeManager {
     /// canonicalize，规避 Windows 短路径/大小写的文本差异。
     pub fn list_unmanaged(&self) -> Result<Vec<PathBuf>> {
         let registry = self.load_registry()?;
-        let canonical = |path: &Path| {
-            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-        };
+        let canonical =
+            |path: &Path| std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let source_canonical = canonical(&self.source_root);
         let managed = registry
             .records()
@@ -108,7 +107,10 @@ impl WorktreeManager {
     ) -> Result<WorktreeView> {
         git::verify_repository(&self.source_root)?;
         git::validate_branch(&params.branch_name)?;
-        let base = params.base_ref.clone().unwrap_or_else(|| "HEAD".to_string());
+        let base = params
+            .base_ref
+            .clone()
+            .unwrap_or_else(|| "HEAD".to_string());
         let head_sha = git::rev_parse_commit(&self.source_root, &base)?;
 
         let base_dir = paths::worktree_base_dir(&self.source_root);
@@ -196,6 +198,22 @@ impl WorktreeManager {
         status::build(&self.source_root)
     }
 
+    /// 工作树差异文本（`None` = 全树）；路径必须是工作树内的字面相对路径。
+    ///
+    /// V3 `GitxRequest::Diff` 的 `path` 可直接传入；回执由调用方将文本包装为
+    /// `ContentRef`。会话绑定 worktree 的调用方应以该 worktree 根构造 manager。
+    pub fn diff(&self, path: Option<&str>) -> Result<String> {
+        git::diff(&self.source_root, path)
+    }
+
+    /// 提交工作树全部变更并返回完整 SHA，对应 V3 `GitxResponse::Committed`。
+    ///
+    /// V3 `GitxRequest::Commit` 的 `message` 可直接传入；会话绑定 worktree 的
+    /// 调用方应以该 worktree 根构造 manager。
+    pub fn commit(&self, message: &str) -> Result<String> {
+        git::commit(&self.source_root, message)
+    }
+
     /// 该会话当前绑定的 worktree 登记（registry owner 反查；无绑定返回 `None`）。
     ///
     /// runtime 的 workspace 派生（`ensure_session_workspace`）用它把绑定会话的
@@ -234,9 +252,9 @@ impl WorktreeManager {
 /// 嵌套 worktree 树必须对 git 状态/dirwalk/journal 全链路不可见——这是 ADR-0041
 /// 决策 2 的硬前提，创建函数强制维护，不依赖仓库已有 ignore 规则。
 fn ensure_gitignored(base_dir: &Path) -> Result<()> {
-    let qaqh_dir = base_dir.parent().ok_or_else(|| {
-        GitxError::Io(std::io::Error::other("worktree base dir has no parent"))
-    })?;
+    let qaqh_dir = base_dir
+        .parent()
+        .ok_or_else(|| GitxError::Io(std::io::Error::other("worktree base dir has no parent")))?;
     let ignore_path = qaqh_dir.join(".gitignore");
     let existing = std::fs::read_to_string(&ignore_path).unwrap_or_default();
     if existing
@@ -278,7 +296,11 @@ mod tests {
             ["config", "user.name", "qaqh-test"],
             ["config", "user.email", "qaqh-test@example.com"],
         ] {
-            let status = Command::new("git").current_dir(root).args(args).status().unwrap();
+            let status = Command::new("git")
+                .current_dir(root)
+                .args(args)
+                .status()
+                .unwrap();
             assert!(status.success());
         }
         std::fs::write(root.join("README.md"), "hello\n").unwrap();
@@ -380,6 +402,178 @@ mod tests {
         assert!(git::is_dirty(Path::new(&view.path)).unwrap());
         let snap = manager.snapshot().unwrap();
         assert!(!snap.dirty);
+    }
+
+    #[test]
+    fn diff_and_commit_round_trip_on_managed_worktree() {
+        let repo = init_repo();
+        let manager = WorktreeManager::new(repo.path());
+        let view = manager
+            .create(
+                &WorktreeCreateParams {
+                    branch_name: "feature/diff-commit".to_string(),
+                    base_ref: None,
+                    attach: false,
+                },
+                None,
+            )
+            .unwrap();
+        let worktree = PathBuf::from(&view.path);
+        let scoped = WorktreeManager::new(&worktree);
+        std::fs::write(worktree.join("README.md"), "updated\n").unwrap();
+
+        let diff = scoped.diff(Some("README.md")).unwrap();
+        assert!(diff.contains("-hello"));
+        assert!(diff.contains("+updated"));
+        assert_eq!(scoped.diff(None).unwrap(), diff);
+        // Git pathspec 魔法必须按字面文件名处理，不能扩大选择范围。
+        assert!(scoped.diff(Some(":(glob)**")).unwrap().is_empty());
+
+        let message = "feat: \"quoted\"; $(touch injected) `touch backtick`";
+        let commit = scoped.commit(message).unwrap();
+        assert_eq!(commit, git::rev_parse_commit(&worktree, "HEAD").unwrap());
+        assert!(scoped.diff(None).unwrap().is_empty());
+        assert!(!git::is_dirty(&worktree).unwrap());
+        assert!(!worktree.join("injected").exists());
+        assert!(!worktree.join("backtick").exists());
+        let output = Command::new("git")
+            .current_dir(&worktree)
+            .args(["log", "-1", "--format=%B"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), message);
+    }
+
+    #[test]
+    fn diff_rejects_absolute_traversal_and_ambiguous_paths() {
+        let repo = init_repo();
+        let manager = WorktreeManager::new(repo.path());
+        let absolute = repo.path().join("README.md").to_string_lossy().into_owned();
+        for path in [
+            absolute,
+            "../README.md".to_string(),
+            "nested/../../README.md".to_string(),
+            "..\\outside.txt".to_string(),
+            "C:\\outside.txt".to_string(),
+            "C:outside.txt".to_string(),
+            "\\\\server\\share\\outside.txt".to_string(),
+            "/etc/passwd".to_string(),
+            String::new(),
+            ".".to_string(),
+        ] {
+            assert!(
+                matches!(
+                    manager.diff(Some(&path)),
+                    Err(GitxError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+                ),
+                "unsafe path was accepted: {path:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn diff_rejects_symlink_escape_in_existing_and_missing_descendants() {
+        use std::os::unix::fs::symlink;
+
+        let repo = init_repo();
+        let outside = TempDir::new().unwrap();
+        std::fs::create_dir(outside.path().join("nested")).unwrap();
+        std::fs::write(outside.path().join("nested").join("secret.txt"), "secret\n").unwrap();
+        symlink(outside.path(), repo.path().join("escape")).unwrap();
+        symlink(
+            outside.path().join("nested").join("secret.txt"),
+            repo.path().join("secret-link"),
+        )
+        .unwrap();
+        let manager = WorktreeManager::new(repo.path());
+
+        for path in [
+            "escape/nested/secret.txt",
+            "escape/missing.txt",
+            "secret-link",
+        ] {
+            assert!(
+                matches!(
+                    manager.diff(Some(path)),
+                    Err(GitxError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+                ),
+                "symlink escape was accepted: {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_and_commit_reject_repository_subdirectory_as_worktree_root() {
+        let repo = init_repo();
+        std::fs::create_dir(repo.path().join("nested")).unwrap();
+        std::fs::write(repo.path().join("README.md"), "updated\n").unwrap();
+        let staged = Command::new("git")
+            .current_dir(repo.path())
+            .args(["add", "README.md"])
+            .status()
+            .unwrap();
+        assert!(staged.success());
+        let before = git::rev_parse_commit(repo.path(), "HEAD").unwrap();
+        let manager = WorktreeManager::new(repo.path().join("nested"));
+
+        for result in [manager.diff(None), manager.commit("must not commit")] {
+            assert!(matches!(
+                result,
+                Err(GitxError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+        }
+        let cached = Command::new("git")
+            .current_dir(repo.path())
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
+        assert!(cached.status.success());
+        assert_eq!(String::from_utf8_lossy(&cached.stdout).trim(), "README.md");
+        assert_eq!(before, git::rev_parse_commit(repo.path(), "HEAD").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn whitespace_named_subdirectory_is_not_mistaken_for_the_repository_root() {
+        let repo = init_repo();
+        let nested = repo.path().join(" ");
+        std::fs::create_dir(&nested).unwrap();
+        let manager = WorktreeManager::new(&nested);
+
+        for result in [manager.diff(None), manager.commit("must not commit")] {
+            assert!(matches!(
+                result,
+                Err(GitxError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+            ));
+        }
+    }
+
+    #[test]
+    fn commit_rejects_invalid_message_before_staging() {
+        let repo = init_repo();
+        let manager = WorktreeManager::new(repo.path());
+        std::fs::write(repo.path().join("README.md"), "updated\n").unwrap();
+        let before = git::rev_parse_commit(repo.path(), "HEAD").unwrap();
+
+        for message in ["", " \t", "bad\0message"] {
+            assert!(
+                matches!(
+                    manager.commit(message),
+                    Err(GitxError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidInput
+                ),
+                "invalid commit message was accepted: {message:?}"
+            );
+        }
+        let staged = Command::new("git")
+            .current_dir(repo.path())
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
+        assert!(staged.status.success());
+        assert!(staged.stdout.is_empty());
+        assert_eq!(before, git::rev_parse_commit(repo.path(), "HEAD").unwrap());
     }
 
     #[test]

@@ -221,11 +221,15 @@ pub fn daemon_executable() -> Result<std::path::PathBuf> {
 /// Unix 用 `process_group(0)` 让 daemon 自成一个进程组（pgid = 自身 pid）——终端
 /// 关闭时的 SIGHUP 只发给**前台进程组**，故此一步即足以保命；std 自带，无需引
 /// libc。Windows 仍用 `CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`。
-pub(crate) fn spawn_daemon_process(executable: &std::path::Path) -> Result<()> {
+pub(crate) fn spawn_daemon_process(
+    executable: &std::path::Path,
+    data_root: &std::path::Path,
+) -> Result<()> {
     log::info!("[qaqh-client] spawning daemon: {}", executable.display());
     let mut command = std::process::Command::new(executable);
     command
         .arg("run")
+        .env("QAQH_DATA_DIR", data_root)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -263,7 +267,7 @@ fn configure_detached(command: &mut std::process::Command) {
 
 fn spawn_daemon_detached() -> Result<()> {
     let executable = daemon_executable()?;
-    spawn_daemon_process(&executable)
+    spawn_daemon_process(&executable, &data_dir())
 }
 
 /// Process liveness probe — v4.5 P2-2b 起为

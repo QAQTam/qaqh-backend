@@ -10,8 +10,7 @@
 //!   GET-only、state 恰好一次且常数时间相等、无关请求不消费事务、
 //!   no-store/no-referrer/严格 CSP、无脚本页面）。产品判定（client_id 规则、
 //!   错误码映射、成功页文案）留在各 crate 的薄产品层；
-//! - [`http`]：ureq 同步客户端的超时封装（`timeout_global` +
-//!   `http_status_as_error(false)`，4xx/5xx 保留可读 body）；
+//! - [`http`]：同步外观、异步 `reqwest` 传输的超时封装（4xx/5xx 保留可读 body）；
 //! - [`store`]：凭据 JSON 的原子落盘（`.json.tmp` + rename、Unix 0600、
 //!   Windows rename 不覆盖的先行删除、失败清临时文件）。
 //!

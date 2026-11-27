@@ -190,6 +190,21 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
         })
     };
 
+    // 先确认三条洪峰都真实建立，避免快速后端在采样期间提前跑完最低负载。
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if a_frames.load(Ordering::Relaxed) > 100
+                && pty_bytes.load(Ordering::Relaxed) >= 256 * 1024
+                && blob_bytes.load(Ordering::Relaxed) > 0
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("并发洪峰未在期限内建立");
+
     // ── 阶段 1：控制面 RTT ──
     let mut control = Vec::with_capacity(CONTROL_SAMPLES);
     for _ in 0..CONTROL_SAMPLES {

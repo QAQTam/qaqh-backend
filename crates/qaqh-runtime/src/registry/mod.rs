@@ -256,27 +256,18 @@ pub(crate) struct SubagentSpawnOptions<'a> {
 }
 
 impl AgentRegistry {
-
     /// ADR-0033:花名册 residency 诚实化——实例在场即 Loaded(含子会话)。
 
     pub fn is_loaded(&self, session_id: &str) -> bool {
-
         self.instances.contains_key(session_id)
-
     }
-
 }
-
-
 
 pub struct AgentRegistry {
     instances: HashMap<String, AgentInstance>,
     /// 会话 owner 目录:每会话业务顺序与工具生命周期的落点。
     owners: Arc<qaqh_session::owner::OwnerDirectory>,
     exec_sessions: Arc<qaqh_agent_runtime::ExecSessionManager>,
-    /// ADR-0028：用户 shell 终端注册表。与 `exec_sessions` **并列且零共享**——
-    /// owner 是 device `instance_key`，不是 `session_id`，所以会话 close 不得牵连它。
-    shells: Arc<crate::shell::ShellRegistry>,
     /// daemon 正在关闭：worker 退出是预期的，禁止自动重生。
     shutting_down: bool,
     /// P2-5：daemon 级 parent/child edge 与 unload 顺序状态机。
@@ -320,7 +311,6 @@ impl AgentRegistry {
             instances: HashMap::new(),
             owners,
             exec_sessions: Arc::new(qaqh_agent_runtime::ExecSessionManager::new()),
-            shells: Arc::new(crate::shell::ShellRegistry::new()),
             shutting_down: false,
             supervisor: SubagentSupervisor::default(),
             agent_catalog: AgentCatalog::default(),
@@ -339,12 +329,6 @@ impl AgentRegistry {
 
     pub fn exec_sessions(&self) -> Arc<qaqh_agent_runtime::ExecSessionManager> {
         Arc::clone(&self.exec_sessions)
-    }
-
-    /// 用户 shell 面（ADR-0028 切片 3）。服务方法 `shell.*` 与 ws 数据面共用这一份，
-    /// 没有第二张注册表。
-    pub fn shells(&self) -> Arc<crate::shell::ShellRegistry> {
-        Arc::clone(&self.shells)
     }
 
     /// ADR-0014：注入终态回传路由（service init 调用一次）。

@@ -11,6 +11,7 @@
 //! 宪法 #5 零容忍）。
 
 use aws_lc_rs::rand::{SecureRandom, SystemRandom};
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 /// URL-safe base64（无 padding）随机串。`n` 为**字节数**，输出长度约 `4n/3`。
@@ -74,8 +75,8 @@ pub fn base64url_decode(input: &str) -> Result<Vec<u8>, String> {
 
 /// `code_challenge = BASE64URL(SHA256(ASCII(code_verifier)))`（RFC 7636 §4.2，S256）。
 pub fn pkce_challenge(verifier: &str) -> String {
-    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, verifier.as_bytes());
-    base64url_encode(digest.as_ref())
+    let digest = Sha256::digest(verifier.as_bytes());
+    base64url_encode(&digest)
 }
 
 #[cfg(test)]
@@ -96,7 +97,11 @@ mod tests {
             b"hello world".to_vec(),
         ] {
             let encoded = base64url_encode(&raw);
-            assert_eq!(base64url_decode(&encoded).expect("decode"), raw, "{encoded}");
+            assert_eq!(
+                base64url_decode(&encoded).expect("decode"),
+                raw,
+                "{encoded}"
+            );
         }
         // 带 padding 的输入同样接受（JWT/JWKS 常混用）。
         assert_eq!(base64url_decode("Zm9vYg==").expect("padded"), b"foob");
@@ -119,7 +124,10 @@ mod tests {
         let b = random_transaction_value();
         assert_ne!(a, b);
         assert_eq!(a.len(), 43, "32 字节 → 43 字符: {a}");
-        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]
@@ -131,7 +139,10 @@ mod tests {
         assert_eq!(first.chars().filter(|c| *c == '-').count(), 4);
         assert_eq!(first.chars().nth(14), Some('4'), "version 位: {first}");
         let variant = first.chars().nth(19).expect("variant");
-        assert!(matches!(variant, '8' | '9' | 'a' | 'b'), "variant 位: {first}");
+        assert!(
+            matches!(variant, '8' | '9' | 'a' | 'b'),
+            "variant 位: {first}"
+        );
     }
 
     #[test]

@@ -9,6 +9,7 @@ description = "GUI-independent QAQ-Harness daemon application runtime"
 qaqh-agent-runtime = { path = "../qaqh-agent-runtime" }
 qaqh-ringing-runtime = { path = "../qaqh-ringing-runtime" }
 qaqh-config = { path = "../qaqh-config" }
+qaqh-core-vocab = { path = "../qaqh-core-vocab" }
 qaqh-mcp = { path = "../qaqh-mcp" }
 qaqh-ringing = { path = "../qaqh-ringing" }
 # schema feature：gitx 工具的 Args/Output schema 从契约类型派生（ADR-0008 形状权威）。

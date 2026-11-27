@@ -13,6 +13,24 @@ impl AgentRegistry {
         }
     }
 
+    /// 当前已加载会话的实时工具目录；未加载即失败，由服务面先 resume。
+    pub fn tool_catalog(
+        &self,
+        session_id: &str,
+        mode: qaqh_core_vocab::ToolMode,
+        capabilities: &qaqh_types::ModelCapabilities,
+    ) -> Result<qaqh_core_vocab::ToolCatalog, String> {
+        self.instances
+            .get(session_id)
+            .map(|instance| {
+                instance
+                    .loop_
+                    .tool_catalog(mode, capabilities)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap_or_else(|| Err(format!("session {session_id} is not loaded")))
+    }
+
     pub(crate) fn loops_for_tree(
         &self,
         root: &str,

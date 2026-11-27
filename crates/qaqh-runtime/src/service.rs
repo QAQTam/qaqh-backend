@@ -13,6 +13,8 @@ use qaqh_ringing_runtime::RingingHub;
 #[derive(Clone)]
 pub struct QaqhService {
     pub(crate) registry: Arc<Mutex<AgentRegistry>>,
+    /// ADR-0028：用户 shell 独立于 agent 生命周期；owner 是 device `instance_key`。
+    pub(crate) shells: Arc<crate::shell::ShellRegistry>,
     pub(crate) hub: std::sync::OnceLock<Arc<RingingHub>>,
     /// 会话 owner 目录:SQLite 业务权威 + 每会话事件单流。
     pub(crate) owners: Arc<qaqh_session::owner::OwnerDirectory>,
@@ -85,6 +87,7 @@ impl QaqhService {
         let registry = AgentRegistry::new(Arc::clone(&owners));
         let service = Self {
             registry: Arc::new(Mutex::new(registry)),
+            shells: Arc::new(crate::shell::ShellRegistry::new()),
             hub: std::sync::OnceLock::new(),
             owners,
             siwc: std::sync::OnceLock::new(),
@@ -121,19 +124,14 @@ impl QaqhService {
         // 独立 init_tools，本进程只提供注册表快照，不参与工具执行）。
         // 不带会话工具注册器：spawn_subagent 等属于会话工具面，不在 daemon
         // 查询注册表里。todo 宿主用同一 service 实现（真实 DB 单事务 RMW）。
-        qaqh_workspace::runtime::init_tools(
-            "daemon",
-            &[],
-            vec![],
-            Arc::clone(&tool_hosts.todo),
-        );
+        qaqh_workspace::runtime::init_tools("daemon", &[], vec![], Arc::clone(&tool_hosts.todo));
         service
     }
 
     /// SIWC 会话管理器（懒装配到 `<data_dir>/siwc`）。
     /// 懒装配而非 `init` 里装配：只有真正用到套餐用量时才建目录、读 host id；
     /// 不用该能力的用户不该多出任何磁盘副作用。
-    pub(crate) fn siwc(&self) -> Result<Arc<qaqh_siwc::SiwcManager>, String> {
+    pub fn siwc(&self) -> Result<Arc<qaqh_siwc::SiwcManager>, String> {
         if let Some(manager) = self.siwc.get() {
             return Ok(Arc::clone(manager));
         }
@@ -164,7 +162,7 @@ impl QaqhService {
     /// DeepSeek 账号管理器（懒装配；凭据默认落在 config 目录）。
     /// 懒装配的理由与 SIWC 相同：不用该能力的用户不该多出任何磁盘副作用。
     /// 构造本身不读盘、不联网——真正的读盘发生在第一次 `status()` / `token()`。
-    pub(crate) fn dsaccount(&self) -> Result<&qaqh_dsaccount::DsAccountManager, String> {
+    pub fn dsaccount(&self) -> Result<&qaqh_dsaccount::DsAccountManager, String> {
         if let Some(manager) = self.dsaccount.get() {
             return Ok(manager);
         }
@@ -206,6 +204,11 @@ impl QaqhService {
     /// 会话 owner 目录(业务库 + 事件单流的唯一入口)。
     pub fn owners(&self) -> &Arc<qaqh_session::owner::OwnerDirectory> {
         &self.owners
+    }
+
+    /// 用户 shell 注册表；PTY 生命周期不经过中央 agent registry 锁。
+    pub fn shells(&self) -> &Arc<crate::shell::ShellRegistry> {
+        &self.shells
     }
 
     /// Dispatch a trusted Ringing command directly to the session loop.
@@ -458,10 +461,8 @@ impl QaqhService {
                 // 闭包里并持着 registry 的 std MutexGuard——不能跨 await,故用
                 // 项目唯一的同步→异步桥 `async_rt::block_on_host`,阻塞池线程上
                 // 驱动宿主 runtime 是合法的(P1-1 已用常驻用例钉死这一事实)。
-                qaqh_workspace::async_rt::block_on_host(
-                    service.owners.get_or_create(id).flush(),
-                )
-                .map_err(|error| error.to_string())?;
+                qaqh_workspace::async_rt::block_on_host(service.owners.get_or_create(id).flush())
+                    .map_err(|error| error.to_string())?;
             }
             let ids = service
                 .owners
@@ -535,9 +536,7 @@ impl QaqhService {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .shutdown_all();
-        // ADR-0028 D5：用户 shell 与 exec 面同律 —— daemon 关停前把活壳收干净，
-        // 不留孤儿 powershell/bash。必须在 registry 锁**释放之后**调用：
-        // `shutdown_shells()` 自己还要取同一把锁。
+        // ADR-0028 D5：daemon 关停前收干净用户 shell；注册表独立，不经过 registry 锁。
         let shells = self.shutdown_shells();
         if shells > 0 {
             log::info!("[runtime] shutdown stopped {shells} user shell(s)");
@@ -579,6 +578,23 @@ impl QaqhService {
         crate::session_meta::patch(&self.owners, session_id, patch)
     }
 
+    /// Persist a tool mode, reject an empty custom allowlist, and reload the worker.
+    pub fn set_tool_mode(&self, session_id: &str, mode: &str) -> Result<(), String> {
+        crate::service::params::validate_tool_mode(mode)?;
+        if mode == qaqh_types::tool_mode::CUSTOM
+            && self
+                .session_meta(session_id)
+                .is_none_or(|meta| meta.custom_tools.is_empty())
+        {
+            return Err("custom tool mode requires at least one tool in custom_tools".into());
+        }
+        let mut patch = qaqh_ringing_contract::fact::SessionMetadataPatch::default();
+        patch.tool_mode = Some(mode.to_string());
+        self.write_meta(session_id, patch)?;
+        self.send_ringing_cmd(session_id.to_string(), RingingCommand::AgentReloadConfig)?;
+        Ok(())
+    }
+
     /// Write a session title (business column).
     pub(crate) fn write_title(
         &self,
@@ -600,21 +616,15 @@ impl QaqhService {
             .map_err(|e| format!("registry lock: {e}"))
     }
 
-    // ── 用户 shell 面（ADR-0028 切片 3）──────────────────────────────────
-    //
-    // `owner_instance_key` 一律由 daemon 从**已鉴权身份/lease** 反查后传入
-    // （`service_api` 的 shell 臂），这里绝不从 params 里读 owner —— `authz.rs`
-    // 的纪律是"绝不采信客户端自报字段"。执行体在 `crate::shell::ShellRegistry`，
-    // 这一层只做装配与 DTO 投影，形状由 `service_methods` 的 typed 表锁死。
+    // ── 用户 shell 面（ADR-0028 切片 3）：owner 由 daemon 从鉴权身份/lease 反查 ──
+    // 这里只做独立 ShellRegistry 装配与 DTO 投影，绝不采信 params 自报 owner。
 
     pub fn shell_open(
         &self,
         owner_instance_key: &str,
         params: &crate::ringing::service_methods::ShellOpenParams,
     ) -> Result<crate::ringing::service_methods::ShellView, String> {
-        let registry = self.registry()?;
-        registry
-            .shells()
+        self.shells()
             .open(
                 owner_instance_key,
                 crate::shell::ShellOpen {
@@ -632,8 +642,7 @@ impl QaqhService {
         owner_instance_key: &str,
         shell_id: &str,
     ) -> Result<crate::ringing::service_methods::ShellCloseResult, String> {
-        let registry = self.registry()?;
-        let reason = registry.shells().close(owner_instance_key, shell_id)?;
+        let reason = self.shells().close(owner_instance_key, shell_id)?;
         Ok(crate::ringing::service_methods::ShellCloseResult {
             shell_id: shell_id.to_string(),
             reason: reason.as_str().to_string(),
@@ -644,9 +653,8 @@ impl QaqhService {
         &self,
         owner_instance_key: &str,
     ) -> Result<crate::ringing::service_methods::ShellListResult, String> {
-        let registry = self.registry()?;
         Ok(crate::ringing::service_methods::ShellListResult {
-            shells: registry
+            shells: self
                 .shells()
                 .list(owner_instance_key)
                 .into_iter()
@@ -655,14 +663,9 @@ impl QaqhService {
         })
     }
 
-    // ── 数据面（ADR-0028 D3 裁定=候选 B：ws）──────────────────────────
-    //
-    // 这三条**不是**服务方法，也没有 DTO/validator/METHODS 登记：`stdin`/`resize`
-    // 做成 RPC 就等于给终端另造一套请求-回执-游标语义（ADR-0017 §被否选项第 4 条
-    // 点名的平行协议形态，也是 D4 刻意不做 `shell.write`/`shell.output` 的理由）。
-    // 它们是给 daemon 的 ws handler 用的内核侧句柄 —— `registry()` 是 `pub(crate)`，
-    // 装配层拿不到 `ShellRegistry`，只能从这一层过。owner 的口径与 RPC 面**同一条**
-    // （daemon 从已鉴权身份/lease 反查），这里同样绝不接受自报 owner。
+    // ── 数据面（ADR-0028 D3：ws）────────────────────────────────────────
+    // `stdin`/`resize`/`attach` 不是 RPC；`shells()` 独立于中央 registry 锁，
+    // owner 仍由 daemon 从鉴权身份/lease 反查，绝不接受自报值。
 
     /// 订阅一条 shell：有界回放段 + 实时帧 + 终止事实。`from_offset` 落在缓冲头
     /// 之前时按可用段给（`ShellAttach::from_offset` 是实际起点）。
@@ -672,8 +675,8 @@ impl QaqhService {
         shell_id: &str,
         from_offset: u64,
     ) -> Result<crate::shell::ShellAttach, String> {
-        let registry = self.registry()?;
-        registry.shells().attach(owner_instance_key, shell_id, from_offset)
+        self.shells()
+            .attach(owner_instance_key, shell_id, from_offset)
     }
 
     /// 往 shell 打原始字节（终端 keystroke/粘贴）。
@@ -683,8 +686,7 @@ impl QaqhService {
         shell_id: &str,
         bytes: &[u8],
     ) -> Result<usize, String> {
-        let registry = self.registry()?;
-        registry.shells().write(owner_instance_key, shell_id, bytes)
+        self.shells().write(owner_instance_key, shell_id, bytes)
     }
 
     /// 改几何，回报**内核读回值**（D6：shell 面吃活尺寸，不回报请求值）。
@@ -695,36 +697,25 @@ impl QaqhService {
         cols: u16,
         rows: u16,
     ) -> Result<(u16, u16), String> {
-        let registry = self.registry()?;
-        registry.shells().resize(owner_instance_key, shell_id, cols, rows)
+        self.shells()
+            .resize(owner_instance_key, shell_id, cols, rows)
     }
 
     /// device 吊销路径（`pairing::handle_device_revoke`）：吊销即收掉该身份名下
     /// 所有 shell。这是 D5 的三条显式 kill 路之一。
     pub fn shutdown_shells_of(&self, owner_instance_key: &str) -> usize {
-        let Ok(registry) = self.registry() else {
-            return 0;
-        };
-        registry.shells().shutdown_owner(owner_instance_key)
+        self.shells().shutdown_owner(owner_instance_key)
     }
 
     /// daemon 60s 周期任务（与 `sweep_active_goals` / `sweep_handoff_forks` 同律
     /// 同址）。阈值是代码常量而非 config 字段，理由见 `shell::SHELL_IDLE_REAP_SECS`。
     pub fn sweep_idle_shells(&self) -> Vec<String> {
-        let Ok(registry) = self.registry() else {
-            return Vec::new();
-        };
-        registry
-            .shells()
-            .sweep_idle(crate::shell::SHELL_IDLE_REAP_SECS)
+        self.shells().sweep_idle(crate::shell::SHELL_IDLE_REAP_SECS)
     }
 
     /// daemon 关停：与 exec 面同律，先把用户的壳收干净再走。
     pub fn shutdown_shells(&self) -> usize {
-        let Ok(registry) = self.registry() else {
-            return 0;
-        };
-        registry.shells().shutdown_all()
+        self.shells().shutdown_all()
     }
 
     pub fn exec_session_owner(
@@ -836,7 +827,7 @@ impl QaqhService {
     /// 返回类型化值后，**新增字段的唯一途径是改类型**：想在回包里塞个临时键，
     /// 必须先拆掉类型才行。形状锁在 `qaqh-types` 的
     /// `session_list_entry_wire_keys_are_locked`。
-    fn list_sessions(
+    pub fn list_sessions(
         &self,
         include_archived: bool,
     ) -> QaqhResult<Vec<qaqh_types::SessionListEntry>> {
@@ -1079,9 +1070,12 @@ fn spawn_config_file_poller() {
             let check_path = path.clone();
             let previous_mtime = last_mtime;
             let (mtime, reloaded) = tokio::task::spawn_blocking(move || {
-                let mtime = std::fs::metadata(&check_path).and_then(|m| m.modified()).ok();
-                let reloaded =
-                    mtime.is_some() && mtime != previous_mtime && qaqh_config::watch::reload_from_disk();
+                let mtime = std::fs::metadata(&check_path)
+                    .and_then(|m| m.modified())
+                    .ok();
+                let reloaded = mtime.is_some()
+                    && mtime != previous_mtime
+                    && qaqh_config::watch::reload_from_disk();
                 (mtime, reloaded)
             })
             .await
@@ -1197,6 +1191,8 @@ pub(crate) mod stats;
 
 use self::common::{command_id, release_freed_heap_memory};
 
+#[cfg(test)]
+mod shell_lock_tests;
 #[cfg(test)]
 mod tool_mode_tests {
     use super::params::{optional_tool_mode, validate_tool_mode};

@@ -1,6 +1,6 @@
 # ADR-0042 RingingV3：Rust Native 二进制多路流（本地 IPC + 远端纯 QUIC）与反腐迁移铁律
 
-状态: `已采纳 · 未实施` · 初始决策 2026-11-25 · r2 修订 2026-11-26（纳入 5/14–7/31 创世初心与 9/21–10/30 V2 历史考古、七条零遗留设计铁律、六条反腐迁移纪律）· r3 修订 2026-11-26（采纳 `V4_6_DECISION_PACK` 二审定案：1C′ 纯原语拆分、`skip_serializing_if` 零命中红线、Windows Named Pipe Owner-Only DACL、独立无版本 `daemon.endpoint`、尾窗 `pinned_compaction`/`timeline_epoch`、`yamux` 量化延迟与细粒度静态分发异步门面）· **r4 修订 2026-11-26（协议深度复核定案：对外由裸 `quinn` 升级为 `iroh` 纯 QUIC + `EndpointId` 公钥寻址/NAT 打洞/加密 Relay；对内坚持 `UDS/Pipe + yamux` 并经薄 `MuxTransport` 与 `iroh::Connection` 同构、否决 `remoc`；桌面与移动端统一坚持裸 `postcard` + 机器指纹严格同版 Fail-Closed；显式钉死四流因果分流与跨流时序铁律）** · **r5 修订 2026-11-27（本地传输路线复核定案：澄清 r4 为“本地 `yamux` / 远端 `iroh` 平行互斥、零嵌套”而非 `yamux over QUIC`；维持本地 `UDS/Pipe + yamux`，将“本地亦全走 `iroh` 回环”记为附切换触发条件的被否方案；新增 `yamux` 工程约束、`MuxTransport` 双后端不变量矩阵与 PTY 一帧延迟门槛）** · **决策人：仓库所有者**
+状态: `已采纳 · 部分实施` · 初始决策 2026-11-25 · r2 修订 2026-11-26（纳入 5/14–7/31 创世初心与 9/21–10/30 V2 历史考古、七条零遗留设计铁律、六条反腐迁移纪律）· r3 修订 2026-11-26（采纳 `V4_6_DECISION_PACK` 二审定案：1C′ 纯原语拆分、`skip_serializing_if` 零命中红线、Windows Named Pipe Owner-Only DACL、独立无版本 `daemon.endpoint`、尾窗 `pinned_compaction`/`timeline_epoch`、`yamux` 量化延迟与细粒度静态分发异步门面）· **r4 修订 2026-11-26（协议深度复核定案：对外由裸 `quinn` 升级为 `iroh` 纯 QUIC + `EndpointId` 公钥寻址/NAT 打洞/加密 Relay；对内坚持 `UDS/Pipe + yamux` 并经薄 `MuxTransport` 与 `iroh::Connection` 同构、否决 `remoc`；桌面与移动端统一坚持裸 `postcard` + 机器指纹严格同版 Fail-Closed；显式钉死四流因果分流与跨流时序铁律）** · **r5 修订 2026-11-27（本地传输路线复核定案：澄清 r4 为“本地 `yamux` / 远端 `iroh` 平行互斥、零嵌套”而非 `yamux over QUIC`；维持本地 `UDS/Pipe + yamux`，将“本地亦全走 `iroh` 回环”记为附切换触发条件的被否方案；新增 `yamux` 工程约束、`MuxTransport` 双后端不变量矩阵与 PTY 一帧延迟门槛）** · **r6 修订 2026-11-27（P3-5c 实施补充：本地 UDS/Named Pipe 传输、`V3Client::connect_local` 与三后端不变量矩阵落地；生产 daemon 接线仍待 P3-5d，整体状态保持“未实施”）** · **r7 修订 2026-11-27（P3-5d 实施补充：`v3_bridge/RealBackend`、SQLite 持久回执、会话投影、Shell/Config/Account/Pairing/Workspace/Marketplace/Gitx/Fs/System 真门面与 daemon 本地 IPC 生产启动/停机收摊已落地；整体状态改为“部分实施”，广域 QUIC、GPUI 原子迁移与 Windows 真实运行仍待后续验收）** · **决策人：仓库所有者**
 
 > 一句话：随着默认桌面前端切换为纯原生 `../qaqh-gpui`（零 WebView、10k 时间线实测 RSS ~153 MiB）、移动端保持 Rust `qaqh-client` 核心 + FFI 薄壳，本仓决定在 **`v4.6`–`v4.9`** 落地 **RingingV3**——以零 `serde_json` 依赖的纯 Rust 强类型二进制多路流（`postcard`）彻底取代 HTTP + SSE + WebSocket 三拼及所有 `/v1` 孤岛端点；本地走 **Named Pipe（Windows）/ UDS（Linux）+ `yamux`**，远端与移动端走 **`iroh` 纯 QUIC（`EndpointId` 公钥寻址 + 自动 NAT 打洞 + 端到端加密 Relay 兜底）**，两者在协议层经极薄 `MuxTransport` 100% 同构；冻结 `ADR-0008` C# 投影演进，并以硬性物理隔离与死刑倒计时在 **`v4.9` 物理立斩旧 V2 控制面**，为 `v4.12` 稳定封板与 `v5.0` 内核革命扫清一切协议债。
 
@@ -69,7 +69,7 @@
 
 ### 铁律 5：跨代协议不变量守卫先于业务代码（根绝 11/10 P0 复发）
 在编写 V3 业务 handler 前，必须先用 `tokio::io::duplex` 建立并锁定 **`ringing_v3_invariants`** 六大红线守卫，且在 `v4.9` 删旧栈后保持 100% 绿灯：
-- **`MuxTransport` 双后端矩阵（r5）**：六大守卫按 `MuxTransport` 后端参数化，必须**同时**在 `yamux` 后端（`v4.6` 为 `duplex` 内存，`v4.7` 起追加真实 UDS / Named Pipe）与 `iroh` 本机回环后端上全绿，任一守卫仅在单一后端变绿即判失败；`iroh` 在 `v4.6`–`v4.7` 仅以 `dev-dependency` 进入测试矩阵、不进入生产依赖图（生产接线仍在 `v4.8`）。以此机器兜底“两套复用引擎行为分叉”风险，并保证远端路径在本机即被持续验证。
+- **`MuxTransport` 三后端矩阵（r6）**：六大守卫按 `MuxTransport` 后端参数化，必须**同时**在 `yamux` 后端（`v4.6` 为 `duplex` 内存，`v4.7` 起追加真实 UDS / Named Pipe）、`local_ipc` 后端（OS 本机字节流 + `yamux`）与 `iroh` 本机回环后端上全绿，任一守卫仅在单一后端变绿即判失败；`iroh` 在 `v4.6`–`v4.7` 仅以 `dev-dependency` 进入测试矩阵、不进入生产依赖图（生产接线仍在 `v4.8`）。以此机器兜底“本地 OS 传输、内存复用与 QUIC 行为分叉”风险，并保证远端路径在本机即被持续验证。
 
 1. **原子订阅 + 有界回放尾**：先 grab 订阅接收器再读回放环，事件洪峰下 `resync_cycles == 0`（直接继承 11/10 P0 守卫语义）；
 2. **多流背压隔离与延迟上界**：大 Blob 满载分片 + PTY 刷屏 + 会话 A 洪峰并发时，Control RPC 往返 **P99 < 50ms**、PTY 回显帧 **P99 ≤ 16.6ms**（一帧渲染预算，r5 新增）且会话 B 事件不被饿死；
@@ -141,11 +141,9 @@
 
 ---
 
-## 六、实施进度（按切片滚动登记；状态字段仍为 `已采纳 · 未实施`）
+## 六、实施进度（按切片滚动登记；状态字段为 `已采纳 · 部分实施`）
 
-> **纪律提醒（宪法 #10）**：协议**契约**冻结 ≠ 协议**已实施**。在 `P3-4` 的
-> `v3_server` / `client/v3` 与 `duplex` 自闭环全绿之前，本 ADR 的状态**不得**
-> 写成"已实施"。以下逐条只登记"已冻结/已落地"的事实与其验证命令。
+> **纪律提醒（宪法 #10）**：协议**契约**冻结 ≠ 协议**已实施**。本地生产接线已落地，但广域 QUIC、GPUI 原子迁移与 Windows 真实运行尚未完成；以下逐条只登记已冻结/已落地的事实与其验证命令。
 
 ### `v4.6 P3-2`（2026-11-27）：原语底座
 
@@ -264,6 +262,8 @@
   ⑥ **前端渲染预算与有序性**：`yamux` 发布 2021 帧 → 收 115 帧（合掉 1906），`iroh` 发布
      2021 帧 → 收 167 帧（合掉 1854），增量字节 14000 B 全对齐，8 MiB 外置（预览 1024 B），
      代际 bump 后 `StaleCursor` 生效。
+- **P3-5c 本地 IPC 与三后端矩阵（`ADR-0042 r6`）**：`qaqh-v3-transport` 新增 Unix UDS 与 Windows Named Pipe 本机传输——Unix 新建父目录 `0700`、socket `0600`、拒绝非 socket 路径、拒绝抢占活跃 socket、`peer_cred` 同 UID 校验与 drop 清理；Windows 从当前进程令牌取得用户 SID 构造 Protected Owner-Only DACL、`reject_remote_clients(true)`、首实例标志与有界 `ERROR_PIPE_BUSY` 重试。`V3Client::connect_local` 完成 `daemon.endpoint` 发现、build/channel 校验、按需自启、15 秒启动/握手超时与严格 V3 握手；六大守卫扩展为 `yamux` / `local_ipc` / `iroh` 共 18 条。Linux 实测 transport 12 项、client V3 12 项、daemon `v3_server` 43 项（含 18 条守卫）全绿；Windows MSVC transport 测试代码交叉编译通过，真实运行待 CI。
+- **P3-5d 真后端与生产本地 IPC（`ADR-0042 r7`）**：`v3_bridge/RealBackend` 已接入真实 `QaqhService`、SQLite、ShellRegistry、Config/Account/Pairing/Workspace/Marketplace/Gitx/Fs/System；会话投影按需启动并以 readiness barrier 保证首事件不丢，Owner 序号从 0 开始严格校验，快照先取回放水位再读库；回执指纹改为 SHA-256，一次性 pairing 凭据不进入持久回执；生产 daemon 启动本地 IPC、发布 `daemon.endpoint`，停机统一取消并等待连接/逻辑流任务后清理端点与 socket。Linux 实测 `v3_bridge` 10 项、`v3_server` 44 项通过，iroh backpressure 守卫在全量串行运行中 PTY P99 偶发超线、隔离重跑通过；生产 daemon 启动/停机烟测通过，端点与 socket 均为 `0600` 且退出后清理。Windows 真实运行仍待 CI。
 - **反腐隔离闸**：`rg 'axum_server|RINGING_V2|v2_stream|serde_json|skip_serializing_if|serde\((tag|flatten|untagged|alias)|legacy_|compat_'`
   扫描 `qaqh-core-vocab`、`qaqh-ringing-v3`、`qaqh-v3-transport/src`、`v3_server/`、`client/v3/` → **字面 0 命中**（注释内禁词示例也已清除）。
 - **两份前置 ADR**：[0046](0046-native-structured-visualization-no-webview.md)（无 WebView
@@ -272,11 +272,6 @@
 
 ### 仍未实施（留给后续切片，保持诚实）
 
-- **生产接线（`v4.7`）**：`v3_server` 尚未进入 daemon 生产启动路径（无 UDS/Named Pipe 监听器、
-  无 `SO_PEERCRED` 校验、`daemon.endpoint` 仅测试验证）；`Marketplace`/`Gitx`/`Fs`/`Config`/
-  `Account` 门面仍返回 `Unavailable`；回合仍是 `SkeletonBackend` 回声而非真 AgentLoop；
-  Shell 仍是内存缓冲后端而非真 PTY。
-- **广域 QUIC / 中继链路（`v4.8`）**：`P3-4` 已通过 `iroh 1.5` 本机回环验证 QUIC 多流与反压，
-  但中继发现、公网打洞、密钥持久化与真实移动端集成留待 `v4.8`。
-- **Windows / macOS 分支**：Named Pipe 的 Owner-Only DACL、`reject_remote_clients(true)` 与
-  非 Linux 宿主行为均无本地运行实测（本机仅 Linux 宿主，不写未验跨平台实现）。
+- **前端原子切端（`v4.7 P3-5e`）**：`v3_server` 与 `v3_bridge` 本地 IPC 生产路径已于 `P3-5c`/`P3-5d` 落地 daemon，但 `../qaqh-gpui` 消费端尚未切至 `V3Client`，旧 `bridge.rs` 仍保留在前端仓库。
+- **广域 QUIC / 中继链路与 V2 物理退场（`v4.8` / `v4.9`）**：`P3-4` 已通过 `iroh 1.5` 本机回环验证 QUIC 多流与反压，但中继发现、公网打洞、密钥持久化、真实移动端集成留待 `v4.8`，`axum_server` / V2 整目录物理删除留待 `v4.9`。
+- **Windows / macOS 分支**：Windows Named Pipe 的当前用户 SID Owner-Only DACL、`reject_remote_clients(true)` 与测试代码已通过 MSVC 交叉编译，真实运行验收交由 Ubuntu/Windows CI；本机仅 Linux 宿主，未实测 Windows 运行行为，也未编译或运行 macOS 分支。

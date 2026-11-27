@@ -1,0 +1,75 @@
+name: RingingV3 CI
+
+on:
+  push:
+    branches: [main, 'feat/*']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  v3:
+    name: v3 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Reject V2 and JSON escape hatches in V3 sources
+        run: |
+          set -euo pipefail
+          if rg -n 'axum_server|RINGING_V2|v2_stream|serde_json|skip_serializing_if|serde\([^)]*(tag|flatten|untagged|alias)|legacy_|compat_' \
+            crates/qaqh-core-vocab \
+            crates/qaqh-ringing-v3 \
+            crates/qaqh-v3-transport/src \
+            crates/qaqh-daemon/src/v3_server \
+            crates/qaqh-client/src/v3; then
+            echo '::error::RingingV3 isolation scan found a forbidden V2/JSON escape hatch'
+            exit 1
+          fi
+
+      - name: Keep V3 production dependency graphs clean
+        run: |
+          set -euo pipefail
+          for crate in qaqh-core-vocab qaqh-ringing-v3 qaqh-v3-transport; do
+            if cargo tree --locked -p "$crate" -e normal,build | rg 'serde_json|iroh'; then
+              echo "::error::$crate production/build graph contains serde_json or iroh"
+              exit 1
+            fi
+          done
+          if cargo tree --locked -p qaqh-daemon -e normal,build | rg 'iroh'; then
+            echo '::error::iroh must remain a qaqh-daemon dev-dependency'
+            exit 1
+          fi
+
+      - name: Test V3 contracts and platform transport
+        run: cargo test --locked -j2 -p qaqh-core-vocab -p qaqh-ringing-v3 -p qaqh-v3-transport
+
+      - name: Test V3 client local discovery and handshake
+        run: cargo test --locked -j2 -p qaqh-client --lib v3
+
+      - name: Test V3 server and three-backend invariant matrix
+        run: cargo test --locked -j2 -p qaqh-daemon --bin qaqh-daemon v3_server -- --test-threads=1
+
+      - name: Test real V3 backend over local IPC
+        run: cargo test --locked -j2 -p qaqh-daemon --bin qaqh-daemon v3_bridge -- --test-threads=1
+
+      - name: Test P3-5d lock, async content, pairing, and Gitx boundaries
+        run: |
+          set -euo pipefail
+          cargo test --locked -j2 -p qaqh-runtime --lib shell_lock_tests -- --test-threads=1
+          cargo test --locked -j2 -p qaqh-ringing-runtime async_content -- --test-threads=1
+          cargo test --locked -j2 -p qaqh-ringing-runtime pairing:: -- --test-threads=1
+          cargo test --locked -j2 -p qaqh-gitx -- --test-threads=1

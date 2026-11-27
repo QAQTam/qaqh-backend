@@ -9,7 +9,9 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use qaqh_core_vocab::{ContentHash, ContentRef};
+use qaqh_core_vocab::ContentHash;
+#[cfg(test)]
+use qaqh_core_vocab::ContentRef;
 use qaqh_ringing_v3::{BlobChunkFrame, DeliveryClass, ErrorCode, FrameMeta, RpcError};
 use qaqh_v3_transport::write_frame;
 use tokio::io::AsyncWrite;
@@ -48,72 +50,88 @@ impl SkeletonBlob {
     where
         W: AsyncWrite + Unpin,
     {
-        let blob = self.state.blobs.get(&hash).ok_or_else(|| {
+        push_blob(&self.state, writer, hash, expected_len).await
+    }
+}
+
+pub(crate) async fn push_blob<W>(
+    state: &ServerState,
+    writer: &mut W,
+    hash: ContentHash,
+    expected_len: u64,
+) -> Result<u64, RpcError>
+where
+    W: AsyncWrite + Unpin,
+{
+    let blob = state.blobs.get(&hash).ok_or_else(|| {
+        rpc(
+            ErrorCode::NotFound,
+            format!("blob `{}` 不在库里", hash.to_hex()),
+        )
+    })?;
+    if blob.len() as u64 != expected_len {
+        return Err(rpc(
+            ErrorCode::Internal,
+            format!(
+                "blob `{}` 长度不符：引用 {expected_len}，实际 {}",
+                hash.to_hex(),
+                blob.len()
+            ),
+        ));
+    }
+    if blob.is_empty() {
+        let frame = BlobChunkFrame {
+            meta: FrameMeta {
+                seq: 1,
+                server_ts_ms: now_ms(),
+                delivery: DeliveryClass::Reliable,
+            },
+            hash,
+            offset: 0,
+            bytes: Bytes::new(),
+            last: true,
+        };
+        write_frame(writer, &frame).await.map_err(|error| {
             rpc(
-                ErrorCode::NotFound,
-                format!("blob `{}` 不在库里", hash.to_hex()),
+                ErrorCode::Unavailable,
+                format!("BlobTransfer 流写失败：{error}"),
             )
         })?;
-        if blob.len() as u64 != expected_len {
-            return Err(rpc(
-                ErrorCode::Internal,
-                format!(
-                    "blob `{}` 长度不符：引用 {expected_len}，实际 {}",
-                    hash.to_hex(),
-                    blob.len()
-                ),
-            ));
-        }
-        if blob.is_empty() {
-            let frame = BlobChunkFrame {
-                meta: FrameMeta {
-                    seq: 1,
-                    server_ts_ms: now_ms(),
-                    delivery: DeliveryClass::Reliable,
-                },
-                hash,
-                offset: 0,
-                bytes: Bytes::new(),
-                last: true,
-            };
-            write_frame(writer, &frame).await.map_err(|error| {
-                rpc(
-                    ErrorCode::Unavailable,
-                    format!("BlobTransfer 流写失败：{error}"),
-                )
-            })?;
-            return Ok(0);
-        }
-        let chunk_bytes = self.state.config.blob_chunk_bytes.max(1);
-        let mut offset = 0usize;
-        let mut seq = 0u64;
-        while offset < blob.len() {
-            let end = (offset + chunk_bytes).min(blob.len());
-            seq += 1;
-            let last = end == blob.len();
-            let frame = BlobChunkFrame {
-                meta: FrameMeta {
-                    seq,
-                    server_ts_ms: now_ms(),
-                    delivery: DeliveryClass::Reliable,
-                },
-                hash,
-                offset: offset as u64,
-                bytes: Bytes::copy_from_slice(&blob[offset..end]),
-                last,
-            };
-            write_frame(writer, &frame).await.map_err(|error| {
-                rpc(
-                    ErrorCode::Unavailable,
-                    format!("BlobTransfer 流写失败：{error}"),
-                )
-            })?;
-            offset = end;
-            // 每块让出：Blob 是"能等的"，别把同连接的其它流挤在后面。
+        return Ok(0);
+    }
+    let chunk_bytes = state.config.blob_chunk_bytes.max(1);
+    let mut offset = 0usize;
+    let mut seq = 0u64;
+    while offset < blob.len() {
+        let end = (offset + chunk_bytes).min(blob.len());
+        seq += 1;
+        let last = end == blob.len();
+        let frame = BlobChunkFrame {
+            meta: FrameMeta {
+                seq,
+                server_ts_ms: now_ms(),
+                delivery: DeliveryClass::Reliable,
+            },
+            hash,
+            offset: offset as u64,
+            bytes: Bytes::copy_from_slice(&blob[offset..end]),
+            last,
+        };
+        write_frame(writer, &frame).await.map_err(|error| {
+            rpc(
+                ErrorCode::Unavailable,
+                format!("BlobTransfer 流写失败：{error}"),
+            )
+        })?;
+        offset = end;
+        // 每块让出、每 512 KiB 喘息 1ms：Blob 是"能等的"，避免占满 QUIC 发送窗口把控制面/PTY 挤在后面。
+        if seq.is_multiple_of(8) {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        } else {
             tokio::task::yield_now().await;
         }
-        Ok(offset as u64)
     }
+    Ok(offset as u64)
 }
 
 #[cfg(test)]

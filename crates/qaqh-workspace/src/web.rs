@@ -5,18 +5,20 @@
 //!
 //! - **官方工具面**（`EndpointCompat::official_web_tools`）→ `POST /v1/tools/fetch`，
 //!   平台直接返回 Markdown，跳过 `html2text`；
-//! - **其余 profile** → 本模块自实现的 `ureq` + `html2text` 抓取。
+//! - **其余 profile** → 本模块自实现的异步 `reqwest` + `html2text` 抓取。
 //!
 //! `search` **没有**自实现版本（本地 Bing-RSS 解析器已退役）：它只在官方工具面
 //! 的 profile 上被 runtime 放进模型工具清单（`session_agent::assembly::tool_defs`）。
 //! 工具名必须是 canonical `search`：Responses 端点若保留该名，由 gate 的
 //! `search_function_alias` 出站改名（`qaqh-gate/src/responses_sdk.rs`）。
 
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio::runtime::Handle;
 
 use crate::ToolRisk;
 use crate::tool_api::{
@@ -123,11 +125,43 @@ impl TypedTool for WebFetchTool {
     }
 }
 
-fn http_agent(timeout_secs: u64) -> ureq::Agent {
-    ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(timeout_secs)))
+fn http_agent(timeout_secs: u64) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
         .build()
-        .into()
+        .expect("reqwest client must build")
+}
+
+fn run_async<T: Send + 'static>(
+    future: impl Future<Output = Result<T, ToolExecutionError>> + Send + 'static,
+) -> Result<T, ToolExecutionError> {
+    match Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        _ => {
+            let run = move || -> Result<T, ToolExecutionError> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| {
+                        web_fetch_payload_error(
+                            "fetch_error",
+                            format!("创建 HTTP runtime 失败: {error}"),
+                            "",
+                        )
+                    })?;
+                runtime.block_on(future)
+            };
+            if Handle::try_current().is_ok() {
+                std::thread::spawn(run).join().map_err(|_| {
+                    web_fetch_payload_error("fetch_error", "HTTP runtime 线程异常退出", "")
+                })?
+            } else {
+                run()
+            }
+        }
+    }
 }
 
 #[allow(clippy::result_large_err)] // ToolExecutionError is the frozen typed boundary.
@@ -138,47 +172,61 @@ fn fetch_content(
     timeout_secs: u64,
 ) -> Result<String, ToolExecutionError> {
     const MAX_WEB_BODY_BYTES: u64 = 512 * 1024;
-    let resp = http_agent(timeout_secs)
-        .get(url)
-        .header(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-        )
-        .call()
-        .map_err(|error| web_fetch_payload_error("fetch_error", format!("{error}"), ""))?;
-    if resp
-        .body()
-        .content_length()
-        .is_some_and(|len| len > MAX_WEB_BODY_BYTES)
-    {
-        return Err(web_fetch_payload_error(
-            "response_too_large",
-            format!("Response exceeds the {MAX_WEB_BODY_BYTES} byte limit"),
-            "Fetch a narrower URL or use a source with a paginated API.",
-        ));
-    }
-    let is_html = resp
-        .headers()
-        .get("Content-Type")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.contains("html"));
-    let body = resp
-        .into_body()
-        .with_config()
-        .limit(MAX_WEB_BODY_BYTES)
-        .read_to_string()
-        .map_err(|_| {
+    let client = http_agent(timeout_secs);
+    let request = client.get(url).header(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+    );
+    let readable = run_async(async move {
+        let mut response = request
+            .send()
+            .await
+            .map_err(|error| web_fetch_payload_error("fetch_error", format!("{error}"), ""))?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_WEB_BODY_BYTES)
+        {
+            return Err(web_fetch_payload_error(
+                "response_too_large",
+                format!("Response exceeds the {MAX_WEB_BODY_BYTES} byte limit"),
+                "Fetch a narrower URL or use a source with a paginated API.",
+            ));
+        }
+        let is_html = response
+            .headers()
+            .get("Content-Type")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("html"));
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            web_fetch_payload_error(
+                "read_error",
+                "Response could not be read within the body limit",
+                "Fetch a narrower URL or use a source with a paginated API.",
+            )
+        })? {
+            if (bytes.len() as u64).saturating_add(chunk.len() as u64) > MAX_WEB_BODY_BYTES {
+                return Err(web_fetch_payload_error(
+                    "response_too_large",
+                    format!("Response exceeds the {MAX_WEB_BODY_BYTES} byte limit"),
+                    "Fetch a narrower URL or use a source with a paginated API.",
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        let body = String::from_utf8(bytes).map_err(|_| {
             web_fetch_payload_error(
                 "read_error",
                 "Response could not be read within the body limit",
                 "Fetch a narrower URL or use a source with a paginated API.",
             )
         })?;
-    let readable = if is_html || body.trim_start().starts_with('<') {
-        html2text::from_read(body.as_bytes(), body.len().min(120_000)).unwrap_or(body)
-    } else {
-        body
-    };
+        Ok(if is_html || body.trim_start().starts_with('<') {
+            html2text::from_read(body.as_bytes(), body.len().min(120_000)).unwrap_or(body)
+        } else {
+            body
+        })
+    })?;
     Ok(persist_output(ctx, output, readable))
 }
 
@@ -436,7 +484,46 @@ pub fn register(mgr: &mut crate::ToolManager) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use std::path::Path;
+    use std::thread::JoinHandle;
+
+    fn spawn_web_server(
+        content_type: &str,
+        body: Vec<u8>,
+        include_content_length: bool,
+    ) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("server address");
+        let content_type = content_type.to_string();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept test request");
+            let mut writer = stream.try_clone().expect("clone stream");
+            let mut reader = BufReader::new(stream);
+            let mut request = String::new();
+            loop {
+                let mut line = String::new();
+                let read = reader.read_line(&mut line).expect("read request line");
+                if read == 0 || line == "\r\n" {
+                    break;
+                }
+                request.push_str(&line);
+            }
+            assert!(request.starts_with("GET / HTTP/1.1"), "{request}");
+            let length_header = if include_content_length {
+                format!("content-length: {}\r\n", body.len())
+            } else {
+                String::new()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n{length_header}connection: close\r\n\r\n"
+            );
+            let _ = writer.write_all(response.as_bytes());
+            let _ = writer.write_all(&body);
+        });
+        (format!("http://{address}/"), server)
+    }
 
     fn ctx(root: &Path) -> ToolCallContext {
         ToolCallContext {
@@ -711,5 +798,35 @@ mod tests {
             display_workspace_path(&ctx(dir.path()), &resolved),
             "nested/page.md"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_content_inside_spawn_blocking_does_not_panic() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (url, server) = spawn_web_server("text/plain", b"hello from web".to_vec(), true);
+        let root = dir.path().to_path_buf();
+        let request_url = url.clone();
+        let content = tokio::task::spawn_blocking(move || {
+            let context = ctx(&root);
+            fetch_content(&context, &request_url, None, 2)
+        })
+        .await
+        .expect("spawn_blocking join")
+        .expect("fetch content");
+        assert_eq!(content, "hello from web");
+        server.join().expect("server join");
+    }
+
+    #[test]
+    fn fetch_content_rejects_body_over_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (url, _server) = spawn_web_server("text/plain", vec![b'x'; 512 * 1024 + 1], false);
+        let error = fetch_content(&ctx(dir.path()), &url, None, 2).expect_err("body limit");
+        match error {
+            ToolExecutionError::Recoverable(error) => {
+                assert_eq!(error.code.as_str(), "response_too_large");
+            }
+            ToolExecutionError::Fatal(error) => panic!("unexpected fatal: {}", error.code),
+        }
     }
 }

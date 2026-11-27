@@ -24,7 +24,7 @@ pub(crate) async fn handle_content_get(
     let store_id = content_id
         .strip_prefix("sha256:")
         .unwrap_or(content_id.as_str());
-    let owners = match state.hub.content_sessions(store_id) {
+    let owners = match state.hub.content_sessions_async(store_id).await {
         Ok(owners) => owners,
         Err(error) => {
             return api_error_response(
@@ -53,7 +53,7 @@ pub(crate) async fn handle_content_get(
         )
             .into_response();
     };
-    let entry = match state.hub.get_content(&owner_session, store_id) {
+    let entry = match state.hub.get_content_async(&owner_session, store_id).await {
         Ok(Some(entry)) => entry,
         Ok(None) => return (StatusCode::NOT_FOUND, "content not found").into_response(),
         Err(error) => {
@@ -252,7 +252,8 @@ pub(crate) async fn handle_content_upload(
     let content_size = content.len() as u64;
     let content_id = match state
         .hub
-        .put_content(&session_id, &media_type, content, false)
+        .put_content_async(&session_id, &media_type, content, false)
+        .await
     {
         Ok(content_id) => content_id,
         Err(error) => {

@@ -32,10 +32,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
         }))
         .await
         .expect("Attach");
-    let mut stream = client
-        .attach_session(&session_id, 0)
-        .await
-        .expect("事件流");
+    let mut stream = client.attach_session(&session_id, 0).await.expect("事件流");
 
     // ── 甲：Replaceable 洪峰 + 交错的 Reliable 审批 + 最后一条 Reliable 终态 ──
     let block_id = harness::block(201);
@@ -80,7 +77,11 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
             .expect("事件流 30s 无进展")
             .expect("事件帧");
         match &frame.event {
-            SessionEvent::AnswerDelta { block_id: bid, text, .. } if bid == &block_id => {
+            SessionEvent::AnswerDelta {
+                block_id: bid,
+                text,
+                ..
+            } if bid == &block_id => {
                 answer_accum.push_str(text);
             }
             SessionEvent::InteractionRequested { .. } => interactions += 1,

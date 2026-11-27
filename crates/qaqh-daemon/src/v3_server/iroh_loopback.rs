@@ -74,13 +74,15 @@ impl Drop for IrohLifetime {
 #[derive(Clone)]
 pub(crate) struct IrohTransport {
     conn: Connection,
+    is_server: bool,
     _lifetime: Arc<IrohLifetime>,
 }
 
 impl IrohTransport {
-    fn new(conn: Connection, endpoint: Endpoint) -> Self {
+    fn new(conn: Connection, endpoint: Endpoint, is_server: bool) -> Self {
         Self {
             conn: conn.clone(),
+            is_server,
             _lifetime: Arc::new(IrohLifetime {
                 conn,
                 endpoint: Some(endpoint),
@@ -109,11 +111,14 @@ impl MuxTransport for IrohTransport {
 
     async fn open_bi(&self) -> Result<Self::BiStream, MuxError> {
         let (send, recv) = self.conn.open_bi().await.map_err(map_conn_error)?;
+        // Server-initiated bi-streams are background blob pushes; keep interactive client streams ahead.
+        let _ = send.set_priority(if self.is_server { -10 } else { 10 });
         Ok(IrohBiStream { send, recv })
     }
 
     async fn accept_bi(&self) -> Result<Self::BiStream, MuxError> {
         let (send, recv) = self.conn.accept_bi().await.map_err(map_conn_error)?;
+        let _ = send.set_priority(if self.is_server { 10 } else { -10 });
         Ok(IrohBiStream { send, recv })
     }
 
@@ -154,7 +159,7 @@ pub(crate) async fn iroh_loopback_pair() -> (IrohTransport, IrohTransport) {
     let (client_conn_res, (server_ep, server_conn)) = tokio::join!(connect_fut, accept_fut);
     let client_conn = client_conn_res.expect("iroh loopback connect");
     (
-        IrohTransport::new(client_conn, client_ep),
-        IrohTransport::new(server_conn, server_ep),
+        IrohTransport::new(client_conn, client_ep, false),
+        IrohTransport::new(server_conn, server_ep, true),
     )
 }

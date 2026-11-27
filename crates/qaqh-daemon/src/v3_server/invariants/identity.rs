@@ -50,11 +50,13 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
 
     // ── ① 越权访问他人会话 & shell ──
     let error = device
-        .call(ControlRequest::Session(SessionRequest::GetSessionSnapshot {
-            session_id: session_id.clone(),
-            tail_blocks: 4,
-            tail_turns: 8,
-        }))
+        .call(ControlRequest::Session(
+            SessionRequest::GetSessionSnapshot {
+                session_id: session_id.clone(),
+                tail_blocks: 4,
+                tail_turns: 8,
+            },
+        ))
         .await
         .expect_err("已配对设备不得读主设备的会话");
     assert_eq!(error.code(), Some(ErrorCode::PermissionDenied));
@@ -115,11 +117,13 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
 
     // ── ② 对照：主设备同调用通过 ──
     owner
-        .call(ControlRequest::Session(SessionRequest::GetSessionSnapshot {
-            session_id: session_id.clone(),
-            tail_blocks: 4,
-            tail_turns: 8,
-        }))
+        .call(ControlRequest::Session(
+            SessionRequest::GetSessionSnapshot {
+                session_id: session_id.clone(),
+                tail_blocks: 4,
+                tail_turns: 8,
+            },
+        ))
         .await
         .expect("主设备必须能读自己的会话");
     assert!(!state.shutdown_requested());

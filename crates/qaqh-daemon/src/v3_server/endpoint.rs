@@ -55,10 +55,7 @@ pub(crate) fn local_ipc_endpoint(
 }
 
 /// 原子发布（先写 `.tmp` 再 rename：半截文件永远不该被读到）。
-pub(crate) fn publish(
-    data_dir: &Path,
-    endpoint: &DaemonEndpoint,
-) -> std::io::Result<PathBuf> {
+pub(crate) fn publish(data_dir: &Path, endpoint: &DaemonEndpoint) -> std::io::Result<PathBuf> {
     std::fs::create_dir_all(data_dir)?;
     write_daemon_endpoint(data_dir, endpoint)
 }

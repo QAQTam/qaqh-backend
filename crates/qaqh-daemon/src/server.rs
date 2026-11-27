@@ -2,11 +2,13 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 
-use qaqh_ringing_runtime::RingingHub;
+use qaqh_ringing_runtime::{RingingHub, pairing::PairingTable};
 use qaqh_runtime::QaqhService;
 use qaqh_types::{CONTROL_PROTOCOL_VERSION, DaemonDiscovery};
+use qaqh_v3_transport::bind_local_ipc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
 fn daemon_channel() -> String {
     std::env::var("QAQH_CHANNEL").unwrap_or_else(|_| {
@@ -227,9 +229,9 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     // 身份生成与资源清理经 service.owners()。
     let service = QaqhService::init(qaqh_types::platform::data_dir());
     // v4.4 P1-3：receipt 权威进 `command_receipts`，服务库先于幂等表装配。
-    let pending_commands = Arc::new(Mutex::new(
-        qaqh_ringing_runtime::PendingCommandStore::new(service.owners().db().clone()),
-    ));
+    let pending_commands = Arc::new(Mutex::new(qaqh_ringing_runtime::PendingCommandStore::new(
+        service.owners().db().clone(),
+    )));
     let hub = Arc::new(RingingHub::with_database(
         epoch.clone(),
         Arc::clone(service.owners().db()),
@@ -252,7 +254,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
         devices: Arc::new(qaqh_ringing_runtime::DeviceRegistry::new(
             service.owners().db().clone(),
         )),
-        pairings: Arc::new(Mutex::new(crate::axum_server::PairingTable::new())),
+        pairings: Arc::new(Mutex::new(PairingTable::new())),
         tls_fingerprint: tls.as_ref().map(|material| material.fingerprint.clone()),
         challenges: Arc::new(crate::axum_server::ChallengeStore::default()),
         epoch: epoch.clone(),
@@ -378,11 +380,96 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             }
         });
     }
-    // 发布 discovery：HTTP accept 循环即将开始（listener 早已 bind，但
-    // 端口在 service 初始化完成前不可服务）。延迟发布避免客户端拿到
-    // "已写 daemon.json 但 HTTP 未就绪"的假端口而导航失败（白屏/错误页），
-    // 也让 ensure_daemon_running 的轮询与真实就绪时刻对齐。
-    write_discovery(&discovery)?;
+    let v3_socket = crate::v3_bridge::local_ipc_path(&data_root);
+    let mut v3_listener = bind_local_ipc(&v3_socket)
+        .await
+        .map_err(|error| format!("bind RingingV3 local IPC {}: {error}", v3_socket.display()))?;
+    let v3_config = crate::v3_server::state::ServerConfig {
+        build_id: discovery.build_id.clone(),
+        server_instance_id: epoch.clone(),
+        channel: daemon_channel(),
+        ..Default::default()
+    };
+    let os_user = std::env::var(if cfg!(windows) { "USERNAME" } else { "USER" })
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "local OS user identity is required for RingingV3".to_string())?;
+    let v3_state = crate::v3_server::state::ServerState::new(v3_config, os_user);
+    let v3_backend = crate::v3_bridge::RealBackend::new(
+        service.clone(),
+        Arc::clone(&v3_state),
+        hub.clone(),
+        app_state.pairings.clone(),
+        app_state.devices.clone(),
+        shutdown.clone(),
+        pending_commands.clone(),
+    )
+    .await?;
+    let v3_endpoint = crate::v3_server::endpoint::local_ipc_endpoint(
+        &v3_state.config,
+        v3_socket.to_string_lossy(),
+    );
+    if let Err(error) = crate::v3_server::endpoint::publish(&data_root, &v3_endpoint) {
+        let _ = crate::v3_server::endpoint::retire(&data_root);
+        let _ = std::fs::remove_file(&v3_socket);
+        return Err(format!("publish daemon.endpoint: {error}"));
+    }
+    // HTTP discovery 只在 V3 listener/backend 均已就绪后发布；随后不再有可失败装配步骤。
+    if let Err(error) = write_discovery(&discovery) {
+        let _ = crate::v3_server::endpoint::retire(&data_root);
+        let _ = std::fs::remove_file(&v3_socket);
+        return Err(error);
+    }
+    let v3_task = {
+        let mut v3_shutdown = shutdown.subscribe();
+        let v3_state = Arc::clone(&v3_state);
+        let v3_backend = v3_backend.clone();
+        let v3_shutdown_sender = shutdown.clone();
+        let data_root = data_root.clone();
+        tokio::spawn(async move {
+            let mut connections = JoinSet::new();
+            loop {
+                while let Some(joined) = connections.try_join_next() {
+                    match joined {
+                        Ok(()) => {}
+                        Err(error) => log::warn!("v3 connection task failed: {error}"),
+                    }
+                }
+                tokio::select! {
+                    changed = v3_shutdown.changed() => {
+                        if changed.is_err() || *v3_shutdown.borrow() {
+                            break;
+                        }
+                    }
+                    accepted = v3_listener.accept() => {
+                        let transport = match accepted {
+                            Ok(transport) => transport,
+                            Err(error) => {
+                                log::error!("v3 local IPC accept failed: {error}");
+                                if let Err(error) = crate::v3_server::endpoint::retire(&data_root) {
+                                    log::error!("retire daemon.endpoint after V3 accept failure: {error}");
+                                }
+                                v3_shutdown_sender.send_replace(true);
+                                break;
+                            }
+                        };
+                        let server = crate::v3_server::V3Server::with_backend(
+                            transport,
+                            Arc::clone(&v3_state),
+                            v3_backend.clone(),
+                        );
+                        connections.spawn(async move {
+                            if let Err(error) = server.serve().await {
+                                log::warn!("v3 connection ended: {error}");
+                            }
+                        });
+                    }
+                }
+            }
+            connections.shutdown().await;
+        })
+    };
     let app = crate::axum_server::build_router(app_state);
     // LAN TLS accept loop 与 loopback accept loop 共用同一 router/state；
     // 两个 graceful 都挂在同一 shutdown watch 上，stop/信号同时收掉。
@@ -396,7 +483,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
             .with_graceful_shutdown({
                 let mut shutdown_rx = shutdown.subscribe();
                 async move {
-                    let _ = shutdown_rx.changed().await;
+                    let _ = shutdown_rx.wait_for(|flag| *flag).await;
                 }
             });
             Some(tokio::spawn(async move { serve.await }))
@@ -405,7 +492,7 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     };
     let mut shutdown_rx = shutdown.subscribe();
     let graceful = async move {
-        let _ = shutdown_rx.changed().await;
+        let _ = shutdown_rx.wait_for(|flag| *flag).await;
     };
     axum::serve(
         listener,
@@ -417,7 +504,13 @@ pub async fn run_with(config: ServerNetworkConfig) -> Result<(), String> {
     if let Some(lan_serve) = lan_serve {
         lan_serve.abort();
     }
+    let _ = shutdown.send_replace(true);
+    if let Err(error) = v3_task.await {
+        log::error!("v3 local IPC task failed during shutdown: {error}");
+    }
     service.shutdown();
+    let _ = crate::v3_server::endpoint::retire(&data_root);
+    let _ = std::fs::remove_file(&v3_socket);
     let _ = std::fs::remove_file(qaqh_types::platform::daemon_discovery_path());
     let _ = std::fs::remove_file(qaqh_types::platform::daemon_lock_path());
     Ok(())
@@ -502,7 +595,8 @@ fn write_discovery(discovery: &DaemonDiscovery) -> Result<(), String> {
     serde_json::to_writer_pretty(&mut temp, discovery).map_err(stringify)?;
     std::io::Write::flush(&mut temp).map_err(stringify)?;
     temp.as_file().sync_all().map_err(stringify)?;
-    temp.persist(target.clone()).map_err(|e| stringify(e.error))?;
+    temp.persist(target.clone())
+        .map_err(|e| stringify(e.error))?;
     restrict_discovery_permissions(&target)
 }
 

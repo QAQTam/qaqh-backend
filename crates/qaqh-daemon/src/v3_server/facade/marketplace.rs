@@ -32,7 +32,9 @@ impl SkeletonMarketplace {
             request,
             MarketplaceRequest::Install { .. } | MarketplaceRequest::Uninstall { .. }
         ) {
-            context.identity.require_owner("Marketplace::Install/Uninstall")?;
+            context
+                .identity
+                .require_owner("Marketplace::Install/Uninstall")?;
         }
         Err(not_wired(
             "Marketplace 域在 v4.6 P3-4 只落地签名与拒绝语义；真实现随 v4.7 接 qaqh-marketplace",

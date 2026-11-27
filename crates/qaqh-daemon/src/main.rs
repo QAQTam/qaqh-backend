@@ -3,10 +3,8 @@
 mod axum_server;
 mod server;
 mod tls;
-// v4.6 P3-4：RingingV3 服务端骨架（物理隔离目录，ADR-0042 铁律 3）。
-// 生产接线在 v4.7 切端，本切片由 `v3_server::invariants` 的六大守卫驱动，
-// 故暂允许 dead_code——v4.7 接线时删除此 `allow`。
-#[allow(dead_code)]
+mod v3_bridge;
+// v4.6 P3-4：RingingV3 服务端（物理隔离目录，ADR-0042 铁律 3）。
 mod v3_server;
 mod zed_integration;
 
