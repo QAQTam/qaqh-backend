@@ -17,6 +17,25 @@ use qaqh_core_vocab::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Blob 流方向角色（同时支撑服务端主动推、客户端按哈希拉与客户端上传附件）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlobTransferRole {
+    /// 服务端主动推送（大输出外置）。
+    ServerPush,
+    /// 客户端按内容哈希拉取。
+    ClientFetch {
+        /// 目标内容哈希。
+        hash: ContentHash,
+    },
+    /// 客户端上传附件（服务端校验 `sha256(bytes) == hash`）。
+    ClientUpload {
+        /// 内容哈希。
+        hash: ContentHash,
+        /// 预期总字节数。
+        len: u64,
+    },
+}
+
 /// 四条逻辑流（多路复用连接上的流身份）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamKind {
@@ -36,8 +55,11 @@ pub enum StreamKind {
         /// 客户端已有的字节偏移（服务端从此处续传）。
         from_offset: u64,
     },
-    /// Blob 传输：大输出/图片按窗口分块，天然可背压。
-    BlobTransfer,
+    /// Blob 传输：大输出/图片/附件按窗口分块，天然可背压。
+    BlobTransfer {
+        /// 传输角色与方向。
+        role: BlobTransferRole,
+    },
 }
 
 /// 投递分级（**帧属性**，不是流属性）。

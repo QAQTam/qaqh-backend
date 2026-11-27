@@ -8,7 +8,7 @@ build = "build.rs"
 
 # **依赖面是宪法级约束**（`ADR-0042` 铁律 1/2/3）：只允许
 # core-vocab + serde + postcard + bytes + thiserror。
-# 永久禁止：serde_json（裸 Value 逃生口）、axum（传输实现耦合）、
+# 永久禁止：JSON Value 库（无类型逃生口）、HTTP/axum 栈（传输实现耦合）、
 # qaqh-ringing / qaqh-types / qaqh-ringing-contract（V2 冰封面）。
 [dependencies]
 qaqh-core-vocab = { path = "../qaqh-core-vocab" }

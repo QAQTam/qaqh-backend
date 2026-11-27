@@ -120,7 +120,7 @@ fn core_vocab_primitives_round_trip() {
 
 /// `Option` 与 `Vec` 的混合序列：`None → Some → 空 Vec → 多元素 Vec` 必须各自对齐。
 ///
-/// 这是 `skip_serializing_if` 的专用反证：一旦有人给某个字段加上它，
+/// 这是空值跳过属性的专用反证：一旦有人给某个字段加上它，
 /// `None` 就不再占位，后面所有字段整体错位——本测试立刻红。
 #[test]
 fn option_and_vec_positions_never_drift() {
@@ -139,6 +139,10 @@ fn option_and_vec_positions_never_drift() {
         turns: vec![],
         tail_blocks: vec![],
         tool_calls: vec![],
+        pending_interactions: vec![],
+        exec_sessions: vec![],
+        driver_client_instance_id: None,
+        driver_ordinal: 0,
         pinned_compaction: None,
         tool_mode: ToolMode::Standard,
     };
@@ -175,6 +179,25 @@ fn option_and_vec_positions_never_drift() {
             finished_at_ms: None,
             summary: None,
         }],
+        pending_interactions: vec![InteractionView {
+            interaction_id: InteractionId::new("INT-9").expect("valid"),
+            kind: InteractionKind::Ask,
+            title: "选择".into(),
+            body: "确认？".into(),
+            options: vec!["A".into(), "B".into()],
+            expires_at_ms: Some(99),
+        }],
+        exec_sessions: vec![ExecSessionSnapshot {
+            exec_session_id: ExecSessionId::new("execs_09").expect("valid"),
+            command: "echo hi".into(),
+            tty: false,
+            finished: true,
+            exit_code: Some(0),
+            next_offset: 3,
+            output: Some(ContentRef::Inline { text: "hi\n".into() }),
+        }],
+        driver_client_instance_id: Some("desktop-1".into()),
+        driver_ordinal: 2,
         pinned_compaction: Some(CompactionSummary {
             pinned_at_ms: 1,
             blocks_compacted: 2,
@@ -192,9 +215,15 @@ fn option_and_vec_positions_never_drift() {
 
 #[test]
 fn every_session_dto_round_trips() {
+    round_trip(SessionRequest::Create {
+        title: Some("新会话".into()),
+        cwd: None,
+        tool_mode: Some(ToolMode::Core),
+    });
     round_trip(SessionRequest::GetSessionSnapshot {
         session_id: session_id(),
         tail_blocks: 200,
+        tail_turns: 32,
     });
     round_trip(SessionRequest::List);
     round_trip(SessionRequest::Rename {
@@ -216,6 +245,12 @@ fn every_session_dto_round_trips() {
         session_id: session_id(),
         target_client_instance_id: None,
     });
+    round_trip(SessionResponse::Created(SessionSummary {
+        session_id: session_id(),
+        title: Some("新会话".into()),
+        activity: ActivityState::Idle,
+        updated_at_ms: 8,
+    }));
     round_trip(SessionResponse::Sessions(vec![SessionSummary {
         session_id: session_id(),
         title: None,
@@ -263,6 +298,13 @@ fn system_and_command_domains_round_trip() {
             text: "no".into(),
         },
     });
+    round_trip(CommandRequest::RespondInteraction {
+        session_id: session_id(),
+        interaction_id: InteractionId::new("INT-2").expect("valid"),
+        resolution: CommandInteractionResolution::Answer {
+            text: "选 B".into(),
+        },
+    });
     round_trip(CommandResponse::Accepted {
         input_id: InputId::new("IN-1").expect("valid"),
     });
@@ -273,6 +315,7 @@ fn system_and_command_domains_round_trip() {
 #[test]
 fn shell_marketplace_config_domains_round_trip() {
     round_trip(ShellRequest::Open {
+        session_id: session_id(),
         cols: 120,
         rows: 40,
         cwd: Some("/tmp".into()),
@@ -285,6 +328,9 @@ fn shell_marketplace_config_domains_round_trip() {
         shell_id: "sh1".into(),
         cols: 80,
         rows: 24,
+    });
+    round_trip(ShellRequest::List {
+        session_id: session_id(),
     });
     round_trip(ShellResponse::Opened(ShellView {
         shell_id: "sh1".into(),
@@ -362,11 +408,13 @@ fn account_pairing_gitx_fs_catalog_domains_round_trip() {
     }));
     round_trip(GitxResponse::Worktrees(vec![]));
     round_trip(FsRequest::ReadRange {
+        session_id: session_id(),
         path: "a.txt".into(),
         offset: 8,
         len: 4096,
     });
     round_trip(FsRequest::Write {
+        session_id: session_id(),
         path: "a.txt".into(),
         bytes: Bytes::from_static(b"x"),
     });
@@ -401,7 +449,20 @@ fn stream_frames_and_events_round_trip() {
         shell_id: "sh".into(),
         from_offset: 4,
     });
-    round_trip(StreamKind::BlobTransfer);
+    round_trip(StreamKind::BlobTransfer {
+        role: BlobTransferRole::ServerPush,
+    });
+    round_trip(StreamKind::BlobTransfer {
+        role: BlobTransferRole::ClientFetch {
+            hash: content_hash(),
+        },
+    });
+    round_trip(StreamKind::BlobTransfer {
+        role: BlobTransferRole::ClientUpload {
+            hash: content_hash(),
+            len: 512,
+        },
+    });
     round_trip(ShellOutputFrame {
         meta: FrameMeta {
             seq: 1,
@@ -651,13 +712,21 @@ fn endpoint() -> DaemonEndpoint {
     DaemonEndpoint {
         build_id: "build-2026-11-27".into(),
         channel: EndpointChannel("dev".into()),
-        transport: EndpointTransport::LocalIpc {
-            path: "/run/qaqh/daemon.sock".into(),
-        },
+        local_ipc: Some("/run/qaqh/daemon.sock".into()),
+        iroh: None,
         protocol_rev: PROTOCOL_REV,
         protocol_fingerprint: PROTOCOL_FINGERPRINT,
         written_at_ms: 1_700_000_000_000,
     }
+}
+
+#[test]
+fn wire_deserialization_rejects_malformed_session_id() {
+    let bad_wire = postcard::to_stdvec(&"../../etc/passwd".to_string()).expect("encode");
+    assert!(
+        postcard::from_bytes::<SessionId>(&bad_wire).is_err(),
+        "线缆上的路径穿越 SessionId 必须 Fail-Closed 拒绝"
+    );
 }
 
 #[test]
@@ -696,14 +765,27 @@ fn daemon_endpoint_round_trips_and_rejects_stale_daemons() {
         })
     );
 
-    // 远端载体同样往返（iroh 预留字段必须能过线）。
-    let remote = DaemonEndpoint {
-        transport: EndpointTransport::Iroh {
-            endpoint_id: [7u8; 32],
-            relay_url: Some("https://relay.example".into()),
-        },
+    // 既无本地 IPC 也无远端 iroh：必须拒绝。
+    let empty_transport = DaemonEndpoint {
+        local_ipc: None,
+        iroh: None,
         ..endpoint.clone()
     };
+    assert_eq!(
+        empty_transport.validate("dev"),
+        Err(EndpointReject::NoTransport)
+    );
+
+    // 远端载体与双栈并存同样往返（v4.8 本地与 iroh 同盘）。
+    let remote = DaemonEndpoint {
+        local_ipc: Some("/run/qaqh/daemon.sock".into()),
+        iroh: Some(IrohEndpointInfo {
+            endpoint_id: [7u8; 32],
+            relay_url: Some("https://relay.example".into()),
+        }),
+        ..endpoint.clone()
+    };
+    remote.validate("dev").expect("双端点同时存在合法");
     let bytes = remote.encode().expect("encode");
     assert_eq!(DaemonEndpoint::decode(&bytes).expect("decode"), remote);
 }

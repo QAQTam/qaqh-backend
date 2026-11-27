@@ -23,8 +23,8 @@ use crate::tool_mode::ToolMode;
 /// 原始 JSON 文本（**不解释、不强类型**）。
 ///
 /// V3 里唯一允许承载"动态 JSON 值"的载体：它是字符串，不参与协议结构，
-/// 用完即弃；绝不提供 `Value` 视图，也就没有"顺手改一个字段"的逃生口
-/// （`ADR-0042` 铁律 1：依赖级封杀 `serde_json`）。
+/// 用完即弃；绝不提供动态 `Value` 视图，也就没有"顺手改一个字段"的逃生口
+/// （`ADR-0042` 铁律 1：依赖级封杀 JSON 值库）。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct JsonText(String);
 
