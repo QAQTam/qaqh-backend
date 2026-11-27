@@ -16,8 +16,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
 
     // ── 第一个连接 ──
     let (client_transport, server_transport) = factory.pair().await;
-    let (_server, _server_task) =
-        harness::spawn_server(server_transport, Arc::clone(&state)).await;
+    let (_server, _server_task) = harness::spawn_server(server_transport, Arc::clone(&state)).await;
     let client_a = harness::connect(client_transport, harness::owner_hello("guard-03")).await;
 
     let session = harness::session_for(&state, &harness::owner_device());

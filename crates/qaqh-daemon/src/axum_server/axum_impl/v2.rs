@@ -218,7 +218,7 @@ pub(crate) async fn handle_bootstrap_v2(
         Some(tail) => owner.snapshot_tailed(tail).await,
         None => owner.snapshot().await,
     };
-    let mut snapshot = match snapshot_result {
+    let snapshot = match snapshot_result {
         Ok(snapshot) => snapshot,
         Err(error) => {
             return api_error_response(
@@ -326,10 +326,7 @@ pub(crate) async fn handle_team_snapshot_v2(
             qaqh_ringing_contract::fact::AgentPath::parse_absolute(&format!("/root/{child}"))
                 .unwrap_or(root_path.clone())
         });
-        let loaded = state
-            .service
-            .agent_residency_loaded(child)
-            .unwrap_or(false);
+        let loaded = state.service.agent_residency_loaded(child).unwrap_or(false);
         agents.push(qaqh_ringing_contract::team::TeamAgentSnapshot {
             agent_id: qaqh_ringing_contract::fact::SessionId::new(child.clone()),
             agent_path: path.clone(),
@@ -422,13 +419,9 @@ pub(crate) async fn handle_team_snapshot_v2(
 /// { "pending_permission": {...}|null, "pending_interaction": {...}|null }
 /// ```
 ///
-/// 正文降级只有一种合法来源：**内容确实取不到**（`ContentValue::Unavailable`，或 ref
-/// 指向的正文行已被淘汰）⇒ `details_unavailable: true` / `details: null`，条目仍在
-/// （id 是答复所必需的）。正文存在却读不成 JSON、或 JSON 不合
-/// `PermissionRequestDetails` 形状 ⇒ **带错误码的显式失败**，不再 `.ok()` 成 None：
-/// 那种降级把形状漂移伪装成"没有详情"，HTTP 仍 200，没人知道契约断了（ADR-0004 §决策
-/// 4；错误码表见 `ApprovalBodyError::code`，由 `coverage.json` 的 approvals.admin
-/// `wire_notes` 钉住）。
+/// 正文缺失时 `details_unavailable: true` / `details: null`，条目仍在。正文读不成 JSON 或形状不符时
+/// `PermissionRequestDetails` 形状 ⇒ **带错误码的显式失败**，不再 `.ok()` 成 None（ADR-0004 §决策
+/// 4；错误码表见 `ApprovalBodyError::code`，由 `coverage.json` 的 approvals.admin `wire_notes` 钉住）。
 ///
 /// 返回的 id 是 **canonical** 形态（`call_<ULID>` / `int_<ULID>`）；运行时侧已接受
 /// canonical 与 wire 两种形态，故宿主直接透传即可。
@@ -470,16 +463,18 @@ pub(crate) async fn handle_pending_approvals_v2(
         .filter(pending)
         .find(|interaction| interaction.kind == InteractionKind::Permission);
     let pending_permission = match permission {
-        Some(interaction) => match pending_permission_view(&state, &session_id, interaction) {
-            Ok(view) => view,
-            Err(error) => {
-                return api_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    error.code(),
-                    &format!("pending permission details for {session_id}: {error}"),
-                );
+        Some(interaction) => {
+            match pending_permission_view(&state, &session_id, interaction).await {
+                Ok(view) => view,
+                Err(error) => {
+                    return api_error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        error.code(),
+                        &format!("pending permission details for {session_id}: {error}"),
+                    );
+                }
             }
-        },
+        }
         None => None,
     };
     let interaction = interactions
@@ -488,16 +483,17 @@ pub(crate) async fn handle_pending_approvals_v2(
         .find(|interaction| interaction.kind == InteractionKind::Ask);
     let pending_interaction = match interaction {
         Some(interaction) => {
-            let details = match interaction_body_value(&state, &session_id, &interaction.request) {
-                Ok(details) => details,
-                Err(error) => {
-                    return api_error_response(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        error.code(),
-                        &format!("pending interaction body for {session_id}: {error}"),
-                    );
-                }
-            };
+            let details =
+                match interaction_body_value(&state, &session_id, &interaction.request).await {
+                    Ok(details) => details,
+                    Err(error) => {
+                        return api_error_response(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            error.code(),
+                            &format!("pending interaction body for {session_id}: {error}"),
+                        );
+                    }
+                };
             Some(RingingV2PendingInteractionView {
                 id: interaction.interaction_id.as_str().to_string(),
                 kind: interaction.kind,
@@ -602,7 +598,7 @@ pub(crate) async fn handle_approval_respond_v2(
     execute_command(&state, &headers, &identity, envelope).await
 }
 
-fn pending_permission_view(
+async fn pending_permission_view(
     state: &AppState,
     session_id: &str,
     interaction: &InteractionView,
@@ -614,7 +610,7 @@ fn pending_permission_view(
     else {
         return Ok(None);
     };
-    let body = interaction_body_value(state, session_id, &interaction.request)?;
+    let body = interaction_body_value(state, session_id, &interaction.request).await?;
     let details = permission_request_details(session_id, body)?;
     Ok(Some(RingingV2PendingPermissionView {
         tool_call_id,
@@ -648,7 +644,7 @@ fn pending_permission_view(
     }))
 }
 
-fn interaction_body_value(
+async fn interaction_body_value(
     state: &AppState,
     session_id: &str,
     request: &ContentValue,
@@ -664,7 +660,8 @@ fn interaction_body_value(
             let store_id = store_id.strip_prefix("sha256:").unwrap_or(store_id);
             let Some(entry) = state
                 .hub
-                .get_content(session_id, store_id)
+                .get_content_async(session_id, store_id)
+                .await
                 .map_err(ApprovalBodyError::Store)?
             else {
                 // 正文行已被淘汰：这是唯一允许降级的一种"取不到"。
@@ -1235,12 +1232,10 @@ fn command_result_for(
         (
             InteractionKind::Permission,
             InteractionDecision::Approved | InteractionDecision::ApprovedForSession,
-        ) => {
-            Some(RingingV2CommandResult::PermissionResolved {
-                interaction_id,
-                approved: true,
-            })
-        }
+        ) => Some(RingingV2CommandResult::PermissionResolved {
+            interaction_id,
+            approved: true,
+        }),
         (InteractionKind::Permission, InteractionDecision::Rejected) => {
             Some(RingingV2CommandResult::PermissionResolved {
                 interaction_id,

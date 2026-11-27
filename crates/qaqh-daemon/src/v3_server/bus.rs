@@ -38,7 +38,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use qaqh_core_vocab::{BlockId, ExecSessionId, SessionId};
+use qaqh_core_vocab::{BlockId, ExecSessionId, SessionId, ToolCallId};
 use qaqh_ringing_v3::{DeliveryClass, FrameMeta, SessionEvent, SessionEventFrame};
 use tokio::sync::{mpsc, watch};
 
@@ -202,7 +202,12 @@ impl EventBus {
 
     /// **反证原语之二**：只注册 receiver、不读回放环（仅测试可见）。
     #[cfg(test)]
-    pub(crate) fn register_only(&self) -> (mpsc::Receiver<Arc<SessionEventFrame>>, watch::Receiver<bool>) {
+    pub(crate) fn register_only(
+        &self,
+    ) -> (
+        mpsc::Receiver<Arc<SessionEventFrame>>,
+        watch::Receiver<bool>,
+    ) {
         let mut inner = lock(&self.inner);
         let (tx, live) = mpsc::channel(self.subscriber_queue);
         let (lag, lagged) = watch::channel(false);
@@ -219,6 +224,8 @@ enum CoalesceKey {
     Answer(SessionId, BlockId),
     Reasoning(SessionId, BlockId),
     ExecOutput(SessionId, ExecSessionId),
+    ToolArguments(SessionId, ToolCallId),
+    ToolOutput(SessionId, ToolCallId),
 }
 
 /// 已合并但尚未写出的增量。
@@ -321,6 +328,22 @@ fn coalesce_key(event: &SessionEvent) -> Option<CoalesceKey> {
             session_id.clone(),
             exec_session_id.clone(),
         )),
+        SessionEvent::ToolArgumentsDelta {
+            session_id,
+            tool_call_id,
+            ..
+        } => Some(CoalesceKey::ToolArguments(
+            session_id.clone(),
+            tool_call_id.clone(),
+        )),
+        SessionEvent::ToolOutputDelta {
+            session_id,
+            tool_call_id,
+            ..
+        } => Some(CoalesceKey::ToolOutput(
+            session_id.clone(),
+            tool_call_id.clone(),
+        )),
         _ => None,
     }
 }
@@ -328,7 +351,9 @@ fn coalesce_key(event: &SessionEvent) -> Option<CoalesceKey> {
 fn can_merge(target: &SessionEvent, incoming: &SessionEvent) -> bool {
     match (target, incoming) {
         (SessionEvent::AnswerDelta { .. }, SessionEvent::AnswerDelta { .. })
-        | (SessionEvent::ReasoningDelta { .. }, SessionEvent::ReasoningDelta { .. }) => true,
+        | (SessionEvent::ReasoningDelta { .. }, SessionEvent::ReasoningDelta { .. })
+        | (SessionEvent::ToolArgumentsDelta { .. }, SessionEvent::ToolArgumentsDelta { .. })
+        | (SessionEvent::ToolOutputDelta { .. }, SessionEvent::ToolOutputDelta { .. }) => true,
         (
             SessionEvent::ExecOutputDelta {
                 end_offset,
@@ -361,7 +386,21 @@ fn merge_event(target: &mut SessionEvent, incoming: &SessionEvent) {
                 text: incoming_text,
                 ..
             },
+        )
+        | (
+            SessionEvent::ToolOutputDelta { text, .. },
+            SessionEvent::ToolOutputDelta {
+                text: incoming_text,
+                ..
+            },
         ) => text.push_str(incoming_text),
+        (
+            SessionEvent::ToolArgumentsDelta { delta, .. },
+            SessionEvent::ToolArgumentsDelta {
+                delta: incoming_delta,
+                ..
+            },
+        ) => delta.push_str(incoming_delta),
         (
             SessionEvent::ExecOutputDelta {
                 end_offset, text, ..
@@ -399,9 +438,10 @@ impl DeltaLedger {
         }
         self.frames.fetch_add(1, Ordering::Relaxed);
         let bytes = match event {
-            SessionEvent::AnswerDelta { text, .. } | SessionEvent::ReasoningDelta { text, .. } => {
-                text.len()
-            }
+            SessionEvent::AnswerDelta { text, .. }
+            | SessionEvent::ReasoningDelta { text, .. }
+            | SessionEvent::ToolOutputDelta { text, .. } => text.len(),
+            SessionEvent::ToolArgumentsDelta { delta, .. } => delta.len(),
             SessionEvent::ExecOutputDelta { text, .. } => text.len(),
             _ => 0,
         };
@@ -413,7 +453,13 @@ impl DeltaLedger {
 mod tests {
     use super::*;
 
-    fn exec_frame(seq: u64, start: u64, end: u64, text: &str, spilled: bool) -> Arc<SessionEventFrame> {
+    fn exec_frame(
+        seq: u64,
+        start: u64,
+        end: u64,
+        text: &str,
+        spilled: bool,
+    ) -> Arc<SessionEventFrame> {
         Arc::new(SessionEventFrame {
             meta: FrameMeta {
                 seq,

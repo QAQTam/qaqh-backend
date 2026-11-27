@@ -316,6 +316,41 @@ async fn pairing_requires_admin_and_token_is_one_shot() {
 }
 
 #[tokio::test]
+async fn pairing_endpoint_honors_custom_zero_ttl() {
+    let state = super::test_state();
+    *state.pairings.lock().unwrap() = qaqh_ringing_runtime::pairing::PairingTable::with_ttl_ms(0);
+    let app = build_router(state.clone());
+
+    let issued = app
+        .clone()
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/pairing/tokens",
+            Some(ADMIN),
+            None,
+            Some(serde_json::json!({ "scope_grant": "view", "device_name": "x", "platform": "y" })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(issued.status(), StatusCode::OK);
+    let issued = body_json(issued).await;
+    assert_eq!(issued["expires_in_ms"], 0);
+
+    let rejected = app
+        .oneshot(request(
+            "POST",
+            "/ringing/v2/pair",
+            None,
+            None,
+            Some(serde_json::json!({ "pairing_token": issued["pairing_token"] })),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+    assert_eq!(body_json(rejected).await["code"], "pairing_expired");
+}
+
+#[tokio::test]
 async fn view_token_cannot_read_unattached_session() {
     let state = super::test_state();
     let app = build_router(state.clone());

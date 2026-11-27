@@ -34,16 +34,20 @@ pub use qaqh_v3_transport::FrameIoError;
 pub use session_events::{SessionEventsStream, SessionStreamStats};
 pub use shell_output::{ShellOutputStream, ShellStreamStats};
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use qaqh_core_vocab::{ContentHash, SessionId};
 use qaqh_ringing_v3::{
-    BlobChunkFrame, BlobTransferRole, ClientHello, ControlCall, ControlReply, ControlRequest,
-    ControlResponse, DeliveryClass, ErrorCode, FrameMeta, RpcError, ServerHello, StreamAttach,
-    StreamKind, verify_handshake,
+    BlobChunkFrame, BlobTransferRole, ClientCredential, ClientHello, ClientKind, ControlCall,
+    ControlReply, ControlRequest, ControlResponse, DeliveryClass, EndpointReject, ErrorCode,
+    FrameMeta, RpcError, ServerHello, StreamAttach, StreamKind, verify_handshake,
 };
-use qaqh_v3_transport::{MuxError, MuxTransport, read_frame, write_frame};
+use qaqh_v3_transport::{
+    MuxError, MuxTransport, YamuxTransport, connect_local_ipc, read_frame, write_frame,
+};
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
@@ -81,6 +85,18 @@ pub enum ClientError {
         /// 回执里的幂等键。
         actual: String,
     },
+    /// 发现文件或构建校验失败。
+    #[error("daemon 端点校验失败：{0}")]
+    Endpoint(#[from] EndpointError),
+    /// daemon 自启失败。
+    #[error("启动 qaqh-daemon 失败：{0}")]
+    DaemonLaunch(String),
+    /// daemon 自启后未在期限内发布可连接端点。
+    #[error("qaqh-daemon 未在期限内发布可连接端点")]
+    DaemonStartTimeout,
+    /// 已连接但 daemon 未在期限内完成 V3 握手。
+    #[error("qaqh-daemon 未在期限内完成 V3 握手")]
+    HandshakeTimeout,
     /// 协议形状错误。
     #[error("协议错误：{0}")]
     Protocol(String),
@@ -267,14 +283,22 @@ impl<B: MuxTransport> V3Client<B> {
         Ok(ShellOutputStream::new(stream, attach, from_offset))
     }
 
-    /// 向服务端上传一条内容寻址 blob（分片直传，零 Base64 膨胀）。
-    pub async fn upload_blob(&self, bytes: &[u8]) -> Result<ContentHash, ClientError> {
+    /// 向服务端上传一条属于指定会话的内容寻址 blob（分片直传，零 Base64 膨胀）。
+    pub async fn upload_blob(
+        &self,
+        session_id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<ContentHash, ClientError> {
         let digest: [u8; 32] = Sha256::digest(bytes).into();
         let hash = ContentHash::from_bytes(digest);
         let len = bytes.len() as u64;
         let mut stream = self.transport.open_bi().await?;
         let kind = StreamKind::BlobTransfer {
-            role: BlobTransferRole::ClientUpload { hash, len },
+            role: BlobTransferRole::ClientUpload {
+                session_id: session_id.clone(),
+                hash,
+                len,
+            },
         };
         write_frame(&mut stream, &kind).await?;
         const CHUNK_BYTES: usize = 64 * 1024;
@@ -323,6 +347,16 @@ impl<B: MuxTransport> V3Client<B> {
         Ok(hash)
     }
 
+    /// 按内容哈希从服务端拉取一条 blob（经 `sha256` Fail-Closed 校验）。
+    pub async fn fetch_blob(&self, hash: &ContentHash) -> Result<bytes::Bytes, ClientError> {
+        let mut stream = self.transport.open_bi().await?;
+        let kind = StreamKind::BlobTransfer {
+            role: BlobTransferRole::ClientFetch { hash: *hash },
+        };
+        write_frame(&mut stream, &kind).await?;
+        blob::receive_fetched_blob(&mut stream, *hash).await
+    }
+
     /// 取走 blob 收件箱（服务端推来的 `BlobTransfer` 流在这里被组装）。
     ///
     /// 取走而不是借用：收件箱通常要交给一个独立任务持续消费，而控制面调用
@@ -330,6 +364,104 @@ impl<B: MuxTransport> V3Client<B> {
     pub fn take_blob_inbox(&mut self) -> Option<BlobInbox> {
         self.blobs.take()
     }
+}
+
+impl V3Client<YamuxTransport> {
+    const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(15);
+
+    /// 发现本机 daemon、按需自启，并通过本地 IPC 完成 V3 握手。
+    ///
+    /// `launch_if_missing = false` 时，端点缺失或不可达会直接返回错误；不会派生进程。
+    pub async fn connect_local(
+        data_root: &Path,
+        expected_build_id: &str,
+        expected_channel: &str,
+        client_instance_id: &str,
+        launch_if_missing: bool,
+    ) -> Result<Self, ClientError> {
+        if client_instance_id.trim().is_empty() {
+            return Err(ClientError::Protocol(
+                "client_instance_id must be non-empty".to_string(),
+            ));
+        }
+        let hello = ClientHello::new(
+            client_instance_id,
+            ClientKind::Desktop,
+            ClientCredential::LocalOsUser {
+                user: local_os_user()?,
+            },
+        );
+        let deadline = tokio::time::Instant::now() + Self::DAEMON_START_TIMEOUT;
+        let mut launched = false;
+
+        loop {
+            match resolve_daemon_endpoint(data_root, expected_channel, Some(expected_build_id)) {
+                Ok(endpoint) => {
+                    let path = endpoint.local_ipc.as_deref().ok_or_else(|| {
+                        ClientError::Protocol("daemon.endpoint 未声明本地 IPC 端点".to_string())
+                    })?;
+                    match connect_local_ipc(Path::new(path)).await {
+                        Ok(transport) => {
+                            return match tokio::time::timeout_at(
+                                deadline,
+                                Self::connect(transport, hello.clone()),
+                            )
+                            .await
+                            {
+                                Ok(result) => result,
+                                Err(_) => Err(ClientError::HandshakeTimeout),
+                            };
+                        }
+                        Err(error) => {
+                            if !launch_if_missing {
+                                return Err(error.into());
+                            }
+                            if !launched {
+                                launch_daemon(data_root)?;
+                                launched = true;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    let missing = matches!(
+                        &error,
+                        EndpointError::Rejected(EndpointReject::Unreadable(_))
+                    );
+                    if !launch_if_missing || !missing {
+                        return Err(error.into());
+                    }
+                    if !launched {
+                        launch_daemon(data_root)?;
+                        launched = true;
+                    }
+                }
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return Err(ClientError::DaemonStartTimeout);
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    }
+}
+
+fn local_os_user() -> Result<String, ClientError> {
+    let variable = if cfg!(windows) { "USERNAME" } else { "USER" };
+    std::env::var(variable)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            ClientError::Protocol(format!("本地 OS 用户标识缺失：环境变量 {variable} 为空"))
+        })
+}
+
+fn launch_daemon(data_root: &Path) -> Result<(), ClientError> {
+    let executable = crate::discovery::daemon_executable()
+        .map_err(|error| ClientError::DaemonLaunch(error.to_string()))?;
+    crate::discovery::spawn_daemon_process(&executable, data_root)
+        .map_err(|error| ClientError::DaemonLaunch(error.to_string()))
 }
 
 impl From<qaqh_ringing_v3::FrameError> for ClientError {
@@ -348,5 +480,142 @@ impl<B: MuxTransport> Drop for V3Client<B> {
     fn drop(&mut self) {
         self.cancel.send_replace(true);
         self.accept_task.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qaqh_ringing_v3::{
+        DAEMON_ENDPOINT_FILE, DaemonEndpoint, EndpointChannel, PROTOCOL_FINGERPRINT, PROTOCOL_REV,
+        write_daemon_endpoint,
+    };
+    use qaqh_v3_transport::bind_local_ipc;
+    use std::path::PathBuf;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "qaqh-v3-connect-local-{tag}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("temp dir");
+        path
+    }
+
+    fn local_ipc_path(_dir: &Path, _tag: &str) -> PathBuf {
+        #[cfg(windows)]
+        {
+            PathBuf::from(format!(
+                r"\\.\pipe\qaqh-v3-client-{_tag}-{}",
+                std::process::id()
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            _dir.join("daemon.sock")
+        }
+    }
+
+    fn endpoint(dir: &Path, build_id: &str, socket: &Path) {
+        let endpoint = DaemonEndpoint {
+            build_id: build_id.to_string(),
+            channel: EndpointChannel("dev".to_string()),
+            local_ipc: Some(socket.to_string_lossy().into_owned()),
+            iroh: None,
+            protocol_rev: PROTOCOL_REV,
+            protocol_fingerprint: PROTOCOL_FINGERPRINT,
+            written_at_ms: 1,
+        };
+        write_daemon_endpoint(dir, &endpoint).expect("publish endpoint");
+    }
+
+    #[tokio::test]
+    async fn connect_local_discovers_endpoint_and_completes_handshake() {
+        let dir = temp_dir("handshake");
+        let socket = local_ipc_path(&dir, "handshake");
+        endpoint(&dir, "build-1", &socket);
+        let mut listener = bind_local_ipc(&socket).await.expect("bind");
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let transport = listener.accept().await.expect("accept");
+            let mut stream = transport.accept_bi().await.expect("control stream");
+            let kind: StreamKind = read_frame(&mut stream).await.expect("stream kind");
+            assert!(matches!(kind, StreamKind::Control));
+            let hello: ClientHello = read_frame(&mut stream).await.expect("client hello");
+            assert_eq!(hello.client_instance_id, "client-1");
+            assert!(matches!(
+                hello.credential,
+                ClientCredential::LocalOsUser { .. }
+            ));
+            write_frame(
+                &mut stream,
+                &ServerHello::Accepted {
+                    server_instance_id: "server-1".to_string(),
+                    build_id: "build-1".to_string(),
+                    protocol_rev: PROTOCOL_REV,
+                },
+            )
+            .await
+            .expect("server hello");
+            let _ = release_rx.await;
+        });
+
+        let client_result =
+            V3Client::connect_local(&dir, "build-1", "dev", "client-1", false).await;
+        let _ = release_tx.send(());
+        server.await.expect("server task");
+        let client = client_result.expect("connect_local");
+        match client.server_hello() {
+            ServerHello::Accepted {
+                server_instance_id, ..
+            } => assert_eq!(server_instance_id, "server-1"),
+            other => panic!("必须接受握手，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn connect_local_times_out_when_server_never_completes_handshake() {
+        let dir = temp_dir("handshake-timeout");
+        let socket = local_ipc_path(&dir, "handshake-timeout");
+        endpoint(&dir, "build-1", &socket);
+        let mut listener = bind_local_ipc(&socket).await.expect("bind");
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let _transport = listener.accept().await.expect("accept");
+            let _ = release_rx.await;
+        });
+
+        let result = V3Client::connect_local(&dir, "build-1", "dev", "client-1", false).await;
+        let _ = release_tx.send(());
+        server.await.expect("server task");
+        assert!(matches!(result, Err(ClientError::HandshakeTimeout)));
+    }
+
+    #[tokio::test]
+    async fn connect_local_without_launch_rejects_missing_endpoint() {
+        let dir = temp_dir("missing");
+        let error = match V3Client::connect_local(&dir, "build-1", "dev", "client-1", false).await {
+            Ok(_) => panic!("missing endpoint must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ClientError::Endpoint(_)));
+    }
+
+    #[tokio::test]
+    async fn connect_local_refuses_another_build_before_connecting() {
+        let dir = temp_dir("wrong-build");
+        endpoint(&dir, "old-build", &dir.join("daemon.sock"));
+        let error = match V3Client::connect_local(&dir, "new-build", "dev", "client-1", false).await
+        {
+            Ok(_) => panic!("wrong build must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            ClientError::Endpoint(EndpointError::BuildIdMismatch { .. })
+        ));
+        assert!(dir.join(DAEMON_ENDPOINT_FILE).exists());
     }
 }

@@ -12,10 +12,13 @@
 
 use bytes::Bytes;
 use qaqh_core_vocab::{
-    ActivityState, ContentHash, ContentRef, ExecSessionId, InteractionId, SessionId, ToolCallId,
-    TurnId, TurnTerminal, UsageInfo,
+    ActivityState, ContentHash, ContentRef, ExecSessionId, InteractionId, PermissionGrantScope,
+    SessionId, ToolCallId, TurnId, TurnPhase, TurnTerminal, UsageInfo,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::session::BlockView;
+use crate::team::{GoalView, SubagentSummary};
 
 /// Blob 流方向角色（同时支撑服务端主动推、客户端按哈希拉与客户端上传附件）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,8 +30,10 @@ pub enum BlobTransferRole {
         /// 目标内容哈希。
         hash: ContentHash,
     },
-    /// 客户端上传附件（服务端校验 `sha256(bytes) == hash`）。
+    /// 客户端上传附件（服务端校验权限与 `sha256(bytes) == hash`，并归属目标会话）。
     ClientUpload {
+        /// 所属会话 id（与后端 `(session_id, content_id)` 复合主键对齐）。
+        session_id: SessionId,
         /// 内容哈希。
         hash: ContentHash,
         /// 预期总字节数。
@@ -153,6 +158,28 @@ pub struct ToolCallView {
     pub summary: Option<ContentRef>,
 }
 
+/// Ask 单个问题项。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskQuestionView {
+    /// 问题 id。
+    pub id: String,
+    /// 题干提示。
+    pub prompt: String,
+    /// 可选项标签。
+    pub options: Vec<String>,
+    /// 是否允许自由文本输入。
+    pub allow_free_text: bool,
+}
+
+/// Ask 单个回答。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskAnswer {
+    /// 对应问题 id。
+    pub question_id: String,
+    /// 用户选择的标签或输入的文本。
+    pub answer: String,
+}
+
 /// 交互请求视图（审批 / Ask）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InteractionView {
@@ -160,12 +187,16 @@ pub struct InteractionView {
     pub interaction_id: InteractionId,
     /// 交互种类。
     pub kind: InteractionKind,
+    /// 若为工具权限审批，关联的工具调用 id。
+    pub tool_call_id: Option<ToolCallId>,
     /// 标题。
     pub title: String,
-    /// 正文（审批理由 / Ask 问题）。
+    /// 正文（审批理由 / Ask 引导）。
     pub body: String,
-    /// 选项（Ask；审批为空）。
+    /// 扁平选项（快捷审批/单选展示）。
     pub options: Vec<String>,
+    /// 多题 Ask 结构化问题列表（权限审批为空）。
+    pub questions: Vec<AskQuestionView>,
     /// 到期时刻（毫秒；`None` = 不超时）。
     pub expires_at_ms: Option<u64>,
 }
@@ -182,19 +213,24 @@ pub enum InteractionKind {
 /// 交互处置结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InteractionResolution {
-    /// 批准。
-    Approved,
+    /// 批准（含授权作用域）。
+    Approved {
+        /// 批准作用范围。
+        scope: PermissionGrantScope,
+    },
     /// 拒绝（带理由）。
     Denied {
         /// 理由。
         reason: String,
     },
-    /// 已回答。
+    /// 已回答（结构化多题答案）。
     Answered {
-        /// 回答文本。
-        answer: String,
+        /// 各题回答列表。
+        answers: Vec<AskAnswer>,
     },
-    /// 超时/取消。
+    /// 用户主动关闭/忽略 Ask。
+    Dismissed,
+    /// 超时/系统取消。
     Abandoned,
 }
 
@@ -247,6 +283,15 @@ pub enum SessionEvent {
         /// 开始时刻（毫秒）。
         started_at_ms: u64,
     },
+    /// 回合执行子阶段变更。
+    TurnPhaseChanged {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 回合 id。
+        turn_id: TurnId,
+        /// 新子阶段。
+        phase: TurnPhase,
+    },
     /// 回合结束（终态一旦成立不可回退）。
     TurnFinished {
         /// 会话 id。
@@ -257,6 +302,17 @@ pub enum SessionEvent {
         terminal: TurnTerminal,
         /// 用量。
         usage: UsageInfo,
+    },
+    /// 上游 Provider 重试通知（不推进序列阻塞主状态，仅透传重试提示）。
+    ProviderRetrying {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 当前尝试次数。
+        attempt: u32,
+        /// 等待退避毫秒。
+        delay_ms: u64,
+        /// 原因摘要。
+        reason: String,
     },
     /// 答案增量（`Replaceable`）。
     AnswerDelta {
@@ -285,12 +341,46 @@ pub enum SessionEvent {
         /// 全文引用。
         content: ContentRef,
     },
+    /// 时间线新块落库通知（含权威 `ord`）。
+    TimelineAppended {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 新落库的块视图。
+        block: BlockView,
+    },
+    /// 时间线按回合回滚/截断（触发 `timeline_epoch` 递增）。
+    TimelineTruncated {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 截断起点回合。
+        from_turn_id: TurnId,
+        /// 截断后新代际。
+        timeline_epoch: u64,
+    },
     /// 工具调用状态变更。
     ToolCallUpdated {
         /// 会话 id。
         session_id: SessionId,
         /// 调用视图。
         call: ToolCallView,
+    },
+    /// 工具参数流式增量（`Replaceable`）。
+    ToolArgumentsDelta {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 调用 id。
+        tool_call_id: ToolCallId,
+        /// JSON 片段增量。
+        delta: String,
+    },
+    /// 工具执行流式输出增量（`Replaceable`）。
+    ToolOutputDelta {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 调用 id。
+        tool_call_id: ToolCallId,
+        /// 输出增量。
+        text: String,
     },
     /// 交互请求。
     InteractionRequested {
@@ -351,6 +441,43 @@ pub enum SessionEvent {
         /// 会话 id。
         session_id: SessionId,
     },
+    /// 会话元信息变更（标题/工作区/归档态等）。
+    SessionMetaChanged {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 最新标题。
+        title: Option<String>,
+    },
+    /// 子代理/同事状态变更。
+    SubagentUpdated {
+        /// 宿主会话 id。
+        session_id: SessionId,
+        /// 子代理摘要。
+        subagent: SubagentSummary,
+    },
+    /// 会话持久目标变更（清空时为 `None`）。
+    GoalUpdated {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 当前目标视图。
+        goal: Option<GoalView>,
+    },
+    /// 交接封箱完成（指明后继子会话）。
+    HandoffSealed {
+        /// 来源会话 id。
+        session_id: SessionId,
+        /// 后继子会话 id。
+        successor_session_id: SessionId,
+        /// 交接摘要引用。
+        summary: ContentRef,
+    },
+    /// 用户输入被策略或队列阻塞。
+    PromptBlocked {
+        /// 会话 id。
+        session_id: SessionId,
+        /// 阻塞原因文案。
+        reason: String,
+    },
     /// 会话被删除。
     SessionRemoved {
         /// 会话 id。
@@ -384,11 +511,17 @@ impl SessionEvent {
         match self {
             Self::ActivityChanged { session_id, .. }
             | Self::TurnStarted { session_id, .. }
+            | Self::TurnPhaseChanged { session_id, .. }
             | Self::TurnFinished { session_id, .. }
+            | Self::ProviderRetrying { session_id, .. }
             | Self::AnswerDelta { session_id, .. }
             | Self::ReasoningDelta { session_id, .. }
             | Self::BlockFinal { session_id, .. }
+            | Self::TimelineAppended { session_id, .. }
+            | Self::TimelineTruncated { session_id, .. }
             | Self::ToolCallUpdated { session_id, .. }
+            | Self::ToolArgumentsDelta { session_id, .. }
+            | Self::ToolOutputDelta { session_id, .. }
             | Self::InteractionRequested { session_id, .. }
             | Self::InteractionResolved { session_id, .. }
             | Self::ExecSessionUpdated { session_id, .. }
@@ -396,6 +529,11 @@ impl SessionEvent {
             | Self::DriverChanged { session_id, .. }
             | Self::PinnedCompactionChanged { session_id, .. }
             | Self::CatalogChanged { session_id }
+            | Self::SessionMetaChanged { session_id, .. }
+            | Self::SubagentUpdated { session_id, .. }
+            | Self::GoalUpdated { session_id, .. }
+            | Self::HandoffSealed { session_id, .. }
+            | Self::PromptBlocked { session_id, .. }
             | Self::SessionRemoved { session_id }
             | Self::ResyncRequired { session_id, .. } => session_id,
         }
@@ -403,13 +541,15 @@ impl SessionEvent {
 
     /// 该事件的投递分级（**帧属性由事件语义决定**，调用方不得自行挑选）。
     ///
-    /// 只有三类高频增量是 `Replaceable`；其余一律 `Reliable`——包括 `DriverChanged`
-    /// （驱动权丢了就是两台设备同时发指令，绝不允许被合帧丢掉）。
+    /// 只有五类高频流式增量是 `Replaceable`；其余一律 `Reliable`——包括
+    /// `DriverChanged`（驱动权丢了就是两台设备同时发指令，绝不允许被合帧丢掉）。
     pub fn delivery(&self) -> DeliveryClass {
         match self {
-            Self::AnswerDelta { .. } | Self::ReasoningDelta { .. } | Self::ExecOutputDelta { .. } => {
-                DeliveryClass::Replaceable
-            }
+            Self::AnswerDelta { .. }
+            | Self::ReasoningDelta { .. }
+            | Self::ExecOutputDelta { .. }
+            | Self::ToolArgumentsDelta { .. }
+            | Self::ToolOutputDelta { .. } => DeliveryClass::Replaceable,
             _ => DeliveryClass::Reliable,
         }
     }

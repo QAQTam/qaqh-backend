@@ -1105,7 +1105,7 @@ async fn wait_for_daemon(
         .filter(crate::discovery::discovery_is_live);
     if live.is_none() && !crate::discovery::lock_holder_alive() {
         // 唯一 spawn 出口（内含脱离 shell 进程组的保护，见该函数文档）。
-        crate::discovery::spawn_daemon_process(executable.as_ref())?;
+        crate::discovery::spawn_daemon_process(executable.as_ref(), &crate::discovery::data_dir())?;
     }
     drop(guard);
 

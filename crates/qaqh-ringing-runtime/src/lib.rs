@@ -7,10 +7,12 @@ pub mod attachment;
 pub mod device_registry;
 pub mod hub;
 pub mod lease_store;
+pub mod pairing;
 pub mod pending_store;
 
 pub use attachment::hydrate_attachment_previews;
 pub use device_registry::{DeviceRecord, DeviceRegistry, Scope};
 pub use hub::RingingHub;
 pub use lease_store::RingingLeaseStore;
+pub use pairing::{DEFAULT_PAIRING_TOKEN_TTL_MS, PairingGrant, PairingTable};
 pub use pending_store::{ExistingCommandReceipt, PendingCommandStore};

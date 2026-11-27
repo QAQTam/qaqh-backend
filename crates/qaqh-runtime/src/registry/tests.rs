@@ -330,7 +330,9 @@ async fn idle_unload_reaps_descendant_session_owners() {
         qaqh_session::owner::OwnerDirectory::open(dir.path().join("qaqh.db"))
             .expect("open owners db"),
     );
-    owners.ensure_session("ses-idle-parent", None, false).expect("parent row");
+    owners
+        .ensure_session("ses-idle-parent", None, false)
+        .expect("parent row");
     owners
         .ensure_session("ses-idle-child", Some("ses-idle-parent"), false)
         .expect("child row");
@@ -397,6 +399,7 @@ fn shutdown_all_clears_tool_hosts_slot() {
     let registry = std::sync::Arc::new(std::sync::Mutex::new(AgentRegistry::new(owners.clone())));
     let service = crate::service::QaqhService {
         registry: std::sync::Arc::clone(&registry),
+        shells: std::sync::Arc::new(crate::shell::ShellRegistry::new()),
         hub: std::sync::OnceLock::new(),
         owners,
         siwc: std::sync::OnceLock::new(),

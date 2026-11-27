@@ -8,11 +8,11 @@
 //! flag, re-evaluating permissions and approval grants before dispatch, and telling the truth
 //! about whether anything started.
 
+use qaqh_process_tools::exec_session::capture::ExecOutputWatermark;
 use qaqh_process_tools::exec_session::{
     ExecManagerError, ExecManagerErrorKind, ExecSessionManager, ExecSessionPoll,
     ExecSessionPublisher, ExecSessionResult, ExecSessionStart,
 };
-use qaqh_process_tools::exec_session::capture::ExecOutputWatermark;
 use qaqh_ringing_contract::fact::{
     ToolCallOutcome, ToolCancellationReason, ToolError, ToolInterruptionReason, ToolMetrics,
 };
@@ -21,9 +21,7 @@ use qaqh_session::owner::{ToolLifecycle, ToolRun, ToolSettlement};
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{
-        Arc, Mutex, RwLock,
-    },
+    sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 
@@ -405,6 +403,19 @@ impl WorkspaceToolPort {
         manager.filtered_defs()
     }
 
+    /// Project the live per-session tool registry into the V3 catalog.
+    pub fn tool_catalog(
+        &self,
+        mode: qaqh_core_vocab::ToolMode,
+        capabilities: &qaqh_types::ModelCapabilities,
+    ) -> Result<qaqh_core_vocab::ToolCatalog, qaqh_workspace::CatalogError> {
+        let manager = self
+            .manager
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        qaqh_workspace::project_tool_catalog(&manager, mode, capabilities)
+    }
+
     /// Workspace root the current policy dispatches against.
     pub fn workspace_root(&self) -> PathBuf {
         self.policy
@@ -743,49 +754,39 @@ impl WorkspaceToolPort {
         };
 
         let mut user_approved_challenge = false;
-        let authorized =
-            match qaqh_workspace::admit_with_context(invocation, &context, &policy.trusted_dirs) {
-                qaqh_workspace::Admission::Authorized(call) => call,
-                qaqh_workspace::Admission::Denied(reason) => {
-                    self.lifecycle.settled(
-                        &request.call_id,
-                        &request.tool_name,
-                        args_json.clone(),
-                        failed_settlement("permission_denied", &reason, None, None),
-                    );
-                    return Err(ToolFailure::Denied(reason));
-                }
-                qaqh_workspace::Admission::ApprovalRequired(challenge) => {
-                    let single_grant = self
-                        .approvals
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .remove(&request.execution_id);
-                    if let Some(grant) = single_grant {
-                        let normalized_ws =
-                            qaqh_workspace::resolve_target_path(policy.workspace_root.clone());
-                        let grant_ws = qaqh_workspace::resolve_target_path(grant.workspace_root);
-                        if grant.call_id != request.call_id
-                            || grant.execution_id != request.execution_id
-                            || grant.args_hash != args_hash
-                            || grant_ws != normalized_ws
-                        {
-                            let reason =
+        let authorized = match qaqh_workspace::admit_with_context(
+            invocation,
+            &context,
+            &policy.trusted_dirs,
+        ) {
+            qaqh_workspace::Admission::Authorized(call) => call,
+            qaqh_workspace::Admission::Denied(reason) => {
+                self.lifecycle.settled(
+                    &request.call_id,
+                    &request.tool_name,
+                    args_json.clone(),
+                    failed_settlement("permission_denied", &reason, None, None),
+                );
+                return Err(ToolFailure::Denied(reason));
+            }
+            qaqh_workspace::Admission::ApprovalRequired(challenge) => {
+                let single_grant = self
+                    .approvals
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .remove(&request.execution_id);
+                if let Some(grant) = single_grant {
+                    let normalized_ws =
+                        qaqh_workspace::resolve_target_path(policy.workspace_root.clone());
+                    let grant_ws = qaqh_workspace::resolve_target_path(grant.workspace_root);
+                    if grant.call_id != request.call_id
+                        || grant.execution_id != request.execution_id
+                        || grant.args_hash != args_hash
+                        || grant_ws != normalized_ws
+                    {
+                        let reason =
                             "approval grant does not match execution identity, arguments, or workspace"
                                 .to_string();
-                            self.lifecycle.settled(
-                                &request.call_id,
-                                &request.tool_name,
-                                args_json.clone(),
-                                failed_settlement("permission_denied", &reason, None, None),
-                            );
-                            return Err(ToolFailure::Denied(reason));
-                        }
-                    } else if !self.is_session_approved(&challenge) {
-                        let reason = format!(
-                            "permission approval required or revoked for {}",
-                            request.tool_name
-                        );
                         self.lifecycle.settled(
                             &request.call_id,
                             &request.tool_name,
@@ -794,22 +795,35 @@ impl WorkspaceToolPort {
                         );
                         return Err(ToolFailure::Denied(reason));
                     }
-                    user_approved_challenge = true;
-                    match challenge.approve(true) {
-                        Ok(call) => call,
-                        Err(err) => {
-                            let reason = format!("approval challenge rejected: {err:?}");
-                            self.lifecycle.settled(
-                                &request.call_id,
-                                &request.tool_name,
-                                args_json.clone(),
-                                failed_settlement("permission_denied", &reason, None, None),
-                            );
-                            return Err(ToolFailure::Denied(reason));
-                        }
+                } else if !self.is_session_approved(&challenge) {
+                    let reason = format!(
+                        "permission approval required or revoked for {}",
+                        request.tool_name
+                    );
+                    self.lifecycle.settled(
+                        &request.call_id,
+                        &request.tool_name,
+                        args_json.clone(),
+                        failed_settlement("permission_denied", &reason, None, None),
+                    );
+                    return Err(ToolFailure::Denied(reason));
+                }
+                user_approved_challenge = true;
+                match challenge.approve(true) {
+                    Ok(call) => call,
+                    Err(err) => {
+                        let reason = format!("approval challenge rejected: {err:?}");
+                        self.lifecycle.settled(
+                            &request.call_id,
+                            &request.tool_name,
+                            args_json.clone(),
+                            failed_settlement("permission_denied", &reason, None, None),
+                        );
+                        return Err(ToolFailure::Denied(reason));
                     }
                 }
-            };
+            }
+        };
 
         if cancel.is_cancelled() {
             self.lifecycle.settled(
@@ -1178,8 +1192,14 @@ mod swap_workspace_root_tests {
         port.swap_workspace_root(new_root.clone());
         assert_eq!(port.workspace_root(), new_root);
         let spec = port.sandbox_spec();
-        assert!(spec.writable_roots.contains(&new_root), "writable roots follow the new root");
-        assert!(!spec.writable_roots.contains(&old_root), "old root must not linger");
+        assert!(
+            spec.writable_roots.contains(&new_root),
+            "writable roots follow the new root"
+        );
+        assert!(
+            !spec.writable_roots.contains(&old_root),
+            "old root must not linger"
+        );
 
         // 同根 = 无操作（幂等）。
         port.swap_workspace_root(new_root.clone());

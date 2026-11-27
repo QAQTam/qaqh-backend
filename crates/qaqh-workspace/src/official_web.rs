@@ -52,7 +52,7 @@ struct DsOfficialWeb {
 impl DsOfficialWeb {
     /// 每次调用新建客户端：超时取工具上下文给出的值，`ZERO` 表示用端点缺省。
     ///
-    /// 客户端本身没有状态（只有一个 `ureq` agent + 配置），所以这不构成
+    /// 客户端本身没有状态（只有一个 HTTP agent + 配置），所以这不构成
     /// "每次调用重建连接池"的成本问题；反过来，缓存它就要缓存 token，
     /// 而 token 的失效只能由平台发现。
     fn client(&self, timeout: Duration) -> qaqh_dsaccount::DsClient {

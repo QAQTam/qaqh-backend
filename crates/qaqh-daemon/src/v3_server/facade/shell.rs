@@ -46,7 +46,11 @@ impl SkeletonShell {
             .shells
             .get(shell_id)
             .ok_or_else(|| not_found(format!("没有 shell `{shell_id}`")))?;
-        self.require_session_access(context, &handle.session_id)?;
+        if let Some(session_id) = &handle.session_id {
+            self.require_session_access(context, session_id)?;
+        } else if handle.owner != context.identity.device {
+            return Err(denied(format!("设备无权访问全局 shell `{shell_id}`")));
+        }
         Ok(handle)
     }
 
@@ -62,10 +66,13 @@ impl SkeletonShell {
                 cols,
                 rows,
                 cwd: _,
+                shell: _,
             } => {
-                self.require_session_access(context, &session_id)?;
+                if let Some(sid) = &session_id {
+                    self.require_session_access(context, sid)?;
+                }
                 let handle = self.state.shells.open(
-                    &session_id,
+                    session_id.as_ref(),
                     &context.identity.device,
                     cols,
                     rows,
@@ -101,8 +108,14 @@ impl SkeletonShell {
                 Ok(ShellResponse::Closed)
             }
             ShellRequest::List { session_id } => {
-                self.require_session_access(context, &session_id)?;
-                Ok(ShellResponse::Shells(self.state.shells.list(&session_id)))
+                if let Some(sid) = &session_id {
+                    self.require_session_access(context, sid)?;
+                }
+                Ok(ShellResponse::Shells(
+                    self.state
+                        .shells
+                        .list(&context.identity.device, session_id.as_ref()),
+                ))
             }
         }
     }
@@ -111,8 +124,8 @@ impl SkeletonShell {
 #[cfg(test)]
 mod smoke {
     use super::*;
-    use bytes::Bytes;
     use crate::v3_server::facade::test_support;
+    use bytes::Bytes;
 
     #[tokio::test]
     async fn shell_open_write_and_list_touch_only_the_shell_table() {
@@ -125,10 +138,11 @@ mod smoke {
             .handle(
                 &context,
                 ShellRequest::Open {
-                    session_id: session.id.clone(),
+                    session_id: Some(session.id.clone()),
                     cols: 80,
                     rows: 24,
                     cwd: None,
+                    shell: None,
                 },
             )
             .await
@@ -159,7 +173,7 @@ mod smoke {
             .handle(
                 &context,
                 ShellRequest::List {
-                    session_id: session.id.clone(),
+                    session_id: Some(session.id.clone()),
                 },
             )
             .await
@@ -173,7 +187,7 @@ mod smoke {
         }
         assert_eq!(rig.state.shells.len(), 1);
         assert_eq!(
-            session.id,
+            Some(session.id.clone()),
             rig.state.shells.get(&shell_id).expect("句柄").session_id
         );
     }
@@ -190,10 +204,11 @@ mod smoke {
             .handle(
                 &owner,
                 ShellRequest::Open {
-                    session_id: session.id.clone(),
+                    session_id: Some(session.id.clone()),
                     cols: 80,
                     rows: 24,
                     cwd: None,
+                    shell: None,
                 },
             )
             .await

@@ -56,8 +56,7 @@ struct ShellInner {
 /// 一个 shell 句柄（**独立于连接**：断联不杀它；支持多端同时观看）。
 pub(crate) struct ShellHandle {
     pub(crate) id: String,
-    pub(crate) session_id: SessionId,
-    #[allow(dead_code)]
+    pub(crate) session_id: Option<SessionId>,
     pub(crate) owner: DeviceKey,
     exited: AtomicBool,
     inner: Mutex<ShellInner>,
@@ -71,9 +70,15 @@ impl ShellHandle {
 
     /// 视图。
     pub(crate) fn view(&self) -> ShellView {
+        let inner = lock(&self.inner);
         ShellView {
             shell_id: self.id.clone(),
-            output_offset: self.output_offset(),
+            pid: 0,
+            shell: "skeleton".to_string(),
+            cwd: String::new(),
+            cols: inner.size.0,
+            rows: inner.size.1,
+            output_offset: inner.output_offset,
             exited: self.exited.load(Ordering::SeqCst),
         }
     }
@@ -188,7 +193,7 @@ impl ShellTable {
     /// 打开一个 shell。
     pub(crate) fn open(
         &self,
-        session_id: &SessionId,
+        session_id: Option<&SessionId>,
         owner: &DeviceKey,
         cols: u16,
         rows: u16,
@@ -198,7 +203,7 @@ impl ShellTable {
         let id = format!("shell-{ordinal:04}");
         let handle = Arc::new(ShellHandle {
             id: id.clone(),
-            session_id: session_id.clone(),
+            session_id: session_id.cloned(),
             owner: owner.clone(),
             exited: AtomicBool::new(false),
             inner: Mutex::new(ShellInner {
@@ -222,11 +227,14 @@ impl ShellTable {
         lock(&self.inner).get(id).cloned()
     }
 
-    /// 本会话的 shell 列表（按 id 升序）。
-    pub(crate) fn list(&self, session_id: &SessionId) -> Vec<ShellView> {
+    /// 本设备/指定会话的 shell 列表（按 id 升序）。
+    pub(crate) fn list(&self, owner: &DeviceKey, session_id: Option<&SessionId>) -> Vec<ShellView> {
         lock(&self.inner)
             .values()
-            .filter(|handle| &handle.session_id == session_id)
+            .filter(|handle| match session_id {
+                Some(sid) => handle.session_id.as_ref() == Some(sid),
+                None => &handle.owner == owner,
+            })
             .map(|handle| handle.view())
             .collect()
     }

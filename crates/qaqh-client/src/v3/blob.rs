@@ -11,10 +11,12 @@ use std::collections::HashMap;
 
 use qaqh_core_vocab::ContentHash;
 use qaqh_ringing_v3::{BlobChunkFrame, BlobTransferRole, StreamKind};
-use qaqh_v3_transport::{MuxError, MuxTransport, read_frame};
+use qaqh_v3_transport::{FrameIoError, MuxError, MuxTransport, read_frame};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncRead;
 use tokio::sync::{mpsc, watch};
+
+use super::ClientError;
 
 /// 接收端单条 blob 上限（128 MiB，防恶意服务端或损坏帧拖垮客户端内存）。
 pub const MAX_ASSEMBLED_BLOB_BYTES: usize = 128 * 1024 * 1024;
@@ -96,42 +98,39 @@ pub(crate) async fn accept_pushes<B: MuxTransport>(
     }
 }
 
-/// 从单条流读出、组装并校验 `sha256`（独立函数便于单测）。
-async fn receive_pushed_blob<R: AsyncRead + Unpin>(stream: &mut R) -> Option<AssembledBlob> {
-    let Ok(StreamKind::BlobTransfer {
-        role: BlobTransferRole::ServerPush,
-    }) = read_frame::<_, StreamKind>(stream).await
-    else {
-        log::warn!("v3-client: 服务端推来了一条非 ServerPush BlobTransfer 流，已忽略");
-        return None;
-    };
+/// 从单条流读出、组装并校验 `sha256`（`ServerPush` 与 `ClientFetch` 共用）。
+async fn read_and_verify_chunks<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    pinned_hash: Option<ContentHash>,
+) -> Result<AssembledBlob, ClientError> {
     let mut bytes: Vec<u8> = Vec::new();
-    let mut hash: Option<ContentHash> = None;
+    let mut hash = pinned_hash;
     let mut chunks = 0u32;
     loop {
         let frame: BlobChunkFrame = match read_frame(stream).await {
             Ok(frame) => frame,
-            Err(error) => {
-                log::warn!("v3-client: blob 流中断（{error}），丢弃半截内容");
-                return None;
-            }
+            Err(FrameIoError::Eof) => return Err(ClientError::StreamRejected),
+            Err(error) => return Err(ClientError::Frame(error)),
         };
         if frame.offset != bytes.len() as u64 {
-            log::warn!(
-                "v3-client: blob 分片偏移断裂（期望 {}，收到 {}），丢弃该 blob",
+            return Err(ClientError::Protocol(format!(
+                "blob 分片偏移断裂（期望 {}，收到 {}）",
                 bytes.len(),
                 frame.offset
-            );
-            return None;
+            )));
         }
         if bytes.len().saturating_add(frame.bytes.len()) > MAX_ASSEMBLED_BLOB_BYTES {
-            log::warn!("v3-client: blob 超过单条接收上限 {MAX_ASSEMBLED_BLOB_BYTES}，丢弃");
-            return None;
+            return Err(ClientError::Protocol(format!(
+                "blob 超过单条接收上限 {MAX_ASSEMBLED_BLOB_BYTES}"
+            )));
         }
         if let Some(expected) = hash {
             if expected != frame.hash {
-                log::warn!("v3-client: 同一条 blob 流里出现两个 hash，丢弃");
-                return None;
+                return Err(ClientError::Protocol(format!(
+                    "blob 哈希不匹配：期望 `{}`，收到 `{}`",
+                    expected.to_hex(),
+                    frame.hash.to_hex()
+                )));
             }
         } else {
             hash = Some(frame.hash);
@@ -142,20 +141,53 @@ async fn receive_pushed_blob<R: AsyncRead + Unpin>(stream: &mut R) -> Option<Ass
             break;
         }
     }
-    let hash = hash?;
-    let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let Some(hash) = hash else {
+        return Err(ClientError::StreamRejected);
+    };
+    let (bytes, actual_digest) = tokio::task::spawn_blocking(move || {
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        (bytes, digest)
+    })
+    .await
+    .map_err(|error| ClientError::Protocol(format!("blob sha256 校验任务异常退出：{error}")))?;
     if actual_digest != *hash.as_bytes() {
-        log::warn!(
-            "v3-client: blob `{}` sha256 校验失败（内容篡改或损坏），丢弃",
+        return Err(ClientError::Protocol(format!(
+            "blob `{}` sha256 校验失败（内容篡改或损坏）",
             hash.to_hex()
-        );
-        return None;
+        )));
     }
-    Some(AssembledBlob {
+    Ok(AssembledBlob {
         hash,
         bytes,
         chunks,
     })
+}
+
+/// 读取并校验一条客户端主动 `ClientFetch` 响应流。
+pub(crate) async fn receive_fetched_blob<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    expected_hash: ContentHash,
+) -> Result<bytes::Bytes, ClientError> {
+    let assembled = read_and_verify_chunks(stream, Some(expected_hash)).await?;
+    Ok(bytes::Bytes::from(assembled.bytes))
+}
+
+/// 从单条流读出、组装并校验服务端主动 `ServerPush` 流（独立函数便于单测）。
+async fn receive_pushed_blob<R: AsyncRead + Unpin>(stream: &mut R) -> Option<AssembledBlob> {
+    let Ok(StreamKind::BlobTransfer {
+        role: BlobTransferRole::ServerPush,
+    }) = read_frame::<_, StreamKind>(stream).await
+    else {
+        log::warn!("v3-client: 服务端推来了一条非 ServerPush BlobTransfer 流，已忽略");
+        return None;
+    };
+    match read_and_verify_chunks(stream, None).await {
+        Ok(blob) => Some(blob),
+        Err(error) => {
+            log::warn!("v3-client: blob 接收校验失败（{error}），丢弃");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -236,5 +268,61 @@ mod tests {
             receive_pushed_blob(&mut client).await.is_none(),
             "sha256 不匹配的 blob 必须被拒绝"
         );
+    }
+
+    #[tokio::test]
+    async fn fetched_blob_verifies_hash_and_rejects_mismatch() {
+        let payload = b"client fetched payload bytes".to_vec();
+        let digest: [u8; 32] = Sha256::digest(&payload).into();
+        let hash = ContentHash::from_bytes(digest);
+
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        write_frame(
+            &mut server,
+            &BlobChunkFrame {
+                meta: FrameMeta {
+                    seq: 1,
+                    server_ts_ms: 1,
+                    delivery: DeliveryClass::Reliable,
+                },
+                hash,
+                offset: 0,
+                bytes: Bytes::from(payload.clone()),
+                last: true,
+            },
+        )
+        .await
+        .expect("chunk");
+        drop(server);
+        let fetched = receive_fetched_blob(&mut client, hash)
+            .await
+            .expect("hash 对齐的 ClientFetch 必须通过");
+        assert_eq!(fetched.as_ref(), payload.as_slice());
+
+        // 篡改后即使 hash 字段仍声明正确，也必须 Fail-Closed 拒绝。
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let mut bad = payload;
+        bad[0] ^= 0xFF;
+        write_frame(
+            &mut server,
+            &BlobChunkFrame {
+                meta: FrameMeta {
+                    seq: 1,
+                    server_ts_ms: 1,
+                    delivery: DeliveryClass::Reliable,
+                },
+                hash,
+                offset: 0,
+                bytes: Bytes::from(bad),
+                last: true,
+            },
+        )
+        .await
+        .expect("chunk");
+        drop(server);
+        let err = receive_fetched_blob(&mut client, hash)
+            .await
+            .expect_err("sha256 不匹配必须 Fail-Closed 报错");
+        assert!(matches!(err, ClientError::Protocol(_)));
     }
 }

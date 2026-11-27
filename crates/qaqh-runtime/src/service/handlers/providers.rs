@@ -94,6 +94,33 @@ fn refresh_config(service: &QaqhService, revision: u64) -> QaqhResult<()> {
 }
 
 impl QaqhService {
+    /// 会话实时工具目录：模型能力从权威 provider 目录解析，工具视图来自
+    /// 该会话自己的 `WorkspaceToolPort`，不重建第二份注册表。
+    pub fn session_tool_catalog(
+        &self,
+        session_id: &str,
+    ) -> QaqhResult<qaqh_core_vocab::ToolCatalog> {
+        let meta = self
+            .session_meta(session_id)
+            .ok_or_else(|| QaqhError::not_found(format!("session {session_id} not found")))?;
+        let store = load_catalog()?;
+        let selection = meta
+            .model_selection
+            .or_else(|| store.document().default_model_selection.clone())
+            .ok_or_else(|| QaqhError::invalid("请先在电脑端设置默认服务商和模型"))?;
+        let effective = qaqh_profile::resolve_model_selection(store.document(), &selection)
+            .map_err(QaqhError::message)?;
+        let mode = match meta.tool_mode.as_str() {
+            "minimal" | "minimal:b" | "minimal:c" => qaqh_core_vocab::ToolMode::Core,
+            "custom" => qaqh_core_vocab::ToolMode::Custom,
+            _ => qaqh_core_vocab::ToolMode::Standard,
+        };
+        self.resume_session(session_id)?;
+        self.registry()?
+            .tool_catalog(session_id, mode, &effective.capabilities)
+            .map_err(QaqhError::message)
+    }
+
     /// 目录全量读（脱敏：api_key 只含 "set" 标记，无明文）。
     pub fn provider_catalog(&self) -> QaqhResult<Value> {
         let store = load_catalog()?;

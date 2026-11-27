@@ -15,17 +15,24 @@ use std::fmt::Debug;
 
 use bytes::Bytes;
 use qaqh_core_vocab::{
-    ActivityState, BlockId, ContentHash, ContentRef, ExecSessionId, InputId, InteractionId,
-    JsonText, SessionId, ToolCallId, ToolCatalog, ToolMode, TurnId, TurnTerminal, UsageInfo,
+    ActivityState, BlockId, ContentHash, ContentRef, ExecSessionId, GoalStatus, InputId,
+    InteractionId, JsonText, ModelSelection, ModelSelectionOptions, PermissionGrantScope,
+    SessionId, SettingOverride, ToolCallId, ToolCatalog, ToolMode, TurnId, TurnPhase,
+    TurnTerminal, UsageInfo, WorkspaceId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crate::account::*;
+use crate::config::*;
 use crate::control::*;
 use crate::endpoint::*;
 use crate::frame::{FrameError, decode_frame, encode_frame};
 use crate::handshake::*;
+use crate::session::*;
 use crate::stream::*;
+use crate::team::*;
+use crate::workspace::*;
 use crate::{
     DAEMON_ENDPOINT_FILE, MAX_FRAME_BYTES, PROTOCOL_FINGERPRINT, PROTOCOL_REV, RINGING_V3_ALPN,
 };
@@ -89,7 +96,22 @@ fn core_vocab_primitives_round_trip() {
     round_trip(InputId::new("IN-1").expect("valid"));
     round_trip(InteractionId::new("INT-1").expect("valid"));
     round_trip(ExecSessionId::new("execs_01A").expect("valid"));
+    round_trip(WorkspaceId::new("WS-1").expect("valid"));
     round_trip(content_hash());
+    round_trip(PermissionGrantScope::Session);
+    round_trip(GoalStatus::BudgetLimited);
+    round_trip(TurnPhase::WaitingUser);
+    round_trip(ModelSelection {
+        provider_id: "deepseek".into(),
+        model_id: "deepseek-chat".into(),
+        options: ModelSelectionOptions {
+            max_output_tokens: Some(4096),
+            reasoning_effort: None,
+            native_web_search: Some(true),
+        },
+    });
+    round_trip(SettingOverride::<u32>::Inherit);
+    round_trip(SettingOverride::Use(42u32));
     round_trip(TurnTerminal::Completed);
     round_trip(TurnTerminal::Failed {
         code: "exit_nonzero".into(),
@@ -133,6 +155,11 @@ fn option_and_vec_positions_never_drift() {
     let some_variant = SessionSnapshot {
         session_id: session_id(),
         title: Some("标题".into()),
+        workspace_id: None,
+        cwd: None,
+        archived: false,
+        settings_revision: 1,
+        model_selection: None,
         activity: ActivityState::Running,
         timeline_epoch: 3,
         seq: 42,
@@ -141,6 +168,8 @@ fn option_and_vec_positions_never_drift() {
         tool_calls: vec![],
         pending_interactions: vec![],
         exec_sessions: vec![],
+        subagents: vec![],
+        goal: None,
         driver_client_instance_id: None,
         driver_ordinal: 0,
         pinned_compaction: None,
@@ -149,6 +178,15 @@ fn option_and_vec_positions_never_drift() {
     let multi_variant = SessionSnapshot {
         session_id: session_id(),
         title: None,
+        workspace_id: Some(WorkspaceId::new("WS-1").expect("valid")),
+        cwd: Some("/work".into()),
+        archived: true,
+        settings_revision: 9,
+        model_selection: Some(ModelSelection {
+            provider_id: "openai".into(),
+            model_id: "gpt-5".into(),
+            options: ModelSelectionOptions::default(),
+        }),
         activity: ActivityState::Idle,
         timeline_epoch: 4,
         seq: 43,
@@ -182,9 +220,16 @@ fn option_and_vec_positions_never_drift() {
         pending_interactions: vec![InteractionView {
             interaction_id: InteractionId::new("INT-9").expect("valid"),
             kind: InteractionKind::Ask,
+            tool_call_id: None,
             title: "选择".into(),
             body: "确认？".into(),
             options: vec!["A".into(), "B".into()],
+            questions: vec![AskQuestionView {
+                id: "q1".into(),
+                prompt: "继续吗？".into(),
+                options: vec!["A".into(), "B".into()],
+                allow_free_text: true,
+            }],
             expires_at_ms: Some(99),
         }],
         exec_sessions: vec![ExecSessionSnapshot {
@@ -196,6 +241,23 @@ fn option_and_vec_positions_never_drift() {
             next_offset: 3,
             output: Some(ContentRef::Inline { text: "hi\n".into() }),
         }],
+        subagents: vec![SubagentSummary {
+            session_id: session_id(),
+            nickname: Some("研究员".into()),
+            status: TeamAgentStatus::Running,
+            residency: TeamAgentResidency::Loaded,
+        }],
+        goal: Some(GoalView {
+            goal_id: "g1".into(),
+            session_id: session_id(),
+            objective: "完成验证".into(),
+            status: GoalStatus::Active,
+            token_budget: Some(100_000),
+            tokens_used: 1200,
+            time_used_ms: 5000,
+            created_at_ms: 1,
+            updated_at_ms: 2,
+        }),
         driver_client_instance_id: Some("desktop-1".into()),
         driver_ordinal: 2,
         pinned_compaction: Some(CompactionSummary {
@@ -215,20 +277,77 @@ fn option_and_vec_positions_never_drift() {
 
 #[test]
 fn every_session_dto_round_trips() {
+    let summary = SessionSummary {
+        session_id: session_id(),
+        title: Some("新会话".into()),
+        workspace_id: None,
+        cwd: Some("/tmp".into()),
+        archived: false,
+        model_selection: None,
+        tool_mode: ToolMode::Standard,
+        settings_revision: 3,
+        handoff_from: None,
+        activity: ActivityState::Idle,
+        updated_at_ms: 8,
+    };
     round_trip(SessionRequest::Create {
         title: Some("新会话".into()),
         cwd: None,
-        tool_mode: Some(ToolMode::Core),
+        tool_mode: Some(ToolMode::Custom),
+        model_selection: Some(ModelSelection::default()),
+        custom_tools: Some(vec!["read_file".into()]),
+        handoff_from: Some(session_id()),
     });
     round_trip(SessionRequest::GetSessionSnapshot {
         session_id: session_id(),
         tail_blocks: 200,
         tail_turns: 32,
     });
-    round_trip(SessionRequest::List);
+    round_trip(SessionRequest::List {
+        include_archived: true,
+    });
     round_trip(SessionRequest::Rename {
         session_id: session_id(),
         title: "新标题".into(),
+    });
+    round_trip(SessionRequest::Archive {
+        session_id: session_id(),
+    });
+    round_trip(SessionRequest::Unarchive {
+        session_id: session_id(),
+    });
+    round_trip(SessionRequest::PatchSettings {
+        session_id: session_id(),
+        patch: SessionSettingsPatch {
+            model_selection: Some(SettingOverride::Inherit),
+            tools: Some(ToolsSettingPatch::Custom {
+                tools: vec!["bash".into()],
+            }),
+            team_mode: Some(true),
+        },
+        expected_revision: 3,
+    });
+    round_trip(SessionRequest::Truncate {
+        session_id: session_id(),
+        turn_id: TurnId::new("T1").expect("valid"),
+    });
+    round_trip(SessionRequest::SetGoal {
+        session_id: session_id(),
+        objective: "目标".into(),
+        status: Some(GoalStatus::Active),
+        token_budget: None,
+    });
+    round_trip(SessionRequest::ClearGoal {
+        session_id: session_id(),
+    });
+    round_trip(SessionRequest::GetTodos {
+        session_id: session_id(),
+    });
+    round_trip(SessionRequest::GetTeam {
+        session_id: session_id(),
+    });
+    round_trip(SessionRequest::GetSkillsCatalog {
+        cwd: Some("/tmp".into()),
     });
     round_trip(SessionRequest::Delete {
         session_id: session_id(),
@@ -245,18 +364,64 @@ fn every_session_dto_round_trips() {
         session_id: session_id(),
         target_client_instance_id: None,
     });
-    round_trip(SessionResponse::Created(SessionSummary {
-        session_id: session_id(),
-        title: Some("新会话".into()),
-        activity: ActivityState::Idle,
-        updated_at_ms: 8,
-    }));
+    round_trip(SessionResponse::Created(summary.clone()));
+    round_trip(SessionResponse::Summary(summary));
     round_trip(SessionResponse::Sessions(vec![SessionSummary {
         session_id: session_id(),
         title: None,
+        workspace_id: Some(WorkspaceId::new("WS-1").expect("valid")),
+        cwd: None,
+        archived: true,
+        model_selection: None,
+        tool_mode: ToolMode::Core,
+        settings_revision: 0,
+        handoff_from: Some(session_id()),
         activity: ActivityState::Idle,
         updated_at_ms: 7,
     }]));
+    round_trip(SessionResponse::Todos(TodoListSnapshot {
+        items: vec![TodoItemView {
+            id: "t1".into(),
+            title: "do".into(),
+            description: "desc".into(),
+            status: "pending".into(),
+            evidence: None,
+        }],
+        current_id: Some("t1".into()),
+        counts: TodoCountsView {
+            pending: 1,
+            in_progress: 0,
+            completed: 0,
+            cancelled: 0,
+            total: 1,
+        },
+    }));
+    round_trip(SessionResponse::Team(Box::new(TeamOverview {
+        session_id: session_id(),
+        team: TeamSnapshot {
+            root_session_id: Some(session_id()),
+            agents: vec![],
+            unread_messages: vec![],
+            revision: 1,
+            last_fact_seq: 2,
+        },
+        tasks: TaskBoardSnapshot {
+            team_id: Some("team-1".into()),
+            revision: 1,
+            last_fact_seq: 2,
+            tasks: vec![],
+        },
+    })));
+    round_trip(SessionResponse::Skills(SkillsCatalogView {
+        skills: vec![SkillCatalogEntry {
+            name: "s1".into(),
+            description: "d".into(),
+            scope: "project".into(),
+            origin: "workspace".into(),
+            path: "skills/s1/SKILL.md".into(),
+        }],
+        diagnostics: vec![],
+    }));
     round_trip(SessionResponse::Page(Box::new(TranscriptPage {
         blocks: vec![],
         tool_calls: vec![],
@@ -264,6 +429,30 @@ fn every_session_dto_round_trips() {
         timeline_epoch: 1,
     })));
     round_trip(SessionResponse::Ack);
+
+    round_trip(WorkspaceRequest::List);
+    round_trip(WorkspaceRequest::Create {
+        path: "/work".into(),
+    });
+    round_trip(WorkspaceRequest::Rename {
+        workspace_id: WorkspaceId::new("WS-1").expect("valid"),
+        title: "主项目".into(),
+    });
+    round_trip(WorkspaceRequest::Delete {
+        workspace_id: WorkspaceId::new("WS-1").expect("valid"),
+    });
+    round_trip(WorkspaceRequest::MoveSession {
+        session_id: session_id(),
+        workspace_id: WorkspaceId::new("WS-1").expect("valid"),
+    });
+    round_trip(WorkspaceResponse::Created(WorkspaceEntry {
+        id: WorkspaceId::new("WS-1").expect("valid"),
+        path: "/work".into(),
+        title: "主项目".into(),
+        order: 1,
+        session_ids: vec![session_id()],
+        missing_dir: false,
+    }));
 }
 
 #[test]
@@ -293,6 +482,13 @@ fn system_and_command_domains_round_trip() {
     });
     round_trip(CommandRequest::RespondInteraction {
         session_id: session_id(),
+        interaction_id: InteractionId::new("INT-0").expect("valid"),
+        resolution: CommandInteractionResolution::Approve {
+            scope: PermissionGrantScope::Persistent,
+        },
+    });
+    round_trip(CommandRequest::RespondInteraction {
+        session_id: session_id(),
         interaction_id: InteractionId::new("INT-1").expect("valid"),
         resolution: CommandInteractionResolution::Reject {
             text: "no".into(),
@@ -302,8 +498,22 @@ fn system_and_command_domains_round_trip() {
         session_id: session_id(),
         interaction_id: InteractionId::new("INT-2").expect("valid"),
         resolution: CommandInteractionResolution::Answer {
-            text: "选 B".into(),
+            answers: vec![AskAnswer {
+                question_id: "q1".into(),
+                answer: "选 B".into(),
+            }],
         },
+    });
+    round_trip(CommandRequest::RespondInteraction {
+        session_id: session_id(),
+        interaction_id: InteractionId::new("INT-3").expect("valid"),
+        resolution: CommandInteractionResolution::Dismiss,
+    });
+    round_trip(CommandRequest::ExecInterrupt {
+        exec_session_id: ExecSessionId::new("execs_01").expect("valid"),
+    });
+    round_trip(CommandRequest::ExecTerminate {
+        exec_session_id: ExecSessionId::new("execs_01").expect("valid"),
     });
     round_trip(CommandResponse::Accepted {
         input_id: InputId::new("IN-1").expect("valid"),
@@ -315,10 +525,18 @@ fn system_and_command_domains_round_trip() {
 #[test]
 fn shell_marketplace_config_domains_round_trip() {
     round_trip(ShellRequest::Open {
-        session_id: session_id(),
+        session_id: Some(session_id()),
         cols: 120,
         rows: 40,
         cwd: Some("/tmp".into()),
+        shell: None,
+    });
+    round_trip(ShellRequest::Open {
+        session_id: None,
+        cols: 80,
+        rows: 24,
+        cwd: None,
+        shell: Some("/bin/bash".into()),
     });
     round_trip(ShellRequest::Write {
         shell_id: "sh1".into(),
@@ -329,11 +547,14 @@ fn shell_marketplace_config_domains_round_trip() {
         cols: 80,
         rows: 24,
     });
-    round_trip(ShellRequest::List {
-        session_id: session_id(),
-    });
+    round_trip(ShellRequest::List { session_id: None });
     round_trip(ShellResponse::Opened(ShellView {
         shell_id: "sh1".into(),
+        pid: 4242,
+        shell: "bash".into(),
+        cwd: "/tmp".into(),
+        cols: 120,
+        rows: 40,
         output_offset: 1024,
         exited: false,
     }));
@@ -358,10 +579,32 @@ fn shell_marketplace_config_domains_round_trip() {
         section: ConfigSection::Ui,
         value: JsonText::new("[]"),
     });
+    round_trip(ConfigRequest::LoadFull);
+    round_trip(ConfigRequest::PatchFull {
+        patch: JsonText::new("{}"),
+    });
+    round_trip(ConfigRequest::ListProviders);
+    round_trip(ConfigRequest::ListProviderPresets);
+    round_trip(ConfigRequest::SetDefaultModel {
+        selection: ModelSelection::default(),
+        expected_revision: 5,
+    });
+    round_trip(ConfigRequest::ReloadAgents);
     round_trip(ConfigResponse::Value {
         section: ConfigSection::Sandbox,
         value: JsonText::new("{}"),
     });
+    round_trip(ConfigResponse::Providers {
+        raw: JsonText::new("{}"),
+        revision: 5,
+    });
+    round_trip(ConfigResponse::ProviderPresets(vec![ProviderPresetView {
+        id: "deepseek".into(),
+        name: "DeepSeek".into(),
+        base_url: "https://api.deepseek.com".into(),
+        wire: "responses".into(),
+        credential: "deepseek_account".into(),
+    }]));
     round_trip(ConfigResponse::Reloaded);
 }
 
@@ -370,12 +613,56 @@ fn account_pairing_gitx_fs_catalog_domains_round_trip() {
     round_trip(AccountRequest::Select {
         account_id: "a1".into(),
     });
+    round_trip(AccountRequest::SiwcStatus);
+    round_trip(AccountRequest::SiwcSignInPoll {
+        flow_id: "f1".into(),
+    });
+    round_trip(AccountRequest::DsSignInStart { locale: "zh".into() });
+    round_trip(AccountRequest::DsAckBonus {
+        order_id: "o1".into(),
+    });
     round_trip(AccountResponse::Current(None));
     round_trip(AccountResponse::Accounts(vec![AccountView {
         account_id: "a1".into(),
         provider: "p".into(),
         label: "L".into(),
         current: true,
+    }]));
+    round_trip(AccountResponse::SiwcStatus(SiwcStatusView {
+        status: SiwcConnectionState::Connected,
+        sharing: true,
+        profiles: 1,
+        usage_url: "https://example.com".into(),
+        api_base: "https://api.example.com".into(),
+        profile_id: Some("p1".into()),
+        label: Some("主号".into()),
+        email: None,
+        name: None,
+        error: None,
+    }));
+    round_trip(AccountResponse::DsStatus(DsAccountStatusView {
+        signed_in: false,
+        account: None,
+        storage_error: None,
+        inference_origin: "https://api.deepseek.com".into(),
+        usage_url: "https://platform.deepseek.com/usage".into(),
+        top_up_url: "https://platform.deepseek.com/top_up".into(),
+        flow: DsAccountFlowView {
+            attempt_id: None,
+            state: DsFlowState::Idle,
+            authorize_url: None,
+            expires_at_ms: 0,
+            error: None,
+        },
+        revoke: DsRevokeOutcomeView {
+            state: "idle".into(),
+            attempts: 0,
+            message: None,
+        },
+    }));
+    round_trip(AccountResponse::DsModels(vec![DsAccountModelView {
+        id: Some("deepseek-chat".into()),
+        raw: JsonText::new("{\"id\":\"deepseek-chat\"}"),
     }]));
     round_trip(PairingRequest::CreateInvite { ttl_ms: 60_000 });
     round_trip(PairingRequest::Redeem {
@@ -459,6 +746,7 @@ fn stream_frames_and_events_round_trip() {
     });
     round_trip(StreamKind::BlobTransfer {
         role: BlobTransferRole::ClientUpload {
+            session_id: session_id(),
             hash: content_hash(),
             len: 512,
         },
@@ -495,11 +783,22 @@ fn stream_frames_and_events_round_trip() {
             turn_id: TurnId::new("T1").expect("valid"),
             started_at_ms: 1,
         },
+        SessionEvent::TurnPhaseChanged {
+            session_id: session_id(),
+            turn_id: TurnId::new("T1").expect("valid"),
+            phase: TurnPhase::Running,
+        },
         SessionEvent::TurnFinished {
             session_id: session_id(),
             turn_id: TurnId::new("T1").expect("valid"),
             terminal: TurnTerminal::Completed,
             usage: UsageInfo::default(),
+        },
+        SessionEvent::ProviderRetrying {
+            session_id: session_id(),
+            attempt: 2,
+            delay_ms: 500,
+            reason: "rate_limit".into(),
         },
         SessionEvent::AnswerDelta {
             session_id: session_id(),
@@ -516,6 +815,21 @@ fn stream_frames_and_events_round_trip() {
             block_id: BlockId::new("B1").expect("valid"),
             content: ContentRef::Inline { text: "z".into() },
         },
+        SessionEvent::TimelineAppended {
+            session_id: session_id(),
+            block: BlockView {
+                ord: 1,
+                kind: BlockKind::Answer,
+                content: ContentRef::Inline { text: "z".into() },
+                tool_call_id: None,
+                created_at_ms: 9,
+            },
+        },
+        SessionEvent::TimelineTruncated {
+            session_id: session_id(),
+            from_turn_id: TurnId::new("T1").expect("valid"),
+            timeline_epoch: 5,
+        },
         SessionEvent::ToolCallUpdated {
             session_id: session_id(),
             call: ToolCallView {
@@ -527,21 +841,35 @@ fn stream_frames_and_events_round_trip() {
                 summary: None,
             },
         },
+        SessionEvent::ToolArgumentsDelta {
+            session_id: session_id(),
+            tool_call_id: ToolCallId::new("C1").expect("valid"),
+            delta: "{\"path\":".into(),
+        },
+        SessionEvent::ToolOutputDelta {
+            session_id: session_id(),
+            tool_call_id: ToolCallId::new("C1").expect("valid"),
+            text: "ok\n".into(),
+        },
         SessionEvent::InteractionRequested {
             session_id: session_id(),
             interaction: InteractionView {
                 interaction_id: InteractionId::new("I1").expect("valid"),
                 kind: InteractionKind::Permission,
+                tool_call_id: Some(ToolCallId::new("C1").expect("valid")),
                 title: "t".into(),
                 body: "b".into(),
                 options: vec!["允许".into(), "拒绝".into()],
+                questions: vec![],
                 expires_at_ms: None,
             },
         },
         SessionEvent::InteractionResolved {
             session_id: session_id(),
             interaction_id: InteractionId::new("I1").expect("valid"),
-            resolution: InteractionResolution::Approved,
+            resolution: InteractionResolution::Approved {
+                scope: PermissionGrantScope::Once,
+            },
         },
         SessionEvent::ExecSessionUpdated {
             session_id: session_id(),
@@ -574,6 +902,34 @@ fn stream_frames_and_events_round_trip() {
         },
         SessionEvent::CatalogChanged {
             session_id: session_id(),
+        },
+        SessionEvent::SessionMetaChanged {
+            session_id: session_id(),
+            title: Some("新标题".into()),
+        },
+        SessionEvent::SubagentUpdated {
+            session_id: session_id(),
+            subagent: SubagentSummary {
+                session_id: session_id(),
+                nickname: Some("同事".into()),
+                status: TeamAgentStatus::Idle,
+                residency: TeamAgentResidency::Loaded,
+            },
+        },
+        SessionEvent::GoalUpdated {
+            session_id: session_id(),
+            goal: None,
+        },
+        SessionEvent::HandoffSealed {
+            session_id: session_id(),
+            successor_session_id: session_id(),
+            summary: ContentRef::Inline {
+                text: "交接".into(),
+            },
+        },
+        SessionEvent::PromptBlocked {
+            session_id: session_id(),
+            reason: "busy".into(),
         },
         SessionEvent::SessionRemoved {
             session_id: session_id(),

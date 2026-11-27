@@ -26,14 +26,15 @@
 mod blob_store;
 mod bus;
 mod connection;
-mod endpoint;
-mod error;
-mod facade;
-mod identity;
+pub(crate) mod endpoint;
+pub(crate) mod error;
+pub(crate) mod facade;
+pub(crate) mod identity;
 mod receipts;
-mod session_runtime;
-mod shell_table;
-mod state;
+pub(crate) mod session_runtime;
+pub(crate) mod shell_table;
+pub(crate) mod state;
+pub(crate) mod streams;
 mod util;
 
 #[cfg(test)]
@@ -63,11 +64,7 @@ pub(crate) struct V3Server<T: MuxTransport, B: V3Backend = SkeletonBackend> {
 impl<T: MuxTransport> V3Server<T, SkeletonBackend> {
     /// 以新状态构造（`os_user` 是本地 IPC 的授权依据）。
     #[allow(dead_code)]
-    pub(crate) fn new(
-        transport: T,
-        config: ServerConfig,
-        os_user: impl Into<String>,
-    ) -> Arc<Self> {
+    pub(crate) fn new(transport: T, config: ServerConfig, os_user: impl Into<String>) -> Arc<Self> {
         Self::with_state(transport, ServerState::new(config, os_user))
     }
 
@@ -83,6 +80,14 @@ impl<T: MuxTransport> V3Server<T, SkeletonBackend> {
 }
 
 impl<T: MuxTransport, B: V3Backend> V3Server<T, B> {
+    pub(crate) fn with_backend(transport: T, state: Arc<ServerState>, backend: B) -> Arc<Self> {
+        Arc::new(Self {
+            transport,
+            state,
+            backend,
+        })
+    }
+
     /// 控制面唯一分派入口：**十一域全覆盖，编译期静态分派**。
     pub(crate) async fn dispatch(
         &self,
@@ -145,6 +150,11 @@ impl<T: MuxTransport, B: V3Backend> V3Server<T, B> {
                 .handle_catalog(context, request)
                 .await
                 .map(ControlResponse::ToolCatalog),
+            ControlRequest::Workspace(request) => self
+                .backend
+                .handle_workspace(context, request)
+                .await
+                .map(ControlResponse::Workspace),
         };
         match outcome {
             Ok(response) => response,

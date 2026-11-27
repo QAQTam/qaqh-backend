@@ -1,6 +1,6 @@
 //! Credential-free SIWC service projections; field names follow the existing wire.
 
-use crate::{ProfileStatus, SiwcCode};
+pub use crate::{ProfileStatus, SiwcCode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

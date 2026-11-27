@@ -2057,8 +2057,6 @@ pub fn session_content_owners(
     rows.collect()
 }
 
-
-
 /// ADR-0033:AgentTeam 根开关(sessions.team_mode)。仅根会话可置位,
 /// 后代继承存活根的模式——写入只经本函数,读取用 session_team_mode。
 pub fn set_session_team_mode(
@@ -2175,7 +2173,7 @@ mod fork_tests {
     #[test]
     fn handoff_successor_gate_closes_once_a_successor_exists() {
         let mut conn = Connection::open_in_memory().expect("open");
-        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("schema");
+        crate::db::schema::initialize(&mut conn).expect("schema");
         new_session(&mut conn, "root", None);
         mark_handoff_sealed(&mut conn, "root").unwrap();
 
@@ -2217,7 +2215,7 @@ mod fork_tests {
     #[test]
     fn recent_handoff_calls_reads_newest_first_including_running() {
         let mut conn = Connection::open_in_memory().expect("open");
-        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("schema");
+        crate::db::schema::initialize(&mut conn).expect("schema");
         new_session(&mut conn, "s", None);
         handoff_call(
             &mut conn,
@@ -2283,7 +2281,7 @@ mod fork_tests {
     #[test]
     fn fork_seeds_completed_prefix_losslessly_and_rewrites_ids() {
         let mut conn = Connection::open_in_memory().expect("open");
-        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("schema");
+        crate::db::schema::initialize(&mut conn).expect("schema");
         new_session(&mut conn, "parent", None);
         new_session(&mut conn, "child", Some("parent"));
 
@@ -2455,7 +2453,7 @@ mod fork_tests {
         // 空前缀：在飞回合开头的会话 fork 出 0 回合。
         new_session(&mut conn, "child2", Some("parent"));
         let mut conn2 = Connection::open_in_memory().expect("open2");
-        crate::db::schema::initialize(&mut conn2, &crate::db::schema::empty_data_dir()).expect("schema2");
+        crate::db::schema::initialize(&mut conn2).expect("schema2");
         new_session(&mut conn2, "p2", None);
         new_session(&mut conn2, "c2", Some("p2"));
         start_turn(&mut conn2, "turn_x", "p2", None).unwrap();

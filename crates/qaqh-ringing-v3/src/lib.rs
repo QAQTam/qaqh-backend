@@ -36,11 +36,16 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![deny(missing_docs)]
 
+pub mod account;
+pub mod config;
 pub mod control;
 pub mod endpoint;
 pub mod frame;
 pub mod handshake;
+pub mod session;
 pub mod stream;
+pub mod team;
+pub mod workspace;
 
 include!(concat!(env!("OUT_DIR"), "/contract.rs"));
 
@@ -60,8 +65,13 @@ pub const DAEMON_ENDPOINT_FILE: &str = "daemon.endpoint";
 /// [`frame::FrameError::TooLarge`]（Fail-Closed，不截断、不静默丢弃）。
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
+pub use account::*;
+pub use config::*;
 pub use control::*;
 pub use endpoint::*;
 pub use frame::*;
 pub use handshake::*;
+pub use session::*;
 pub use stream::*;
+pub use team::*;
+pub use workspace::*;

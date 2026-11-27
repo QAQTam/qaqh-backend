@@ -75,7 +75,10 @@ mod smoke {
             .await
             .expect_err("骨架期必须如实拒绝");
         assert_eq!(error.code, qaqh_ringing_v3::ErrorCode::Unavailable);
-        assert!(!error.retryable, "能力缺失不可重试（重试只会得到同一个答案）");
+        assert!(
+            !error.retryable,
+            "能力缺失不可重试（重试只会得到同一个答案）"
+        );
     }
 
     #[tokio::test]

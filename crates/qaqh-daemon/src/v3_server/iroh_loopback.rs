@@ -11,7 +11,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use iroh::Endpoint;
-use iroh::endpoint::{Connection, ConnectionError, RecvStream, SendStream, VarInt, presets};
+use iroh::endpoint::{
+    Connection, ConnectionError, QuicTransportConfig, RecvStream, SendStream, VarInt, presets,
+};
 use qaqh_ringing_v3::RINGING_V3_ALPN;
 use qaqh_v3_transport::{MuxError, MuxTransport};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -74,13 +76,15 @@ impl Drop for IrohLifetime {
 #[derive(Clone)]
 pub(crate) struct IrohTransport {
     conn: Connection,
+    is_server: bool,
     _lifetime: Arc<IrohLifetime>,
 }
 
 impl IrohTransport {
-    fn new(conn: Connection, endpoint: Endpoint) -> Self {
+    fn new(conn: Connection, endpoint: Endpoint, is_server: bool) -> Self {
         Self {
             conn: conn.clone(),
+            is_server,
             _lifetime: Arc::new(IrohLifetime {
                 conn,
                 endpoint: Some(endpoint),
@@ -109,11 +113,14 @@ impl MuxTransport for IrohTransport {
 
     async fn open_bi(&self) -> Result<Self::BiStream, MuxError> {
         let (send, recv) = self.conn.open_bi().await.map_err(map_conn_error)?;
+        // Server-initiated bi-streams are background blob pushes; keep interactive client streams ahead.
+        let _ = send.set_priority(if self.is_server { -10 } else { 10 });
         Ok(IrohBiStream { send, recv })
     }
 
     async fn accept_bi(&self) -> Result<Self::BiStream, MuxError> {
         let (send, recv) = self.conn.accept_bi().await.map_err(map_conn_error)?;
+        let _ = send.set_priority(if self.is_server { 10 } else { -10 });
         Ok(IrohBiStream { send, recv })
     }
 
@@ -129,14 +136,21 @@ impl MuxTransport for IrohTransport {
 /// 在 `127.0.0.1:0` 建立一对已握手完毕的 `iroh` 回环连接 `(client, server)`。
 pub(crate) async fn iroh_loopback_pair() -> (IrohTransport, IrohTransport) {
     let loopback = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let transport_config = QuicTransportConfig::builder()
+        .stream_receive_window(VarInt::from_u32(128 * 1024))
+        .receive_window(VarInt::from_u32(512 * 1024))
+        .send_window(256 * 1024)
+        .build();
     let server_ep = Endpoint::builder(presets::Minimal)
         .alpns(vec![RINGING_V3_ALPN.to_vec()])
+        .transport_config(transport_config.clone())
         .bind_addr(loopback)
         .expect("server bind_addr")
         .bind()
         .await
         .expect("bind iroh server endpoint");
     let client_ep = Endpoint::builder(presets::Minimal)
+        .transport_config(transport_config)
         .bind_addr(loopback)
         .expect("client bind_addr")
         .bind()
@@ -154,7 +168,7 @@ pub(crate) async fn iroh_loopback_pair() -> (IrohTransport, IrohTransport) {
     let (client_conn_res, (server_ep, server_conn)) = tokio::join!(connect_fut, accept_fut);
     let client_conn = client_conn_res.expect("iroh loopback connect");
     (
-        IrohTransport::new(client_conn, client_ep),
-        IrohTransport::new(server_conn, server_ep),
+        IrohTransport::new(client_conn, client_ep, false),
+        IrohTransport::new(server_conn, server_ep, true),
     )
 }

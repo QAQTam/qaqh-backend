@@ -5,86 +5,12 @@
 
 use super::v2::{api_error_response, json_response};
 use super::*;
-use std::collections::HashMap;
-use std::time::Instant;
 
 use qaqh_ringing::{
     RINGING_V2_VERSION, RingingV2DeviceWire, RingingV2DevicesResponse, RingingV2PairRequest,
     RingingV2PairResponse, RingingV2PairTokenRequest, RingingV2PairTokenResponse,
 };
-use qaqh_ringing_runtime::{Scope, device_registry};
-
-/// 配对令牌 TTL（一次性）。
-const PAIRING_TOKEN_TTL_MS: u64 = 120_000;
-
-#[derive(Debug, Clone)]
-struct PairingGrant {
-    scope: Scope,
-    device_name: String,
-    platform: String,
-    expires_at: Instant,
-    consumed: bool,
-}
-
-/// 短寿配对令牌表（仅内存）。键 = `SHA256(pairing_token)` 摘要。
-#[derive(Debug, Default)]
-pub struct PairingTable {
-    grants: HashMap<String, PairingGrant>,
-}
-
-impl PairingTable {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn purge(&mut self) {
-        let now = Instant::now();
-        // 已消费且过期的直接丢；未消费的过期项保留到被消费时判 `pairing_expired`。
-        self.grants
-            .retain(|_, grant| grant.consumed || grant.expires_at > now);
-    }
-
-    fn issue(&mut self, scope: Scope, device_name: String, platform: String) -> String {
-        self.purge();
-        let token = format!(
-            "{}{}",
-            qaqh_ringing_contract::ulid::generate_ulid(),
-            qaqh_ringing_contract::ulid::generate_ulid()
-        );
-        let digest = device_registry::token_digest(&token);
-        self.grants.insert(
-            digest,
-            PairingGrant {
-                scope,
-                device_name,
-                platform,
-                expires_at: Instant::now() + Duration::from_millis(PAIRING_TOKEN_TTL_MS),
-                consumed: false,
-            },
-        );
-        token
-    }
-
-    /// 一次性消费。错误码区分 `pairing_used` / `pairing_expired` / `pairing_invalid`。
-    fn consume(&mut self, token: &str) -> Result<PairingGrant, &'static str> {
-        let digest = device_registry::token_digest(token);
-        let Some(grant) = self.grants.get(&digest).cloned() else {
-            self.purge();
-            return Err("pairing_invalid");
-        };
-        if grant.consumed {
-            return Err("pairing_used");
-        }
-        if grant.expires_at <= Instant::now() {
-            self.grants.remove(&digest);
-            return Err("pairing_expired");
-        }
-        if let Some(stored) = self.grants.get_mut(&digest) {
-            stored.consumed = true;
-        }
-        Ok(grant)
-    }
-}
+use qaqh_ringing_runtime::Scope;
 
 fn parse_scope(raw: &str) -> Option<Scope> {
     match raw {
@@ -133,16 +59,19 @@ pub(crate) async fn handle_pairing_tokens(
             "scope_grant must be one of view|interact|admin",
         );
     };
-    let token = state
-        .pairings
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .issue(scope, request.device_name, request.platform);
+    let (token, ttl_ms) = {
+        let mut pairings = state
+            .pairings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let token = pairings.issue(scope, request.device_name, request.platform);
+        (token, pairings.ttl_ms())
+    };
     json_response(
         StatusCode::OK,
         &RingingV2PairTokenResponse {
             pairing_token: token,
-            expires_in_ms: PAIRING_TOKEN_TTL_MS,
+            expires_in_ms: ttl_ms,
             tls_fp: state.tls_fingerprint.clone().unwrap_or_default(),
         },
     )

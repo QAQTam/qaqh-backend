@@ -36,8 +36,19 @@ impl SkeletonConfigAccount {
         context: &CallContext,
         request: ConfigRequest,
     ) -> Result<ConfigResponse, RpcError> {
-        if matches!(request, ConfigRequest::Set { .. } | ConfigRequest::Reload) {
-            context.identity.require_owner("Config::Set/Reload")?;
+        if matches!(
+            request,
+            ConfigRequest::Set { .. }
+                | ConfigRequest::Reload
+                | ConfigRequest::PatchFull { .. }
+                | ConfigRequest::UpsertProvider { .. }
+                | ConfigRequest::DeleteProvider { .. }
+                | ConfigRequest::UpsertProviderModel { .. }
+                | ConfigRequest::DeleteProviderModel { .. }
+                | ConfigRequest::SetDefaultModel { .. }
+                | ConfigRequest::ReloadAgents
+        ) {
+            context.identity.require_owner("Config::Write/Reload")?;
         }
         Err(not_wired(
             "Config 域在 v4.6 P3-4 只落地签名与拒绝语义；真实现随 v4.7 接 qaqh-config",
@@ -52,9 +63,17 @@ impl SkeletonConfigAccount {
     ) -> Result<AccountResponse, RpcError> {
         if matches!(
             request,
-            AccountRequest::Select { .. } | AccountRequest::Logout { .. }
+            AccountRequest::Select { .. }
+                | AccountRequest::Logout { .. }
+                | AccountRequest::SiwcSignInStart
+                | AccountRequest::SiwcSignInCancel { .. }
+                | AccountRequest::SiwcSignOut { .. }
+                | AccountRequest::DsSignInStart { .. }
+                | AccountRequest::DsSignInCancel { .. }
+                | AccountRequest::DsSignOut
+                | AccountRequest::DsAckBonus { .. }
         ) {
-            context.identity.require_owner("Account::Select/Logout")?;
+            context.identity.require_owner("Account::Mutate")?;
         }
         Err(not_wired(
             "Account 域在 v4.6 P3-4 只落地签名与拒绝语义；真实现随 v4.7 接 qaqh-dsaccount",
@@ -74,12 +93,7 @@ impl SkeletonConfigAccount {
                     .state
                     .sessions()
                     .iter()
-                    .flat_map(|session| {
-                        session
-                            .attached()
-                            .into_keys()
-                            .collect::<Vec<_>>()
-                    })
+                    .flat_map(|session| session.attached().into_keys().collect::<Vec<_>>())
                     .collect();
                 // 已吊销的设备不再出现在配对表里：吊销＝解绑，不是"打个标记还挂着"。
                 let devices = self
@@ -111,9 +125,11 @@ impl SkeletonConfigAccount {
                 Ok(PairingResponse::Revoked)
             }
             PairingRequest::CreateInvite { .. } | PairingRequest::Redeem { .. } => {
-                context.identity.require_owner("Pairing::CreateInvite/Redeem")?;
+                context
+                    .identity
+                    .require_owner("Pairing::CreateInvite/Redeem")?;
                 Err(not_wired(
-            "配对挑战-应答与令牌落盘随 v4.7 接线；本切片不发放假邀请码",
+                    "配对挑战-应答与令牌落盘随 v4.7 接线；本切片不发放假邀请码",
                 ))
             }
         }
@@ -130,9 +146,10 @@ mod smoke {
     async fn device_list_and_revoke_are_real() {
         let rig = test_support::rig();
         let context = test_support::owner_context(&rig);
+        let digest = qaqh_ringing_runtime::device_registry::token_digest("tablet");
         rig.state
             .identity
-            .register_device("tablet", "平板", Scope::Device);
+            .register_device_digest(&digest, "test-tablet", "平板", Scope::Device, 0);
         let listed = rig
             .backend
             .config_account
@@ -159,7 +176,15 @@ mod smoke {
             .await
             .expect("吊销");
         assert!(matches!(revoked, PairingResponse::Revoked));
-        assert!(rig.state.identity.is_revoked("tablet"));
+        assert!(
+            rig.state
+                .identity
+                .devices()
+                .into_iter()
+                .find(|device| device.device_id == tablet.device_id)
+                .expect("revoked device remains visible to owner")
+                .revoked
+        );
     }
 
     #[tokio::test]

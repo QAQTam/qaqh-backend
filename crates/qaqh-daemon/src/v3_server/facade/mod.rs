@@ -16,10 +16,10 @@ use qaqh_ringing_v3::{
     ConfigResponse, FsRequest, FsResponse, GitxRequest, GitxResponse, MarketplaceRequest,
     MarketplaceResponse, PairingRequest, PairingResponse, RpcError, SessionRequest,
     SessionResponse, ShellRequest, ShellResponse, SystemRequest, SystemResponse,
-    ToolCatalogRequest, ToolCatalogResponse,
+    ToolCatalogRequest, ToolCatalogResponse, WorkspaceRequest, WorkspaceResponse,
 };
-use tokio::io::AsyncWrite;
-use tokio::sync::mpsc;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::{mpsc, watch};
 
 use super::identity::ConnectionIdentity;
 use super::state::ServerState;
@@ -85,6 +85,12 @@ pub(crate) trait SessionFacade {
         context: &CallContext,
         request: ToolCatalogRequest,
     ) -> impl Future<Output = Result<ToolCatalogResponse, RpcError>> + Send;
+
+    fn handle_workspace(
+        &self,
+        context: &CallContext,
+        request: WorkspaceRequest,
+    ) -> impl Future<Output = Result<WorkspaceResponse, RpcError>> + Send;
 }
 
 /// Shell 域纯 `async` 门面（独立并发句柄表，热路径不碰中央会话锁）。
@@ -154,6 +160,46 @@ pub(crate) trait BlobFacade {
     ) -> impl Future<Output = Result<u64, RpcError>> + Send;
 }
 
+/// 四条逻辑流的后端所有权；骨架与真后端各自决定状态来源。
+pub(crate) trait StreamFacade {
+    fn serve_session_events<S>(
+        &self,
+        stream: S,
+        identity: Arc<ConnectionIdentity>,
+        session_id: SessionId,
+        since_seq: u64,
+        cancel: watch::Receiver<bool>,
+    ) -> impl Future<Output = ()> + Send
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+
+    fn serve_shell_pty<S>(
+        &self,
+        stream: S,
+        identity: Arc<ConnectionIdentity>,
+        shell_id: String,
+        from_offset: u64,
+        cancel: watch::Receiver<bool>,
+    ) -> impl Future<Output = ()> + Send
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+
+    fn serve_client_blob<S>(
+        &self,
+        stream: S,
+        identity: Arc<ConnectionIdentity>,
+        role: qaqh_ringing_v3::BlobTransferRole,
+    ) -> impl Future<Output = ()> + Send
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static;
+
+    fn teardown(
+        &self,
+        identity: &ConnectionIdentity,
+        sessions: &std::collections::BTreeSet<SessionId>,
+    );
+}
+
 /// 顶层后端聚合 bound（`V3Server<T, B>` 静态分派约束，零 `dyn`）。
 pub(crate) trait V3Backend:
     SystemFacade
@@ -164,29 +210,47 @@ pub(crate) trait V3Backend:
     + GitxFacade
     + FsFacade
     + BlobFacade
+    + StreamFacade
     + Send
     + Sync
     + 'static
 {
+    fn request_shutdown(&self) {}
+
+    fn lookup_receipt(
+        &self,
+        _device: &super::identity::DeviceKey,
+        _command_id: &str,
+        _fingerprint: &str,
+    ) -> impl std::future::Future<Output = Result<Option<qaqh_ringing_v3::ControlReply>, RpcError>> + Send
+    {
+        async { Ok(None) }
+    }
+
+    fn reserve_receipt(
+        &self,
+        _device: &super::identity::DeviceKey,
+        _command_id: &str,
+        _fingerprint: &str,
+    ) -> impl std::future::Future<Output = Result<(), RpcError>> + Send {
+        async { Ok(()) }
+    }
+
+    fn persist_receipt(
+        &self,
+        _device: &super::identity::DeviceKey,
+        _command_id: &str,
+        _reply: &qaqh_ringing_v3::ControlReply,
+    ) -> impl std::future::Future<Output = Result<(), RpcError>> + Send {
+        async { Ok(()) }
+    }
 }
 
-impl<T> V3Backend for T where
-    T: SystemFacade
-        + SessionFacade
-        + ShellFacade
-        + ConfigAccountFacade
-        + MarketplaceFacade
-        + GitxFacade
-        + FsFacade
-        + BlobFacade
-        + Send
-        + Sync
-        + 'static
-{
-}
+impl V3Backend for SkeletonBackend {}
 
 /// 骨架期后端集合（实现全部 8 个细粒度门面 Trait）。
 pub(crate) struct SkeletonBackend {
+    pub(crate) state: Arc<ServerState>,
     pub(crate) system: system::SkeletonSystem,
     pub(crate) session: session::SkeletonSession,
     pub(crate) shell: shell::SkeletonShell,
@@ -201,6 +265,7 @@ impl SkeletonBackend {
     /// 从全局状态构造。
     pub(crate) fn new(state: Arc<ServerState>) -> Self {
         Self {
+            state: Arc::clone(&state),
             system: system::SkeletonSystem::new(Arc::clone(&state)),
             session: session::SkeletonSession::new(Arc::clone(&state)),
             shell: shell::SkeletonShell::new(Arc::clone(&state)),
@@ -246,6 +311,14 @@ impl SessionFacade for SkeletonBackend {
         request: ToolCatalogRequest,
     ) -> Result<ToolCatalogResponse, RpcError> {
         self.session.handle_catalog(context, request).await
+    }
+
+    async fn handle_workspace(
+        &self,
+        context: &CallContext,
+        request: WorkspaceRequest,
+    ) -> Result<WorkspaceResponse, RpcError> {
+        self.session.handle_workspace(context, request).await
     }
 }
 

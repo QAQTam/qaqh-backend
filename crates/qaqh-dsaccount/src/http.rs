@@ -1,13 +1,13 @@
-//! HTTP 薄封装（同步 ureq 的 DeepSeek 产品投影）。
+//! HTTP 薄封装（同步外观、异步 `reqwest` 的 DeepSeek 产品投影）。
 //!
-//! 机械层（ureq 客户端、全局超时、`http_status_as_error(false)`、原文读取与
-//! request id）在 `qaqh_oauth_core::http`。为什么同步：授权流程与回环监听跑在
+//! 机械层（异步 `reqwest` 客户端、全局超时、非 2xx 原文读取与 request id）
+//! 在 `qaqh_oauth_core::http`。为什么同步：授权流程与回环监听跑在
 //! **专用 std 线程**上，不进 tokio（既避开「阻塞 tokio worker」，也避开
 //! 「runtime 内建 runtime」）。
 //!
 //! 本文件保留的 DeepSeek 侧不变量：
 //!
-//! - **`max_redirects(0)`**：请求带账号凭据，重定向必须由**我们**判断（跨 origin
+//! - **`redirect::Policy::none()`**：请求带账号凭据，重定向必须由**我们**判断（跨 origin
 //!   跟随就等于把凭据转发给第三方）。3xx 会原样回来，由
 //!   [`crate::error::classify_http_status`] 判成协议异常。
 //! - 4xx/5xx 要能读到 body——平台把业务结论放在信封里，压成一句「HTTP 错误」

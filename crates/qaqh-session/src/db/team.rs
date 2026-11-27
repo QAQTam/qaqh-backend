@@ -561,7 +561,7 @@ mod tests {
 
     fn test_conn() -> Connection {
         let mut conn = Connection::open_in_memory().expect("in-memory db");
-        crate::db::schema::initialize(&mut conn, &crate::db::schema::empty_data_dir()).expect("initialize schema");
+        crate::db::schema::initialize(&mut conn).expect("initialize schema");
         conn
     }
 
@@ -573,7 +573,10 @@ mod tests {
                 root_session_id: "root",
                 title: task_id,
                 description_ref: None,
-                write_scopes: &scopes.iter().map(|scope| scope.to_string()).collect::<Vec<_>>(),
+                write_scopes: &scopes
+                    .iter()
+                    .map(|scope| scope.to_string())
+                    .collect::<Vec<_>>(),
                 created_by: "/root",
                 created_at_ms: 1,
             },
@@ -608,6 +611,9 @@ mod tests {
         let after = task_get(&conn, "root", "t-blocked").unwrap().unwrap();
         assert_eq!(after.owner_path.as_deref(), Some("/root/worker"));
         assert_eq!(after.owner_session_id.as_deref(), Some("worker-ses"));
-        assert!(after.claim_epoch > before.claim_epoch, "reassign 递增 epoch");
+        assert!(
+            after.claim_epoch > before.claim_epoch,
+            "reassign 递增 epoch"
+        );
     }
 }

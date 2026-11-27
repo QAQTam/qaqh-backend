@@ -29,7 +29,7 @@ use qaqh_ringing::{
 };
 use qaqh_ringing_runtime::{
     DeviceRegistry, PendingCommandStore, RingingHub, RingingLeaseStore, Scope,
-    hydrate_attachment_previews,
+    hydrate_attachment_previews, pairing::PairingTable,
 };
 use qaqh_runtime::{QaqhService, ringing::service_methods};
 
@@ -86,7 +86,7 @@ pub struct AppState {
     /// （并发裁决收敛到 SQLite 串行写执行器）。
     pub devices: Arc<DeviceRegistry>,
     /// 短寿一次性配对令牌表（仅内存，TTL 120s）。
-    pub pairings: Arc<Mutex<pairing::PairingTable>>,
+    pub pairings: Arc<Mutex<PairingTable>>,
     /// 服务端自签证书指纹（`sha256:<hex>`）；仅非回环 bind 启用 TLS 时非空，
     /// 经 `/pairing/tokens` 进二维码供原生端 pinning。
     pub tls_fingerprint: Option<String>,

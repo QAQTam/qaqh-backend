@@ -153,10 +153,7 @@ impl SessionRuntime {
     pub(crate) fn try_begin_turn(&self) -> Result<(), RpcError> {
         let mut activity = lock(&self.activity);
         if *activity != ActivityState::Idle {
-            return Err(rpc(
-                ErrorCode::Conflict,
-                "上一回合尚未收口，拒绝并发投递",
-            ));
+            return Err(rpc(ErrorCode::Conflict, "上一回合尚未收口，拒绝并发投递"));
         }
         *activity = ActivityState::Running;
         Ok(())
@@ -211,6 +208,16 @@ impl SessionRuntime {
         lock(&self.driver).clone()
     }
 
+    pub(crate) fn driver_with_ordinal(&self) -> (Option<DriverKey>, u64) {
+        let driver = lock(&self.driver);
+        let ordinal = if driver.is_some() {
+            self.driver_ordinal.load(Ordering::SeqCst)
+        } else {
+            0
+        };
+        (driver.clone(), ordinal)
+    }
+
     /// 本连接是否持有驱动权。
     pub(crate) fn is_driver(&self, key: &DriverKey) -> bool {
         lock(&self.driver).as_ref() == Some(key)
@@ -259,9 +266,7 @@ impl SessionRuntime {
             None => {
                 let next_device = attached
                     .iter()
-                    .find(|(device, instances)| {
-                        **device != caller.device && !instances.is_empty()
-                    })
+                    .find(|(device, instances)| **device != caller.device && !instances.is_empty())
                     .and_then(|(device, instances)| {
                         instances.iter().next().map(|instance| DriverKey {
                             device: device.clone(),
@@ -434,6 +439,11 @@ impl SessionRuntime {
         SessionSnapshot {
             session_id: self.id.clone(),
             title: lock(&self.title).clone(),
+            workspace_id: None,
+            cwd: None,
+            archived: false,
+            settings_revision: 0,
+            model_selection: None,
             activity: *lock(&self.activity),
             timeline_epoch: timeline.epoch,
             seq: self.bus.last_seq(),
@@ -442,6 +452,8 @@ impl SessionRuntime {
             tool_calls,
             pending_interactions,
             exec_sessions,
+            subagents: Vec::new(),
+            goal: None,
             driver_client_instance_id: driver_snapshot.map(|key| key.instance),
             driver_ordinal,
             pinned_compaction: timeline.pinned_compaction.clone(),
@@ -504,6 +516,13 @@ impl SessionRuntime {
         SessionSummary {
             session_id: self.id.clone(),
             title: lock(&self.title).clone(),
+            workspace_id: None,
+            cwd: None,
+            archived: false,
+            model_selection: None,
+            tool_mode: *lock(&self.tool_mode),
+            settings_revision: 0,
+            handoff_from: None,
             activity: *lock(&self.activity),
             updated_at_ms: self.updated_at_ms.load(Ordering::Relaxed),
         }

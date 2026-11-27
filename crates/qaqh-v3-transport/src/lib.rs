@@ -33,7 +33,8 @@
 //! `yamux` 规范里**没有单向流**，所以本后端的 `open_uni`/`accept_uni` 一律
 //! [`MuxError::Unsupported`]——这是能力差异，不是缺实现，必须在 `v4.8` 之前就知道。
 
-#![forbid(unsafe_code)]
+// Windows Named Pipe 的 Owner-Only DACL 需要局限在单个 FFI 模块内的 unsafe。
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 
 mod mux;
@@ -41,6 +42,14 @@ mod yamux_backend;
 
 pub mod duplex;
 pub mod framing;
+mod local_ipc;
+#[cfg(unix)]
+mod unix_ipc;
+#[cfg(windows)]
+#[allow(unsafe_code)]
+mod windows_ipc;
+
+pub use local_ipc::{LocalIpcListener, bind_local_ipc, connect_local_ipc};
 
 pub use framing::{FrameIoError, read_frame, write_frame};
 pub use mux::{MuxConfig, MuxError, MuxRole, MuxStats, MuxTransport};

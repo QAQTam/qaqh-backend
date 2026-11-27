@@ -175,9 +175,9 @@ flowchart TD
 | 切片 | PR | 状态 | 备注 |
 |---|---|---|---|
 | `P3-0` | #47 (`bea000a2`) | **已合入 `main`** | Fast-Follow：`session_loop.rs` 16 处 `.await.ok()` + 2 处回滚泄漏清零（拆出 `session_interaction.rs`，降至 2,775 行）+ 修绿 `tool_surface_schema_shape` |
-| `P3-1` | #48（`fa57c3dd`） | **已开 PR 待验收**（栈基底＝`main`） | `ADR-0035` 泄洪闸（独立 `spill_gate.rs` + 当前帧 UTF-8 尾预览兜底；`exec_log.rs` 下沉，`owner.rs` 净减 5 行）+ `ADR-0034` daemon 级真实 32 MiB 洪峰冒烟 |
-| `P3-2` | #49（`3cc2e4ce`） | **已开 PR 待验收**（stacked，base＝`P3-1` 分支） | `crates/qaqh-core-vocab`（0 `serde_json`、`Deserialize` 走 `Self::new` Fail-Closed、字面 `rg == 0`）+ V3 工具模式三档 + 只读 `ToolCatalog`；`1C′`：`qaqh-types`/`qaqh-ringing-contract` 零改动 |
-| `P3-3` | #50（`e817b24b`） | **已开 PR 待验收**（stacked，base＝`P3-2` 分支） | `crates/qaqh-ringing-v3` 强类型协议冻结（`postcard` / 同时覆盖 `core-vocab`+`v3` 的机器指纹与 `normalize()` / `daemon.endpoint` 双传输 + `0o600` / `ClientFetch`+`ClientUpload` / `SessionCreate`+View-Ready 视图 / 11 域全覆盖 / 字面 `rg == 0`） |
-| `P3-4` | #51 | **已开 PR 待验收**（stacked，base＝`P3-3` 分支） | `crates/qaqh-v3-transport`（含单源 `framing`）+ `v3_server`（8 门面 trait + 状态模块 `< 1000` 行拆分 + 设备级幂等 + 推送鉴权）/`client/v3`（SHA-256 校验与去重缓存清理）+ `yamux` / `iroh 1.5` 双后端六大不变量守卫 + `ADR-0046`/`0047` + 字面 `rg == 0` |
+| `P3-1` | #48（`7d7a1d4f`） | **已合入 `main`** | `ADR-0035` 泄洪闸（独立 `spill_gate.rs` + 当前帧 UTF-8 尾预览兜底；`exec_log.rs` 下沉，`owner.rs` 净减 5 行）+ `ADR-0034` daemon 级真实 32 MiB 洪峰冒烟 |
+| `P3-2` | #49（`225a644b`） | **已合入 `main`** | `crates/qaqh-core-vocab`（0 `serde_json`、`Deserialize` 走 `Self::new` Fail-Closed、字面 `rg == 0`）+ V3 工具模式三档 + 只读 `ToolCatalog`；`1C′`：`qaqh-types`/`qaqh-ringing-contract` 零改动 |
+| `P3-3` | #50（`c75f91b8`） | **已合入 `main`** | `crates/qaqh-ringing-v3` 强类型协议冻结（`postcard` / 同时覆盖 `core-vocab`+`v3` 的机器指纹与 `normalize()` / `daemon.endpoint` 双传输 + `0o600` / `ClientFetch`+`ClientUpload` / `SessionCreate`+View-Ready 视图 / 11 域全覆盖 / 字面 `rg == 0`） |
+| `P3-4` | #51（`f751a2c7`） | **已合入 `main`** | `crates/qaqh-v3-transport`（含单源 `framing`）+ `v3_server`（8 门面 trait + 状态模块 `< 1000` 行拆分 + 设备级幂等 + 推送鉴权）/`client/v3`（SHA-256 校验与去重缓存清理）+ `yamux` / `iroh 1.5` 双后端六大不变量守卫 + `ADR-0046`/`0047` + 字面 `rg == 0` |
 
-> **状态口径（宪法 #10 诚实原则）**：`P3-1`～`P3-4` 四张 PR **都还没有 merge**，一律记作"已开 PR 待验收"，不写"已合入 `main`"。它们是一条 stacked 链（`#48` → `#49` → `#50` → `#51`）：每张的 base 指向前一张分支，按序合并时 GitHub 会自动把下一张的 base 重定向到 `main`；四张全部验收合并后，本表才改成"已合入 `main`"。
+> **状态口径（宪法 #10 诚实原则）**：`P3-0`～`P3-4`（PR #47～#51）已全部合入 `main`（终局 merge commit `f751a2c7`），`v4.6` 阶段圆满结项；后续进入 [V4_7_EXECUTION_PLAN.md](./V4_7_EXECUTION_PLAN.md)（`P3-5a`～`P3-5e`）。

@@ -11,7 +11,9 @@ use qaqh_ringing_v3::{
     ShellRequest, ShellResponse,
 };
 use qaqh_v3_transport::duplex::duplex_pair_with_buffer;
-use qaqh_v3_transport::{MuxConfig, MuxTransport, YamuxTransport};
+use qaqh_v3_transport::{
+    MuxConfig, MuxTransport, YamuxTransport, bind_local_ipc, connect_local_ipc,
+};
 use tokio::task::JoinHandle;
 
 use super::V3Server;
@@ -22,7 +24,8 @@ use super::iroh_loopback::{IrohTransport, iroh_loopback_pair};
 use super::session_runtime::SessionRuntime;
 use super::state::{ServerConfig, ServerState};
 
-/// 传输后端工厂：`yamux`（内存双工）与 `iroh`（本机 QUIC 回环）共用同一套守卫。
+/// 传输后端工厂：`yamux`（内存双工）、`local_ipc`（OS 本机端点）与 `iroh`
+/// （本机 QUIC 回环）共用同一套守卫。
 pub(crate) trait BackendFactory: Copy + Send + Sync + 'static {
     type Transport: MuxTransport;
     fn name() -> &'static str;
@@ -39,6 +42,36 @@ impl BackendFactory for YamuxFactory {
     }
     async fn pair(self) -> (Self::Transport, Self::Transport) {
         duplex_pair_with_buffer(MuxConfig::default(), 256 * 1024)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct LocalIpcFactory;
+
+impl BackendFactory for LocalIpcFactory {
+    type Transport = YamuxTransport;
+    fn name() -> &'static str {
+        "local_ipc"
+    }
+    async fn pair(self) -> (Self::Transport, Self::Transport) {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(unix)]
+        let dir = tempfile::tempdir().expect("local IPC temp dir");
+        #[cfg(unix)]
+        let path = dir.path().join(format!(
+            "guard-{}-{seq}.sock",
+            u64::from(std::process::id())
+        ));
+        #[cfg(windows)]
+        let path = std::path::PathBuf::from(format!(
+            r"\\.\pipe\qaqh-v3-guard-{}-{seq}",
+            std::process::id()
+        ));
+        let mut listener = bind_local_ipc(&path).await.expect("bind local IPC");
+        let client = connect_local_ipc(&path).await.expect("connect local IPC");
+        let server = listener.accept().await.expect("accept local IPC");
+        (client, server)
     }
 }
 
@@ -68,7 +101,10 @@ pub(crate) fn owner_device() -> DeviceKey {
 
 /// 已配对设备键。
 pub(crate) fn paired_device() -> DeviceKey {
-    format!("device:{DEVICE_TOKEN}")
+    format!(
+        "device-digest:{}",
+        qaqh_ringing_runtime::device_registry::token_digest(DEVICE_TOKEN)
+    )
 }
 
 /// 守卫用的服务端配置：环与订阅队列刻意调小，让"有界"这件事真的压得上。
@@ -91,9 +127,10 @@ pub(crate) fn config() -> ServerConfig {
 /// 建一份带一台已配对设备的状态。
 pub(crate) fn state() -> Arc<ServerState> {
     let state = ServerState::new(config(), OS_USER);
+    let digest = qaqh_ringing_runtime::device_registry::token_digest(DEVICE_TOKEN);
     state
         .identity
-        .register_device(DEVICE_TOKEN, "守卫手机", Scope::Device);
+        .register_device_digest(&digest, "guard-phone", "守卫手机", Scope::Device, 0);
     state
 }
 
@@ -123,17 +160,17 @@ pub(crate) fn device_hello(instance: &str) -> ClientHello {
 pub(crate) async fn spawn_server<B: MuxTransport>(
     transport: B,
     state: Arc<ServerState>,
-) -> (Arc<V3Server<B, SkeletonBackend>>, JoinHandle<Result<(), ServerError>>) {
+) -> (
+    Arc<V3Server<B, SkeletonBackend>>,
+    JoinHandle<Result<(), ServerError>>,
+) {
     let server = V3Server::with_state(transport, state);
     let handle = tokio::spawn(Arc::clone(&server).serve());
     (server, handle)
 }
 
 /// 连上一个客户端（握手必须最先在 Control 流上完成）。
-pub(crate) async fn connect<B: MuxTransport>(
-    transport: B,
-    hello: ClientHello,
-) -> V3Client<B> {
+pub(crate) async fn connect<B: MuxTransport>(transport: B, hello: ClientHello) -> V3Client<B> {
     V3Client::connect(transport, hello)
         .await
         .expect("握手必须成功")
@@ -153,10 +190,11 @@ pub(crate) async fn open_shell<B: MuxTransport>(
 ) -> String {
     match client
         .call(ControlRequest::Shell(ShellRequest::Open {
-            session_id: session_id.clone(),
+            session_id: Some(session_id.clone()),
             cols: 120,
             rows: 40,
             cwd: None,
+            shell: None,
         }))
         .await
         .expect("开 shell")
@@ -199,7 +237,11 @@ pub(crate) fn mean_ms(samples: &[Duration]) -> f64 {
     if samples.is_empty() {
         return f64::NAN;
     }
-    samples.iter().map(|sample| sample.as_secs_f64()).sum::<f64>() * 1000.0
+    samples
+        .iter()
+        .map(|sample| sample.as_secs_f64())
+        .sum::<f64>()
+        * 1000.0
         / samples.len() as f64
 }
 

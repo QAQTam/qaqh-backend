@@ -10,20 +10,19 @@ use std::sync::{Arc, mpsc};
 use rusqlite::{Connection, OpenFlags};
 use tokio::sync::oneshot;
 
-pub mod goals;
 pub mod devices;
+pub mod goals;
+/// v4.5.1 任务2/3:WAL 封顶、空间回收与撤回孤儿 BLOB 清理(独立子模块)。
+pub(crate) mod maintenance;
 pub mod quota;
+/// v4.5.1 任务4:有界只读连接池(独立子模块,替代单把 `Mutex<Connection>`)。
+mod read_pool;
 pub mod receipts;
-pub mod sidecar;
 pub mod schema;
 pub mod store;
 pub mod team;
 pub mod todos;
 pub mod view;
-/// v4.5.1 任务2/3:WAL 封顶、空间回收与撤回孤儿 BLOB 清理(独立子模块)。
-pub(crate) mod maintenance;
-/// v4.5.1 任务4:有界只读连接池(独立子模块,替代单把 `Mutex<Connection>`)。
-mod read_pool;
 #[cfg(test)]
 mod view_tests;
 pub mod workspace;
@@ -98,9 +97,7 @@ impl DbError {
                     if error.code == rusqlite::ErrorCode::DiskFull
             ),
             DbError::Io(error) => error.kind() == std::io::ErrorKind::StorageFull,
-            DbError::CreateDir { source, .. } => {
-                source.kind() == std::io::ErrorKind::StorageFull
-            }
+            DbError::CreateDir { source, .. } => source.kind() == std::io::ErrorKind::StorageFull,
             _ => false,
         }
     }
@@ -145,10 +142,7 @@ impl Db {
         maintenance::configure_journal_size_limit(&read_conn)?;
         let read_pool = Arc::new(read_pool::ReadPool::new(path.clone(), Some(read_conn)));
 
-        // MUST 铁闸 2:schema 初始化(含 sidecar 吸入)以 db 文件父目录为
-        // data_dir——生产路径恒为 `data_dir/qaqh.db`,parent 恒存在。
-        let data_dir = path.parent().unwrap_or(std::path::Path::new("."));
-        schema::initialize(&mut write_conn, data_dir)?;
+        schema::initialize(&mut write_conn)?;
 
         let write_tx = spawn_executor(write_conn)?;
 
@@ -189,11 +183,9 @@ impl Db {
         F: FnOnce(&Connection) -> Result<T, E> + Send + 'static,
     {
         let pool = Arc::clone(&self.read_pool);
-        tokio::task::spawn_blocking(move || {
-            pool.with(f)
-        })
-        .await
-        .map_err(|_| DbError::ExecutorStopped)?
+        tokio::task::spawn_blocking(move || pool.with(f))
+            .await
+            .map_err(|_| DbError::ExecutorStopped)?
     }
 
     /// 串行写入(阻塞版):供同步线程(会话 owner 泵)使用,同一个写执行器。
