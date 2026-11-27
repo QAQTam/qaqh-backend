@@ -299,7 +299,14 @@ fn validate_relative_path(dir: &Path, path: &str) -> Result<PathBuf> {
                     return Err(invalid_path(path, "symlink resolves outside the worktree"));
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidFilename
+                ) =>
+            {
+                break;
+            }
             Err(error) => return Err(error.into()),
         }
     }

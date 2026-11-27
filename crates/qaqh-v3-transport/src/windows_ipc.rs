@@ -205,6 +205,8 @@ fn create_server(name: &OsStr, first_instance: bool) -> io::Result<NamedPipeServ
     let mut options = ServerOptions::new();
     options
         .first_pipe_instance(first_instance)
+        .in_buffer_size(256 * 1024)
+        .out_buffer_size(256 * 1024)
         .reject_remote_clients(true);
     // SAFETY: attributes and its self-relative descriptor stay alive for this synchronous call;
     // CreateNamedPipeW copies the descriptor into the pipe object.

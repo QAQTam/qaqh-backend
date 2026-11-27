@@ -325,6 +325,7 @@ async fn shell_pty<S: AsyncWrite + Unpin>(
                 Err(_) => break,
             }
         }
+        let was_coalesced = coalesced.is_some();
         let bytes = coalesced.map_or(first_bytes, Bytes::from);
         seq += 1;
         if write_frame(
@@ -344,6 +345,9 @@ async fn shell_pty<S: AsyncWrite + Unpin>(
         .is_err()
         {
             break;
+        }
+        if was_coalesced {
+            tokio::task::yield_now().await;
         }
     }
     handle.detach(generation);

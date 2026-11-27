@@ -395,7 +395,10 @@ mod tests {
         assert!(status.success());
         let unmanaged = manager.list_unmanaged().unwrap();
         assert_eq!(unmanaged.len(), 1);
-        assert_eq!(unmanaged[0], manual);
+        assert_eq!(
+            std::fs::canonicalize(&unmanaged[0]).unwrap(),
+            std::fs::canonicalize(&manual).unwrap()
+        );
 
         // dirty 属于 worktree 自身；source_root 的快照不受影响。
         std::fs::write(Path::new(&view.path).join("untracked.txt"), "x\n").unwrap();
