@@ -1,0 +1,33 @@
+[package]
+name = "qaqh-ringing-v3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RingingV3 强类型二进制协议契约：postcard 线缆帧、握手、四流与全量 RPC（零 JSON 值逃生口）"
+build = "build.rs"
+
+# **依赖面是宪法级约束**（`ADR-0042` 铁律 1/2/3）：只允许
+# core-vocab + serde + postcard + bytes + thiserror。
+# 永久禁止：JSON Value 库（无类型逃生口）、HTTP/axum 栈（传输实现耦合）、
+# qaqh-ringing / qaqh-types / qaqh-ringing-contract（V2 冰封面）。
+[dependencies]
+qaqh-core-vocab = { path = "../qaqh-core-vocab" }
+# `serde` feature 让 `Bytes` 以 `serialize_bytes`（长度 + 裸字节）过线，
+# 零拷贝语义保留到传输层（`ADR-0042` 铁律"零拷贝图像直传 GPU"）。
+bytes = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+# `postcard` 是唯一的线缆编码器：零自描述、位置编码、无标签名。
+# `use-std` 提供 `to_stdvec`/`from_bytes`；默认 feature（heapless-cas）关掉，
+# 本 crate 不需要无堆环境。
+postcard = { version = "1", default-features = false, features = ["use-std"] }
+thiserror = "2"
+
+[build-dependencies]
+# 协议指纹由 build.rs 从**类型定义源码**自动计算（严禁手改变量）。
+sha2 = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
