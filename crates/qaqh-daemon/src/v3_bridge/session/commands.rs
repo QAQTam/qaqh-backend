@@ -70,16 +70,54 @@ pub(super) async fn create(
     summary(backend, &id).await.map(SessionResponse::Created)
 }
 
+pub(super) struct SessionRowExtra {
+    pub(super) custom_tools: Vec<String>,
+    pub(super) created_at_ms: u64,
+    pub(super) updated_at_ms: u64,
+}
+
+fn read_session_extras(
+    conn: &rusqlite::Connection,
+) -> rusqlite::Result<std::collections::HashMap<String, SessionRowExtra>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id, custom_tools_json, created_at_ms, updated_at_ms FROM sessions",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let id: String = row.get(0)?;
+        let custom_tools = row
+            .get::<_, Option<String>>(1)?
+            .and_then(|json| serde_json::from_str(&json).ok())
+            .unwrap_or_default();
+        let created_at_ms = row.get::<_, i64>(2)?.max(0) as u64;
+        let updated_at_ms = row.get::<_, i64>(3)?.max(0) as u64;
+        Ok((
+            id,
+            SessionRowExtra {
+                custom_tools,
+                created_at_ms,
+                updated_at_ms,
+            },
+        ))
+    })?;
+    rows.collect()
+}
+
 pub(super) async fn list(
     backend: &RealBackend,
     context: &CallContext,
     include_archived: bool,
 ) -> Result<SessionResponse, RpcError> {
     let service = backend.service.clone();
-    let sessions = RealBackend::blocking(move || {
-        service
+    let (sessions, mut extras) = RealBackend::blocking(move || {
+        let sessions = service
             .list_sessions(include_archived)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let extras = service
+            .owners()
+            .db()
+            .read_blocking(read_session_extras)
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((sessions, extras))
     })
     .await?;
     let mut visible = Vec::new();
@@ -90,7 +128,8 @@ pub(super) async fn list(
             continue;
         };
         if runtime.can_access(&context.identity.device) {
-            visible.push(summary_entry(entry)?);
+            let extra = extras.remove(id.as_str());
+            visible.push(summary_entry(entry, extra.as_ref())?);
         }
     }
     Ok(SessionResponse::Sessions(visible))
@@ -102,17 +141,28 @@ pub(super) async fn summary(
 ) -> Result<SessionSummary, RpcError> {
     let service = backend.service.clone();
     let raw = id.as_str().to_string();
-    let sessions = RealBackend::blocking(move || {
-        service
+    let (sessions, row) = RealBackend::blocking(move || {
+        let sessions = service
             .list_sessions(true)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        let row = service
+            .owners()
+            .db()
+            .read_blocking(|conn| qaqh_session::db::store::session_row(conn, &raw))
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((sessions, row))
     })
     .await?;
     let entry = sessions
         .into_iter()
-        .find(|entry| entry.meta.session_id == raw)
+        .find(|entry| entry.meta.session_id == id.as_str())
         .ok_or_else(|| crate::v3_server::error::not_found(format!("会话 `{id}` 不存在")))?;
-    summary_entry(entry)
+    let extra = row.map(|row| SessionRowExtra {
+        custom_tools: row.custom_tools,
+        created_at_ms: row.created_at_ms.max(0) as u64,
+        updated_at_ms: row.updated_at_ms.max(0) as u64,
+    });
+    summary_entry(entry, extra.as_ref())
 }
 
 pub(super) async fn patch_settings(

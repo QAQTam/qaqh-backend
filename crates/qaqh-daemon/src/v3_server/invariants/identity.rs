@@ -147,6 +147,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
             input_id: InputId::new("guard-04-spoof").expect("input id"),
             text: "冒充".to_string(),
             attachments: Vec::new(),
+            images: Vec::new(),
         }))
         .await
         .expect_err("冒充实例名不得取得驱动权");

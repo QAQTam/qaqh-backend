@@ -1,9 +1,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use qaqh_core_vocab::{BlockId, ContentRef, InputId, SessionId, TurnId, TurnPhase};
+use qaqh_ringing_contract::commands::SubagentTerminalKind as OldSubagentTerminalKind;
+use qaqh_ringing_contract::fact::{ActorKind, ContentValue, InputPurpose as OldInputPurpose};
 use qaqh_ringing_runtime::RingingHub;
 use qaqh_ringing_v3::{
-    self as v3, BlockKind, BlockView, CompactionSummary, ErrorCode, RpcError, SessionSnapshot,
+    self as v3, BlockActor, BlockKind, BlockView, CompactionSummary, ErrorCode, InputPurpose,
+    InterAgentView, RpcError, SessionSnapshot, SubagentTerminalKind, SubagentTerminalView,
     TranscriptPage,
 };
 use rusqlite::OptionalExtension;
@@ -74,7 +78,11 @@ pub(super) async fn snapshot(
     let mut tool_calls = Vec::new();
     for tool in &state.tools {
         if call_ids.contains(tool.call_id.as_str()) {
-            tool_calls.push(tool_view(backend, &raw, tool).await?);
+            tool_calls.push(
+                projection::tool_call_view(&backend.hub, &backend.state, &raw, tool)
+                    .await
+                    .map_err(internal)?,
+            );
         }
     }
     let mut pending_interactions = Vec::with_capacity(state.interactions.len());
@@ -93,23 +101,47 @@ pub(super) async fn snapshot(
                 .map_err(internal)?,
         );
     }
-    let turns = state
+    let mut turns = Vec::new();
+    for (index, turn) in state
         .turns
         .iter()
         .enumerate()
         .rev()
         .take(tail_turns.clamp(1, 256) as usize)
         .rev()
-        .map(|(index, turn)| v3::TurnSummary {
+    {
+        let turn_id = TurnId::new(turn.turn_id.as_str()).map_err(|error| internal(error.to_string()))?;
+        let input_id = turn
+            .input_id
+            .as_ref()
+            .map(|id| InputId::new(id.as_str()).map_err(|error| internal(error.to_string())))
+            .transpose()?;
+        let phase = turn.phase.map(|phase| match phase {
+            qaqh_ringing_contract::TurnPhase::Running => TurnPhase::Running,
+            qaqh_ringing_contract::TurnPhase::WaitingUser => TurnPhase::WaitingUser,
+            qaqh_ringing_contract::TurnPhase::Cancelling => TurnPhase::Cancelling,
+        });
+        let usage = match &turn.outcome {
+            Some(qaqh_ringing_contract::state::TurnOutcome::Finished {
+                usage: Some(usage),
+                ..
+            }) => Some(projection::map_usage(usage.clone())),
+            _ => None,
+        };
+        turns.push(v3::TurnSummary {
+            turn_id,
+            input_id,
             ordinal: index as u64 + 1,
+            phase,
             terminal: turn.outcome.as_ref().map(turn_terminal),
+            usage,
             started_at_ms: started
                 .get(turn.turn_id.as_str())
                 .copied()
                 .unwrap_or_default()
                 .max(0) as u64,
-        })
-        .collect();
+        });
+    }
     let pinned_compaction = match state.timeline.iter().find_map(|entry| match entry {
         qaqh_ringing_contract::state::TimelineEntry::Compaction { summary } => Some(summary),
         _ => None,
@@ -184,6 +216,9 @@ pub(super) async fn snapshot(
         driver_ordinal,
         pinned_compaction,
         tool_mode: meta.tool_mode,
+        custom_tools: meta.custom_tools,
+        handoff_from: meta.handoff_from,
+        created_at_ms: meta.created_at_ms,
     })
 }
 
@@ -250,7 +285,11 @@ pub(super) async fn page(
             .map_err(|error| internal(error.to_string()))?;
         for tool in &state.tools {
             if call_ids.contains(tool.call_id.as_str()) {
-                tool_calls.push(tool_view(backend, &raw, tool).await?);
+                tool_calls.push(
+                    projection::tool_call_view(&backend.hub, &backend.state, &raw, tool)
+                        .await
+                        .map_err(internal)?,
+                );
             }
         }
     }
@@ -273,107 +312,238 @@ pub(crate) async fn block_view(
         .ok_or_else(|| internal(format!("block {} 缺 payload_json", row.block_id)))?;
     let entry = serde_json::from_str::<qaqh_ringing_contract::state::TimelineEntry>(&payload)
         .map_err(|error| internal(format!("解析 block {}: {error}", row.block_id)))?;
-    let (kind, content, tool_call_id) = match entry {
-        qaqh_ringing_contract::state::TimelineEntry::Input { content, .. } => {
-            (BlockKind::User, content, None)
+    let row_block_id = BlockId::new(row.block_id.clone())
+        .map_err(|error| internal(format!("block_id `{}`: {error}", row.block_id)))?;
+    let row_turn_id = row
+        .turn_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(|id| TurnId::new(id).map_err(|error| internal(error.to_string())))
+        .transpose()?;
+    match entry {
+        qaqh_ringing_contract::state::TimelineEntry::Input {
+            block_id,
+            turn_id,
+            purpose,
+            content,
+            attachments: raw_attachments,
+            images: raw_images,
+            inter_agent,
+            subagent_terminal,
+            actor,
+        } => {
+            let mut images = Vec::with_capacity(raw_images.len());
+            for image in raw_images {
+                images.push(
+                    projection::image_from_b64(hub, session_id, &image.data, image.mime_type)
+                        .await
+                        .map_err(internal)?,
+                );
+            }
+            let mut attachments = Vec::with_capacity(raw_attachments.len());
+            for content_ref in raw_attachments {
+                attachments.push(
+                    projection::content_ref(
+                        hub,
+                        state,
+                        session_id,
+                        ContentValue::Ref { content_ref },
+                    )
+                    .await
+                    .map_err(internal)?,
+                );
+            }
+            let inter_agent = inter_agent
+                .map(|envelope| -> Result<InterAgentView, RpcError> {
+                    Ok(InterAgentView {
+                        message_id: envelope.message_id,
+                        root_session_id: SessionId::new(envelope.root_session_id)
+                            .map_err(|error| internal(error.to_string()))?,
+                        author: envelope.author,
+                        recipient: envelope.recipient,
+                        other_recipients: envelope.other_recipients,
+                        task_id: envelope.task_id,
+                        reply_to: envelope.reply_to,
+                        created_at_ms: envelope.created_at_ms.max(0) as u64,
+                    })
+                })
+                .transpose()?;
+            let subagent_terminal = subagent_terminal
+                .map(|notice| -> Result<SubagentTerminalView, RpcError> {
+                    Ok(SubagentTerminalView {
+                        child_session_id: SessionId::new(notice.child_session_id)
+                            .map_err(|error| internal(error.to_string()))?,
+                        parent_call_id: tool_call_id(&notice.parent_call_id)?,
+                        terminal: match notice.terminal {
+                            OldSubagentTerminalKind::Completed => SubagentTerminalKind::Completed,
+                            OldSubagentTerminalKind::Failed => SubagentTerminalKind::Failed,
+                            OldSubagentTerminalKind::Cancelled => SubagentTerminalKind::Cancelled,
+                            OldSubagentTerminalKind::TimedOut => SubagentTerminalKind::TimedOut,
+                        },
+                    })
+                })
+                .transpose()?;
+            let turn_id = turn_id
+                .map(|id| TurnId::new(id.as_str()).map_err(|error| internal(error.to_string())))
+                .transpose()?
+                .or(row_turn_id);
+            Ok(BlockView {
+                block_id: BlockId::new(block_id.as_str())
+                    .map_err(|error| internal(error.to_string()))?,
+                turn_id,
+                ord: u64::try_from(row.ord).map_err(|_| internal("negative block ord"))?,
+                kind: BlockKind::User,
+                content: projection::content_ref(hub, state, session_id, content)
+                    .await
+                    .map_err(internal)?,
+                tool_call_id: None,
+                created_at_ms: row.created_at_ms.max(0) as u64,
+                actor: Some(match actor.kind {
+                    ActorKind::User => BlockActor::User,
+                    ActorKind::Api => BlockActor::Api,
+                    ActorKind::System => BlockActor::System,
+                    ActorKind::Agent => BlockActor::Agent,
+                    ActorKind::Subagent => BlockActor::Subagent,
+                }),
+                purpose: Some(match purpose {
+                    OldInputPurpose::TriggerTurn => InputPurpose::TriggerTurn,
+                    OldInputPurpose::QueueOnly => InputPurpose::QueueOnly,
+                    OldInputPurpose::Steer => InputPurpose::Steer,
+                    OldInputPurpose::Interject => InputPurpose::Interject,
+                }),
+                model: None,
+                usage: None,
+                generated_ms: None,
+                images,
+                attachments,
+                inter_agent,
+                subagent_terminal,
+            })
         }
         qaqh_ringing_contract::state::TimelineEntry::AssistantBlock {
+            block_id,
+            turn_id,
             block_kind,
             content,
+            model,
+            usage,
+            generated_ms,
             ..
-        } => (
-            match block_kind {
+        } => Ok(BlockView {
+            block_id: BlockId::new(block_id.as_str())
+                .map_err(|error| internal(error.to_string()))?,
+            turn_id: Some(
+                TurnId::new(turn_id.as_str()).map_err(|error| internal(error.to_string()))?,
+            ),
+            ord: u64::try_from(row.ord).map_err(|_| internal("negative block ord"))?,
+            kind: match block_kind {
                 qaqh_ringing_contract::fact::AssistantBlockKind::Answer => BlockKind::Answer,
                 qaqh_ringing_contract::fact::AssistantBlockKind::Reasoning => BlockKind::Reasoning,
                 qaqh_ringing_contract::fact::AssistantBlockKind::ToolCall => BlockKind::ToolCall,
             },
-            content,
-            None,
-        ),
-        qaqh_ringing_contract::state::TimelineEntry::ToolCall { call_id, .. } => (
-            BlockKind::ToolCall,
-            qaqh_ringing_contract::fact::ContentValue::Inline {
-                text: String::new(),
-            },
-            Some(tool_call_id(call_id.as_str())?),
-        ),
+            content: projection::content_ref(hub, state, session_id, content)
+                .await
+                .map_err(internal)?,
+            tool_call_id: None,
+            created_at_ms: row.created_at_ms.max(0) as u64,
+            actor: None,
+            purpose: None,
+            model: (!model.is_empty()).then_some(model),
+            usage: usage.map(projection::map_usage),
+            generated_ms,
+            images: Vec::new(),
+            attachments: Vec::new(),
+            inter_agent: None,
+            subagent_terminal: None,
+        }),
+        qaqh_ringing_contract::state::TimelineEntry::ToolCall { call_id, turn_id } => {
+            let turn_id = turn_id
+                .map(|id| TurnId::new(id.as_str()).map_err(|error| internal(error.to_string())))
+                .transpose()?
+                .or(row_turn_id);
+            Ok(BlockView {
+                block_id: row_block_id,
+                turn_id,
+                ord: u64::try_from(row.ord).map_err(|_| internal("negative block ord"))?,
+                kind: BlockKind::ToolCall,
+                content: ContentRef::Inline {
+                    text: String::new(),
+                },
+                tool_call_id: Some(tool_call_id(call_id.as_str())?),
+                created_at_ms: row.created_at_ms.max(0) as u64,
+                actor: None,
+                purpose: None,
+                model: None,
+                usage: None,
+                generated_ms: None,
+                images: Vec::new(),
+                attachments: Vec::new(),
+                inter_agent: None,
+                subagent_terminal: None,
+            })
+        }
         qaqh_ringing_contract::state::TimelineEntry::ToolResult {
-            call_id, content, ..
-        } => (
-            BlockKind::ToolResult,
+            call_id,
+            turn_id,
             content,
-            Some(tool_call_id(call_id.as_str())?),
-        ),
-        qaqh_ringing_contract::state::TimelineEntry::Compaction { summary } => {
-            (BlockKind::System, summary, None)
-        }
-    };
-    Ok(BlockView {
-        ord: u64::try_from(row.ord).map_err(|_| internal("negative block ord"))?,
-        kind,
-        content: projection::content_ref(hub, state, session_id, content)
-            .await
-            .map_err(internal)?,
-        tool_call_id,
-        created_at_ms: row.created_at_ms.max(0) as u64,
-    })
-}
-
-async fn tool_view(
-    backend: &RealBackend,
-    session_id: &str,
-    tool: &qaqh_ringing_contract::state::ToolCallView,
-) -> Result<v3::ToolCallView, RpcError> {
-    use v3::ToolCallStatus;
-    let (status, finished) = match &tool.state {
-        qaqh_ringing_contract::state::ToolCallState::Declared
-        | qaqh_ringing_contract::state::ToolCallState::AwaitingInteraction { .. } => {
-            (ToolCallStatus::Pending, None)
-        }
-        qaqh_ringing_contract::state::ToolCallState::Running => (ToolCallStatus::Running, None),
-        qaqh_ringing_contract::state::ToolCallState::Cancelling => {
-            (ToolCallStatus::Cancelled, None)
-        }
-        qaqh_ringing_contract::state::ToolCallState::Finished { outcome } => (
-            match outcome {
-                qaqh_ringing_contract::fact::ToolCallOutcome::Completed
-                | qaqh_ringing_contract::fact::ToolCallOutcome::Yielded { .. } => {
-                    ToolCallStatus::Succeeded
-                }
-                qaqh_ringing_contract::fact::ToolCallOutcome::Failed { .. } => {
-                    ToolCallStatus::Failed
-                }
-                qaqh_ringing_contract::fact::ToolCallOutcome::Cancelled { .. } => {
-                    ToolCallStatus::Cancelled
-                }
-                qaqh_ringing_contract::fact::ToolCallOutcome::Interrupted { .. } => {
-                    ToolCallStatus::Indeterminate
-                }
-            },
-            tool.metrics
-                .as_ref()
-                .map(|metrics| metrics.finished_at_ms.max(0) as u64),
-        ),
-    };
-    Ok(v3::ToolCallView {
-        tool_call_id: tool_call_id(tool.call_id.as_str())?,
-        tool_name: tool.tool_name.clone().unwrap_or_default(),
-        status,
-        started_at_ms: tool
-            .metrics
-            .as_ref()
-            .map(|metrics| metrics.started_at_ms.max(0) as u64)
-            .unwrap_or_default(),
-        finished_at_ms: finished,
-        summary: match &tool.output {
-            Some(output) => Some(
-                projection::content_ref(&backend.hub, &backend.state, session_id, output.clone())
+            images: raw_images,
+        } => {
+            let mut images = Vec::with_capacity(raw_images.len());
+            for image in raw_images {
+                let b64 = qaqh_types::image_store::load_image_b64(&image.sha256, &image.mime_type)
+                    .map_err(internal)?;
+                images.push(
+                    projection::image_from_b64(hub, session_id, &b64, image.mime_type)
+                        .await
+                        .map_err(internal)?,
+                );
+            }
+            let turn_id = turn_id
+                .map(|id| TurnId::new(id.as_str()).map_err(|error| internal(error.to_string())))
+                .transpose()?
+                .or(row_turn_id);
+            Ok(BlockView {
+                block_id: row_block_id,
+                turn_id,
+                ord: u64::try_from(row.ord).map_err(|_| internal("negative block ord"))?,
+                kind: BlockKind::ToolResult,
+                content: projection::content_ref(hub, state, session_id, content)
                     .await
                     .map_err(internal)?,
-            ),
-            None => None,
-        },
-    })
+                tool_call_id: Some(tool_call_id(call_id.as_str())?),
+                created_at_ms: row.created_at_ms.max(0) as u64,
+                actor: None,
+                purpose: None,
+                model: None,
+                usage: None,
+                generated_ms: None,
+                images,
+                attachments: Vec::new(),
+                inter_agent: None,
+                subagent_terminal: None,
+            })
+        }
+        qaqh_ringing_contract::state::TimelineEntry::Compaction { summary } => Ok(BlockView {
+            block_id: row_block_id,
+            turn_id: row_turn_id,
+            ord: u64::try_from(row.ord).map_err(|_| internal("negative block ord"))?,
+            kind: BlockKind::System,
+            content: projection::content_ref(hub, state, session_id, summary)
+                .await
+                .map_err(internal)?,
+            tool_call_id: None,
+            created_at_ms: row.created_at_ms.max(0) as u64,
+            actor: None,
+            purpose: None,
+            model: None,
+            usage: None,
+            generated_ms: None,
+            images: Vec::new(),
+            attachments: Vec::new(),
+            inter_agent: None,
+            subagent_terminal: None,
+        }),
+    }
 }
 
 fn tool_call_id(raw: &str) -> Result<qaqh_core_vocab::ToolCallId, RpcError> {

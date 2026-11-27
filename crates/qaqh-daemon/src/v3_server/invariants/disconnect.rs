@@ -38,6 +38,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
         input_id: InputId::new("guard-03-input").expect("input id"),
         text: "只执行一次的回合".to_string(),
         attachments: Vec::new(),
+        images: Vec::new(),
     });
     let first = client_a
         .call_idempotent("guard-03-idem", request.clone())

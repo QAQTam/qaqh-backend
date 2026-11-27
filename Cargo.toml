@@ -82,7 +82,7 @@ windows-sys = "0.61"
 jsonc-parser = { version = "0.34", features = ["cst", "serde_json"] }
 
 [workspace.package]
-version = "4.2.0"
+version = "4.7.100"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 

@@ -1,5 +1,7 @@
 # P3-5e 前置工单：`qaqh-ringing-v3` 契约补齐（供后端同事执行）
 
+> **状态（2026-11-27 后端审计与裁决完成）**：已依据本仓宪法与 `ADR-0042` 完成全部阻塞清空与投影补齐，同时**驳回/修正**了工单中 5 处不符合 V3 架构或不必要的设计（见文末 `§6 后端审计裁决与额外修复`）。
+>
 > **一句话结论**：`P3-5a` 冻结的 V3 契约只够"能跑通控制面"，**不够 `../qaqh-gpui` 现网渲染**——`ToolCallView` 丢掉了 args/output/diff/metrics/code_delta/effects/exec_session_id，`BlockView` 丢掉了 `block_id`/`turn_id`/`actor`/`purpose`/图片/子代理/每块 model+usage，`ExecSessionSnapshot` 丢掉了状态机与尾窗，`InteractionView` 把结构化审批正文退化成一段 JSON 字符串。按现状切端，GPUI 的 diff 面板、工具参数、执行会话观察窗、图片附件、上下文/缓存遥测会**直接消失**。
 >
 > **本工单只做一件事**：把这些"前端已经在用的事实"补成 V3 强类型字段，投影层同步填上。**禁止**的方案见 §5。
@@ -328,3 +330,28 @@ cargo test -j2 -p qaqh-daemon --bin qaqh-daemon regression
 2. **不要在 `v3_bridge` 里拼 JSON 字符串冒充结构化字段**（例如把 `PermissionRequestDetails` 序列化进 `body`）。结构化正文要开结构体字段。
 3. **不要为前端新增"V2 形状镜像"DTO**（如把 `TimelineEntry` 原样搬进 V3）。V3 的块模型是 `BlockView`，补齐方式是在它身上加事实字段，不是把 V2 枚举搬过来。
 4. **不要用 base64 内联图片**。图片一律 `ContentHash` + `upload_blob/fetch_blob`。
+
+---
+
+## 6. 后端审计裁决与额外修复（2026-11-27）
+
+### 已驳回 / 修正的提案
+
+1. **驳回 H 组“指向 `qaqh-profile` 枚举”与“在 `config.rs` 新增模型 capabilities 目录视图”**：
+   - `qaqh-profile` 依赖 `qaqh-types`（含 `serde_json` 与 `skip_serializing_if`），违反 `ADR-0042` 铁律 1；已改为在 `qaqh-core-vocab` 新增零 JSON 依赖的 `Wire` 与 `CredentialSource` 枚举。
+   - `ConfigRequest::ListProviders` 已返回完整 `ProfilesDocument`（含 `ModelDef.capabilities`、`reasoning_levels`、`defaults`、`context_window`），`qaqh-gpui` 既有的 `store.rs:1760` 即直读 `ProfilesDocument`，无需在 `config.rs` 再造第二份目录视图。
+2. **驳回 A 组同时保留 `summary` 与 `output` 两个重复字段**：
+   - `v3_bridge` 原 `summary` 实质就是 `tool.output`，不存在独立的短摘要源。已直接用 `output: Option<ContentRef>` 替代 `summary`（单源，大输出走 Blob），并额外补齐前端 `TimelineTruncated` 与 `HandoffSealed` 必需的 `turn_id: Option<TurnId>`。
+3. **修正 A 组 `ToolCallStatus` 与 E 组 `InteractionChoiceView.decision` 弱类型**：
+   - `ToolCallStatus` 直接新增 `AwaitingInteraction` 与 `Cancelling`（不再靠 `Pending + interaction_id.is_some()` 隐式推导）。
+   - `InteractionChoiceView.decision` 改为强类型枚举 `InteractionDecisionKind`（拒绝裸 `String`）。
+4. **明确 `ToolArgumentsDelta` 维持增量 `delta` 语义**：
+   - 保持 `delta: String` 增量推送与 `DeltaCoalescer` 同流合帧，仅补充 `tool_name` / `lines_added` / `lines_removed` / `target_files` / `args_complete` 最新快照字段（`args_complete == true` 时立即 flush）。
+
+### 后端主动发现并一并修掉的隐藏阻塞 Bug
+
+1. **`AnswerDelta` / `ReasoningDelta` 全量当增量发（重大渲染 Bug）**：`v3_bridge/projection/events.rs` 原直接透传 V2 `MessageDelta` 的累计前缀文本，前端 `push_str` 会拼成重复乱码；已改为按 `block_id` `strip_prefix` 产出真增量，非单调收缩 Fail-Closed。
+2. **`SessionSummary.updated_at_ms` 1000 倍单位错位 + 缺 `custom_tools`/`created_at_ms`**：`service.list_sessions` 返回的 `meta.updated_at` 实为秒级且未带 `custom_tools`；`v3_bridge` 已直读 `sessions` 表毫秒字段与 `custom_tools`，同时在 `SessionSnapshot` 上补齐 `custom_tools` / `handoff_from` / `created_at_ms`。
+3. **`CommandRequest::SendPrompt` 缺图片入口（前端迁移方案 §3 遗漏）**：仅靠 `attachments: Vec<ContentRef>` 无法区分文本附件与多模态图片且丢失 `mime_type`；已在 `SendPrompt` 新增 `images: Vec<ImageRefView>`，支持纯图无文本投递并在 `v3_bridge` 边界做魔数/MIME 校验。
+4. **`ToolStateChanged` / `ToolFinished` 丢掉 `ToolDeclared` 参数与起始时间**：`v3_bridge` 原按状态事件重建空 `ToolCallView` 导致全量替换把 `args` 抹空；已改为事件投影缓存 + DB 回查合并，保证每次 `ToolCallUpdated` 均携带完整 `args` 与上下文。
+5. **补齐 `TurnSummary`、`TurnStarted`、`ProviderRetrying`、`HandoffSealed` 与 `UsageInfo` 映射**：`TurnSummary` 补齐 `turn_id`/`input_id`/`phase`/`usage`；`TurnStarted` 补齐 `input_id`；`ProviderRetrying` 补齐 `max_attempts`；`HandoffSealed` 补齐 `sealed_session_id`/`turn_id`/`at_ms` 且强制 `Inline`；`map_usage` 按 `total_input`（`hit + miss` 优先）映射。

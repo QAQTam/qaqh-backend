@@ -1,13 +1,13 @@
 //! Session 域强类型 RPC、首屏快照与历史时间线分页 DTO。
 
 use qaqh_core_vocab::{
-    ContentRef, GoalStatus, ModelSelection, SessionId, SettingOverride, ToolCallId, ToolMode,
-    TurnId, TurnTerminal, WorkspaceId,
+    BlockId, ContentRef, GoalStatus, InputId, ModelSelection, SessionId, SettingOverride,
+    ToolCallId, ToolMode, TurnId, TurnPhase, TurnTerminal, UsageInfo, WorkspaceId,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::stream::{
-    CompactionSummary, ExecSessionSnapshot, InteractionView, ToolCallView,
+    CompactionSummary, ExecSessionSnapshot, ImageRefView, InteractionView, ToolCallView,
 };
 use crate::team::{
     GoalView, SkillsCatalogView, SubagentSummary, TeamOverview, TodoListSnapshot,
@@ -176,9 +176,86 @@ pub enum SessionRequest {
     },
 }
 
+/// 时间线输入块发起者类别。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlockActor {
+    /// 人类用户。
+    User,
+    /// 外部 API。
+    Api,
+    /// 系统内部注入。
+    System,
+    /// 代理自身/同事代理。
+    Agent,
+    /// 子代理。
+    Subagent,
+}
+
+/// 用户/系统输入块投递意图。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InputPurpose {
+    /// 触发新回合。
+    TriggerTurn,
+    /// 仅入队。
+    QueueOnly,
+    /// 运行中转向。
+    Steer,
+    /// 运行中插话。
+    Interject,
+}
+
+/// 跨代理通信消息卡片元数据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterAgentView {
+    /// 消息 id。
+    pub message_id: String,
+    /// 根会话 id。
+    pub root_session_id: SessionId,
+    /// 发送者签名。
+    pub author: String,
+    /// 主接收者签名。
+    pub recipient: String,
+    /// 其余抄送接收者。
+    pub other_recipients: Vec<String>,
+    /// 关联任务板任务 id。
+    pub task_id: Option<String>,
+    /// 回复目标消息 id。
+    pub reply_to: Option<String>,
+    /// 创建时刻（毫秒）。
+    pub created_at_ms: u64,
+}
+
+/// 子代理终态种类。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SubagentTerminalKind {
+    /// 正常完成。
+    Completed,
+    /// 失败。
+    Failed,
+    /// 被取消。
+    Cancelled,
+    /// 超时。
+    TimedOut,
+}
+
+/// 随子代理终态注入携带的结构化通知。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentTerminalView {
+    /// 子会话 id。
+    pub child_session_id: SessionId,
+    /// 父级派生工具调用 id。
+    pub parent_call_id: ToolCallId,
+    /// 终态种类。
+    pub terminal: SubagentTerminalKind,
+}
+
 /// 时间线块。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BlockView {
+    /// 块 id（与 `AnswerDelta` / `ReasoningDelta` / `BlockFinal` 对齐）。
+    pub block_id: BlockId,
+    /// 所属回合 id（会话级横幅为 `None`）。
+    pub turn_id: Option<TurnId>,
     /// 时间线内的定序号（跨页唯一）。
     pub ord: u64,
     /// 块种类。
@@ -189,9 +266,30 @@ pub struct BlockView {
     pub tool_call_id: Option<ToolCallId>,
     /// 产生该块的时间（毫秒）。
     pub created_at_ms: u64,
+    /// 发起者类别（`User` 块携带）。
+    pub actor: Option<BlockActor>,
+    /// 输入投递意图（`User` 块携带）。
+    pub purpose: Option<InputPurpose>,
+    /// 生成该助手块的模型名（`Answer`/`Reasoning` 块携带）。
+    pub model: Option<String>,
+    /// 块级 token 用量（遥测口径）。
+    pub usage: Option<UsageInfo>,
+    /// 内核实测产出时长（毫秒；吐字速率分母）。
+    pub generated_ms: Option<u64>,
+    /// 块附带图片（内容寻址 blob，禁止 base64 内联）。
+    pub images: Vec<ImageRefView>,
+    /// 块附带文本附件引用。
+    pub attachments: Vec<ContentRef>,
+    /// 跨代理消息元数据（如有）。
+    pub inter_agent: Option<InterAgentView>,
+    /// 子代理终态通知元数据（如有）。
+    pub subagent_terminal: Option<SubagentTerminalView>,
 }
 
 /// 块种类。
+///
+/// 压缩摘要由 [`SessionSnapshot::pinned_compaction`] 单独承载，不混入时间线；
+/// `System` 只承载系统提示/横幅。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlockKind {
     /// 用户输入。
@@ -204,17 +302,25 @@ pub enum BlockKind {
     ToolCall,
     /// 工具结果。
     ToolResult,
-    /// 系统提示（压缩摘要、错误横幅等）。
+    /// 系统提示（横幅等；压缩摘要单独走 `pinned_compaction`）。
     System,
 }
 
 /// 回合摘要（首屏 `turns` 窗口）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnSummary {
+    /// 回合 id。
+    pub turn_id: TurnId,
+    /// 触发该回合的用户输入 id（如有）。
+    pub input_id: Option<InputId>,
     /// 回合定序号。
     pub ordinal: u64,
+    /// 非终态子阶段（已有 `terminal` 时为 `None`）。
+    pub phase: Option<TurnPhase>,
     /// 终态（未结束为 `None`）。
     pub terminal: Option<TurnTerminal>,
+    /// 回合汇总用量（遥测兜底）。
+    pub usage: Option<UsageInfo>,
     /// 开始时刻（毫秒）。
     pub started_at_ms: u64,
 }
@@ -236,7 +342,7 @@ pub struct SessionSnapshot {
     pub settings_revision: u64,
     /// 会话显式模型绑定（未覆写为 `None`）。
     pub model_selection: Option<ModelSelection>,
-    /// 当前活动状态。
+    /// 当前活动状态（V3 仅四态，不存在"未运行/未加载"态）。
     pub activity: qaqh_core_vocab::ActivityState,
     /// 时间线代际（翻页校验用）。
     pub timeline_epoch: u64,
@@ -264,6 +370,12 @@ pub struct SessionSnapshot {
     pub pinned_compaction: Option<CompactionSummary>,
     /// 当前工具模式。
     pub tool_mode: ToolMode,
+    /// `Custom` 工具模式下的自定义工具白名单。
+    pub custom_tools: Vec<String>,
+    /// 若由交接产生，来源会话 id。
+    pub handoff_from: Option<SessionId>,
+    /// 创建时刻（毫秒）。
+    pub created_at_ms: u64,
 }
 
 /// 翻页结果。
@@ -296,12 +408,16 @@ pub struct SessionSummary {
     pub model_selection: Option<ModelSelection>,
     /// 当前工具模式。
     pub tool_mode: ToolMode,
+    /// `Custom` 工具模式下的自定义工具白名单。
+    pub custom_tools: Vec<String>,
     /// 设置乐观锁修订号。
     pub settings_revision: u64,
     /// 若由交接产生，来源会话 id。
     pub handoff_from: Option<SessionId>,
-    /// 活动状态。
+    /// 活动状态（V3 语义下无 `NotRunning`/"未加载"态，前端直接按四态渲染）。
     pub activity: qaqh_core_vocab::ActivityState,
+    /// 创建时刻（毫秒）。
+    pub created_at_ms: u64,
     /// 最后活动时刻（毫秒）。
     pub updated_at_ms: u64,
 }

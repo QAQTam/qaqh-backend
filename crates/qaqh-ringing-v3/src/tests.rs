@@ -15,10 +15,10 @@ use std::fmt::Debug;
 
 use bytes::Bytes;
 use qaqh_core_vocab::{
-    ActivityState, BlockId, ContentHash, ContentRef, ExecSessionId, GoalStatus, InputId,
-    InteractionId, JsonText, ModelSelection, ModelSelectionOptions, PermissionGrantScope,
+    ActivityState, BlockId, ContentHash, ContentRef, CredentialSource, ExecSessionId, GoalStatus,
+    InputId, InteractionId, JsonText, ModelSelection, ModelSelectionOptions, PermissionGrantScope,
     SessionId, SettingOverride, ToolCallId, ToolCatalog, ToolMode, TurnId, TurnPhase,
-    TurnTerminal, UsageInfo, WorkspaceId,
+    TurnTerminal, UsageInfo, Wire, WorkspaceId,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -138,6 +138,8 @@ fn core_vocab_primitives_round_trip() {
     round_trip(JsonText::new("{\"a\":1}"));
     round_trip(ActivityState::WaitingUser);
     round_trip(ToolMode::Custom);
+    round_trip(Wire::Messages);
+    round_trip(CredentialSource::DeepseekAccount);
 }
 
 /// `Option` 与 `Vec` 的混合序列：`None → Some → 空 Vec → 多元素 Vec` 必须各自对齐。
@@ -174,6 +176,9 @@ fn option_and_vec_positions_never_drift() {
         driver_ordinal: 0,
         pinned_compaction: None,
         tool_mode: ToolMode::Standard,
+        custom_tools: vec![],
+        handoff_from: None,
+        created_at_ms: 1,
     };
     let multi_variant = SessionSnapshot {
         session_id: session_id(),
@@ -192,44 +197,125 @@ fn option_and_vec_positions_never_drift() {
         seq: 43,
         turns: vec![
             TurnSummary {
+                turn_id: TurnId::new("T1").expect("valid"),
+                input_id: None,
                 ordinal: 1,
+                phase: Some(TurnPhase::Running),
                 terminal: None,
+                usage: None,
                 started_at_ms: 10,
             },
             TurnSummary {
+                turn_id: TurnId::new("T2").expect("valid"),
+                input_id: Some(InputId::new("IN-2").expect("valid")),
                 ordinal: 2,
+                phase: None,
                 terminal: Some(TurnTerminal::Cancelled { code: "y".into() }),
+                usage: Some(UsageInfo {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cached_input_tokens: Some(4),
+                    reasoning_tokens: None,
+                }),
                 started_at_ms: 20,
             },
         ],
         tail_blocks: vec![BlockView {
+            block_id: BlockId::new("BLK-9").expect("valid"),
+            turn_id: Some(TurnId::new("T2").expect("valid")),
             ord: 5,
             kind: BlockKind::Answer,
             content: ContentRef::Inline { text: "x".into() },
             tool_call_id: Some(ToolCallId::new("CALL-9").expect("valid")),
             created_at_ms: 30,
+            actor: Some(BlockActor::User),
+            purpose: Some(InputPurpose::TriggerTurn),
+            model: Some("gpt-5".into()),
+            usage: Some(UsageInfo::default()),
+            generated_ms: Some(120),
+            images: vec![ImageRefView {
+                hash: content_hash(),
+                len: 4,
+                mime_type: "image/png".into(),
+            }],
+            attachments: vec![ContentRef::Blob {
+                hash: content_hash(),
+                len: 10,
+            }],
+            inter_agent: Some(InterAgentView {
+                message_id: "m1".into(),
+                root_session_id: session_id(),
+                author: "/root".into(),
+                recipient: "/root/a".into(),
+                other_recipients: vec![],
+                task_id: Some("t1".into()),
+                reply_to: None,
+                created_at_ms: 30,
+            }),
+            subagent_terminal: Some(SubagentTerminalView {
+                child_session_id: session_id(),
+                parent_call_id: ToolCallId::new("CALL-9").expect("valid"),
+                terminal: SubagentTerminalKind::Completed,
+            }),
         }],
         tool_calls: vec![ToolCallView {
             tool_call_id: ToolCallId::new("CALL-9").expect("valid"),
+            turn_id: Some(TurnId::new("T2").expect("valid")),
             tool_name: "read".into(),
-            status: ToolCallStatus::Running,
+            status: ToolCallStatus::AwaitingInteraction,
             started_at_ms: 30,
             finished_at_ms: None,
-            summary: None,
+            args: Some(ContentRef::Inline {
+                text: "{\"path\":\"a.rs\"}".into(),
+            }),
+            output: None,
+            output_truncated: false,
+            diff: Some(ContentRef::Inline {
+                text: "--- a\n+++ b\n".into(),
+            }),
+            code_delta: Some(CodeDeltaView {
+                lines_added: 1,
+                lines_removed: 0,
+                files_created: 0,
+                files_deleted: 0,
+                file: Some("a.rs".into()),
+            }),
+            metrics: Some(ToolMetricsView {
+                started_at_ms: 30,
+                finished_at_ms: 35,
+                retry_count: 0,
+                output_bytes: 12,
+                progress_bytes_total: 12,
+            }),
+            exec_session_id: None,
+            interaction_id: Some(InteractionId::new("INT-9").expect("valid")),
+            effects: vec![ToolEffectView::SubagentSpawned {
+                child_session_id: session_id(),
+                name: "sub".into(),
+                task_text: "go".into(),
+            }],
         }],
         pending_interactions: vec![InteractionView {
             interaction_id: InteractionId::new("INT-9").expect("valid"),
+            turn_id: Some(TurnId::new("T2").expect("valid")),
             kind: InteractionKind::Ask,
             tool_call_id: None,
             title: "选择".into(),
             body: "确认？".into(),
             options: vec!["A".into(), "B".into()],
+            choices: vec![InteractionChoiceView {
+                decision: InteractionDecisionKind::Answered,
+                label: "提交".into(),
+                description: None,
+                tone: ChoiceTone::Primary,
+            }],
             questions: vec![AskQuestionView {
                 id: "q1".into(),
                 prompt: "继续吗？".into(),
                 options: vec!["A".into(), "B".into()],
                 allow_free_text: true,
             }],
+            permission: None,
             expires_at_ms: Some(99),
         }],
         exec_sessions: vec![ExecSessionSnapshot {
@@ -240,6 +326,20 @@ fn option_and_vec_positions_never_drift() {
             exit_code: Some(0),
             next_offset: 3,
             output: Some(ContentRef::Inline { text: "hi\n".into() }),
+            state: ExecSessionStateView::Finished {
+                outcome: ExecOutcomeView::Exited { exit_code: 0 },
+            },
+            owner_session_id: session_id(),
+            origin_turn_id: Some(TurnId::new("T2").expect("valid")),
+            origin_call_id: Some(ToolCallId::new("CALL-9").expect("valid")),
+            cwd: Some("/work".into()),
+            started_at_ms: 10,
+            finished_at_ms: Some(20),
+            output_preview: "hi\n".into(),
+            preview_start_offset: 0,
+            output_complete: true,
+            capture_omitted_bytes: 0,
+            stream_dropped_bytes: 0,
         }],
         subagents: vec![SubagentSummary {
             session_id: session_id(),
@@ -266,6 +366,9 @@ fn option_and_vec_positions_never_drift() {
             summary: "sum".into(),
         }),
         tool_mode: ToolMode::Core,
+        custom_tools: vec!["read".into()],
+        handoff_from: Some(session_id()),
+        created_at_ms: 2,
     };
     // 三种形状交替往返多次：位置错位会在某一次对上崩塌。
     for _ in 0..3 {
@@ -285,9 +388,11 @@ fn every_session_dto_round_trips() {
         archived: false,
         model_selection: None,
         tool_mode: ToolMode::Standard,
+        custom_tools: vec![],
         settings_revision: 3,
         handoff_from: None,
         activity: ActivityState::Idle,
+        created_at_ms: 5,
         updated_at_ms: 8,
     };
     round_trip(SessionRequest::Create {
@@ -374,9 +479,11 @@ fn every_session_dto_round_trips() {
         archived: true,
         model_selection: None,
         tool_mode: ToolMode::Core,
+        custom_tools: vec!["bash".into()],
         settings_revision: 0,
         handoff_from: Some(session_id()),
         activity: ActivityState::Idle,
+        created_at_ms: 3,
         updated_at_ms: 7,
     }]));
     round_trip(SessionResponse::Todos(TodoListSnapshot {
@@ -479,6 +586,11 @@ fn system_and_command_domains_round_trip() {
         input_id: InputId::new("IN-1").expect("valid"),
         text: "hi".into(),
         attachments: vec![],
+        images: vec![ImageRefView {
+            hash: content_hash(),
+            len: 8,
+            mime_type: "image/png".into(),
+        }],
     });
     round_trip(CommandRequest::RespondInteraction {
         session_id: session_id(),
@@ -602,8 +714,8 @@ fn shell_marketplace_config_domains_round_trip() {
         id: "deepseek".into(),
         name: "DeepSeek".into(),
         base_url: "https://api.deepseek.com".into(),
-        wire: "responses".into(),
-        credential: "deepseek_account".into(),
+        wire: Wire::Responses,
+        credential: CredentialSource::DeepseekAccount,
     }]));
     round_trip(ConfigResponse::Reloaded);
 }
@@ -781,6 +893,7 @@ fn stream_frames_and_events_round_trip() {
         SessionEvent::TurnStarted {
             session_id: session_id(),
             turn_id: TurnId::new("T1").expect("valid"),
+            input_id: Some(InputId::new("IN-1").expect("valid")),
             started_at_ms: 1,
         },
         SessionEvent::TurnPhaseChanged {
@@ -797,6 +910,7 @@ fn stream_frames_and_events_round_trip() {
         SessionEvent::ProviderRetrying {
             session_id: session_id(),
             attempt: 2,
+            max_attempts: 5,
             delay_ms: 500,
             reason: "rate_limit".into(),
         },
@@ -818,33 +932,59 @@ fn stream_frames_and_events_round_trip() {
         SessionEvent::TimelineAppended {
             session_id: session_id(),
             block: BlockView {
+                block_id: BlockId::new("B1").expect("valid"),
+                turn_id: Some(TurnId::new("T1").expect("valid")),
                 ord: 1,
                 kind: BlockKind::Answer,
                 content: ContentRef::Inline { text: "z".into() },
                 tool_call_id: None,
                 created_at_ms: 9,
+                actor: None,
+                purpose: None,
+                model: Some("deepseek-chat".into()),
+                usage: None,
+                generated_ms: Some(45),
+                images: vec![],
+                attachments: vec![],
+                inter_agent: None,
+                subagent_terminal: None,
             },
         },
         SessionEvent::TimelineTruncated {
             session_id: session_id(),
             from_turn_id: TurnId::new("T1").expect("valid"),
+            removed_turn_ids: vec![TurnId::new("T1").expect("valid")],
             timeline_epoch: 5,
         },
         SessionEvent::ToolCallUpdated {
             session_id: session_id(),
             call: ToolCallView {
                 tool_call_id: ToolCallId::new("C1").expect("valid"),
+                turn_id: Some(TurnId::new("T1").expect("valid")),
                 tool_name: "read".into(),
                 status: ToolCallStatus::Succeeded,
                 started_at_ms: 1,
                 finished_at_ms: Some(2),
-                summary: None,
+                args: None,
+                output: None,
+                output_truncated: false,
+                diff: None,
+                code_delta: None,
+                metrics: None,
+                exec_session_id: None,
+                interaction_id: None,
+                effects: vec![],
             },
         },
         SessionEvent::ToolArgumentsDelta {
             session_id: session_id(),
             tool_call_id: ToolCallId::new("C1").expect("valid"),
+            tool_name: "edit".into(),
             delta: "{\"path\":".into(),
+            lines_added: Some(3),
+            lines_removed: Some(1),
+            target_files: vec!["a.rs".into()],
+            args_complete: false,
         },
         SessionEvent::ToolOutputDelta {
             session_id: session_id(),
@@ -855,12 +995,30 @@ fn stream_frames_and_events_round_trip() {
             session_id: session_id(),
             interaction: InteractionView {
                 interaction_id: InteractionId::new("I1").expect("valid"),
+                turn_id: Some(TurnId::new("T1").expect("valid")),
                 kind: InteractionKind::Permission,
                 tool_call_id: Some(ToolCallId::new("C1").expect("valid")),
                 title: "t".into(),
                 body: "b".into(),
                 options: vec!["允许".into(), "拒绝".into()],
+                choices: vec![InteractionChoiceView {
+                    decision: InteractionDecisionKind::Approved,
+                    label: "允许".into(),
+                    description: None,
+                    tone: ChoiceTone::Primary,
+                }],
                 questions: vec![],
+                permission: Some(PermissionRequestView {
+                    tool_name: "write".into(),
+                    action_summary: None,
+                    justification: None,
+                    reason: "write file".into(),
+                    paths: vec!["a.rs".into()],
+                    category: "write".into(),
+                    level: 2,
+                    risk: "medium".into(),
+                    consequence: "modifies file".into(),
+                }),
                 expires_at_ms: None,
             },
         },
@@ -881,6 +1039,18 @@ fn stream_frames_and_events_round_trip() {
                 exit_code: None,
                 next_offset: 10,
                 output: None,
+                state: ExecSessionStateView::Running,
+                owner_session_id: session_id(),
+                origin_turn_id: Some(TurnId::new("T1").expect("valid")),
+                origin_call_id: Some(ToolCallId::new("C1").expect("valid")),
+                cwd: None,
+                started_at_ms: 1,
+                finished_at_ms: None,
+                output_preview: String::new(),
+                preview_start_offset: 0,
+                output_complete: false,
+                capture_omitted_bytes: 0,
+                stream_dropped_bytes: 0,
             },
         },
         SessionEvent::ExecOutputDelta {
@@ -922,10 +1092,13 @@ fn stream_frames_and_events_round_trip() {
         },
         SessionEvent::HandoffSealed {
             session_id: session_id(),
+            sealed_session_id: session_id(),
             successor_session_id: session_id(),
+            turn_id: TurnId::new("T1").expect("valid"),
             summary: ContentRef::Inline {
                 text: "交接".into(),
             },
+            at_ms: 123,
         },
         SessionEvent::PromptBlocked {
             session_id: session_id(),

@@ -263,6 +263,7 @@ pub(crate) async fn handle_command(
             input_id,
             text,
             attachments,
+            images,
         } => {
             let runtime = backend.session_for(context, &session_id).await?;
             if !runtime.is_driver(&context.identity.driver_key()) {
@@ -270,7 +271,7 @@ pub(crate) async fn handle_command(
                     "只有当前驱动端可以投递用户输入",
                 ));
             }
-            if text.trim().is_empty() {
+            if text.trim().is_empty() && attachments.is_empty() && images.is_empty() {
                 return Err(bad_request("用户输入不能为空"));
             }
             let mut stored = Vec::with_capacity(attachments.len());
@@ -285,6 +286,28 @@ pub(crate) async fn handle_command(
                     )),
                 ));
             }
+            let mut image_blocks = Vec::with_capacity(images.len());
+            for image in images {
+                let entry = backend
+                    .hub
+                    .get_content_async(session_id.as_str(), &image.hash.to_hex())
+                    .await
+                    .map_err(|error| internal(format!("读取上传图片失败：{error}")))?
+                    .ok_or_else(|| bad_request("图片必须是已上传的 Blob 引用"))?;
+                if entry.bytes.len() as u64 != image.len {
+                    return Err(bad_request("图片字节长度与 Blob 不匹配"));
+                }
+                let detected = detect_image_mime(&entry.bytes)
+                    .ok_or_else(|| bad_request("仅支持 PNG、JPEG、GIF、WebP 图片"))?;
+                if detected != image.mime_type {
+                    return Err(bad_request("图片 MIME 类型与载荷头不匹配"));
+                }
+                use base64::Engine as _;
+                image_blocks.push(qaqh_ringing_contract::commands::ImageBlock {
+                    mime_type: detected.to_string(),
+                    data: base64::engine::general_purpose::STANDARD.encode(&entry.bytes),
+                });
+            }
             backend.ensure_projector_ready(&session_id).await?;
             send(
                 &backend.service,
@@ -292,7 +315,7 @@ pub(crate) async fn handle_command(
                 qaqh_ringing::RingingCommand::ConversationSendMessage(
                     qaqh_ringing::ConversationSendMessage {
                         text,
-                        images: Vec::new(),
+                        images: image_blocks,
                         attachments: Some(stored),
                         message_id: Some(input_id.as_str().to_string()),
                         input_purpose: qaqh_ringing_contract::fact::InputPurpose::TriggerTurn,
@@ -438,6 +461,20 @@ async fn skills_catalog(
             })
             .collect(),
     }))
+}
+
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some("image/webp")
+    } else {
+        None
+    }
 }
 
 fn rpc(code: ErrorCode, message: impl Into<String>) -> RpcError {

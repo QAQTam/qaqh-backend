@@ -34,8 +34,8 @@ pub mod tool_catalog;
 pub mod tool_mode;
 
 pub use domain::{
-    ActivityState, ContentRef, GoalStatus, ModelSelection, ModelSelectionOptions,
-    PermissionGrantScope, SettingOverride, TurnPhase, TurnTerminal, UsageInfo,
+    ActivityState, ContentRef, CredentialSource, GoalStatus, ModelSelection, ModelSelectionOptions,
+    PermissionGrantScope, SettingOverride, TurnPhase, TurnTerminal, UsageInfo, Wire,
 };
 pub use ids::{
     BlockId, ContentHash, ExecSessionId, IdError, InputId, InteractionId, SessionId, ToolCallId,

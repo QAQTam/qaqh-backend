@@ -22,9 +22,16 @@ use crate::v3_server::state::ServerState;
 
 use epoch::{RemovalGuard, removal_receiver, set_epoch};
 
-pub(crate) use content::content_ref;
+pub(crate) use content::{content_ref, image_from_b64};
 pub(crate) use epoch::{epoch, notify_removed};
-pub(crate) use views::{exec_view, interaction_view};
+pub(crate) use events::map_usage;
+pub(crate) use views::{exec_view, interaction_view, tool_call_view};
+
+struct ProjectionCache {
+    blocks: BTreeMap<String, String>,
+    arguments: BTreeMap<String, String>,
+    tools: BTreeMap<String, v3::ToolCallView>,
+}
 
 pub(crate) async fn run(
     service: QaqhService,
@@ -44,7 +51,11 @@ pub(crate) async fn run(
     if attach.replay.gap {
         return Err(format!("owner attach replay gap for {session_id}"));
     }
-    let mut arguments = BTreeMap::<String, String>::new();
+    let mut cache = ProjectionCache {
+        blocks: BTreeMap::new(),
+        arguments: BTreeMap::new(),
+        tools: BTreeMap::new(),
+    };
     let mut epoch = runtime.epoch();
     set_epoch(session_id, epoch);
     for frame in attach.replay.frames {
@@ -67,7 +78,7 @@ pub(crate) async fn run(
             &hub,
             &runtime,
             frame,
-            &mut arguments,
+            &mut cache,
             &mut epoch,
         )
         .await?;
@@ -103,7 +114,7 @@ pub(crate) async fn run(
                                 .ok_or("owner replay sequence overflow")?;
                             if frame.seq != expected { return Err(format!("owner replay sequence gap: {expected} -> {}", frame.seq)); }
                             last_seq = Some(frame.seq);
-                            project_frame(&service, &state, &hub, &runtime, frame, &mut arguments, &mut epoch).await?;
+                            project_frame(&service, &state, &hub, &runtime, frame, &mut cache, &mut epoch).await?;
                         }
                         continue;
                     }
@@ -119,7 +130,7 @@ pub(crate) async fn run(
                     return Err(format!("owner sequence gap: {expected} -> {}", frame.seq));
                 }
                 last_seq = Some(frame.seq);
-                project_frame(&service, &state, &hub, &runtime, frame, &mut arguments, &mut epoch).await?;
+                project_frame(&service, &state, &hub, &runtime, frame, &mut cache, &mut epoch).await?;
             }
         }
     }
@@ -131,16 +142,27 @@ async fn project_frame(
     hub: &RingingHub,
     runtime: &Arc<SessionRuntime>,
     frame: qaqh_ringing_contract::SessionEventFrame,
-    arguments: &mut BTreeMap<String, String>,
+    cache: &mut ProjectionCache,
     epoch: &mut u64,
 ) -> Result<(), String> {
-    if let OldEvent::TimelineTruncated { from_turn_id, .. } = &frame.event {
+    if let OldEvent::TimelineTruncated {
+        from_turn_id,
+        removed_turn_ids,
+    } = &frame.event
+    {
         *epoch = epoch.checked_add(1).ok_or("timeline epoch overflow")?;
         set_epoch(&runtime.id, *epoch);
+        let removed_turn_ids = removed_turn_ids
+            .iter()
+            .map(|id| qaqh_core_vocab::TurnId::new(id.as_str()).map_err(|error| error.to_string()))
+            .collect::<Result<Vec<_>, _>>()?;
+        cache.blocks.clear();
+        cache.arguments.clear();
         let event = SessionEvent::TimelineTruncated {
             session_id: runtime.id.clone(),
             from_turn_id: qaqh_core_vocab::TurnId::new(from_turn_id.as_str())
                 .map_err(|error| error.to_string())?,
+            removed_turn_ids,
             timeline_epoch: *epoch,
         };
         runtime.emit(event);
@@ -170,8 +192,17 @@ async fn project_frame(
         });
         return Ok(());
     }
-    if let Some(event) =
-        events::map_event(service, state, hub, runtime, frame.event, arguments).await?
+    if let Some(event) = events::map_event(
+        service,
+        state,
+        hub,
+        runtime,
+        frame.event,
+        &mut cache.blocks,
+        &mut cache.arguments,
+        &mut cache.tools,
+    )
+    .await?
     {
         runtime.emit(event);
     }

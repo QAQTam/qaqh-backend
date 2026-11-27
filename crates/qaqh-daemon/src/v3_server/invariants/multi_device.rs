@@ -194,6 +194,7 @@ fn send_prompt(session_id: &qaqh_core_vocab::SessionId, input: &str) -> ControlR
         input_id: InputId::new(input).expect("input id"),
         text: format!("{input} 的正文"),
         attachments: Vec::new(),
+        images: Vec::new(),
     })
 }
 

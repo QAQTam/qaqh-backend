@@ -27,9 +27,10 @@ use qaqh_core_vocab::{
     ToolOrigin, ToolRiskLevel, ToolUnavailableReason, TurnTerminal,
 };
 use qaqh_ringing_v3::{
-    BlockKind, CommandInteractionResolution, CommandRequest, CommandResponse, ExecSessionSnapshot,
-    InteractionResolution, RpcError, SessionEvent, SessionRequest, SessionResponse, ToolCallStatus,
-    ToolCallView, ToolCatalogRequest, ToolCatalogResponse, WorkspaceRequest, WorkspaceResponse,
+    BlockKind, CommandInteractionResolution, CommandRequest, CommandResponse, ExecOutcomeView,
+    ExecSessionSnapshot, ExecSessionStateView, InteractionResolution, RpcError, SessionEvent,
+    SessionRequest, SessionResponse, ToolCallStatus, ToolCallView, ToolCatalogRequest,
+    ToolCatalogResponse, WorkspaceRequest, WorkspaceResponse,
 };
 
 use super::super::error::{denied, not_found, not_wired};
@@ -203,6 +204,7 @@ impl SkeletonSession {
                 input_id,
                 text,
                 attachments,
+                images: _,
             } => {
                 let session = self.session_for(context, &session_id)?;
                 self.run_skeleton_turn(context, &session, input_id, text, attachments)
@@ -339,6 +341,7 @@ impl SkeletonSession {
         session.emit(SessionEvent::TurnStarted {
             session_id: session_id.clone(),
             turn_id: turn_id.clone(),
+            input_id: Some(input_id.clone()),
             started_at_ms: now_ms(),
         });
 
@@ -349,11 +352,20 @@ impl SkeletonSession {
             ToolCallId::new(format!("tool-call-{exec_ordinal:04}")).expect("tool call id 形状固定");
         let running_view = ToolCallView {
             tool_call_id: tool_call_id.clone(),
+            turn_id: Some(turn_id.clone()),
             tool_name: "exec_command".to_string(),
             status: ToolCallStatus::Running,
             started_at_ms: now_ms(),
             finished_at_ms: None,
-            summary: None,
+            args: None,
+            output: None,
+            output_truncated: false,
+            diff: None,
+            code_delta: None,
+            metrics: None,
+            exec_session_id: Some(exec_id.clone()),
+            interaction_id: None,
+            effects: Vec::new(),
         };
         session.upsert_tool_call(running_view.clone());
         session.emit(SessionEvent::ToolCallUpdated {
@@ -379,6 +391,7 @@ impl SkeletonSession {
         } else {
             ContentRef::Inline { text: text.clone() }
         };
+        let preview_text = preview_of(&text, 1024).to_string();
         let exec_snapshot = ExecSessionSnapshot {
             exec_session_id: exec_id.clone(),
             command: format!(
@@ -390,6 +403,20 @@ impl SkeletonSession {
             exit_code: Some(0),
             next_offset: output.len() as u64,
             output: Some(content_ref.clone()),
+            state: ExecSessionStateView::Finished {
+                outcome: ExecOutcomeView::Exited { exit_code: 0 },
+            },
+            owner_session_id: session_id.clone(),
+            origin_turn_id: Some(turn_id.clone()),
+            origin_call_id: Some(tool_call_id.clone()),
+            cwd: None,
+            started_at_ms: now_ms(),
+            finished_at_ms: Some(now_ms()),
+            output_preview: preview_text,
+            preview_start_offset: 0,
+            output_complete: true,
+            capture_omitted_bytes: 0,
+            stream_dropped_bytes: 0,
         };
         session.upsert_exec_session(exec_snapshot.clone());
         session.emit(SessionEvent::ExecSessionUpdated {
@@ -427,11 +454,20 @@ impl SkeletonSession {
         session.end_tool_call();
         let finished_view = ToolCallView {
             tool_call_id: tool_call_id.clone(),
+            turn_id: Some(turn_id.clone()),
             tool_name: "exec_command".to_string(),
             status: ToolCallStatus::Succeeded,
             started_at_ms: now_ms(),
             finished_at_ms: Some(now_ms()),
-            summary: Some(content_ref.clone()),
+            args: None,
+            output: Some(content_ref.clone()),
+            output_truncated: false,
+            diff: None,
+            code_delta: None,
+            metrics: None,
+            exec_session_id: Some(exec_id),
+            interaction_id: None,
+            effects: Vec::new(),
         };
         session.upsert_tool_call(finished_view.clone());
         session.emit(SessionEvent::ToolCallUpdated {
@@ -603,12 +639,15 @@ pub(crate) fn permission_interaction(
 ) -> qaqh_ringing_v3::InteractionView {
     qaqh_ringing_v3::InteractionView {
         interaction_id,
+        turn_id: None,
         kind: qaqh_ringing_v3::InteractionKind::Permission,
         tool_call_id: None,
         title: title.into(),
         body: body.into(),
         options: Vec::new(),
+        choices: Vec::new(),
         questions: Vec::new(),
+        permission: None,
         expires_at_ms: None,
     }
 }

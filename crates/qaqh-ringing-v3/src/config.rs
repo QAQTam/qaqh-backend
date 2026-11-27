@@ -1,6 +1,6 @@
 //! Config 与 Provider 目录管理域强类型 RPC。
 
-use qaqh_core_vocab::{JsonText, ModelSelection};
+use qaqh_core_vocab::{CredentialSource, JsonText, ModelSelection, Wire};
 use serde::{Deserialize, Serialize};
 
 /// 配置分区。
@@ -28,9 +28,9 @@ pub struct ProviderPresetView {
     /// 默认 API 根地址。
     pub base_url: String,
     /// 线缆协议类别。
-    pub wire: String,
+    pub wire: Wire,
     /// 凭据来源类别。
-    pub credential: String,
+    pub credential: CredentialSource,
 }
 
 /// 配置域请求。

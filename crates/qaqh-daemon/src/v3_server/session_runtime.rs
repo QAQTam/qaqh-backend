@@ -61,6 +61,7 @@ pub(crate) struct SessionRuntime {
     allowed: Mutex<BTreeSet<DeviceKey>>,
     timeline: Mutex<Timeline>,
     tool_mode: Mutex<ToolMode>,
+    created_at_ms: u64,
     updated_at_ms: AtomicU64,
     tool_calls_running: AtomicU32,
     /// 当前回合序号（空闲为 `None`）。
@@ -94,6 +95,7 @@ impl SessionRuntime {
                 pinned_compaction: None,
             }),
             tool_mode: Mutex::new(ToolMode::Standard),
+            created_at_ms: now_ms(),
             updated_at_ms: AtomicU64::new(now_ms()),
             tool_calls_running: AtomicU32::new(0),
             current_turn: Mutex::new(None),
@@ -324,12 +326,24 @@ impl SessionRuntime {
         let mut timeline = lock(&self.timeline);
         timeline.next_ord += 1;
         let ord = timeline.next_ord;
+        let block_id = skeleton_block_id(ord);
         let block = BlockView {
+            block_id,
+            turn_id: None,
             ord,
             kind,
             content,
             tool_call_id,
             created_at_ms: now_ms(),
+            actor: None,
+            purpose: None,
+            model: None,
+            usage: None,
+            generated_ms: None,
+            images: Vec::new(),
+            attachments: Vec::new(),
+            inter_agent: None,
+            subagent_terminal: None,
         };
         timeline.blocks.push_back(block.clone());
         while timeline.blocks.len() > self.max_blocks {
@@ -370,8 +384,12 @@ impl SessionRuntime {
         let mut timeline = lock(&self.timeline);
         let ordinal = timeline.turns.len() as u64 + 1;
         let summary = TurnSummary {
+            turn_id: skeleton_turn_id(ordinal),
+            input_id: None,
             ordinal,
+            phase: terminal.is_none().then_some(qaqh_core_vocab::TurnPhase::Running),
             terminal,
+            usage: None,
             started_at_ms: now_ms(),
         };
         timeline.turns.push(summary.clone());
@@ -394,6 +412,7 @@ impl SessionRuntime {
             .find(|turn| turn.ordinal == ordinal)
             && turn.terminal.is_none()
         {
+            turn.phase = None;
             turn.terminal = Some(terminal);
             self.metrics.turns_finished.fetch_add(1, Ordering::Relaxed);
         }
@@ -458,6 +477,9 @@ impl SessionRuntime {
             driver_ordinal,
             pinned_compaction: timeline.pinned_compaction.clone(),
             tool_mode: *lock(&self.tool_mode),
+            custom_tools: Vec::new(),
+            handoff_from: None,
+            created_at_ms: self.created_at_ms,
         }
     }
 
@@ -521,9 +543,11 @@ impl SessionRuntime {
             archived: false,
             model_selection: None,
             tool_mode: *lock(&self.tool_mode),
+            custom_tools: Vec::new(),
             settings_revision: 0,
             handoff_from: None,
             activity: *lock(&self.activity),
+            created_at_ms: self.created_at_ms,
             updated_at_ms: self.updated_at_ms.load(Ordering::Relaxed),
         }
     }

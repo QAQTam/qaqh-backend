@@ -3655,7 +3655,7 @@ checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "qaqh-acp"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "agent-client-protocol",
  "qaqh-client",
@@ -3669,7 +3669,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-agent-runtime"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "chrono",
  "log",
@@ -3699,7 +3699,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-client"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3726,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-config"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "base64 0.23.1",
  "log",
@@ -3745,7 +3745,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-contract-export"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "hex",
  "qaqh-dsaccount",
@@ -3767,7 +3767,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-core-vocab"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "hex",
  "serde",
@@ -3776,7 +3776,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-daemon"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -3829,7 +3829,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-dsaccount"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3844,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ffi"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "android_logger",
  "log",
@@ -3859,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-file-tools"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -3884,7 +3884,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-gate"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "anyhow",
  "futures",
@@ -3902,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-gitx"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "qaqh-ringing-contract",
@@ -3918,7 +3918,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-harmony-napi"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "napi-build-ohos",
  "napi-derive-ohos",
@@ -3931,7 +3931,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-hooks"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "chrono",
  "hex",
@@ -3947,7 +3947,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-marketplace"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "qaqh-config",
@@ -3959,7 +3959,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-mcp"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "axum",
  "libc",
@@ -3978,7 +3978,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-memwatch"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "schemars 1.2.3",
  "serde",
@@ -3987,7 +3987,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-oauth-core"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
@@ -4004,7 +4004,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-permission"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "path-clean",
@@ -4017,7 +4017,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-process-tools"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4040,7 +4040,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-profile"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "qaqh-types",
@@ -4054,7 +4054,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-pty"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "anyhow",
  "libc",
@@ -4064,7 +4064,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "qaqh-profile",
  "qaqh-ringing-contract",
@@ -4076,7 +4076,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-contract"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "qaqh-types",
  "schemars 1.2.3",
@@ -4090,7 +4090,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-runtime"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "qaqh-memwatch",
@@ -4107,7 +4107,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-ringing-v3"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "bytes",
  "postcard",
@@ -4120,7 +4120,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-runtime"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "libc",
  "log",
@@ -4162,7 +4162,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-sandbox"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "landlock",
  "libc",
@@ -4178,7 +4178,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-session"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "hex",
  "log",
@@ -4200,7 +4200,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-siwc"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "aws-lc-rs",
  "log",
@@ -4216,7 +4216,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-skills"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "include_dir",
  "serde",
@@ -4226,7 +4226,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-subagent"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "qaqh-config",
@@ -4242,7 +4242,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-tool-core"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "anyhow",
  "log",
@@ -4257,7 +4257,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-types"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "chrono",
  "dunce",
@@ -4275,7 +4275,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-v3-transport"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "log",
  "qaqh-ringing-v3",
@@ -4290,7 +4290,7 @@ dependencies = [
 
 [[package]]
 name = "qaqh-workspace"
-version = "4.2.0"
+version = "4.7.100"
 dependencies = [
  "anyhow",
  "chrono",

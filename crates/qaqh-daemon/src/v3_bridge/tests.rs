@@ -180,7 +180,7 @@ async fn real_service_sqlite_uds_and_client_share_one_v3_backend() {
 
     let client = V3Client::connect_local(
         temp.path(),
-        "real-backend-test",
+        Some("real-backend-test"),
         "dev",
         "real-backend-client",
         false,
@@ -291,7 +291,7 @@ async fn real_service_sqlite_uds_and_client_share_one_v3_backend() {
 
     let restarted_client = V3Client::connect_local(
         temp.path(),
-        "real-backend-test",
+        Some("real-backend-test"),
         "dev",
         "real-backend-client",
         false,

@@ -153,6 +153,32 @@ pub enum SettingOverride<T> {
     Inherit,
 }
 
+/// 端点线缆协议类别（与 `qaqh-profile` 预设及 `ProviderDef` 同源，纯值枚举）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Wire {
+    /// OpenAI Chat Completions (`/chat/completions`)。
+    #[default]
+    Chat,
+    /// OpenAI Responses (`/responses`)。
+    Responses,
+    /// Anthropic Messages (`/v1/messages`)。
+    Messages,
+    /// Google Gemini (`generateContent`)。
+    Gemini,
+}
+
+/// 端点凭据来源类别。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CredentialSource {
+    /// 常规 BYOK API 密钥。
+    #[default]
+    ApiKey,
+    /// ChatGPT 套餐 OAuth 共享。
+    ChatgptPlan,
+    /// DeepSeek 官方账号 OAuth。
+    DeepseekAccount,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

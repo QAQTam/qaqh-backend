@@ -31,7 +31,7 @@ use crate::account::{AccountRequest, AccountResponse};
 use crate::config::{ConfigRequest, ConfigResponse};
 use crate::session::{SessionRequest, SessionResponse};
 use crate::stream::{
-    AskAnswer, ExecSessionSnapshot, SessionEvent, ToolCallStatus, ToolCallView,
+    AskAnswer, ExecSessionSnapshot, ImageRefView, SessionEvent, ToolCallStatus, ToolCallView,
 };
 use crate::workspace::{WorkspaceRequest, WorkspaceResponse};
 
@@ -215,8 +215,10 @@ pub enum CommandRequest {
         input_id: InputId,
         /// 文本。
         text: String,
-        /// 附件引用。
+        /// 文本附件引用。
         attachments: Vec<ContentRef>,
+        /// 多模态图片引用（必须先经 `BlobTransfer::ClientUpload` 上传）。
+        images: Vec<ImageRefView>,
     },
     /// 取消当前回合。
     CancelTurn {

@@ -285,9 +285,28 @@ impl DeltaCoalescer {
             merge_event(&mut merged.event, &frame.event);
             merged.meta = frame.meta;
             self.coalesced_away += 1;
+            if matches!(
+                &merged.event,
+                SessionEvent::ToolArgumentsDelta {
+                    args_complete: true,
+                    ..
+                }
+            ) {
+                return self.flush();
+            }
             return out;
         }
         out.extend(self.flush());
+        if matches!(
+            &frame.event,
+            SessionEvent::ToolArgumentsDelta {
+                args_complete: true,
+                ..
+            }
+        ) {
+            out.push(frame);
+            return out;
+        }
         self.merged = Some(MergedDelta {
             key,
             event: frame.event.clone(),
@@ -395,12 +414,34 @@ fn merge_event(target: &mut SessionEvent, incoming: &SessionEvent) {
             },
         ) => text.push_str(incoming_text),
         (
-            SessionEvent::ToolArgumentsDelta { delta, .. },
             SessionEvent::ToolArgumentsDelta {
-                delta: incoming_delta,
+                tool_name,
+                delta,
+                lines_added,
+                lines_removed,
+                target_files,
+                args_complete,
                 ..
             },
-        ) => delta.push_str(incoming_delta),
+            SessionEvent::ToolArgumentsDelta {
+                tool_name: incoming_name,
+                delta: incoming_delta,
+                lines_added: incoming_added,
+                lines_removed: incoming_removed,
+                target_files: incoming_files,
+                args_complete: incoming_complete,
+                ..
+            },
+        ) => {
+            if !incoming_name.is_empty() {
+                *tool_name = incoming_name.clone();
+            }
+            delta.push_str(incoming_delta);
+            *lines_added = *incoming_added;
+            *lines_removed = *incoming_removed;
+            *target_files = incoming_files.clone();
+            *args_complete = *incoming_complete;
+        }
         (
             SessionEvent::ExecOutputDelta {
                 end_offset, text, ..

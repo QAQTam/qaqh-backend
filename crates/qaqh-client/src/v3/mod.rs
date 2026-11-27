@@ -371,10 +371,12 @@ impl V3Client<YamuxTransport> {
 
     /// 发现本机 daemon、按需自启，并通过本地 IPC 完成 V3 握手。
     ///
-    /// `launch_if_missing = false` 时，端点缺失或不可达会直接返回错误；不会派生进程。
+    /// - `expected_build_id = None` 时仅校验 `protocol_rev`/`protocol_fingerprint`/`channel`
+    ///   （供独立前端如 `qaqh-gpui` 在冷启动及跨仓构建时使用）；
+    /// - `launch_if_missing = false` 时，端点缺失或不可达会直接返回错误；不会派生进程。
     pub async fn connect_local(
         data_root: &Path,
-        expected_build_id: &str,
+        expected_build_id: Option<&str>,
         expected_channel: &str,
         client_instance_id: &str,
         launch_if_missing: bool,
@@ -395,7 +397,7 @@ impl V3Client<YamuxTransport> {
         let mut launched = false;
 
         loop {
-            match resolve_daemon_endpoint(data_root, expected_channel, Some(expected_build_id)) {
+            match resolve_daemon_endpoint(data_root, expected_channel, expected_build_id) {
                 Ok(endpoint) => {
                     let path = endpoint.local_ipc.as_deref().ok_or_else(|| {
                         ClientError::Protocol("daemon.endpoint 未声明本地 IPC 端点".to_string())
@@ -563,7 +565,7 @@ mod tests {
         });
 
         let client_result =
-            V3Client::connect_local(&dir, "build-1", "dev", "client-1", false).await;
+            V3Client::connect_local(&dir, Some("build-1"), "dev", "client-1", false).await;
         let _ = release_tx.send(());
         server.await.expect("server task");
         let client = client_result.expect("connect_local");
@@ -571,6 +573,43 @@ mod tests {
             ServerHello::Accepted {
                 server_instance_id, ..
             } => assert_eq!(server_instance_id, "server-1"),
+            other => panic!("必须接受握手，实际 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_local_accepts_any_build_id_when_expected_is_none() {
+        let dir = temp_dir("any-build");
+        let socket = local_ipc_path(&dir, "any-build");
+        endpoint(&dir, "4.7.100", &socket);
+        let mut listener = bind_local_ipc(&socket).await.expect("bind");
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+
+        let server = tokio::spawn(async move {
+            let transport = listener.accept().await.expect("accept");
+            let mut stream = transport.accept_bi().await.expect("control stream");
+            let kind: StreamKind = read_frame(&mut stream).await.expect("stream kind");
+            assert!(matches!(kind, StreamKind::Control));
+            let _: ClientHello = read_frame(&mut stream).await.expect("client hello");
+            write_frame(
+                &mut stream,
+                &ServerHello::Accepted {
+                    server_instance_id: "server-any".to_string(),
+                    build_id: "4.7.100".to_string(),
+                    protocol_rev: PROTOCOL_REV,
+                },
+            )
+            .await
+            .expect("server hello");
+            let _ = release_rx.await;
+        });
+
+        let client_result = V3Client::connect_local(&dir, None, "dev", "client-1", false).await;
+        let _ = release_tx.send(());
+        server.await.expect("server task");
+        let client = client_result.expect("connect_local without build_id pin");
+        match client.server_hello() {
+            ServerHello::Accepted { build_id, .. } => assert_eq!(build_id, "4.7.100"),
             other => panic!("必须接受握手，实际 {other:?}"),
         }
     }
@@ -587,7 +626,8 @@ mod tests {
             let _ = release_rx.await;
         });
 
-        let result = V3Client::connect_local(&dir, "build-1", "dev", "client-1", false).await;
+        let result =
+            V3Client::connect_local(&dir, Some("build-1"), "dev", "client-1", false).await;
         let _ = release_tx.send(());
         server.await.expect("server task");
         assert!(matches!(result, Err(ClientError::HandshakeTimeout)));
@@ -596,10 +636,11 @@ mod tests {
     #[tokio::test]
     async fn connect_local_without_launch_rejects_missing_endpoint() {
         let dir = temp_dir("missing");
-        let error = match V3Client::connect_local(&dir, "build-1", "dev", "client-1", false).await {
-            Ok(_) => panic!("missing endpoint must fail"),
-            Err(error) => error,
-        };
+        let error =
+            match V3Client::connect_local(&dir, Some("build-1"), "dev", "client-1", false).await {
+                Ok(_) => panic!("missing endpoint must fail"),
+                Err(error) => error,
+            };
         assert!(matches!(error, ClientError::Endpoint(_)));
     }
 
@@ -607,11 +648,12 @@ mod tests {
     async fn connect_local_refuses_another_build_before_connecting() {
         let dir = temp_dir("wrong-build");
         endpoint(&dir, "old-build", &dir.join("daemon.sock"));
-        let error = match V3Client::connect_local(&dir, "new-build", "dev", "client-1", false).await
-        {
-            Ok(_) => panic!("wrong build must fail"),
-            Err(error) => error,
-        };
+        let error =
+            match V3Client::connect_local(&dir, Some("new-build"), "dev", "client-1", false).await
+            {
+                Ok(_) => panic!("wrong build must fail"),
+                Err(error) => error,
+            };
         assert!(matches!(
             error,
             ClientError::Endpoint(EndpointError::BuildIdMismatch { .. })

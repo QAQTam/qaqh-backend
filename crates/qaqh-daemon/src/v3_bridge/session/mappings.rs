@@ -4,10 +4,23 @@ use qaqh_ringing_v3::{GoalView, RpcError, SessionSummary};
 use super::super::internal;
 use qaqh_core_vocab::SessionId;
 
+use super::commands::SessionRowExtra;
+
 pub(super) fn summary_entry(
     entry: qaqh_types::SessionListEntry,
+    extra: Option<&SessionRowExtra>,
 ) -> Result<SessionSummary, RpcError> {
     let meta = entry.meta;
+    let created_at_ms = extra
+        .map(|row| row.created_at_ms)
+        .or(meta.created_at_ms)
+        .unwrap_or_else(|| meta.created_at.saturating_mul(1000));
+    let updated_at_ms = extra
+        .map(|row| row.updated_at_ms)
+        .unwrap_or_else(|| meta.updated_at.saturating_mul(1000));
+    let custom_tools = extra
+        .map(|row| row.custom_tools.clone())
+        .unwrap_or(meta.custom_tools);
     Ok(SessionSummary {
         session_id: SessionId::new(meta.session_id).map_err(|error| internal(error.to_string()))?,
         title: meta.title,
@@ -20,6 +33,7 @@ pub(super) fn summary_entry(
         model_selection: meta.model_selection.map(model_selection),
         tool_mode: ToolMode::from_runtime_mode(Some(meta.tool_mode.as_str()))
             .map_err(|error| internal(error.to_string()))?,
+        custom_tools,
         settings_revision: meta.settings_revision,
         handoff_from: meta
             .handoff_from_session_id
@@ -32,7 +46,8 @@ pub(super) fn summary_entry(
             qaqh_types::SessionRunStatus::Cancelling => ActivityState::Cancelling,
             _ => ActivityState::Idle,
         },
-        updated_at_ms: meta.updated_at,
+        created_at_ms,
+        updated_at_ms,
     })
 }
 

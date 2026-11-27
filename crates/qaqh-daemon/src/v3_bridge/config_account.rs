@@ -75,10 +75,53 @@ pub(crate) async fn handle_config(
         ConfigRequest::ListProviderPresets => {
             let service = backend.service.clone();
             let presets = RealBackend::blocking(move || service.provider_presets()).await?;
-            let presets: Vec<qaqh_ringing_v3::ProviderPresetView> =
-                serde_json::from_value(redact(presets))
-                    .map_err(|error| internal(format!("decode provider presets: {error}")))?;
-            Ok(ConfigResponse::ProviderPresets(presets))
+            let entries = presets
+                .as_array()
+                .ok_or_else(|| internal("provider presets must be an array"))?;
+            let mut views = Vec::with_capacity(entries.len());
+            for entry in entries {
+                let id = entry["id"]
+                    .as_str()
+                    .ok_or_else(|| internal("provider preset missing id"))?
+                    .to_string();
+                let name = entry["name"]
+                    .as_str()
+                    .ok_or_else(|| internal("provider preset missing name"))?
+                    .to_string();
+                let base_url = entry["baseUrl"]
+                    .as_str()
+                    .ok_or_else(|| internal("provider preset missing baseUrl"))?
+                    .to_string();
+                let wire = match entry["wire"].as_str() {
+                    Some("chat") => qaqh_core_vocab::Wire::Chat,
+                    Some("responses") => qaqh_core_vocab::Wire::Responses,
+                    Some("messages") => qaqh_core_vocab::Wire::Messages,
+                    Some("gemini") => qaqh_core_vocab::Wire::Gemini,
+                    other => {
+                        return Err(internal(format!(
+                            "unknown provider preset wire: {other:?}"
+                        )));
+                    }
+                };
+                let credential = match entry["credential"].as_str() {
+                    Some("api_key") => qaqh_core_vocab::CredentialSource::ApiKey,
+                    Some("chatgpt_plan") => qaqh_core_vocab::CredentialSource::ChatgptPlan,
+                    Some("deepseek_account") => qaqh_core_vocab::CredentialSource::DeepseekAccount,
+                    other => {
+                        return Err(internal(format!(
+                            "unknown provider preset credential: {other:?}"
+                        )));
+                    }
+                };
+                views.push(qaqh_ringing_v3::ProviderPresetView {
+                    id,
+                    name,
+                    base_url,
+                    wire,
+                    credential,
+                });
+            }
+            Ok(ConfigResponse::ProviderPresets(views))
         }
         ConfigRequest::UpsertProvider {
             provider,

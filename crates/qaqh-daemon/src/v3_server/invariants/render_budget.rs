@@ -111,6 +111,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
             input_id: InputId::new("guard-06-big").expect("input id"),
             text: big,
             attachments: Vec::new(),
+            images: Vec::new(),
         }))
         .await
         .expect("大输出回合必须受理");

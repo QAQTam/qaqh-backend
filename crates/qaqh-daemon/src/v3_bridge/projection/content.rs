@@ -1,8 +1,42 @@
+use base64::Engine as _;
 use qaqh_core_vocab::{ContentHash, ContentRef, SessionId};
 use qaqh_ringing_runtime::RingingHub;
+use qaqh_ringing_v3::ImageRefView;
 
 use crate::v3_server::facade::BlobPush;
 use crate::v3_server::state::ServerState;
+
+pub(crate) async fn json_value(
+    hub: &RingingHub,
+    state: &ServerState,
+    session_id: &str,
+    value: &serde_json::Value,
+) -> Result<ContentRef, String> {
+    let text = serde_json::to_string(value).map_err(|error| error.to_string())?;
+    inline(hub, state, session_id, text).await
+}
+
+pub(crate) async fn image_from_b64(
+    hub: &RingingHub,
+    session_id: &str,
+    b64: &str,
+    mime_type: String,
+) -> Result<ImageRefView, String> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|error| format!("decode image base64: {error}"))?;
+    let len = bytes.len() as u64;
+    let hash = hub
+        .put_content_async(session_id, &mime_type, bytes, false)
+        .await
+        .map_err(|error| error.to_string())?;
+    let hash = ContentHash::from_hex(&hash).map_err(|error| error.to_string())?;
+    Ok(ImageRefView {
+        hash,
+        len,
+        mime_type,
+    })
+}
 
 pub(crate) async fn content_ref(
     hub: &RingingHub,
