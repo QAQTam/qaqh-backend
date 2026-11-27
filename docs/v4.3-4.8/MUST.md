@@ -3,15 +3,15 @@
 
 ---
 
-# QAQ-Harness 后端架构治理与纯血 Rust Native 演进总纲（`v4.3` – `v4.12` → `v5.0`）
+# QAQ-Harness 后端架构治理与纯血 Rust Native 演进总纲（`v4.3` – `v4.11` → `27.0.0`）
 
-> **2026-11-26 路线升格校准（依新版《项目宪法 v2 · 高质量发展修宪版》与 `ADR-0042 r2`）**：
-> - 原 `v4.7`/`v4.8` 封板死线已正式扩展为 **`v4.5` – `v4.12` 高质量演进跑道（`v4.12` 终极稳定封板 → `v5.0` 内核大重写）**，目录名 `docs/v4.3-4.8/` 保持不动以免破坏既有文档与在途 worktree 锚点；
-> - `v4.3`–`v4.5` 继续遵循“铁闸 1（V2 契约 0 漂移）+ 铁闸 2（启动期吸入）+ 铁闸 3（并发反证）”；
-> - **自 `v4.6` 起切换为「RingingV3 反腐铁闸」**（宪法第 5–7 条、`ADR-0042 r2`）：依赖级封杀 `serde_json`、物理隔离目录、`v4.6` 冻协议与 6 条跨代不变量（含前端渲染预算初心守卫）、`v4.7` 切 GPUI 本地 IPC（腰斩 `bridge.rs`）、`v4.8` 切移动端纯 QUIC 多端联动、**`v4.9` 首 PR 整目录物理立斩 V2**、`v4.11` 切 `rust-nightly` 烧机与 PTC 独立沙箱选型、`v4.12` 功能冻结封板。
+> **2026-11-28 路线终版校准（依所有者拍板 & 《项目宪法 v2》）**：
+> - 为在 12 月前彻底终结 RingingV1/V2 耦合与同步阻塞架构、先确保电脑端（`qaqh-gpui`）纯血跑稳，正式收敛为 **`v4.8`–`v4.10` 三天清场 + `v4.11` 桌面真机全量调测封板 + `27.0.0` 远端 QUIC & Mobile 正式调测**（取消原 `rust-nightly` 切轨与 `v4.12` 冗余版号）；
+> - **自 `v4.6` 起切换为「RingingV3 反腐铁闸」**（宪法第 5–7 条、`ADR-0042 r2`）：`v4.6` 冻协议与 6 条跨代不变量、`v4.7` 切 GPUI 本地 IPC 并拉升 `v4.7.100`、`v4.8` 首 PR 整目录物理立斩 RingingV2、`v4.9` 工具 Trait 化（`AsyncTool` + 砍 v1 `ToolResult` 七层信封 + 真并发调度）、`v4.10` `SessionLoop` Trait 解耦重写 + 物理清零 `qaqh-ringing-contract` & `v3_bridge/projection`（SQLite 直接切纯血新格式，不保留旧对话行兼容）+ Per-Root Actor、`v4.11` 专注电脑端前后端真实联调封板；
+> - 下一个大版本定案为 **`27.0.0`**（桌面稳态后开启 `iroh`/QUIC 远端与 Android/OHOS Mobile 正式调测）。
 
-- **当前版本基线**：`v4.2.0`（[Cargo.toml](file:///home/qaqtam/项目/qaqh-backend/Cargo.toml#L64)；`v4.3` P0、`v4.4` P1 与 `v4.5` `P2-0` #39 已合入 `main`）
-- **最终完工死线**：**核心架构清债（P0–P2）在 `v4.5` 100% 清零；旧 RingingV2 协议栈在 `v4.9` 首张 PR 物理清零；`v4.12` 全平台稳定封板，随后进入 `v5.0` 内核重写。**
+- **当前版本基线**：`v4.7.100`（[Cargo.toml](file:///home/qaqtam/项目/qaqh-backend/Cargo.toml#L85)；`v4.3`–`v4.7` 已全部合入 `main`）
+- **最终完工死线**：**核心架构清债（P0–P2）在 `v4.5` 清零；GPUI 纯 V3 切端在 `v4.7.100` 合入 `main`；旧 RingingV2 栈在 `v4.8` 物理清零；工具/内核 Trait 化解耦在 `v4.9`–`v4.10` 清零；`v4.11` 桌面全流程封板；`27.0.0` 启动远端 QUIC 与 Mobile 正式调测。**
 - **适用最高准则**：《项目宪法（v2 · 高质量发展修宪版）》第 1–17 条
 - **核心约束**：
   1. **`v4.3`–`v4.5` 阶段旧前端 0 适配**；**`v4.6`–`v4.9` 阶段全面转向纯血 Rust Native（`../qaqh-gpui` + 移动 `qaqh-client` FFI）并立斩旧 V2 栈**；
@@ -182,21 +182,20 @@ sequenceDiagram
 
 ---
 
-## 四、`v4.3` – `v4.12` → `v5.0` 高质量演进路线图与优先级总表
+## 四、`v4.3` – `v4.11` → `27.0.0` 高质量演进路线图与优先级总表
 
-> **硬性排期校准（2026-11-26）**：`v4.3`（P0-1~P0-4）、`v4.4`（P1-0a~P1-4）及 `v4.5` `P2-0`（PR #39 `fe091bde`）均已合入 `main`。以下路线图按新版《项目宪法 v2》与 [ADR-0042 r2](../adr/0042-ringing-v3-rust-native-ipc-and-quic.md) 拆分为四个清晰战役，任何切片未通过反证与隔离闸验收，严禁进入下一阶段。
->
-> **2026-11-23 `LOCK_AUDIT_REPORT.md` 补充校准（已于 v4.4/v4.5-P2-0 收口）**：
-> 1. `P1-0a ~ P1-0c` 已在 `v4.4` 清零；`P1-0d` 顺延锁微修（`L-21/L-15/L-16/L-13/L-29`）已于 `v4.5 P2-0`（#39）清零，`L-23` 随移除 `qaqh-lsp` 自然消亡，`L-27` 归入 `P2-2b`。
-> 2. 剩余与传输耦合的高价值结构刺（`L-11` Shell stdin 持 `registry` 锁、`L-12` Blob 同步写盘）锁定在 `v4.7` 切 RingingV3 异步门面时根除。
+> **硬性排期校准（2026-11-28）**：`v4.3`–`v4.7`（`v4.7.100`）已全部合入 `main`。以下自 `P3-6` 起按「先斩 V2 → 工具 Trait 化 → Loop/DB 解耦 → 桌面联调封板 → `27.0.0` 多端」重排，彻底消除双栈与翻译层返工。
 
 ### 优先级与阶段分级定义
 - **P0（`v4.3`，已清零）**：架构毒瘤 / 单线程 `FALLBACK_RT` / 工具 `thread_local!` / 违宪伪随机补丁。
 - **P1（`v4.4`，已清零）**：Tokio Runtime 合一、`SessionOwner` 去 OS 线程化、野生 JSON/JSONL 吸入 SQLite WAL、`service_methods` 强类型收口。
-- **P2（`v4.5`，进行中：`P2-0` 已合入）**：伪模块化空壳 Crate 合并（同步清理 `../qaqh-gpui/Cargo.toml` 的 `qaqh-config-api` 依赖）、消除 5 个 `OnceLock<Arc<dyn *Host>>` 反向槽、清剿全部劣质手写轮子。
-- **P3（`v4.6`–`v4.9`：RingingV3 建新厂 → 切全端 → 物理立斩 V2）**：`v4.6` 落地 `ADR-0035` 泄洪闸 + `ToolCatalog` + 冻结零 `serde_json` 的 `qaqh-ringing-v3` 强类型协议与 6 条跨代不变量守卫（剥离重型 PTC 沙箱）；`v4.7` 落本地 IPC（Linux UDS / Win Pipe）+ `../qaqh-gpui` 原子切 V3（`bridge.rs` 腰斩）+ 拔 `sidecar.rs` 与统一依赖；`v4.8` 落远端纯 QUIC（`quinn`）与原生多端联动 + 移动端原子切 V3；**`v4.9` 首张 PR 整目录物理立斩旧 V2 栈**。
-- **P4（`v4.10`–`v4.12`：纯血 Rust Native 精雕 + `rust-nightly` 烧机 + 稳定封板）**：`v4.10` 无 WebView 原生可视化 + `ADR-0024` 硬件 MCP 接线 + 跨会话检索；`v4.11` 切 `rust-nightly` 烧机 + 8 GiB RAM 全链路压测 + PTC 独立沙箱选型（不碰 `session_loop.rs`）+ 冻结 `v5.0` 内核 ADR；`v4.12` 功能冻结稳定封板，确立 `v5.0` 内核大重写前的可靠逃生舱。
-- **P5（`v5.0`：内核一次性革命）**：按宪法 #8 一次性完成 `SessionLoop` Effect 状态机 + 全异步工具 + Per-Root Actor + PTC 正式接入。
+- **P2（`v4.5`，已清零）**：伪模块化空壳 Crate 合并、消除 5 个 `OnceLock<Arc<dyn *Host>>` 反向槽、清剿全部劣质手写轮子。
+- **P3（`v4.6`–`v4.8`，`v4.6`/`v4.7` 已合入 `main`）**：`v4.6` 冻 RingingV3 协议 + `ADR-0035` + `ToolCatalog`；`v4.7.100` 落本地 IPC + `v3_bridge` + `../qaqh-gpui` 纯 V3 原子切换；**`v4.8` 提前物理立斩 RingingV2 旧栈**（`qaqh-ffi`/`qaqh-harmony-napi` 暂移出默认编译成员至 `27.0.0`），落完 `ADR-0047`（`已采纳 · 未实施`）台账注释并取消 `rust-nightly` 切轨。
+- **P4（`v4.9`–`v4.11`，11/29–12 月初：解耦革命 + 桌面真实调测封板）**：
+  - `v4.9`：工具 Trait 化原生重做（`AsyncTool` + 消灭 v1 `ToolResult` 七层信封直出一源三视图 + `Concurrency` 真并发批次调度 + 去 `Mutex<ToolManager>` 重复鉴权）；
+  - `v4.10`：`SessionLoop` 按小 Trait 解耦重写 + Per-Root Actor 根除 `L-01` + 物理清零 `qaqh-ringing-contract` 与 `v3_bridge/projection` + SQLite 直接切纯血新表（不保留旧对话行兼容）；
+  - `v4.11`：不加新架构，全力做 Linux/Windows `qaqh-gpui` + 新内核 `qaqh-daemon` 前后端真实全流程调测与 8 GiB 宿主机压测封板。
+- **P5（`27.0.0`，桌面稳态后）**：开启 `iroh`/QUIC 远端多端联动 + Android（`qaqh-ffi`）/ OHOS（`qaqh-harmony-napi`）Mobile 正式调测 + `ADR-0046`（原生结构化可视化）+ `ADR-0024`（硬件 MCP）+ PTC 沙箱选型接入。
 
 ### 全局整改优先级、Worktree/PR 映射与版本切片表
 
@@ -210,13 +209,12 @@ sequenceDiagram
 | **P3-2** | **`v4.6`** | `../qaqh-wt-v4.6-p3-2`<br>`feat/v4.6-p3-2-tool-modes-and-catalog` | **工具模式三档重塑 + 强类型只读 `ToolCatalog`**（[tool_mode.rs](file:///home/qaqtam/项目/qaqh-backend/crates/qaqh-types/src/tool_mode.rs) 收口、`minimal:b/c` 收回测试夹具，暴露工具分组/风险标签/模型能力联动；**剥离重型 PTC 沙箱运行时至 `v4.11` 选型 / `v5.0` 接入**） | 纯 Rust 强类型 DTO（直供 `qaqh-gpui` / V3） | 1. 后端单一真源驱动工具目录，0 硬编码数量；<br>2. 模型视觉/工具能力与风险标签联动生效；<br>3. 精准 crate 测试全绿。 |
 | **P3-3** | **`v4.6`** | `../qaqh-wt-v4.6-p3-3`<br>`feat/v4.6-p3-3-ringing-v3-contract` | **冻结 `crates/qaqh-ringing-v3` 强类型二进制协议 crate（`ADR-0042 r2` 七铁律）**：`postcard` 长度前缀帧 + ALPN/指纹 Fail-Closed 握手 + 覆盖 `System/Session(含尾窗分页)/Command/Shell/Blob/Marketplace/Config/Account/Pairing/Gitx/Fs/ToolCatalog` 全能力 + `DeliveryClass` 与 `server_ts_ms`（**0 个 `/v1` 孤岛、0 `serde_json` 依赖、0 `#[serde(alias)]`**） | **V3 反腐隔离闸**：`qaqh-ringing-v3` 内 `serde_json` / `RINGING_V2` / `serde(alias` **0 命中** | 1. `cargo tree -p qaqh-ringing-v3` 不含 `serde_json`；<br>2. 全量 `ControlRequest/Response` 与四流帧（含尾窗分页与 `DeliveryClass`）往返编码测试全绿；<br>3. 失配版本/非法帧 Fail-Closed 反证绿。 |
 | **P3-4** | **`v4.6`** | `../qaqh-wt-v4.6-p3-4`<br>`feat/v4.6-p3-4-v3-duplex-and-invariants` | **建立 `v3_server/` + `client/v3/` 隔离骨架 + `tokio::io::duplex` 内存闭环 + 6 条跨代不变量守卫**（原子订阅回放尾防活锁、四流零队头阻塞、断联不杀进程+幂等回执、身份单权威、多端联动原语、前端渲染预算保护）+ 补写无 WebView 可视化与 `audit/JOURNAL_IO` 归属 ADR | **V3 反腐隔离闸**：`v3_server/` 与 `client/v3/` 零引用 `axum_server` / `v2_stream` | 1. `ringing_v3_invariants` 6 大守卫在 `duplex` 上毫秒级全绿（含 11/10 P0 洪峰 `resync_cycles == 0` 复现守卫与渲染预算守卫）；<br>2. 反腐隔离 `rg` 闸 0 命中。 |
-| **P3-5** | **`v4.7`** | `../qaqh-wt-v4.7-p3-5`<br>`feat/v4.7-p3-5-v3-local-ipc-and-gpui` | **RingingV3 本地传输层 + `../qaqh-gpui` 原子切换 + 依赖收口**：<br>① Linux UDS (`0600`) + Windows Named Pipe + `yamux` + 本地发现升级；<br>② 删 `v4.4` 临时 [sidecar.rs](file:///home/qaqtam/项目/qaqh-backend/crates/qaqh-session/src/db/sidecar.rs)，统一 `ureq → reqwest` 与 SHA-256；<br>③ `../qaqh-gpui` 单 PR 原子切 V3（删旧 HTTP/SSE 逻辑，瘦身 `bridge.rs`，解决 `L-11`/`L-12`） | V2 只读冰封；GPUI 零回退开关 | 1. Linux UDS 与 Windows Named Pipe 本地直连全绿；<br>2. `qaqh-gpui` 在 V3 上跑通会话、审批、Shell PTY、二进制附件；<br>3. `sidecar.rs` 与 `ureq` 物理删除。 |
-| **P3-6** | **`v4.8`** | `../qaqh-wt-v4.8-p3-6`<br>`feat/v4.8-p3-6-v3-quic-multidevice` | **RingingV3 远端纯 QUIC（`quinn`）+ 原生多端联动 + 移动端原子切 V3**：<br>① `quinn` 纯 QUIC（ALPN `qaqh-ringing/3` + 指纹 pin + Device Token + 0-RTT + Wi-Fi↔5G 迁移，遵守 `ADR-0039` OHOS `ring` 分治）；<br>② 协议级多端联动（多端同看会话/Shell、Driver 交接广播、吊销即时踢流）；<br>③ `qaqh-ffi`（Android）与 `qaqh-harmony-napi`（OHOS）同 PR 原子切 V3 | V2 维持只读冰封；移动端零回退开关 | 1. 弱网切网连接迁移不断流；<br>2. 桌面 GPUI + 移动端双端同看同一会话/Shell 与 Driver 交接验收全绿；<br>3. OHOS `ring` / host `aws-lc-rs` 交叉编译分治通过。 |
-| **P3-7** | **`v4.9`** | `../qaqh-wt-v4.9-p3-7`<br>`refactor/v4.9-p3-7-demolish-ringing-v2` | **物理立斩 RingingV2 旧世界（纯血 Rust Native 里程碑，宪法 #2/#5/#7）**：<br>① 首张 PR 整目录 `git rm -rf` 删除 `qaqh-daemon/src/axum_server/`、`qaqh-ringing/src/v2/`、`qaqh-client/src/{v2.rs,v2_stream.rs,sse_decoder.rs,shell_stream.rs}`、`tools/qaqh-contract-export/`；<br>② 补齐 `../qaqh-gpui` Linux + Windows 双桌面端一等交付 | **RingingV3 唯一控制面** | 1. `rg 'axum_server\|RINGING_V2\|/ringing/v2\|/control/v1\|/marketplace/v1\|v2_stream' crates/` **0 命中**；<br>2. `ringing_v3_invariants` 全绿证明零误伤；<br>3. Linux + Windows GPUI 双端打包可运行。 |
-| **P4-1** | **`v4.10`** | `../qaqh-wt-v4.10-p4-1`<br>`feat/v4.10-p4-1-native-genui-and-tail-adrs` | **纯原生富体验 & 历史 ADR 收账**：<br>① 无 WebView 原生可视化（取代 HTML iframe `widget-directive`）；<br>② 接线 `ADR-0024` 硬件控制 MCP 到 daemon/`qaqh-mcp`；<br>③ 落定 `audit v1/v2` 与 `JOURNAL_IO` 归属；突破 GPUI 256 条会话检索上限 | 纯 V3 强类型演进 | 1. 后端 0 处 Electron/WebView 专属协议残留；<br>2. 硬件 MCP 过真 daemon 闭环验收；<br>3. ADR 台账 4.x `部分实施` 项清零。 |
-| **P4-2** | **`v4.11`** | `../qaqh-wt-v4.11-p4-2`<br>`chore/v4.11-p4-2-nightly-stress-and-v5-prep` | **`rust-nightly` 切轨烧机 + 8 GiB 级压测 + `v5.0` 边界预演**：<br>① `rust-toolchain.toml` 与 CI 全面切 `rust-nightly`；<br>② 8 GiB RAM 宿主机级全压测（10k+ 时间线、多端 QUIC、200MB 洪峰泄洪、真 `spawn_new` 空闲回收）；<br>③ 独立实验验证 PTC 沙箱选型（`rquickjs`/`Starlark`/`Monty`，**不碰 `session_loop.rs`**）并定稿 `v5.0` 内核 ADR | `rust-nightly` 全绿 + 压测指标落盘 | 1. nightly 全平台编译测试绿；<br>2. 8 GiB 压测无 OOM/无泄漏；<br>3. `v5.0` 架构 ADR 与 PTC 选型定稿。 |
-| **P4-3** | **`v4.12.0` 稳定版封板** | `../qaqh-wt-v4.12-p4-3`<br>`release/v4.12.0-native-seal` | **4.x 终极稳定封板（Feature Freeze，准逃生舱）**：只修稳定性与边界缺陷；Linux GPUI / Windows GPUI / Android / OHOS 全矩阵端到端验收；冻结 `qaqh.db` 迁移基线与 `v5.0` 切换清单 | 全平台封板基线 | 签发可长期自用的纯血 Rust Native `v4.12.0`（是否切 LTS 由所有者显式决定），随后 `main` 进入 `v5.0` 内核革命。 |
-| **P5** | **`v5.0`** | 独立 `v5.0` 执行计划 | **上帝文件一次性内核革命（宪法 #8）**：`SessionLoop` Effect 状态机 + 全异步工具 + Per-Root Actor（根除 `L-01` 中央 `registry` 锁）+ PTC 正式接入 | 纯血 V3 + 新内核 | 独立 `v5.0` ADR 验收。 |
+| **P3-5** | **`v4.7.100`（已合入）** | `c6c59d70` + `qaqh-gpui` `debd2d1` | **RingingV3 本地传输层 + `../qaqh-gpui` 原子切换 + 依赖收口**：Linux UDS (`0600`) + Windows Named Pipe + `yamux`、`sidecar.rs` 删除、异步 `reqwest`、解决 `L-11`/`L-12`、`v3_bridge` 真接线与 `P3_5E_V3_CONTRACT_GAPS` 全量补齐 | V3 隔离闸全绿；GPUI 零回退开关 | 已合入双仓 `main`，`qaqh-gpui --probe` 连 `4.7.100` daemon 实测通过（真窗口人工验收转入 `v4.11`）。 |
+| **P3-6** | **`v4.8`**（11/28） | `../qaqh-wt-v4.8-demolish-v2`<br>`refactor/v4.8-demolish-ringing-v2` | **物理立斩 RingingV2 旧世界 + `ADR-0047` 台账封口**：<br>① 整目录删 `axum_server/`、`tls.rs`、`qaqh-ringing/src/v2/`、`qaqh-client/src/{client.rs,v2*.rs,sse_decoder.rs,shell_stream.rs,...}`、`tools/qaqh-contract-export/`；<br>② `qaqh-daemon status/stop/todo` 与 `qaqh-acp` 切 `V3Client::connect_local`，删 `daemon.json`；<br>③ `qaqh-ffi`/`qaqh-harmony-napi` 移出默认 workspace 编译成员（延至 `27.0.0`）；<br>④ 完成 `ADR-0047`（`已采纳 · 未实施`）单写者注释与 `LOCK_AUDIT_REPORT` 落账 | **RingingV3 唯一控制面** | 1. `rg 'axum_server\|RINGING_V2\|/ringing/v2\|/control/v1\|/marketplace/v1\|v2_stream' crates/` **0 命中**；<br>2. `daemon run`/`status`/`stop` 与 `qaqh-gpui --probe` 纯 V3 闭环；<br>3. `v3_server` + `v3_bridge` 测试全绿。 |
+| **P4-1** | **`v4.9`**（11/29） | `../qaqh-wt-v4.9-async-tools`<br>`refactor/v4.9-async-tools-and-traits` | **工具侧 Trait 化原生重做**：<br>① `TypedTool` 升级为原生 **`AsyncTool` Trait**（MCP/Web/Exec/Subagent 原生 `.await`，铲除 `spawn_blocking → block_on_host` 三明治、detached 进度线程与取消桥）；<br>② **物理删除 v1 `qaqh_types::ToolResult` 七层信封**：直出一源三视图（`canonical/BlobRef` · `model_view` · `human_view`），工具产图直出 `Bytes`/`ContentHash` 零 Base64，修净 `output_truncated: false`；<br>③ 拆掉 `Mutex<ToolManager>` 高频锁与 `precheck + execute` 重复鉴权；<br>④ 调度层真正兑现 **`Concurrency::{Parallel, Serial, Exclusive}` 并发批次调度** | 工具契约零 v1 `ToolResult` 残留 | 1. 并发批次反证：同批多只读工具并发耗时 ≈ 单次；<br>2. 工具层 `block_on_host` 归零；<br>3. `human_view` 与 `model_view` 分离及 `output_truncated` 反证全绿。 |
+| **P4-2** | **`v4.10`**（11/30） | `../qaqh-wt-v4.10-loop-decouple`<br>`refactor/v4.10-session-loop-and-purge-contract` | **`SessionLoop` Trait 解耦 + 灭 `qaqh-ringing-contract` & `v3_bridge/projection`**：<br>① 内核（`SessionOwner` / `SessionLoop`）直接讲 `qaqh-core-vocab` / V3 词汇，整目录删除 `qaqh-ringing-contract` 与 `v3_bridge/projection/`；<br>② SQLite 直接切纯血新格式（**不保留旧对话行兼容**）；<br>③ `SessionLoop` 拆为小 Trait（`ProviderPort`/`ToolDispatcher`/`InteractionPort`/`SessionSink`）+ Effect 状态机（单文件 `< 600` 行）；<br>④ Per-Root Actor 根除 `L-01` 中央 `registry` 锁与静态 `GLOBAL_TRUSTED` | `qaqh-ringing-contract` 与 `v3_bridge/projection` **0 引用** | 1. 新 SQLite 表空库建库 & 读写全绿；<br>2. 并发会话无中央 `registry` 锁争用；<br>3. `v3_server` 六大不变量守卫全绿 + `qaqh-gpui` 联调绿。 |
+| **P4-3** | **`v4.11`**（12 月初） | `../qaqh-wt-v4.11-desktop-qa`<br>`test/v4.11-desktop-e2e-and-seal` | **纯桌面端前后端真实全流程调测 & 稳定封板**：不加新架构，集中执行 Linux/Windows `qaqh-gpui` + 新内核 `qaqh-daemon` 真窗口端到端调测、8 GiB RAM 压测（长对话上翻、并行工具卡、diff、审批/Ask、PTY、exec 泄洪、图片 Blob、交接封箱开箱），修净所有边界缺陷封板 | 纯血桌面端封板基线 | 桌面端全清单真窗口验收全绿，无 OOM/死锁/状态分叉。 |
+| **P5** | **`27.0.0`**（桌面稳态后） | `27.0.0-alpha.1` → `27.0.0` | **远端 QUIC 多端联动 + 正式 Mobile 调测 & 扩展体验**：<br>① `iroh`/QUIC 远端传输 + Wi-Fi↔5G 迁移 + 多端同看与 Driver 交接；<br>② 移回并原子切换 Android（`qaqh-ffi`）与 OHOS（`qaqh-harmony-napi`）至纯 V3 正式联调；<br>③ 落地 `ADR-0046`（原生可视化）、`ADR-0024`（硬件 MCP）与 PTC 沙箱选型接入 | 全平台（桌面 + 移动）纯 V3 | 全平台联调通过后签发 **`27.0.0`** 正式版。 |
 
 ---
 
