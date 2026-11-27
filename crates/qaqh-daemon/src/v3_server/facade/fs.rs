@@ -1,25 +1,23 @@
 //! Fs 域：**骨架期只有签名与拒绝语义**。
 //!
 //! `Fs` 的真实现必须挂在会话授权根上（`ADR-0042` 铁律 7 显式否决了
-//! `local_readonly_path` 这类"客户端指定路径"的后门）：范围由**会话授权**决定，
-//! 不由请求里的 `path` 决定。那套授权根要在 `v4.7` 接 `qaqh-workspace` 时才有真身，
-//! 所以这里如实 `Unavailable`——返回假 `Stat` 才是这一层最该避免的错误。
+//! `local_readonly_path` 这类"客户端指定路径"的后门）：范围由**所属会话授权**
+//! 决定，不由请求里的 `path` 决定。
 
 use std::sync::Arc;
 
 use qaqh_ringing_v3::{FsRequest, FsResponse, RpcError};
 
-use super::super::error::not_wired;
+use super::super::error::{denied, not_found, not_wired};
 use super::super::state::ServerState;
 use super::CallContext;
 
-/// Fs 门面。
-pub(crate) struct FsFacade {
-    #[allow(dead_code)]
+/// Fs 门面骨架实现。
+pub(crate) struct SkeletonFs {
     state: Arc<ServerState>,
 }
 
-impl FsFacade {
+impl SkeletonFs {
     /// 构造。
     pub(crate) fn new(state: Arc<ServerState>) -> Self {
         Self { state }
@@ -28,12 +26,25 @@ impl FsFacade {
     /// 处理一条 Fs 请求。
     pub(crate) async fn handle(
         &self,
-        _context: &CallContext,
+        context: &CallContext,
         request: FsRequest,
     ) -> Result<FsResponse, RpcError> {
+        let session_id = match &request {
+            FsRequest::Stat { session_id, .. }
+            | FsRequest::List { session_id, .. }
+            | FsRequest::ReadRange { session_id, .. }
+            | FsRequest::Write { session_id, .. } => session_id,
+        };
         // 写路径额外要求主设备作用域：即使将来接上真实现，这条判断也不会放宽。
         if matches!(request, FsRequest::Write { .. }) {
-            _context.identity.require_owner("Fs::Write")?;
+            context.identity.require_owner("Fs::Write")?;
+        }
+        let session = self
+            .state
+            .session(session_id)
+            .ok_or_else(|| not_found(format!("没有会话 `{session_id}`")))?;
+        if !session.can_access(&context.identity.device) {
+            return Err(denied(format!("设备无权访问会话 `{session_id}` 文件域")));
         }
         Err(not_wired(
             "Fs 域在 v4.6 P3-4 只落地签名与拒绝语义；真实现随 v4.7 会话授权根接线",
@@ -50,12 +61,14 @@ mod smoke {
     async fn fs_is_reached_through_dispatch_and_says_unavailable() {
         let rig = test_support::rig();
         let context = test_support::owner_context(&rig);
+        let session = rig.state.create_session(&context.identity.device);
         let error = rig
-            .facades
+            .backend
             .fs
             .handle(
                 &context,
                 FsRequest::Stat {
+                    session_id: session.id.clone(),
                     path: "README.md".to_string(),
                 },
             )
@@ -68,13 +81,16 @@ mod smoke {
     #[tokio::test]
     async fn fs_write_requires_owner_before_capability_is_checked() {
         let rig = test_support::rig();
+        let owner = test_support::owner_context(&rig);
         let device = test_support::device_context(&rig);
+        let session = rig.state.create_session(&owner.identity.device);
         let error = rig
-            .facades
+            .backend
             .fs
             .handle(
                 &device,
                 FsRequest::Write {
+                    session_id: session.id.clone(),
                     path: "x.txt".to_string(),
                     bytes: bytes::Bytes::from_static(b"x"),
                 },

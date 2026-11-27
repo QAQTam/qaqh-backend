@@ -25,29 +25,28 @@
 
 mod blob;
 mod endpoint;
-mod framing;
 mod session_events;
 mod shell_output;
 
 pub use blob::{AssembledBlob, BlobInbox};
 pub use endpoint::{EndpointError, resolve_daemon_endpoint};
-pub use framing::FrameIoError;
+pub use qaqh_v3_transport::FrameIoError;
 pub use session_events::{SessionEventsStream, SessionStreamStats};
 pub use shell_output::{ShellOutputStream, ShellStreamStats};
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use qaqh_core_vocab::SessionId;
+use qaqh_core_vocab::{ContentHash, SessionId};
 use qaqh_ringing_v3::{
-    ClientHello, ControlCall, ControlReply, ControlRequest, ControlResponse, ErrorCode, RpcError,
-    ServerHello, StreamAttach, StreamKind, verify_handshake,
+    BlobChunkFrame, BlobTransferRole, ClientHello, ControlCall, ControlReply, ControlRequest,
+    ControlResponse, DeliveryClass, ErrorCode, FrameMeta, RpcError, ServerHello, StreamAttach,
+    StreamKind, verify_handshake,
 };
-use qaqh_v3_transport::{MuxError, MuxTransport};
+use qaqh_v3_transport::{MuxError, MuxTransport, read_frame, write_frame};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, watch};
 use tokio::task::JoinHandle;
-
-use framing::{read_frame, write_frame};
 
 /// 客户端错误（每一种都对应一个可执行动作）。
 #[derive(Debug, thiserror::Error)]
@@ -109,17 +108,11 @@ struct ControlChannel<S> {
     stream: S,
 }
 
-/// 进程内客户端序号：`command_id` 里必须带上它。
-///
-/// 只靠 `client_instance_id` 生成 `command_id` 会让"两个客户端用了同一个实例名"
-/// 直接撞进服务端的幂等表——后者的回执会拿到前者的结果（串话）。实例名是自报
-/// 标签，不能承担唯一性；进程内唯一序号才能。
-static NEXT_CLIENT_NONCE: AtomicU64 = AtomicU64::new(0);
-
 /// V3 客户端句柄。
 pub struct V3Client<B: MuxTransport> {
     transport: B,
     control: Arc<Mutex<ControlChannel<B::BiStream>>>,
+    client_nonce: String,
     next_command_id: AtomicU64,
     hello: ClientHello,
     accepted: ServerHello,
@@ -164,6 +157,7 @@ impl<B: MuxTransport> V3Client<B> {
         Ok(Self {
             transport,
             control: Arc::new(Mutex::new(ControlChannel { stream })),
+            client_nonce: uuid::Uuid::new_v4().to_string(),
             next_command_id: AtomicU64::new(0),
             hello,
             accepted,
@@ -188,12 +182,11 @@ impl<B: MuxTransport> V3Client<B> {
         &self.transport
     }
 
-    /// 发一条请求，`command_id` 自动生成（**除非你确实要重放**——重放请用
-    /// [`Self::call_idempotent`] 并复用同一个 id）。
+    /// 发一条请求，`command_id` 自动生成（跨进程唯一，**除非你确实要重放**——
+    /// 重放请用 [`Self::call_idempotent`] 并复用同一个 id）。
     pub async fn call(&self, request: ControlRequest) -> Result<ControlResponse, ClientError> {
         let id = self.next_command_id.fetch_add(1, Ordering::SeqCst) + 1;
-        let nonce = NEXT_CLIENT_NONCE.fetch_add(1, Ordering::SeqCst);
-        let command_id = format!("{}-{nonce:04}-cmd-{id}", self.hello.client_instance_id);
+        let command_id = format!("{}-cmd-{id}", self.client_nonce);
         self.call_idempotent(&command_id, request).await
     }
 
@@ -265,7 +258,69 @@ impl<B: MuxTransport> V3Client<B> {
             Err(FrameIoError::Eof) => return Err(ClientError::StreamRejected),
             Err(error) => return Err(ClientError::Frame(error)),
         };
-        Ok(ShellOutputStream::new(stream, attach))
+        if attach.stream != kind {
+            return Err(ClientError::Protocol(format!(
+                "shell attach 回执的流身份不符：请求 {kind:?}，回执 {:?}",
+                attach.stream
+            )));
+        }
+        Ok(ShellOutputStream::new(stream, attach, from_offset))
+    }
+
+    /// 向服务端上传一条内容寻址 blob（分片直传，零 Base64 膨胀）。
+    pub async fn upload_blob(&self, bytes: &[u8]) -> Result<ContentHash, ClientError> {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let hash = ContentHash::from_bytes(digest);
+        let len = bytes.len() as u64;
+        let mut stream = self.transport.open_bi().await?;
+        let kind = StreamKind::BlobTransfer {
+            role: BlobTransferRole::ClientUpload { hash, len },
+        };
+        write_frame(&mut stream, &kind).await?;
+        const CHUNK_BYTES: usize = 64 * 1024;
+        if bytes.is_empty() {
+            let frame = BlobChunkFrame {
+                meta: FrameMeta {
+                    seq: 1,
+                    server_ts_ms: 0,
+                    delivery: DeliveryClass::Reliable,
+                },
+                hash,
+                offset: 0,
+                bytes: bytes::Bytes::new(),
+                last: true,
+            };
+            write_frame(&mut stream, &frame).await?;
+        } else {
+            let mut offset = 0usize;
+            let mut seq = 0u64;
+            while offset < bytes.len() {
+                let end = (offset + CHUNK_BYTES).min(bytes.len());
+                seq += 1;
+                let frame = BlobChunkFrame {
+                    meta: FrameMeta {
+                        seq,
+                        server_ts_ms: 0,
+                        delivery: DeliveryClass::Reliable,
+                    },
+                    hash,
+                    offset: offset as u64,
+                    bytes: bytes::Bytes::copy_from_slice(&bytes[offset..end]),
+                    last: end == bytes.len(),
+                };
+                write_frame(&mut stream, &frame).await?;
+                offset = end;
+            }
+        }
+        let ack: bool = match read_frame(&mut stream).await {
+            Ok(ok) => ok,
+            Err(FrameIoError::Eof) => return Err(ClientError::StreamRejected),
+            Err(error) => return Err(ClientError::Frame(error)),
+        };
+        if !ack {
+            return Err(ClientError::Protocol("服务端拒绝了 blob 上传".to_string()));
+        }
+        Ok(hash)
     }
 
     /// 取走 blob 收件箱（服务端推来的 `BlobTransfer` 流在这里被组装）。
@@ -274,6 +329,18 @@ impl<B: MuxTransport> V3Client<B> {
     /// 又需要 `&self`——两者同时持有 `&mut` 是不可能的，所以设计成一次性取出。
     pub fn take_blob_inbox(&mut self) -> Option<BlobInbox> {
         self.blobs.take()
+    }
+}
+
+impl From<qaqh_ringing_v3::FrameError> for ClientError {
+    fn from(error: qaqh_ringing_v3::FrameError) -> Self {
+        ClientError::Frame(FrameIoError::Frame(error))
+    }
+}
+
+impl From<std::io::Error> for ClientError {
+    fn from(error: std::io::Error) -> Self {
+        ClientError::Frame(FrameIoError::Io(error))
     }
 }
 

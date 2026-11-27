@@ -6,10 +6,12 @@ description = "RingingV3 多路复用传输抽象（本地 yamux 后端 + v4.8 i
 license.workspace = true
 
 [dependencies]
+qaqh-ringing-v3 = { path = "../qaqh-ringing-v3" }
+serde = { version = "1" }
 log = { version = "0.4", features = ["std"] }
 # 只吃 io-util（`tokio::io::duplex` 与 AsyncRead/AsyncWrite 适配）与 sync/rt（driver task）。
 tokio = { version = "1", features = ["io-util", "rt", "sync"] }
-# `compat` 是**唯一**的 futures-io ↔ tokio-io 桥：yamux 说 futures-io，
+# 唯一 futures-io ↔ tokio-io 桥：yamux 说 futures-io，
 # 本仓其余全栈说 tokio-io。适配只发生在这一层（见 ADR-0042 r5）。
 tokio-util = { version = "0.7", features = ["compat"] }
 # 本地多路复用（ADR-0042 r5 定案：本地维持 `UDS/Pipe + yamux`，不上 iroh）。

@@ -10,12 +10,12 @@ use tokio::sync::{mpsc, watch};
 
 use super::super::identity::{ConnectionIdentity, Scope};
 use super::super::state::{ServerConfig, ServerState};
-use super::{CallContext, Facades};
+use super::{CallContext, SkeletonBackend};
 
 /// 门面单测的整套装置。
 pub(crate) struct Rig {
     pub(crate) state: Arc<ServerState>,
-    pub(crate) facades: Facades,
+    pub(crate) backend: SkeletonBackend,
     pub(crate) owner: ConnectionIdentity,
     pub(crate) device: ConnectionIdentity,
 }
@@ -23,7 +23,7 @@ pub(crate) struct Rig {
 /// 造一套装置。
 pub(crate) fn rig() -> Rig {
     let state = ServerState::new(ServerConfig::default(), "qaqh-test");
-    let facades = Facades::new(Arc::clone(&state));
+    let backend = SkeletonBackend::new(Arc::clone(&state));
     // 两条身份都先经真凭据表认证，保证单测走的是与生产同一条路径。
     state
         .identity
@@ -50,7 +50,7 @@ pub(crate) fn rig() -> Rig {
         .expect("设备认证");
     Rig {
         state,
-        facades,
+        backend,
         owner,
         device,
     }

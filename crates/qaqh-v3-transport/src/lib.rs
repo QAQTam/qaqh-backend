@@ -40,7 +40,9 @@ mod mux;
 mod yamux_backend;
 
 pub mod duplex;
+pub mod framing;
 
+pub use framing::{FrameIoError, read_frame, write_frame};
 pub use mux::{MuxConfig, MuxError, MuxRole, MuxStats, MuxTransport};
 pub use yamux_backend::{MuxStream, YamuxTransport};
 

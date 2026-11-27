@@ -10,13 +10,13 @@ use super::super::error::not_wired;
 use super::super::state::ServerState;
 use super::CallContext;
 
-/// Marketplace 门面。
-pub(crate) struct MarketplaceFacade {
+/// Marketplace 门面骨架实现。
+pub(crate) struct SkeletonMarketplace {
     #[allow(dead_code)]
     state: Arc<ServerState>,
 }
 
-impl MarketplaceFacade {
+impl SkeletonMarketplace {
     /// 构造。
     pub(crate) fn new(state: Arc<ServerState>) -> Self {
         Self { state }
@@ -50,7 +50,7 @@ mod smoke {
         let rig = test_support::rig();
         let context = test_support::owner_context(&rig);
         let error = rig
-            .facades
+            .backend
             .marketplace
             .handle(
                 &context,
@@ -69,7 +69,7 @@ mod smoke {
         let rig = test_support::rig();
         let device = test_support::device_context(&rig);
         let error = rig
-            .facades
+            .backend
             .marketplace
             .handle(
                 &device,

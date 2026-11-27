@@ -1,61 +1,46 @@
-//! V3 服务端：接受循环 + **十一域静态分派**（`ADR-0042` 铁律 2/4/6）。
-//!
-//! ## 一条连接 = 一个 `MuxTransport`，四条逻辑流 = 四条 bi 流
-//!
-//! 接受循环只做三件事：接流、认首帧、把流交给对应的服务循环。分派是编译期
-//! `match`（无 `dyn`），所以"哪条路走哪个门面"在类型层面就是确定的。
-//!
-//! ## 握手在 Control 流上，且必须最先完成
-//!
-//! 多路复用没有"连接建立"事件，只有一条条流。所以身份必须落在**第一条 Control
-//! 流**上：`StreamKind::Control` → `ClientHello` → `ServerHello`。在此之前到达的
-//! 任何业务流一律关掉——**未认证的连接没有资格开流**，这条规则比"先收下再补认证"
-//! 少一整类竞态。
-//!
-//! ## 第二条 Control 流会被拒
-//!
-//! 控制面是"一问一答"：两条 Control 流会让同一个 `command_id` 的回执出现两个
-//! 乱序的写者。宁可拒绝，也不让定序失去物理载体。
-//!
-//! ## blob 推送是**服务端开流**
-//!
-//! 门面把"要推这个 blob"投进本连接的推送队列，推送任务据此 `open_bi` 开一条
-//! `BlobTransfer` 流。方向与服务端推 `SessionEvents` 一致：服务端知道有什么要推，
-//! 客户端只需要收。
+//! V3 服务端：接受循环 + 十一域静态分派 + 鉴权推送（`ADR-0042` 铁律 2/4/5/6）。
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use qaqh_core_vocab::SessionId;
+use qaqh_core_vocab::{ContentHash, SessionId};
 use qaqh_ringing_v3::{
-    ClientHello, ControlCall, ControlReply, ControlResponse, DeliveryClass,
-    ErrorCode, FrameMeta, HandshakeReject, PROTOCOL_FINGERPRINT, PROTOCOL_REV, ResyncReason,
-    ServerHello, SessionEvent, SessionEventFrame, ShellOutputFrame, StreamAttach, StreamKind,
-    verify_handshake,
+    BlobChunkFrame, BlobTransferRole, ClientHello, ControlCall, ControlReply, ControlResponse,
+    DeliveryClass, ErrorCode, FrameMeta, HandshakeReject, PROTOCOL_FINGERPRINT, PROTOCOL_REV,
+    ResyncReason, ServerHello, SessionEvent, SessionEventFrame, ShellOutputFrame, StreamAttach,
+    StreamKind, verify_handshake,
 };
-use qaqh_v3_transport::{MuxError, MuxTransport};
+use qaqh_v3_transport::{MuxError, MuxTransport, read_frame, write_frame};
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, watch};
 
 use super::V3Server;
 use super::bus::{DeltaCoalescer, SubscribeOutcome};
 use super::error::{ServerError, rpc};
-use super::facade::{BlobPush, CallContext};
-use super::framing::{read_frame, write_frame};
+use super::facade::{BlobPush, CallContext, V3Backend};
 use super::identity::ConnectionIdentity;
-use super::state::{ReceiptStart, ServerState};
+use super::receipts::ReceiptStart;
+use super::state::ServerState;
 use super::util::{lock, now_ms};
 
-/// 一条连接上共享的状态（所有逻辑流看到的是**同一个身份**）。
+/// 客户端上传单条 Blob 上限（64 MiB）。
+const MAX_CLIENT_UPLOAD_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+
+async fn wait_true(rx: &mut watch::Receiver<bool>) {
+    let _ = rx.wait_for(|&flag| flag).await;
+}
+
+/// 一条连接上共享的状态（所有逻辑流看到的是同一个身份）。
 pub(crate) struct ConnectionState {
+    control_claimed: AtomicBool,
     identity: std::sync::Mutex<Option<Arc<ConnectionIdentity>>>,
     cancel: watch::Sender<bool>,
     blob_pushes: mpsc::UnboundedSender<BlobPush>,
-    /// 本连接附着过的会话（收摊时据此撤销附着与驱动权）。
+    /// 本连接附着过的会话（收摊时据此撤销附着与驱动权，并约束推送范围）。
     attached_sessions: Arc<std::sync::Mutex<std::collections::BTreeSet<SessionId>>>,
 }
 
 impl ConnectionState {
-    /// 建一份连接状态，返回它自己与两个接收端（取消哨兵、blob 推送队列）。
     pub(crate) fn new() -> (
         Arc<Self>,
         watch::Receiver<bool>,
@@ -65,6 +50,7 @@ impl ConnectionState {
         let (blob_pushes, blob_rx) = mpsc::unbounded_channel();
         (
             Arc::new(Self {
+                control_claimed: AtomicBool::new(false),
                 identity: std::sync::Mutex::new(None),
                 cancel,
                 blob_pushes,
@@ -102,10 +88,7 @@ impl ConnectionState {
         Arc::clone(&self.attached_sessions)
     }
 
-    /// 收摊：把本连接留下的附着与驱动权**全部撤掉**。
-    ///
-    /// 不做这一步，"断联不杀进程"的另一面就变成"断联留下幽灵驱动端"：
-    /// 会话的驱动权永远指向一个已经不存在的实例，任何重连都无法投递输入。
+    /// 收摊：把本连接留下的附着与驱动权全部撤掉。
     fn teardown(&self, state: &ServerState) {
         let Some(identity) = self.identity() else {
             return;
@@ -119,13 +102,14 @@ impl ConnectionState {
     }
 }
 
-impl<B: MuxTransport> V3Server<B> {
+impl<T: MuxTransport, B: V3Backend> V3Server<T, B> {
     /// 跑接受循环，直到传输层关闭或本端收摊。
     pub(crate) async fn serve(self: Arc<Self>) -> Result<(), ServerError> {
         self.state.peers.fetch_add(1, Ordering::Relaxed);
         let (connection, cancel_rx, blob_rx) = ConnectionState::new();
         let pump = tokio::spawn(blob_pump(
             Arc::clone(&self),
+            Arc::clone(&connection),
             blob_rx,
             connection.subscribe_cancel(),
         ));
@@ -138,15 +122,15 @@ impl<B: MuxTransport> V3Server<B> {
     }
 }
 
-async fn accept_loop<B: MuxTransport>(
-    server: Arc<V3Server<B>>,
+async fn accept_loop<T: MuxTransport, B: V3Backend>(
+    server: Arc<V3Server<T, B>>,
     connection: Arc<ConnectionState>,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<(), ServerError> {
     loop {
         let accepted = tokio::select! {
             biased;
-            _ = cancel.changed() => return Ok(()),
+            _ = wait_true(&mut cancel) => return Ok(()),
             accepted = server.transport.accept_bi() => accepted,
         };
         match accepted {
@@ -161,30 +145,45 @@ async fn accept_loop<B: MuxTransport>(
     }
 }
 
-/// 服务端推 blob 的任务（每条连接一个）。
-async fn blob_pump<B: MuxTransport>(
-    server: Arc<V3Server<B>>,
+/// 服务端推 blob 的任务（每条连接一个；**严格按身份 + 会话授权过滤**）。
+async fn blob_pump<T: MuxTransport, B: V3Backend>(
+    server: Arc<V3Server<T, B>>,
+    connection: Arc<ConnectionState>,
     mut requests: mpsc::UnboundedReceiver<BlobPush>,
     mut cancel: watch::Receiver<bool>,
 ) {
-    // 两条触发路径：本连接门面在回执里带出来的外置请求，以及进程内的推送广播
-    // （AgentLoop 的位置）。后者与 RPC 完全独立——守卫②量的正是这条路径的隔离性。
     let mut broadcast = server.state.push_bus.subscribe();
     loop {
-        let push = tokio::select! {
+        let (push, from_broadcast) = tokio::select! {
             biased;
-            _ = cancel.changed() => return,
+            _ = wait_true(&mut cancel) => return,
             maybe = requests.recv() => match maybe {
-                Some(push) => push,
+                Some(push) => (push, false),
                 None => return,
             },
             broadcasted = broadcast.recv() => match broadcasted {
-                Ok(push) => push,
-                // 落后于广播：跳过（blob 内容寻址，客户端会按 ContentRef 再要）。
+                Ok(push) => (push, true),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(_) => return,
             },
         };
+        // 鉴权门禁：未认证 / 已吊销 / 无权访问目标会话 / 广播模式下未附着目标会话 → 严禁推送。
+        let Some(identity) = connection.identity() else {
+            continue;
+        };
+        if identity.is_revoked() {
+            return;
+        }
+        let Some(session) = server.state.session(&push.session_id) else {
+            continue;
+        };
+        if !session.can_access(&identity.device) {
+            continue;
+        }
+        if from_broadcast && !lock(&connection.attached_sessions).contains(&push.session_id) {
+            continue;
+        }
+
         let mut stream = match server.transport.open_bi().await {
             Ok(stream) => stream,
             Err(error) => {
@@ -192,26 +191,27 @@ async fn blob_pump<B: MuxTransport>(
                 return;
             }
         };
-        // 首帧必须是 StreamKind：`yamux` 的 SYN 挂在第一帧上。
-        if let Err(error) = write_frame(&mut stream, &StreamKind::BlobTransfer).await {
+        if let Err(error) = write_frame(
+            &mut stream,
+            &StreamKind::BlobTransfer {
+                role: BlobTransferRole::ServerPush,
+            },
+        )
+        .await
+        {
             log::warn!("v3_blob: 写流头失败：{error}");
             return;
         }
-        match server
-            .facades
-            .blob
-            .push(&mut stream, push.hash, push.len)
-            .await
-        {
+        match server.backend.push_blob(&mut stream, push.hash, push.len).await {
             Ok(bytes) => log::debug!("v3_blob: 推送 {} 字节", bytes),
             Err(error) => log::warn!("v3_blob: 推送失败：{error:?}"),
         }
     }
 }
 
-async fn serve_stream<B: MuxTransport>(
-    server: Arc<V3Server<B>>,
-    mut stream: B::BiStream,
+async fn serve_stream<T: MuxTransport, B: V3Backend>(
+    server: Arc<V3Server<T, B>>,
+    mut stream: T::BiStream,
     connection: Arc<ConnectionState>,
 ) {
     let kind: StreamKind = match read_frame(&mut stream).await {
@@ -223,7 +223,8 @@ async fn serve_stream<B: MuxTransport>(
     };
     match kind {
         StreamKind::Control => {
-            if connection.identity().is_some() {
+            // 原子抢占单控制流席位，防并发开两条 Control 流竞态绕过。
+            if connection.control_claimed.swap(true, Ordering::SeqCst) {
                 log::warn!("v3_conn: 第二条 Control 流被拒（一问一答面必须单流）");
                 return;
             }
@@ -231,12 +232,15 @@ async fn serve_stream<B: MuxTransport>(
                 return;
             };
             connection.set_identity(Arc::clone(&identity));
-            // 吊销哨兵 → 整条连接收摊（即时踢流）。
+            // 吊销哨兵 → 整条连接收摊；正常断联时随 conn_cancel 一起退出，绝不泄漏任务。
             let mut revoked = identity.revoked.clone();
-            let cancel = connection.clone();
+            let mut conn_cancel = connection.subscribe_cancel();
+            let cancel_handle = Arc::clone(&connection);
             tokio::spawn(async move {
-                let _ = revoked.changed().await;
-                cancel.cancel();
+                tokio::select! {
+                    _ = wait_true(&mut revoked) => cancel_handle.cancel(),
+                    _ = wait_true(&mut conn_cancel) => {}
+                }
             });
             serve_control(&server, stream, identity, connection).await;
         }
@@ -248,6 +252,9 @@ async fn serve_stream<B: MuxTransport>(
                 log::warn!("v3_conn: 未认证连接试图开 SessionEvents 流");
                 return;
             };
+            if identity.is_revoked() {
+                return;
+            }
             serve_session_events(
                 &server,
                 stream,
@@ -266,6 +273,9 @@ async fn serve_stream<B: MuxTransport>(
                 log::warn!("v3_conn: 未认证连接试图开 ShellPty 流");
                 return;
             };
+            if identity.is_revoked() {
+                return;
+            }
             serve_shell_pty(
                 &server,
                 stream,
@@ -276,15 +286,90 @@ async fn serve_stream<B: MuxTransport>(
             )
             .await;
         }
-        StreamKind::BlobTransfer => {
-            log::warn!("v3_conn: 客户端不得开 BlobTransfer 流（该流是服务端推通道）");
+        StreamKind::BlobTransfer { role } => {
+            let Some(identity) = connection.identity() else {
+                log::warn!("v3_conn: 未认证连接试图开 BlobTransfer 流");
+                return;
+            };
+            if identity.is_revoked() {
+                return;
+            }
+            serve_client_blob(&server, stream, role).await;
         }
     }
 }
 
-async fn handshake<B: MuxTransport>(
-    server: &V3Server<B>,
-    stream: &mut B::BiStream,
+async fn serve_client_blob<T: MuxTransport, B: V3Backend>(
+    server: &V3Server<T, B>,
+    mut stream: T::BiStream,
+    role: BlobTransferRole,
+) {
+    match role {
+        BlobTransferRole::ServerPush => {
+            log::warn!("v3_conn: 客户端不得以 ServerPush 打开 BlobTransfer 流");
+        }
+        BlobTransferRole::ClientFetch { hash } => {
+            let Some(blob) = server.state.blobs.get(&hash) else {
+                log::warn!("v3_blob: 客户端拉取不存在的 blob `{}`", hash.to_hex());
+                return;
+            };
+            if let Err(error) = server
+                .backend
+                .push_blob(&mut stream, hash, blob.len() as u64)
+                .await
+            {
+                log::warn!("v3_blob: ClientFetch 推送失败：{error:?}");
+            }
+        }
+        BlobTransferRole::ClientUpload { hash, len } => {
+            if len > MAX_CLIENT_UPLOAD_BLOB_BYTES {
+                log::warn!("v3_blob: 上传字节 {len} 超过上限 {MAX_CLIENT_UPLOAD_BLOB_BYTES}");
+                let _ = write_frame(&mut stream, &false).await;
+                return;
+            }
+            let ok = receive_upload(&server.state, &mut stream, hash, len).await;
+            let _ = write_frame(&mut stream, &ok).await;
+        }
+    }
+}
+
+async fn receive_upload<S: tokio::io::AsyncRead + Unpin>(
+    state: &ServerState,
+    stream: &mut S,
+    expected_hash: ContentHash,
+    expected_len: u64,
+) -> bool {
+    let mut bytes = Vec::with_capacity(expected_len as usize);
+    loop {
+        let Ok(frame) = read_frame::<_, BlobChunkFrame>(stream).await else {
+            return false;
+        };
+        if frame.hash != expected_hash || frame.offset != bytes.len() as u64 {
+            return false;
+        }
+        let next_len = (bytes.len() as u64).saturating_add(frame.bytes.len() as u64);
+        if next_len > expected_len {
+            return false;
+        }
+        bytes.extend_from_slice(&frame.bytes);
+        if frame.last {
+            break;
+        }
+    }
+    if bytes.len() as u64 != expected_len {
+        return false;
+    }
+    let actual_digest: [u8; 32] = Sha256::digest(&bytes).into();
+    if actual_digest != *expected_hash.as_bytes() {
+        return false;
+    }
+    state.blobs.put(bytes);
+    true
+}
+
+async fn handshake<T: MuxTransport, B: V3Backend>(
+    server: &V3Server<T, B>,
+    stream: &mut T::BiStream,
 ) -> Option<Arc<ConnectionIdentity>> {
     let hello: ClientHello = match read_frame(stream).await {
         Ok(hello) => hello,
@@ -293,7 +378,6 @@ async fn handshake<B: MuxTransport>(
             return None;
         }
     };
-    // 先版本后凭据：版本失配时连凭据都不想看（不泄漏"这个令牌存在过"）。
     let accepted = match verify_handshake(
         &hello,
         &server.state.config.server_instance_id,
@@ -324,9 +408,9 @@ async fn handshake<B: MuxTransport>(
     }
 }
 
-async fn serve_control<B: MuxTransport>(
-    server: &V3Server<B>,
-    mut stream: B::BiStream,
+async fn serve_control<T: MuxTransport, B: V3Backend>(
+    server: &V3Server<T, B>,
+    mut stream: T::BiStream,
     identity: Arc<ConnectionIdentity>,
     connection: Arc<ConnectionState>,
 ) {
@@ -339,37 +423,40 @@ async fn serve_control<B: MuxTransport>(
     loop {
         let call: ControlCall = tokio::select! {
             biased;
-            _ = cancel.changed() => {
+            _ = wait_true(&mut cancel) => {
                 log::info!("v3_conn: 连接已取消（吊销/停机），控制面收流");
                 return;
             }
             frame = read_frame(&mut stream) => match frame {
                 Ok(call) => call,
                 Err(error) => {
-                    log::debug!("v3_conn: 控制面收流（{error}）");
+                    log::debug!("v3_conn: 控制面收流（{error}），整条连接收摊");
+                    connection.cancel();
                     return;
                 }
             },
         };
         let reply = execute(server, &context, call).await;
         if let Err(error) = write_frame(&mut stream, &reply).await {
-            log::debug!("v3_conn: 回执写失败（{error}）");
+            log::debug!("v3_conn: 回执写失败（{error}），整条连接收摊");
+            connection.cancel();
             return;
         }
     }
 }
 
-/// 执行一条控制面调用（**幂等在这里落地**：同 `command_id` 绝不执行第二次）。
-async fn execute<B: MuxTransport>(
-    server: &V3Server<B>,
+/// 执行一条控制面调用（**幂等键绑定 `DeviceKey`**，严禁跨设备串话）。
+async fn execute<T: MuxTransport, B: V3Backend>(
+    server: &V3Server<T, B>,
     context: &CallContext,
     call: ControlCall,
 ) -> ControlReply {
+    let device = &context.identity.device;
     let command_id = call.command_id.clone();
     let mut request = Some(call.request);
     let mut retries = 0u32;
     loop {
-        match server.state.receipts.begin(&command_id) {
+        match server.state.receipts.begin(device, &command_id) {
             ReceiptStart::Duplicate(reply) => return (*reply).clone(),
             ReceiptStart::Fresh { publish } => {
                 let Some(request) = request.take() else {
@@ -386,7 +473,11 @@ async fn execute<B: MuxTransport>(
                     command_id: command_id.clone(),
                     response,
                 };
-                return (*server.state.receipts.finish(&command_id, reply, &publish)).clone();
+                return (*server
+                    .state
+                    .receipts
+                    .finish(device, &command_id, reply, &publish))
+                .clone();
             }
             ReceiptStart::Wait(mut receiver) => match receiver.changed().await {
                 Ok(()) => {
@@ -395,8 +486,7 @@ async fn execute<B: MuxTransport>(
                     }
                 }
                 Err(_) => {
-                    // 领导者异常退出（连接断开等）：摘掉在飞槽位，重新排一次队。
-                    server.state.receipts.abandon(&command_id);
+                    server.state.receipts.abandon(device, &command_id);
                     retries += 1;
                     if retries > 3 {
                         return ControlReply {
@@ -413,9 +503,9 @@ async fn execute<B: MuxTransport>(
     }
 }
 
-async fn serve_session_events<B: MuxTransport>(
-    server: &V3Server<B>,
-    mut stream: B::BiStream,
+async fn serve_session_events<T: MuxTransport, B: V3Backend>(
+    server: &V3Server<T, B>,
+    mut stream: T::BiStream,
     identity: Arc<ConnectionIdentity>,
     session_id: SessionId,
     since_seq: u64,
@@ -462,7 +552,7 @@ async fn serve_session_events<B: MuxTransport>(
                 event: SessionEvent::ResyncRequired {
                     session_id,
                     reason: ResyncReason::CursorGap,
-                    timeline_epoch: epoch,
+                    timeline_epoch: session.epoch(),
                 },
             };
             let _ = write_frame(&mut stream, &frame).await;
@@ -486,7 +576,6 @@ async fn serve_session_events<B: MuxTransport>(
     }
 
     let mut coalescer = DeltaCoalescer::new();
-    // 回放：环里存的是**未合帧的权威帧**，与实时看到的只是分批差别。
     for frame in replay {
         for out in coalescer.push(frame) {
             if write_frame(&mut stream, out.as_ref()).await.is_err() {
@@ -503,9 +592,8 @@ async fn serve_session_events<B: MuxTransport>(
     loop {
         let next = tokio::select! {
             biased;
-            _ = cancel.changed() => return,
-            _ = lagged.changed() => {
-                // 队列溢出：**不静默丢帧**，明说"你落后了，重订"。
+            _ = wait_true(&mut cancel) => return,
+            _ = wait_true(&mut lagged) => {
                 let frame = SessionEventFrame {
                     meta: FrameMeta {
                         seq: session.bus.last_seq(),
@@ -515,7 +603,7 @@ async fn serve_session_events<B: MuxTransport>(
                     event: SessionEvent::ResyncRequired {
                         session_id,
                         reason: ResyncReason::CursorGap,
-                        timeline_epoch: epoch,
+                        timeline_epoch: session.epoch(),
                     },
                 };
                 let _ = write_frame(&mut stream, &frame).await;
@@ -527,7 +615,6 @@ async fn serve_session_events<B: MuxTransport>(
             },
         };
 
-        // 贪心取一批再写：洪峰下才有可能真的合帧（一帧一写等于不合）。
         let mut batch = vec![next];
         while let Ok(frame) = live.try_recv() {
             batch.push(frame);
@@ -548,9 +635,9 @@ async fn serve_session_events<B: MuxTransport>(
     }
 }
 
-async fn serve_shell_pty<B: MuxTransport>(
-    server: &V3Server<B>,
-    mut stream: B::BiStream,
+async fn serve_shell_pty<T: MuxTransport, B: V3Backend>(
+    server: &V3Server<T, B>,
+    mut stream: T::BiStream,
     identity: Arc<ConnectionIdentity>,
     shell_id: String,
     from_offset: u64,
@@ -568,17 +655,14 @@ async fn serve_shell_pty<B: MuxTransport>(
         log::warn!("v3_shell_pty: 设备越权访问 shell `{shell_id}`");
         return;
     }
-    let ShellAttachParts {
-        replay,
-        mut live,
-        mut lagged,
-        attach_offset,
-        gap,
-        generation,
-    } = ShellAttachParts::split(handle.attach(from_offset, &server.state.config));
+    let attach_parts = handle.attach(from_offset, &server.state.config);
+    let replay = attach_parts.replay;
+    let mut live = attach_parts.live;
+    let mut lagged = attach_parts.lagged;
+    let attach_offset = attach_parts.attach_offset;
+    let gap = attach_parts.gap;
+    let generation = attach_parts.generation;
     if gap {
-        // 请求偏移已跌出历史：`attach.seq` 会明确给出当前水位，客户端据此丢弃旧缓冲
-        // 并从水位重建（终端的"重连"语义，不是什么都能续上）。
         log::info!("v3_shell_pty: shell `{shell_id}` 请求偏移 {from_offset} 已跌出历史");
     }
     let kind = StreamKind::ShellPty {
@@ -616,8 +700,8 @@ async fn serve_shell_pty<B: MuxTransport>(
     loop {
         let chunk = tokio::select! {
             biased;
-            _ = cancel.changed() => break,
-            _ = lagged.changed() => break,
+            _ = wait_true(&mut cancel) => break,
+            _ = wait_true(&mut lagged) => break,
             maybe = live.recv() => match maybe {
                 Some(chunk) => chunk,
                 None => break,
@@ -640,28 +724,4 @@ async fn serve_shell_pty<B: MuxTransport>(
         }
     }
     handle.detach(generation);
-}
-
-/// [`ShellAttach`] 的拆解形式（`live`/`lagged` 必须先取出来再进 `select!` 循环，
-/// 否则每轮 clone 一个 receiver 会立刻"看到变化"而空转）。
-struct ShellAttachParts {
-    replay: Vec<(u64, bytes::Bytes)>,
-    live: mpsc::Receiver<(u64, bytes::Bytes)>,
-    lagged: watch::Receiver<bool>,
-    attach_offset: u64,
-    gap: bool,
-    generation: u64,
-}
-
-impl ShellAttachParts {
-    fn split(attach: super::state::ShellAttach) -> Self {
-        Self {
-            replay: attach.replay,
-            live: attach.live,
-            lagged: attach.lagged,
-            attach_offset: attach.attach_offset,
-            gap: attach.gap,
-            generation: attach.generation,
-        }
-    }
 }

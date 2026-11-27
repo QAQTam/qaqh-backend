@@ -11,13 +11,13 @@ use super::super::error::not_wired;
 use super::super::state::ServerState;
 use super::CallContext;
 
-/// Gitx 门面。
-pub(crate) struct GitxFacade {
+/// Gitx 门面骨架实现。
+pub(crate) struct SkeletonGitx {
     #[allow(dead_code)]
     state: Arc<ServerState>,
 }
 
-impl GitxFacade {
+impl SkeletonGitx {
     /// 构造。
     pub(crate) fn new(state: Arc<ServerState>) -> Self {
         Self { state }
@@ -48,7 +48,7 @@ mod smoke {
         let rig = test_support::rig();
         let context = test_support::owner_context(&rig);
         let error = rig
-            .facades
+            .backend
             .gitx
             .handle(
                 &context,

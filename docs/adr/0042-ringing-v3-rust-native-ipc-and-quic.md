@@ -199,67 +199,84 @@
   陈旧代际 Fail-Closed、`daemon.endpoint` 往返与过期守护进程拒绝）；
   `cargo clippy --no-deps -p qaqh-ringing-v3 --all-targets` 零告警。
 
-### `v4.6 P3-4`（2026-11-27）：隔离骨架 + `duplex` 闭环 + 六大不变量守卫
+### `v4.6 P3-4`（2026-11-27）：隔离骨架 + 双后端（`yamux`/`iroh`）闭环 + 六大不变量守卫
 
 > 仍然**不是**「协议已实施」：V3 还不是生产线缆（生产切换在 `v4.7`）。本段只登记
-> 契约两端骨架与守卫的实测事实。
+> 契约两端骨架与双后端不变量守卫的实测事实（`status` 维持 **已采纳 · 未实施**）。
 
-- **传输层独立成 crate**：`crates/qaqh-v3-transport`（`MuxTransport` trait +
-  `yamux 0.14.1` 后端 + `tokio::io::duplex` 闭环）。计划把 trait 挂在 `v3_server/` 下，
-  但两端（`v3_server` 与 `client/v3`）都要说同一套话——放一处会逼出「两套 trait」或
-  「daemon 反向依赖 client crate」，两者都是宪法 #2 判死的债。依赖面实测：
-  `log` / `thiserror` / `tokio` / `tokio-util` / `yamux`，`cargo tree -i serde_json` 无匹配。
+- **传输层独立成 crate**：`crates/qaqh-v3-transport`（`MuxTransport` trait + 单一真源
+  `framing` 编解码 + `yamux 0.14.1` 后端 + `tokio::io::duplex` 闭环）。两端（`v3_server`
+  与 `client/v3`）共用同一份长度前缀与 `FrameIoError::Eof` / `TruncatedPrefix` /
+  `TruncatedPayload` 区分语义（消除两份重复 `framing.rs` 与干净 EOF 被误判截断问题）；
+  依赖面实测仅 `log` / `thiserror` / `tokio` / `tokio-util` / `yamux` / `qaqh-ringing-v3`，
+  `cargo tree -i serde_json` 无匹配。
   - 唯一 driver task（`Connection` 只活在里面）+ 入站**活流**上限（累计计数会在 64 条流后
-    永久封锁，已作为反例写进注释）+ 有界接受队列；
+    永久封锁，已作为反例写进注释）+ `ConnectionError::TooManyStreams` 不拖死整条连接
+    + 有界接受队列；
   - `yamux` 把 SYN 挂在**第一帧**上（流在写出首帧前对端不可见），这条使用前提写进
     `open_bi` 文档并由全部守卫遵守；
-  - `open_uni`/`accept_uni` 如实 `Unsupported`（`yamux` 规范无单向流），
-    保留签名只为 `v4.8` `iroh` 零返工。
-- **`crates/qaqh-daemon/src/v3_server/`**（物理隔离目录，`#[allow(dead_code)]` 待 `v4.7` 接线）：
-  - **十一域静态分派**（`V3Server::dispatch`）+ **8 个门面**：`System`（真：探针/活动/版本/停机）、
-    `Session`+`Command`+`ToolCatalog`（真：快照/翻页/附着/驱动权/骨架回合）、
-    `Shell`（真：独立句柄表 + PTY 回放/水位/附着）、`Blob`（真：内容寻址 + 分块推送让出）、
-    `ConfigAccount`（配对表与吊销**真**，配置/账号 `Unavailable`）、
-    `Marketplace`/`Gitx`/`Fs`（签名 + 拒绝语义，真实现随 `v4.7`）；
+  - `open_uni`/`accept_uni` 在 `yamux` 下如实 `Unsupported`，保留签名供 `iroh` 与 `v4.8` 复用。
+- **`crates/qaqh-daemon/src/v3_server/`**（物理隔离目录，`#[allow(dead_code)]` 待 `v4.7` 接线；
+  全部生产源码拆分为 `< 1000` 行职责单一模块）：
+  - **8 个 RPITIT 门面 Trait + `V3Backend` + `SkeletonBackend`**：`SystemFacade`、
+    `SessionFacade`、`ShellFacade`、`ConfigAccountFacade`、`MarketplaceFacade`、`GitxFacade`、
+    `FsFacade`、`BlobFacade`，与十一域静态分派 `V3Server<T, B>::dispatch` 解耦，方便
+    `v4.7` 零返工挂接真实 `QaqhService`；
+  - **状态模块清晰拆分**：`state.rs`、`session_runtime.rs`（`VecDeque` 回放历史、原子回合
+    占坑、原子驱动权切换与事件发射）、`shell_table.rs`（单锁原子回放+直播附着、多端同看）、
+    `receipts.rs`（`(DeviceKey, command_id)` 设备级隔离 + 4096 上限 FIFO 淘汰）、
+    `blob_store.rs`（256 MiB 字节上限 FIFO 淘汰）；
   - **原子订阅**：同一把锁里读回放环 + 注册 receiver（反证原语 `replay_after` /
     `register_only` 让「先读环后注册必丢帧」可确定性复现）；
-  - **同流合帧**：`DeltaCoalescer` 最多持一帧未写出的 `Replaceable`，`Reliable` 到达时先
-    flush（结构上排除「终态早于尾增量」）；合帧帧带**最大 `seq`**，回放环存未合帧权威帧；
-  - **身份单权威**：授权键是凭据推导的 `DeviceKey`（`client_instance_id` 不参与授权），
-    设备表对外只给与令牌无关的 `device_id`，吊销经 `watch` 哨兵即时踢流；
-  - **幂等回执**：`command_id` → `watch` 槽位（在飞/已落库），重放返回原回执且不再执行；
-  - **`daemon.endpoint`**：启动期生成 + 原子写 + 退出清理；Windows `Owner-Only DACL` +
-    `reject_remote_clients(true)` 与严格同版演进写成文档约定（平台分支随 `v4.7`）。
-- **`crates/qaqh-client/src/v3/`**：`V3Client`（握手 + 一问一答 + 幂等重放）+
-  `SessionEventsStream`（前端唯一真相源：`next_frame` / `into_frame_stream` / 体检计数）+
-  `ShellOutputStream`（原始字节 + 偏移断裂计数）+ `BlobInbox`（服务端推送组装）+
-  `resolve_daemon_endpoint`（`build_id`/`channel`/`rev`/指纹 四重 Fail-Closed）。
-- **六大守卫全绿**（`crates/qaqh-daemon/src/v3_server/invariants/`，真双端 + 真 `yamux` +
-  内存双工；8 核 / 7876 MiB / debug 构建实测）：
-  ① 洪峰 3000 帧中 attach：`resync=0`、字节守恒 21000 B、破序反证必丢 1 帧；
-  ② 并发洪峰（会话 A 约 1.6 万帧 + PTY 约 1 MB + blob 24 MiB）下：控制面 RTT p99
-  **1.65 ms**（红线 < 50）、PTY 回显 p99 **0.98 ms**（红线 ≤ 16.6）、会话 B 帧间隔 p99
-  **6.78 ms**（红线 < 50）；
-  ③ 断联后 shell 存活、同 `command_id` 重放回执**逐字节相同**、回合数仍为 1；
-  ④ 管理面 9 条对已配对设备全拒（主设备同调用通过）、冒充实例名无效、未知令牌握手被拒；
-  ⑤ 驱动权序号 1→2→3 两端一致、非驱动端两次拒绝、吊销 2 s 内踢流并清附着；
-  ⑥ 发布 2021 帧 → 收到 133 帧（合掉 1888）、增量字节全对齐、8 MiB 外置（预览 1024 B）、
-  代际 bump 后 `StaleCursor` 生效。
-- **反腐隔离闸**：`rg 'axum_server|RINGING_V2|v2_stream|serde_json|skip_serializing_if|serde(tag|flatten|untagged)|serde(alias|legacy_|compat_' crates/qaqh-daemon/src/v3_server crates/qaqh-client/src/v3 crates/qaqh-v3-transport/src`
-  → **非注释行 0 命中**（原始输出只命中 `v3_server/mod.rs` 里逐字列出这些禁词的规则说明注释，
-  口径同 `P3-1`/`P3-2` 已登记偏差）。
+  - **同流合帧**：`DeltaCoalescer` 最多持一帧未写出的 `Replaceable`，`Reliable` 到达或
+    同类增量的 `offset` 断裂 / `spilled: true` 变化时先 flush（结构上排除「终态早于尾增量」
+    及缺口/外置覆盖）；合帧帧带**最大 `seq`**，回放环存未合帧权威帧；
+  - **身份单权威与推送鉴权**：授权键是凭据推导的 `DeviceKey`（`client_instance_id` 不参与
+    授权）；`blob_pump` 仅向已认证、未吊销、拥有会话权限且广播模式下已附着该会话的连接推送
+    blob；`Control` 流为连接主锚点（只允许一条且断开即触发连接收摊），吊销经 `watch` 哨兵
+    `wait_for` 无竞态即时踢流；
+  - **`daemon.endpoint`**：支持 `local_ipc` + `iroh` 双传输并行发布，启动期按 `PID + 序号`
+    唯一临时文件原子写入与 Unix `0o600` 权限收敛，并按 `build_id` / `channel` / `rev` /
+    `protocol_fingerprint` 四重 Fail-Closed 校验。
+- **`crates/qaqh-client/src/v3/`**：`V3Client`（handshake + UUID 幂等键生成 + 一问一答 +
+  `upload_blob`）+ `SessionEventsStream`（前端唯一真相源，无重复本地状态缓存，`into_frame_stream`
+  在 `StreamRejected`/EOF 后正常结束）+ `ShellOutputStream`（起始偏移对齐 `from_offset`，非零
+  偏移续读 `gaps == 0`）+ `BlobInbox`（有界 `mpsc(32)` 背压、SHA-256 完整性与单块 128 MiB
+  上限 Fail-Closed）。
+- **`iroh` 1.5 本机回环双后端矩阵（`ADR-0042 r5`）**：仅作为 `qaqh-daemon` 的 `[dev-dependencies]`
+  引入（`default-features = false, features = ["tls-aws-lc-rs"]`，`cargo tree -p qaqh-daemon -e normal,build -i iroh`
+  实测生产/构建依赖为 0，且未启用 `iroh/tls-ring`），在 `127.0.0.1:0` 以 `presets::Minimal` + `RINGING_V3_ALPN` 实例化
+  `IrohTransport` 并与 `YamuxFactory` 同体参数化运行全部 6 大守卫（12 条守卫测试全绿，
+  `v3_server` 37 项单测与守卫全绿，8 核 / 7876 MiB / debug 实测）：
+  ① **洪峰 3000 帧中段 `attach`（`attach_seq >= 200`）**：`yamux` `attach_seq=930` / 收到 72 帧、
+     `iroh` `attach_seq=1442` / 收到 47 帧，均 `resync=0`、字节守恒 21000 B、破序反证必丢 1 帧；
+  ② **并发洪峰背压隔离**：
+     - `yamux`（会话A 10790 帧 / PTY 974848 B / blob 24 MiB / 会话B 43 心跳）：控制面 RTT
+       p99 **1.393 ms**（< 50）、PTY 回显 p99 **1.875 ms**（≤ 16.6）、会话B 帧间隔 p99 **7.779 ms**（< 50）；
+     - `iroh`（会话A 59200 帧 / PTY 1951744 B / blob 40 MiB / 会话B 625 心跳）：控制面 RTT
+       p99 **42.269 ms**（< 50）、PTY 回显 p99 **14.984 ms**（≤ 16.6）、会话B 帧间隔 p99 **17.474 ms**（< 50）；
+  ③ **断联与幂等**：`yamux` / `iroh` 断联均即时释放驱动权、shell 存活、同 `command_id` 重放回执
+     21 B 逐字节相同、回合数=1、从偏移 18 续读 17 B（`gap=0`）；
+  ④ **身份单权威**：管理面 9 条对已配对设备全拒、设备间同 `command_id` 互不串话、`blob_pump`
+     不向未授权设备泄密、冒充实例无效、未知令牌被拒；
+  ⑤ **多端协同与吊销**：双端同看同一 Shell 一致、驱动权序号 `1 → 2 → 3` 两端一致、非驱动端两次
+     被拒、吊销 2 s 内踢流并清附着/驱动权；
+  ⑥ **前端渲染预算与有序性**：`yamux` 发布 2021 帧 → 收 115 帧（合掉 1906），`iroh` 发布
+     2021 帧 → 收 167 帧（合掉 1854），增量字节 14000 B 全对齐，8 MiB 外置（预览 1024 B），
+     代际 bump 后 `StaleCursor` 生效。
+- **反腐隔离闸**：`rg 'axum_server|RINGING_V2|v2_stream|serde_json|skip_serializing_if|serde\((tag|flatten|untagged|alias)|legacy_|compat_'`
+  扫描 `qaqh-core-vocab`、`qaqh-ringing-v3`、`qaqh-v3-transport/src`、`v3_server/`、`client/v3/` → **字面 0 命中**（注释内禁词示例也已清除）。
 - **两份前置 ADR**：[0046](0046-native-structured-visualization-no-webview.md)（无 WebView
-  原生结构化可视化，HTML iframe widget 退役）、[0047](0047-audit-and-journal-consolidation.md)
-  （`audit v1/v2` 与 `JOURNAL_IO` 保留显式单写者，不收编 `qaqh.db`）。
+  原生结构化可视化，HTML iframe widget 退役，**已采纳 · 未实施**）、[0047](0047-audit-and-journal-consolidation.md)
+  （`audit v1/v2` 与 `JOURNAL_IO` 保留显式单写者，不收编 `qaqh.db`，**已采纳 · 未实施**）。
 
 ### 仍未实施（留给后续切片，保持诚实）
 
-- **生产接线（`v4.7`）**：`v3_server` 尚未进入 daemon 启动路径（无 UDS/Named Pipe 监听器、
-  无 `SO_PEERCRED` 校验、`daemon.endpoint` 只在测试里发布）；门面里的
-  `Marketplace`/`Gitx`/`Fs`/`Config`/`Account` 仍是 `Unavailable` 占位；会话回合是
-  `run_skeleton_turn`（骨架 echo）而非真 AgentLoop；Shell 是 echo 后端而非真 PTY。
-- **`iroh` 双后端矩阵（`v4.8`）**：`MuxTransport` 签名已对齐 `iroh::Connection`，但 `iroh`
-  后端**未实现也未运行**；守卫按后端参数化（`guard_for!` 一行实例化），目前只实例化 `yamux`。
-  `open_uni`/`accept_uni` 的能力差异到那时才会被真正用到。
-- **Windows 分支**：Named Pipe 的 Owner-Only DACL 与 `reject_remote_clients(true)` 只有
-  文档约定，没有 `#[cfg(windows)]` 实现（本机无 Windows 宿主，不写未验代码）。
+- **生产接线（`v4.7`）**：`v3_server` 尚未进入 daemon 生产启动路径（无 UDS/Named Pipe 监听器、
+  无 `SO_PEERCRED` 校验、`daemon.endpoint` 仅测试验证）；`Marketplace`/`Gitx`/`Fs`/`Config`/
+  `Account` 门面仍返回 `Unavailable`；回合仍是 `SkeletonBackend` 回声而非真 AgentLoop；
+  Shell 仍是内存缓冲后端而非真 PTY。
+- **广域 QUIC / 中继链路（`v4.8`）**：`P3-4` 已通过 `iroh 1.5` 本机回环验证 QUIC 多流与反压，
+  但中继发现、公网打洞、密钥持久化与真实移动端集成留待 `v4.8`。
+- **Windows / macOS 分支**：Named Pipe 的 Owner-Only DACL、`reject_remote_clients(true)` 与
+  非 Linux 宿主行为均无本地运行实测（本机仅 Linux 宿主，不写未验跨平台实现）。

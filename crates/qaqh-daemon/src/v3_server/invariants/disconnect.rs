@@ -1,14 +1,4 @@
-//! 守卫③：**断联不杀进程 + 幂等回执**（`ADR-0042` 铁律 4）。
-//!
-//! ## 断联必须只断"看的人"
-//!
-//! 连接断了，shell 句柄、输出水位、回放历史都必须在；否则"手机切个后台，
-//! 长跑命令就没了"——那是 V2 时代最难解释的一类事故。
-//!
-//! ## 幂等回执必须逐字节相同
-//!
-//! 断线重放同一个 `command_id`，服务端必须返回**原回执**，且**不得再执行一次**。
-//! 这里用 `encode_frame` 比较两次回执的线缆字节：任何一处字段漂移都抓得到。
+//! 守卫③：**断联不杀进程 + 幂等回执 + 非零偏移续读无误报缺口**（`ADR-0042` 铁律 4/5）。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,15 +8,14 @@ use qaqh_core_vocab::InputId;
 use qaqh_ringing_v3::{
     CommandRequest, ControlRequest, ControlResponse, SessionRequest, encode_frame,
 };
-use qaqh_v3_transport::MuxTransport;
 
-use crate::v3_server::harness;
+use crate::v3_server::harness::{self, BackendFactory};
 
-pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
+pub(crate) async fn guard<F: BackendFactory>(factory: F) {
     let state = harness::state();
 
     // ── 第一个连接 ──
-    let (client_transport, server_transport) = pair();
+    let (client_transport, server_transport) = factory.pair().await;
     let (_server, _server_task) =
         harness::spawn_server(server_transport, Arc::clone(&state)).await;
     let client_a = harness::connect(client_transport, harness::owner_hello("guard-03")).await;
@@ -40,8 +29,10 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
         }))
         .await
         .expect("Attach");
-    let shell_id = harness::open_shell(&client_a).await;
+    let shell_id = harness::open_shell(&client_a, &session_id).await;
     let shell = state.shells.get(&shell_id).expect("shell 句柄");
+    shell.push_output(Bytes::from_static(b"before-disconnect\n"));
+    let pre_disconnect_offset = shell.output_offset();
 
     let request = ControlRequest::Command(CommandRequest::SendPrompt {
         session_id: session_id.clone(),
@@ -56,14 +47,16 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
     assert!(matches!(first, ControlResponse::Command(_)), "回执形状");
     let first_bytes = encode_frame(&first).expect("编码回执");
     assert_eq!(
-        session.metrics.turns_started.load(std::sync::atomic::Ordering::Relaxed),
+        session
+            .metrics
+            .turns_started
+            .load(std::sync::atomic::Ordering::Relaxed),
         1,
         "首次投递必须只开一个回合"
     );
 
     // ── 断联 ──
     drop(client_a);
-    // 等驱动权释放（这是"服务端确实看到了断联"的可观测证据，比 sleep 可靠）。
     for _ in 0..300 {
         if session.driver().is_none() {
             break;
@@ -78,11 +71,10 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
         state.shells.get(&shell_id).is_some(),
         "断联把 shell 杀了（断联不杀进程）"
     );
-    // 断联之后服务端继续产出字节（真实场景：长跑命令还在输出）。
     shell.push_output(Bytes::from_static(b"after-disconnect\n"));
 
     // ── 第二个连接：重放同一个 command_id ──
-    let (client_transport, server_transport) = pair();
+    let (client_transport, server_transport) = factory.pair().await;
     let (_server2, _server_task2) =
         harness::spawn_server(server_transport, Arc::clone(&state)).await;
     let client_b = harness::connect(client_transport, harness::owner_hello("guard-03")).await;
@@ -100,17 +92,20 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
     assert_eq!(
         encode_frame(&replay).expect("编码回执"),
         first_bytes,
-        "重放必须返回**逐字节相同**的原回执"
+        "重放必须返回逐字节相同的原回执"
     );
     assert_eq!(
-        session.metrics.turns_started.load(std::sync::atomic::Ordering::Relaxed),
+        session
+            .metrics
+            .turns_started
+            .load(std::sync::atomic::Ordering::Relaxed),
         1,
-        "重放不得再执行一次回合（幂等不是「再跑一遍但返回旧结果」）"
+        "重放不得再执行一次回合"
     );
 
-    // ── 断联后的字节还在：从偏移 0 重拉必须能看到 ──
+    // ── 非零偏移续读：只拉断联之后的新字节，gap 必须为 0 ──
     let mut pty = client_b
-        .attach_shell(&shell_id, 0)
+        .attach_shell(&shell_id, pre_disconnect_offset)
         .await
         .expect("重连后 attach shell");
     let mut seen = Vec::new();
@@ -129,13 +124,15 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
     assert_eq!(
         pty.stats().gaps,
         0,
-        "从偏移 0 重拉不该出现任何偏移断裂"
+        "从非零偏移 {pre_disconnect_offset} 续读不该误报任何缺口"
     );
-    assert_eq!(pty.stats().bytes, seen.len() as u64);
+    assert_eq!(seen, b"after-disconnect\n");
 
     println!(
-        "[v3-guard-03] 断联后 shell 存活；重放回执 {} B 逐字节相同；回合数=1；断联后回放 {} B（gap=0）",
+        "[v3-guard-03/{}] 断联后 shell 存活；重放回执 {} B 逐字节相同；回合数=1；从偏移 {} 续读 {} B（gap=0）",
+        F::name(),
         first_bytes.len(),
+        pre_disconnect_offset,
         seen.len()
     );
 }

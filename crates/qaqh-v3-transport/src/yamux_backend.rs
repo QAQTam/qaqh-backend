@@ -311,6 +311,12 @@ where
                         _guard: guard,
                     }));
                 }
+                Poll::Ready(Err(yamux::ConnectionError::TooManyStreams)) => {
+                    // 局部流数达上限只拒该次开流请求，不能连累同一连接上其它存活流。
+                    let _ = slot.send(Err(MuxError::Open {
+                        detail: "出站并发流数达上限".to_string(),
+                    }));
+                }
                 Poll::Ready(Err(error)) => {
                     let detail = error.to_string();
                     let _ = slot.send(Err(MuxError::Protocol {

@@ -72,6 +72,9 @@ tokio-tungstenite = "0.29"
 # 切片 5 的判据是「客户端与服务端说的是同一套协议」，而手搓的 tungstenite 客户端证明
 # 不了这一点——两边各自理解错、测试照样绿。daemon 的运行期不依赖客户端库，只登记 dev。
 qaqh-client = { path = "../qaqh-client", features = ["shell-stream"] }
+# v4.6 P3-4 / ADR-0042 r5：双后端不变量矩阵（仅 dev-dependency，严禁进入生产依赖图；
+# 沿用 ADR-0039 aws-lc-rs 单 provider，绝不引入 ring）。
+iroh = { version = "1.5", default-features = false, features = ["tls-aws-lc-rs"] }
 
 [lints]
 workspace = true

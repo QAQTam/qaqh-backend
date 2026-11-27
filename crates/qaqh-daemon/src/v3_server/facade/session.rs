@@ -27,25 +27,25 @@ use qaqh_core_vocab::{
     ToolGroup, ToolMode, ToolOrigin, ToolRiskLevel, TurnTerminal, ToolUnavailableReason,
 };
 use qaqh_ringing_v3::{
-    BlockKind, CommandInteractionResolution, CommandRequest, CommandResponse, ErrorCode,
+    BlockKind, CommandInteractionResolution, CommandRequest, CommandResponse,
     ExecSessionSnapshot, InteractionResolution, RpcError, SessionEvent, SessionRequest,
     SessionResponse, ToolCallStatus, ToolCallView, ToolCatalogRequest, ToolCatalogResponse,
 };
 
-use super::super::error::{denied, not_found, rpc};
-use super::super::state::{
-    ServerState, SessionRuntime, empty_usage, skeleton_block_id, skeleton_exec_id,
-    skeleton_turn_id,
+use super::super::error::{denied, not_found};
+use super::super::session_runtime::{
+    SessionRuntime, empty_usage, skeleton_block_id, skeleton_exec_id, skeleton_turn_id,
 };
+use super::super::state::ServerState;
 use super::super::util::now_ms;
 use super::{BlobPush, CallContext};
 
-/// Session 门面。
-pub(crate) struct SessionFacade {
+/// Session 门面骨架实现。
+pub(crate) struct SkeletonSession {
     state: Arc<ServerState>,
 }
 
-impl SessionFacade {
+impl SkeletonSession {
     /// 构造。
     pub(crate) fn new(state: Arc<ServerState>) -> Self {
         Self { state }
@@ -76,13 +76,28 @@ impl SessionFacade {
         request: SessionRequest,
     ) -> Result<SessionResponse, RpcError> {
         match request {
+            SessionRequest::Create {
+                title,
+                cwd: _,
+                tool_mode,
+            } => {
+                let session = self.state.create_session(&context.identity.device);
+                if let Some(title) = title {
+                    session.rename(title);
+                }
+                if let Some(mode) = tool_mode {
+                    session.set_tool_mode(mode);
+                }
+                Ok(SessionResponse::Created(session.summary()))
+            }
             SessionRequest::GetSessionSnapshot {
                 session_id,
                 tail_blocks,
+                tail_turns,
             } => {
                 let session = self.session_for(context, &session_id)?;
                 Ok(SessionResponse::Snapshot(Box::new(
-                    session.snapshot(tail_blocks),
+                    session.snapshot(tail_blocks, tail_turns),
                 )))
             }
             SessionRequest::TranscriptPage {
@@ -136,17 +151,9 @@ impl SessionFacade {
             } => {
                 let session = self.session_for(context, &session_id)?;
                 session.attach(&context.identity);
-                super::super::lock(&context.attached_sessions).insert(session_id.clone());
-                // 首个附着者取得驱动权（已有驱动端则不动，避免抢权）。
-                if let Some(ordinal) = session.claim_driver_if_vacant(context.identity.driver_key())
-                    && let Some(driver) = session.driver()
-                {
-                    session.emit(super::super::state::driver_changed(
-                        &session_id,
-                        &driver,
-                        ordinal,
-                    ));
-                }
+                super::super::lock(&context.attached_sessions).insert(session_id);
+                // 首个附着者原子取得驱动权并按同一锁序发广播。
+                session.claim_driver_if_vacant_and_emit(context.identity.driver_key());
                 Ok(SessionResponse::Ack)
             }
             SessionRequest::SwitchDriver {
@@ -154,15 +161,10 @@ impl SessionFacade {
                 target_client_instance_id,
             } => {
                 let session = self.session_for(context, &session_id)?;
-                let (driver, ordinal) = session.switch_driver(
+                session.switch_driver_and_emit(
                     &context.identity,
                     target_client_instance_id.as_deref(),
                 )?;
-                session.emit(super::super::state::driver_changed(
-                    &session_id,
-                    &driver,
-                    ordinal,
-                ));
                 Ok(SessionResponse::Ack)
             }
         }
@@ -219,10 +221,14 @@ impl SessionFacade {
                 resolution,
             } => {
                 let session = self.session_for(context, &session_id)?;
+                session.resolve_interaction(&interaction_id);
                 let resolution = match resolution {
                     CommandInteractionResolution::Approve => InteractionResolution::Approved,
                     CommandInteractionResolution::Reject { text } => {
                         InteractionResolution::Denied { reason: text }
+                    }
+                    CommandInteractionResolution::Answer { text } => {
+                        InteractionResolution::Answered { answer: text }
                     }
                 };
                 session.emit(SessionEvent::InteractionResolved {
@@ -266,12 +272,8 @@ impl SessionFacade {
                 "只有当前驱动端可以投递用户输入（请先 SwitchDriver）",
             ));
         }
-        if session.activity() != ActivityState::Idle {
-            return Err(rpc(
-                ErrorCode::Conflict,
-                "上一回合尚未收口，拒绝并发投递",
-            ));
-        }
+        // 原子检查空闲并切换为 Running，防止并发投递竞争。
+        session.try_begin_turn()?;
         let session_id = session.id.clone();
         let attachment_count = attachments.len();
 
@@ -283,7 +285,6 @@ impl SessionFacade {
         );
         let turn = session.start_turn(None);
         let turn_id = skeleton_turn_id(turn.ordinal);
-        session.set_activity(ActivityState::Running);
         session.emit(SessionEvent::ActivityChanged {
             session_id: session_id.clone(),
             activity: ActivityState::Running,
@@ -322,8 +323,12 @@ impl SessionFacade {
         let content_ref = if spilled {
             let hash = self.state.blobs.put(output.clone());
             let len = output.len() as u64;
-            // 入队推送：连接层会为它开一条 BlobTransfer 流（服务端推通道）。
-            let _ = context.blob_pushes.send(BlobPush { hash, len });
+            // 入队推送：连接层会核验权限后开一条 BlobTransfer 流。
+            let _ = context.blob_pushes.send(BlobPush {
+                session_id: session_id.clone(),
+                hash,
+                len,
+            });
             ContentRef::Blob { hash, len }
         } else {
             ContentRef::Inline { text: text.clone() }
@@ -340,6 +345,7 @@ impl SessionFacade {
             next_offset: output.len() as u64,
             output: Some(content_ref.clone()),
         };
+        session.upsert_exec_session(exec_snapshot.clone());
         session.emit(SessionEvent::ExecSessionUpdated {
             session_id: session_id.clone(),
             exec: exec_snapshot,
@@ -563,7 +569,7 @@ pub(crate) fn permission_interaction(
 mod smoke {
     use super::*;
     use crate::v3_server::facade::test_support;
-    use qaqh_ringing_v3::SessionResponse;
+    use qaqh_ringing_v3::{ErrorCode, SessionResponse};
 
     #[tokio::test]
     async fn snapshot_page_and_catalog_are_reachable() {
@@ -573,13 +579,14 @@ mod smoke {
         let session_id = session.id.clone();
 
         let snapshot = rig
-            .facades
+            .backend
             .session
             .handle_session(
                 &context,
                 SessionRequest::GetSessionSnapshot {
                     session_id: session_id.clone(),
                     tail_blocks: 8,
+                    tail_turns: 32,
                 },
             )
             .await
@@ -594,7 +601,7 @@ mod smoke {
         }
 
         let page = rig
-            .facades
+            .backend
             .session
             .handle_session(
                 &context,
@@ -611,7 +618,7 @@ mod smoke {
 
         // 代际失配必须 StaleCursor（绝不"尽量拼一下"）。
         let stale = rig
-            .facades
+            .backend
             .session
             .handle_session(
                 &context,
@@ -627,7 +634,7 @@ mod smoke {
         assert_eq!(stale.code, ErrorCode::StaleCursor);
 
         let catalog = rig
-            .facades
+            .backend
             .session
             .handle_catalog(&context, ToolCatalogRequest::Get { session_id })
             .await
@@ -651,13 +658,14 @@ mod smoke {
         let device = test_support::device_context(&rig);
         let session = rig.state.create_session(&owner.identity.device);
         let error = rig
-            .facades
+            .backend
             .session
             .handle_session(
                 &device,
                 SessionRequest::GetSessionSnapshot {
                     session_id: session.id.clone(),
                     tail_blocks: 4,
+                    tail_turns: 8,
                 },
             )
             .await

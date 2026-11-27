@@ -1,14 +1,6 @@
-//! 六大不变量守卫的共享脚手架（仅测试可见）。
-//!
-//! 这里刻意只做**搭建**，不做断言：断言留给每条守卫自己写明白。
-//!
-//! ## 谁在扮演"洪峰产生方"
-//!
-//! 生产里事件是 AgentLoop 在**同一个进程内**发出来的（不是客户端调接口触发的）。
-//! 所以守卫里也直接调 `SessionRuntime::emit` 造洪峰——它就是 AgentLoop 站位的地方，
-//! 换成真 loop 时这里一行都不用改。若改成"让客户端发 4000 条 RPC 造洪峰"，
-//! 测的就不是"事件洪峰下的订阅原子性"，而是"RPC 吞吐"，那两件事完全不同。
+//! 六大不变量守卫的共享脚手架（仅测试可见，按后端参数化）。
 
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -24,8 +16,44 @@ use tokio::task::JoinHandle;
 
 use super::V3Server;
 use super::error::ServerError;
+use super::facade::SkeletonBackend;
 use super::identity::{DeviceKey, Scope};
-use super::state::{ServerConfig, ServerState, SessionRuntime};
+use super::iroh_loopback::{IrohTransport, iroh_loopback_pair};
+use super::session_runtime::SessionRuntime;
+use super::state::{ServerConfig, ServerState};
+
+/// 传输后端工厂：`yamux`（内存双工）与 `iroh`（本机 QUIC 回环）共用同一套守卫。
+pub(crate) trait BackendFactory: Copy + Send + Sync + 'static {
+    type Transport: MuxTransport;
+    fn name() -> &'static str;
+    fn pair(self) -> impl Future<Output = (Self::Transport, Self::Transport)> + Send;
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct YamuxFactory;
+
+impl BackendFactory for YamuxFactory {
+    type Transport = YamuxTransport;
+    fn name() -> &'static str {
+        "yamux"
+    }
+    async fn pair(self) -> (Self::Transport, Self::Transport) {
+        duplex_pair_with_buffer(MuxConfig::default(), 256 * 1024)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct IrohFactory;
+
+impl BackendFactory for IrohFactory {
+    type Transport = IrohTransport;
+    fn name() -> &'static str {
+        "iroh"
+    }
+    async fn pair(self) -> (Self::Transport, Self::Transport) {
+        iroh_loopback_pair().await
+    }
+}
 
 /// 守卫里的"本机 OS 用户"（本地 IPC 的授权依据）。
 pub(crate) const OS_USER: &str = "qaqh-v3-guard";
@@ -91,18 +119,11 @@ pub(crate) fn device_hello(instance: &str) -> ClientHello {
     )
 }
 
-/// 内存双工后端（**真**多路复用：四条逻辑流跑在同一条连接上）。
-///
-/// 缓冲给 256 KiB：小到能让背压真的发生，大到不至于把测试变成"每帧一次握手"。
-pub(crate) fn duplex_backend() -> (YamuxTransport, YamuxTransport) {
-    duplex_pair_with_buffer(MuxConfig::default(), 256 * 1024)
-}
-
 /// 起一个服务端接受循环。
 pub(crate) async fn spawn_server<B: MuxTransport>(
     transport: B,
     state: Arc<ServerState>,
-) -> (Arc<V3Server<B>>, JoinHandle<Result<(), ServerError>>) {
+) -> (Arc<V3Server<B, SkeletonBackend>>, JoinHandle<Result<(), ServerError>>) {
     let server = V3Server::with_state(transport, state);
     let handle = tokio::spawn(Arc::clone(&server).serve());
     (server, handle)
@@ -125,10 +146,14 @@ pub(crate) fn session_for(state: &Arc<ServerState>, accessor: &DeviceKey) -> Arc
     session
 }
 
-/// 开一个 shell，返回它的 id。
-pub(crate) async fn open_shell<B: MuxTransport>(client: &V3Client<B>) -> String {
+/// 开一个绑定会话的 shell，返回它的 id。
+pub(crate) async fn open_shell<B: MuxTransport>(
+    client: &V3Client<B>,
+    session_id: &SessionId,
+) -> String {
     match client
         .call(ControlRequest::Shell(ShellRequest::Open {
+            session_id: session_id.clone(),
             cols: 120,
             rows: 40,
             cwd: None,
@@ -141,22 +166,13 @@ pub(crate) async fn open_shell<B: MuxTransport>(client: &V3Client<B>) -> String 
     }
 }
 
-/// 造一条 `AnswerDelta`（洪峰/合帧用）。
-pub(crate) fn answer(session_id: &SessionId, block_id: &BlockId, text: impl Into<String>) -> SessionEvent {
-    SessionEvent::AnswerDelta {
-        session_id: session_id.clone(),
-        block_id: block_id.clone(),
-        text: text.into(),
-    }
-}
-
-/// 造一条 `ReasoningDelta`。
-pub(crate) fn reasoning(
+/// 造一条 `AnswerDelta`。
+pub(crate) fn answer(
     session_id: &SessionId,
     block_id: &BlockId,
     text: impl Into<String>,
 ) -> SessionEvent {
-    SessionEvent::ReasoningDelta {
+    SessionEvent::AnswerDelta {
         session_id: session_id.clone(),
         block_id: block_id.clone(),
         text: text.into(),

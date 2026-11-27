@@ -2,28 +2,19 @@
 //!
 //! ## 这个目录的隔离红线
 //!
-//! 本目录（以及 `crates/qaqh-client/src/v3/`、`crates/qaqh-v3-transport/src/`）里
-//! **一行都不许出现**：
-//!
-//! ```text
-//! axum_server   RINGING_V2   v2_stream   serde_json
-//! skip_serializing_if   serde(tag|flatten|untagged)   serde(alias)
-//! legacy_   compat_
-//! ```
-//!
-//! 这不是风格洁癖：V3 的全部意义就是**不再有 V2 的兼容层**。一旦允许"顺手引用一下
-//! 老路由"或"临时塞个 `serde_json::Value`"，双栈期就会永远结束不了
-//! （`v4.6` 之前 40 天的 V2 迁移拖延就是这么来的）。闸门由 CI 抓，见
-//! `docs/adr/0042` 与 `V4_6_EXECUTION_PLAN.md` §三.4。
+//! 本目录（以及 `crates/qaqh-client/src/v3/`、`crates/qaqh-v3-transport/src/`）
+//! 严禁引入旧 HTTP 服务端、旧 V2 流/版本标识、动态 JSON Value 解析库、空值跳过或
+//! 标签/扁平化/别名等 serde 形状属性以及旧代际兼容前缀。
+//! 闸门由 CI 抓，见 `docs/adr/0042` 与 `V4_6_EXECUTION_PLAN.md` §三.4。
 //!
 //! ## 分层
 //!
 //! ```text
-//! qaqh-ringing-v3    线缆形状（零 tokio、零 serde_json）
+//! qaqh-ringing-v3    线缆形状（零 tokio、零 JSON 库）
 //!      ↑
-//! qaqh-v3-transport  多路复用（MuxTransport + yamux + duplex 闭环）
+//! qaqh-v3-transport  多路复用（MuxTransport + yamux + duplex 闭环 + 单源帧 I/O）
 //!      ↑
-//! v3_server          身份 → 门面 → 事件总线 → 四条逻辑流
+//! v3_server          身份 → 按域细粒度 Trait 门面 → 事件总线 → 四条逻辑流
 //! ```
 //!
 //! ## 十一域一网打尽
@@ -32,13 +23,16 @@
 //! （`System` / `Session` / `Command` / `Shell` / `Marketplace` / `Config` /
 //! `Account` / `Pairing` / `Gitx` / `Fs` / `ToolCatalog`）。
 
+mod blob_store;
 mod bus;
 mod connection;
 mod endpoint;
 mod error;
 mod facade;
-mod framing;
 mod identity;
+mod receipts;
+mod session_runtime;
+mod shell_table;
 mod state;
 mod util;
 
@@ -46,6 +40,8 @@ mod util;
 mod harness;
 #[cfg(test)]
 mod invariants;
+#[cfg(test)]
+mod iroh_loopback;
 
 pub(crate) use util::{lock, now_ms};
 
@@ -54,45 +50,39 @@ use std::sync::Arc;
 use qaqh_ringing_v3::{ControlRequest, ControlResponse};
 use qaqh_v3_transport::MuxTransport;
 
-use facade::{CallContext, Facades};
+use facade::{CallContext, SkeletonBackend, V3Backend};
 use state::{ServerConfig, ServerState};
 
-/// V3 服务端（`B` 是具体传输后端，**泛型静态分发，不做 `dyn` 装箱**）。
-pub(crate) struct V3Server<B: MuxTransport> {
-    transport: B,
+/// V3 服务端（传输 `T` 与后端门面 `B` 均走**泛型静态分发，不做 `dyn` 装箱**）。
+pub(crate) struct V3Server<T: MuxTransport, B: V3Backend = SkeletonBackend> {
+    transport: T,
     state: Arc<ServerState>,
-    facades: Facades,
+    backend: B,
 }
 
-impl<B: MuxTransport> V3Server<B> {
+impl<T: MuxTransport> V3Server<T, SkeletonBackend> {
     /// 以新状态构造（`os_user` 是本地 IPC 的授权依据）。
+    #[allow(dead_code)]
     pub(crate) fn new(
-        transport: B,
+        transport: T,
         config: ServerConfig,
         os_user: impl Into<String>,
     ) -> Arc<Self> {
         Self::with_state(transport, ServerState::new(config, os_user))
     }
 
-    /// 以既有状态构造（守卫用它把状态握在手里，才能伪造"洪峰产生方"）。
-    pub(crate) fn with_state(transport: B, state: Arc<ServerState>) -> Arc<Self> {
+    /// 以既有状态构造（守卫用它把状态握在手里，才能在进程内发事件）。
+    pub(crate) fn with_state(transport: T, state: Arc<ServerState>) -> Arc<Self> {
+        let backend = SkeletonBackend::new(Arc::clone(&state));
         Arc::new(Self {
             transport,
-            facades: Facades::new(Arc::clone(&state)),
             state,
+            backend,
         })
     }
+}
 
-    /// 全局状态（句柄）。
-    pub(crate) fn state(&self) -> Arc<ServerState> {
-        Arc::clone(&self.state)
-    }
-
-    /// 传输后端（守卫用）。
-    pub(crate) fn transport(&self) -> &B {
-        &self.transport
-    }
-
+impl<T: MuxTransport, B: V3Backend> V3Server<T, B> {
     /// 控制面唯一分派入口：**十一域全覆盖，编译期静态分派**。
     pub(crate) async fn dispatch(
         &self,
@@ -101,68 +91,57 @@ impl<B: MuxTransport> V3Server<B> {
     ) -> ControlResponse {
         let outcome = match request {
             ControlRequest::System(request) => self
-                .facades
-                .system
-                .handle(context, request)
+                .backend
+                .handle_system(context, request)
                 .await
                 .map(ControlResponse::System),
             ControlRequest::Session(request) => self
-                .facades
-                .session
+                .backend
                 .handle_session(context, request)
                 .await
                 .map(ControlResponse::Session),
             ControlRequest::Command(request) => self
-                .facades
-                .session
+                .backend
                 .handle_command(context, request)
                 .await
                 .map(ControlResponse::Command),
             ControlRequest::Shell(request) => self
-                .facades
-                .shell
-                .handle(context, request)
+                .backend
+                .handle_shell(context, request)
                 .await
                 .map(ControlResponse::Shell),
             ControlRequest::Marketplace(request) => self
-                .facades
-                .marketplace
-                .handle(context, request)
+                .backend
+                .handle_marketplace(context, request)
                 .await
                 .map(ControlResponse::Marketplace),
             ControlRequest::Config(request) => self
-                .facades
-                .config_account
+                .backend
                 .handle_config(context, request)
                 .await
                 .map(ControlResponse::Config),
             ControlRequest::Account(request) => self
-                .facades
-                .config_account
+                .backend
                 .handle_account(context, request)
                 .await
                 .map(ControlResponse::Account),
             ControlRequest::Pairing(request) => self
-                .facades
-                .config_account
+                .backend
                 .handle_pairing(context, request)
                 .await
                 .map(ControlResponse::Pairing),
             ControlRequest::Gitx(request) => self
-                .facades
-                .gitx
-                .handle(context, request)
+                .backend
+                .handle_gitx(context, request)
                 .await
                 .map(ControlResponse::Gitx),
             ControlRequest::Fs(request) => self
-                .facades
-                .fs
-                .handle(context, request)
+                .backend
+                .handle_fs(context, request)
                 .await
                 .map(ControlResponse::Fs),
             ControlRequest::ToolCatalog(request) => self
-                .facades
-                .session
+                .backend
                 .handle_catalog(context, request)
                 .await
                 .map(ControlResponse::ToolCatalog),

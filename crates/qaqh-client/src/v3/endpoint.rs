@@ -57,7 +57,7 @@ pub fn resolve_daemon_endpoint(
 mod tests {
     use super::*;
     use qaqh_ringing_v3::{
-        DAEMON_ENDPOINT_FILE, EndpointChannel, EndpointTransport, PROTOCOL_FINGERPRINT, PROTOCOL_REV,
+        DAEMON_ENDPOINT_FILE, EndpointChannel, PROTOCOL_FINGERPRINT, PROTOCOL_REV,
         write_daemon_endpoint,
     };
 
@@ -76,9 +76,8 @@ mod tests {
         DaemonEndpoint {
             build_id: build_id.to_string(),
             channel: EndpointChannel(channel.to_string()),
-            transport: EndpointTransport::LocalIpc {
-                path: "/run/qaqh/daemon.sock".to_string(),
-            },
+            local_ipc: Some("/run/qaqh/daemon.sock".to_string()),
+            iroh: None,
             protocol_rev: PROTOCOL_REV,
             protocol_fingerprint: PROTOCOL_FINGERPRINT,
             written_at_ms: 1,

@@ -4,10 +4,9 @@
 //!
 //! - `next_frame()`：拿下一帧（原生 async）；
 //! - `into_frame_stream()`：变成 `Stream<Item = Result<SessionEventFrame, _>>`，
-//!   直接喂给任何 `StreamExt` 组合子；
+//!   遇到流关闭或错误吐出终态后立刻结束，绝不无限循环；
 //! - [`SessionStreamStats`]：协议层自证需要的计数（帧数、`resync_cycles`、
-//!   增量字节、乱序次数……）——**不是业务状态**，只是这条流的体检数据；
-//! - 按块累积的答案文本：让调用方能验证"合帧没有吃掉任何字节"。
+//!   增量字节、乱序次数……）——**常数内存**，不在客户端缓存第二份文本全集。
 //!
 //! ## `seq` 只增不减；缺口只可能是"合帧"或"重同步"
 //!
@@ -15,14 +14,11 @@
 //! 所以实时流上看到的 `seq` 是"非递减、可以跳号"的。跳号不代表丢内容——
 //! 内容被并进了前一帧；真正的丢内容只有一种表现：`ResyncRequired`。
 
-use std::collections::BTreeMap;
-
 use futures_util::Stream;
-use qaqh_core_vocab::BlockId;
 use qaqh_ringing_v3::{DeliveryClass, SessionEvent, SessionEventFrame, StreamAttach};
+use qaqh_v3_transport::{FrameIoError, read_frame};
 use tokio::io::AsyncRead;
 
-use super::framing::{FrameIoError, read_frame};
 use super::ClientError;
 
 /// 会话事件流的体检数据。
@@ -42,19 +38,18 @@ pub struct SessionStreamStats {
     pub ordering_violations: u64,
 }
 
-/// 一条会话事件流。
+/// 一条会话事件流（O(1) 内存，不维护第二份会话文本缓存）。
 pub struct SessionEventsStream<S> {
     stream: S,
     attach: StreamAttach,
     stats: SessionStreamStats,
-    /// 按块 id 累积的答案文本（守卫用它做"字节守恒"断言）。
-    answers: BTreeMap<String, String>,
-    /// 按块 id 累积的推理文本。
-    reasoning: BTreeMap<String, String>,
-    /// 按 exec id 累积的输出文本。
-    exec_output: BTreeMap<String, String>,
     /// 已收口的回合数（`TurnFinished` 计数）。
     pub finished_turns: u64,
+}
+
+struct StreamState<S> {
+    inner: SessionEventsStream<S>,
+    ended: bool,
 }
 
 impl<S> SessionEventsStream<S> {
@@ -63,9 +58,6 @@ impl<S> SessionEventsStream<S> {
             stream,
             attach,
             stats: SessionStreamStats::default(),
-            answers: BTreeMap::new(),
-            reasoning: BTreeMap::new(),
-            exec_output: BTreeMap::new(),
             finished_turns: 0,
         }
     }
@@ -80,30 +72,6 @@ impl<S> SessionEventsStream<S> {
         &self.stats
     }
 
-    /// 某一块的答案全文（按收到的增量拼接）。
-    pub fn answer_text(&self, block_id: &BlockId) -> &str {
-        self.answers
-            .get(block_id.as_str())
-            .map(String::as_str)
-            .unwrap_or("")
-    }
-
-    /// 某一块的推理全文。
-    pub fn reasoning_text(&self, block_id: &BlockId) -> &str {
-        self.reasoning
-            .get(block_id.as_str())
-            .map(String::as_str)
-            .unwrap_or("")
-    }
-
-    /// 某个 exec 会话的输出全文。
-    pub fn exec_output(&self, exec_session_id: &str) -> &str {
-        self.exec_output
-            .get(exec_session_id)
-            .map(String::as_str)
-            .unwrap_or("")
-    }
-
     fn observe(&mut self, frame: &SessionEventFrame) {
         self.stats.frames += 1;
         if frame.meta.seq < self.stats.last_seq {
@@ -111,33 +79,11 @@ impl<S> SessionEventsStream<S> {
         }
         self.stats.last_seq = self.stats.last_seq.max(frame.meta.seq);
         match &frame.event {
-            SessionEvent::AnswerDelta { block_id, text, .. } => {
+            SessionEvent::AnswerDelta { text, .. } | SessionEvent::ReasoningDelta { text, .. } => {
                 self.stats.delta_bytes += text.len() as u64;
-                self.answers
-                    .entry(block_id.as_str().to_string())
-                    .or_default()
-                    .push_str(text);
             }
-            SessionEvent::ReasoningDelta { block_id, text, .. } => {
+            SessionEvent::ExecOutputDelta { text, .. } => {
                 self.stats.delta_bytes += text.len() as u64;
-                self.reasoning
-                    .entry(block_id.as_str().to_string())
-                    .or_default()
-                    .push_str(text);
-            }
-            SessionEvent::ExecOutputDelta {
-                exec_session_id,
-                text,
-                spilled,
-                ..
-            } => {
-                self.stats.delta_bytes += text.len() as u64;
-                if !spilled {
-                    self.exec_output
-                        .entry(exec_session_id.as_str().to_string())
-                        .or_default()
-                        .push_str(text);
-                }
             }
             SessionEvent::TurnFinished { .. } => self.finished_turns += 1,
             SessionEvent::ResyncRequired { .. } => self.stats.resync_cycles += 1,
@@ -166,13 +112,72 @@ where
         Ok(frame)
     }
 
-    /// 变成原生 `Stream`（`futures_util::stream::unfold`：零手写状态机）。
+    /// 变成原生 `Stream`（遇到 EOF 或错误后在下一拍返回 `None`，绝不无限自旋）。
     pub fn into_frame_stream(
         self,
     ) -> impl Stream<Item = Result<SessionEventFrame, ClientError>> {
-        futures_util::stream::unfold(self, |mut handle| async move {
-            let frame = handle.next_frame().await;
-            Some((frame, handle))
-        })
+        futures_util::stream::unfold(
+            StreamState {
+                inner: self,
+                ended: false,
+            },
+            |mut state| async move {
+                if state.ended {
+                    return None;
+                }
+                match state.inner.next_frame().await {
+                    Ok(frame) => Some((Ok(frame), state)),
+                    Err(error) => {
+                        state.ended = true;
+                        Some((Err(error), state))
+                    }
+                }
+            },
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures_util::StreamExt;
+    use qaqh_core_vocab::SessionId;
+    use qaqh_ringing_v3::{FrameMeta, StreamKind};
+    use qaqh_v3_transport::write_frame;
+
+    #[tokio::test]
+    async fn frame_stream_terminates_cleanly_after_server_eof() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let session_id = SessionId::new("ses-stream-eof").expect("id");
+        let frame = SessionEventFrame {
+            meta: FrameMeta {
+                seq: 1,
+                server_ts_ms: 1,
+                delivery: DeliveryClass::Reliable,
+            },
+            event: SessionEvent::CatalogChanged {
+                session_id: session_id.clone(),
+            },
+        };
+        write_frame(&mut server, &frame).await.expect("write");
+        drop(server);
+
+        let attach = StreamAttach {
+            stream: StreamKind::SessionEvents {
+                session_id,
+                since_seq: 0,
+            },
+            seq: 1,
+            timeline_epoch: 1,
+        };
+        let mut stream = std::pin::pin!(SessionEventsStream::new(client, attach).into_frame_stream());
+        let first = stream.next().await.expect("第一帧必须到达").expect("ok");
+        assert_eq!(first, frame);
+        let second = stream.next().await.expect("流结束信号");
+        assert!(second.is_err(), "服务端关闭后应给出一次错误终态");
+        assert!(
+            stream.next().await.is_none(),
+            "终态之后必须返回 None，绝不死循环"
+        );
     }
 }

@@ -19,12 +19,12 @@ use super::super::error::not_wired;
 use super::super::state::ServerState;
 use super::CallContext;
 
-/// Config / Account / Pairing 门面。
-pub(crate) struct ConfigAccountFacade {
+/// Config / Account / Pairing 门面骨架实现。
+pub(crate) struct SkeletonConfigAccount {
     state: Arc<ServerState>,
 }
 
-impl ConfigAccountFacade {
+impl SkeletonConfigAccount {
     /// 构造。
     pub(crate) fn new(state: Arc<ServerState>) -> Self {
         Self { state }
@@ -99,10 +99,14 @@ impl ConfigAccountFacade {
             }
             PairingRequest::RevokeDevice { device_id } => {
                 context.identity.require_owner("Pairing::RevokeDevice")?;
-                if !self.state.identity.revoke_device(&device_id) {
+                let Some(device_key) = self.state.identity.revoke_device_with_key(&device_id)
+                else {
                     return Err(super::super::error::not_found(format!(
                         "没有设备 `{device_id}`"
                     )));
+                };
+                for session in self.state.sessions() {
+                    session.evict_device(&device_key);
                 }
                 Ok(PairingResponse::Revoked)
             }
@@ -130,7 +134,7 @@ mod smoke {
             .identity
             .register_device("tablet", "平板", Scope::Device);
         let listed = rig
-            .facades
+            .backend
             .config_account
             .handle_pairing(&context, PairingRequest::ListDevices)
             .await
@@ -144,7 +148,7 @@ mod smoke {
             .find(|device| device.label == "平板")
             .expect("平板必须在列表里");
         let revoked = rig
-            .facades
+            .backend
             .config_account
             .handle_pairing(
                 &context,
@@ -163,7 +167,7 @@ mod smoke {
         let rig = test_support::rig();
         let device = test_support::device_context(&rig);
         let error = rig
-            .facades
+            .backend
             .config_account
             .handle_pairing(&device, PairingRequest::ListDevices)
             .await
@@ -176,7 +180,7 @@ mod smoke {
         let rig = test_support::rig();
         let context = test_support::owner_context(&rig);
         let error = rig
-            .facades
+            .backend
             .config_account
             .handle_pairing(&context, PairingRequest::CreateInvite { ttl_ms: 60_000 })
             .await

@@ -183,19 +183,21 @@ impl IdentityTable {
         key
     }
 
-    /// 按对外设备 id 吊销：置真 + 唤醒所有持该设备哨兵的连接（**即时踢流**）。
-    pub(crate) fn revoke_device(&self, device_id: &str) -> bool {
+    /// 按对外设备 id 吊销并返回其内部 `DeviceKey`：置真 + 唤醒所有持该设备哨兵的连接。
+    pub(crate) fn revoke_device_with_key(&self, device_id: &str) -> Option<DeviceKey> {
         let mut inner = lock(&self.inner);
-        let Some(record) = inner
+        let (key, record) = inner
             .devices
-            .values_mut()
-            .find(|record| record.id == device_id)
-        else {
-            return false;
-        };
+            .iter_mut()
+            .find(|(_, record)| record.id == device_id)?;
         record.revoked = true;
         record.revoker.send_replace(true);
-        true
+        Some(key.clone())
+    }
+
+    /// 按对外设备 id 吊销：置真 + 唤醒所有持该设备哨兵的连接（**即时踢流**）。
+    pub(crate) fn revoke_device(&self, device_id: &str) -> bool {
+        self.revoke_device_with_key(device_id).is_some()
     }
 
     /// 按令牌吊销（内部/测试用：令牌是对内概念，不对外暴露）。

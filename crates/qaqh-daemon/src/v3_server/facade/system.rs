@@ -10,12 +10,12 @@ use qaqh_ringing_v3::{RpcError, SystemRequest, SystemResponse};
 use super::super::state::ServerState;
 use super::CallContext;
 
-/// System 门面。
-pub(crate) struct SystemFacade {
+/// System 门面骨架实现。
+pub(crate) struct SkeletonSystem {
     state: Arc<ServerState>,
 }
 
-impl SystemFacade {
+impl SkeletonSystem {
     /// 构造。
     pub(crate) fn new(state: Arc<ServerState>) -> Self {
         Self { state }
@@ -82,6 +82,7 @@ impl SystemFacade {
 
 #[cfg(test)]
 mod smoke {
+    use super::super::{SkeletonBackend, SystemFacade};
     use super::*;
     use crate::v3_server::facade::test_support;
     use qaqh_ringing_v3::SystemResponse;
@@ -90,20 +91,17 @@ mod smoke {
     async fn health_reports_real_uptime_and_version_reports_build_id() {
         let rig = test_support::rig();
         let context = test_support::owner_context(&rig);
-        let health = rig
-            .facades
-            .system
-            .handle(&context, SystemRequest::Health)
+        let backend: &SkeletonBackend = &rig.backend;
+        let health = backend
+            .handle_system(&context, SystemRequest::Health)
             .await
             .expect("Health 必须可用");
         match health {
             SystemResponse::Health { peers, .. } => assert_eq!(peers, 0),
             other => panic!("Health 回执形状不符：{other:?}"),
         }
-        let version = rig
-            .facades
-            .system
-            .handle(&context, SystemRequest::Version)
+        let version = backend
+            .handle_system(&context, SystemRequest::Version)
             .await
             .expect("Version 必须可用");
         match version {
@@ -119,9 +117,8 @@ mod smoke {
         let rig = test_support::rig();
         let device = test_support::device_context(&rig);
         let error = rig
-            .facades
-            .system
-            .handle(&device, SystemRequest::Stop { graceful: true })
+            .backend
+            .handle_system(&device, SystemRequest::Stop { graceful: true })
             .await
             .expect_err("已配对设备无权停机");
         assert_eq!(error.code, qaqh_ringing_v3::ErrorCode::PermissionDenied);

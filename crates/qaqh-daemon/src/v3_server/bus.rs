@@ -255,6 +255,15 @@ impl DeltaCoalescer {
 
     /// 喂一帧，返回**现在就应该按序写出**的帧（可能为空）。
     pub(crate) fn push(&mut self, frame: Arc<SessionEventFrame>) -> Vec<Arc<SessionEventFrame>> {
+        // `spilled: true` 标志泄洪边界：不可被合帧吞掉，先 flush 旧帧再直接透传。
+        if matches!(
+            &frame.event,
+            SessionEvent::ExecOutputDelta { spilled: true, .. }
+        ) {
+            let mut out = self.flush();
+            out.push(frame);
+            return out;
+        }
         let Some(key) = coalesce_key(&frame.event) else {
             // Reliable / 非增量：先 flush 手里的增量，再吐新帧。
             let mut out = self.flush();
@@ -262,12 +271,13 @@ impl DeltaCoalescer {
             return out;
         };
         let mut out = Vec::new();
-        if self.merged.as_ref().is_some_and(|merged| merged.key == key) {
-            if let Some(merged) = self.merged.as_mut() {
-                merge_event(&mut merged.event, &frame.event);
-                merged.meta = frame.meta;
-                self.coalesced_away += 1;
-            }
+        if let Some(merged) = self.merged.as_mut()
+            && merged.key == key
+            && can_merge(&merged.event, &frame.event)
+        {
+            merge_event(&mut merged.event, &frame.event);
+            merged.meta = frame.meta;
+            self.coalesced_away += 1;
             return out;
         }
         out.extend(self.flush());
@@ -315,7 +325,27 @@ fn coalesce_key(event: &SessionEvent) -> Option<CoalesceKey> {
     }
 }
 
-/// 把 `incoming` 的内容并进 `target`（只在同 key 且形态可并时调用）。
+fn can_merge(target: &SessionEvent, incoming: &SessionEvent) -> bool {
+    match (target, incoming) {
+        (SessionEvent::AnswerDelta { .. }, SessionEvent::AnswerDelta { .. })
+        | (SessionEvent::ReasoningDelta { .. }, SessionEvent::ReasoningDelta { .. }) => true,
+        (
+            SessionEvent::ExecOutputDelta {
+                end_offset,
+                spilled: false,
+                ..
+            },
+            SessionEvent::ExecOutputDelta {
+                start_offset,
+                spilled: false,
+                ..
+            },
+        ) => *end_offset == *start_offset,
+        _ => false,
+    }
+}
+
+/// 把 `incoming` 的内容并进 `target`（只在 [`can_merge`] 为真时调用）。
 fn merge_event(target: &mut SessionEvent, incoming: &SessionEvent) {
     match (target, incoming) {
         (
@@ -337,18 +367,14 @@ fn merge_event(target: &mut SessionEvent, incoming: &SessionEvent) {
                 end_offset, text, ..
             },
             SessionEvent::ExecOutputDelta {
-                start_offset: incoming_start,
                 end_offset: incoming_end,
                 text: incoming_text,
-                spilled: false,
                 ..
             },
-        ) if *end_offset == *incoming_start => {
-            // 只有"紧接着上一段"且都没泄洪时才拼接：中间有洞就绝不假装连续。
+        ) => {
             text.push_str(incoming_text);
             *end_offset = *incoming_end;
         }
-        // 理论上不可达（key 相同但形态不同），保守起见不动目标帧。
         _ => {}
     }
 }
@@ -380,5 +406,83 @@ impl DeltaLedger {
             _ => 0,
         };
         self.bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exec_frame(seq: u64, start: u64, end: u64, text: &str, spilled: bool) -> Arc<SessionEventFrame> {
+        Arc::new(SessionEventFrame {
+            meta: FrameMeta {
+                seq,
+                server_ts_ms: seq,
+                delivery: DeliveryClass::Replaceable,
+            },
+            event: SessionEvent::ExecOutputDelta {
+                session_id: SessionId::new("ses-1").expect("id"),
+                exec_session_id: ExecSessionId::new("execs_1").expect("id"),
+                start_offset: start,
+                end_offset: end,
+                text: text.to_string(),
+                spilled,
+            },
+        })
+    }
+
+    #[test]
+    fn coalescer_never_drops_gapped_or_spilled_exec_deltas() {
+        let mut coalescer = DeltaCoalescer::new();
+        // 1..2 连续：合并；3 出现偏移洞（10..15）：绝不静默丢弃，必须先吐出 [0..6] 再保留 [10..15]；
+        // 4 为 spilled=true：必须先把 [10..15] 吐出，再按序吐出 spilled 帧。
+        assert!(coalescer.push(exec_frame(1, 0, 3, "aaa", false)).is_empty());
+        assert!(coalescer.push(exec_frame(2, 3, 6, "bbb", false)).is_empty());
+
+        let flushed_on_gap = coalescer.push(exec_frame(3, 10, 15, "ccccc", false));
+        assert_eq!(flushed_on_gap.len(), 1);
+        match &flushed_on_gap[0].event {
+            SessionEvent::ExecOutputDelta {
+                start_offset,
+                end_offset,
+                text,
+                spilled,
+                ..
+            } => {
+                assert_eq!((*start_offset, *end_offset, *spilled), (0, 6, false));
+                assert_eq!(text, "aaabbb");
+            }
+            other => panic!("意外帧：{other:?}"),
+        }
+
+        let out_on_spill = coalescer.push(exec_frame(4, 15, 20, "ddddd", true));
+        assert_eq!(out_on_spill.len(), 2);
+        match &out_on_spill[0].event {
+            SessionEvent::ExecOutputDelta {
+                start_offset,
+                end_offset,
+                text,
+                spilled,
+                ..
+            } => {
+                assert_eq!((*start_offset, *end_offset, *spilled), (10, 15, false));
+                assert_eq!(text, "ccccc");
+            }
+            other => panic!("意外帧：{other:?}"),
+        }
+        match &out_on_spill[1].event {
+            SessionEvent::ExecOutputDelta {
+                start_offset,
+                end_offset,
+                text,
+                spilled,
+                ..
+            } => {
+                assert_eq!((*start_offset, *end_offset, *spilled), (15, 20, true));
+                assert_eq!(text, "ddddd");
+            }
+            other => panic!("意外帧：{other:?}"),
+        }
+        assert!(coalescer.flush().is_empty());
     }
 }

@@ -31,8 +31,8 @@
 use std::path::{Path, PathBuf};
 
 use qaqh_ringing_v3::{
-    DAEMON_ENDPOINT_FILE, DaemonEndpoint, EndpointChannel, EndpointTransport, PROTOCOL_FINGERPRINT,
-    PROTOCOL_REV, write_daemon_endpoint,
+    DAEMON_ENDPOINT_FILE, DaemonEndpoint, EndpointChannel, PROTOCOL_FINGERPRINT, PROTOCOL_REV,
+    write_daemon_endpoint,
 };
 
 use super::state::ServerConfig;
@@ -46,9 +46,8 @@ pub(crate) fn local_ipc_endpoint(
     DaemonEndpoint {
         build_id: config.build_id.clone(),
         channel: EndpointChannel(config.channel.clone()),
-        transport: EndpointTransport::LocalIpc {
-            path: socket_path.into(),
-        },
+        local_ipc: Some(socket_path.into()),
+        iroh: None,
         protocol_rev: PROTOCOL_REV,
         protocol_fingerprint: PROTOCOL_FINGERPRINT,
         written_at_ms: now_ms(),
@@ -105,10 +104,8 @@ mod tests {
         assert_eq!(read.build_id, "build-abc");
         assert_eq!(read.protocol_rev, PROTOCOL_REV);
         assert_eq!(read.protocol_fingerprint, PROTOCOL_FINGERPRINT);
-        match read.transport {
-            EndpointTransport::LocalIpc { path } => assert_eq!(path, "/run/qaqh/daemon.sock"),
-            other => panic!("载体形状不符：{other:?}"),
-        }
+        assert_eq!(read.local_ipc.as_deref(), Some("/run/qaqh/daemon.sock"));
+        assert!(read.iroh.is_none());
         retire(&dir).expect("清理");
         assert!(matches!(
             read_daemon_endpoint(&dir, "dev"),

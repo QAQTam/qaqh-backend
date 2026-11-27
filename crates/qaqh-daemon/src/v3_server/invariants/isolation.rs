@@ -1,23 +1,4 @@
 //! 守卫②：**多流背压隔离 + 量化延迟上界**（`ADR-0042` 第四节第 10 条）。
-//!
-//! ## 同时加压的三条洪峰
-//!
-//! 1. 会话 A 的 `Replaceable` 事件洪峰（AgentLoop 的位置）；
-//! 2. Shell PTY 刷屏（4 KiB 一块，连续不断）；
-//! 3. 8 MiB 大 Blob 分片推送（服务端推通道）。
-//!
-//! 在这个背景下量两条延迟：
-//!
-//! | 指标 | 红线 | 理由 |
-//! |---|---|---|
-//! | 控制面 RPC 往返 P99 | **< 50ms** | 审批/停止必须随时点得动 |
-//! | PTY 回显往返 P99 | **≤ 16.6ms** | 终端键回显要在这一帧内到（60fps 预算） |
-//! | 会话 B 帧间隔 P99 | **< 50ms** | 一个会话的洪峰不得饿死另一个会话 |
-//!
-//! ## 不达标就切后端，不调参
-//!
-//! 阈值来自计划与 `ADR-0042`，**本守卫不放宽**。未达标即触发"整体切 `iroh` 回环"
-//! 的决策条件——把红线调宽会让这条守卫变成装饰品。
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -25,27 +6,26 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use qaqh_client::v3::ShellOutputStream;
-use qaqh_ringing_v3::{ControlRequest, ControlResponse, SessionEvent, SessionRequest, ShellRequest, SystemRequest};
-use qaqh_v3_transport::MuxTransport;
+use qaqh_ringing_v3::{
+    ControlRequest, ControlResponse, SessionEvent, SessionRequest, ShellRequest, SystemRequest,
+};
 use tokio::io::AsyncRead;
 
 use crate::v3_server::facade::BlobPush;
-use crate::v3_server::harness;
+use crate::v3_server::harness::{self, BackendFactory};
 
 const CONTROL_SAMPLES: usize = 300;
 const PTY_SAMPLES: usize = 300;
 const BLOB_BYTES: usize = 8 * 1024 * 1024;
-// 1 KiB：与真实 PTY 读块的量级一致。刷得太猛会先把**自己的**有界队列打爆
-// （服务端会正确地判 lag 并收流）——那测不到"隔离性"，只证明背压存在。
 const PTY_FLOOD_CHUNK: usize = 1024;
 
 const CONTROL_P99_LIMIT_MS: f64 = 50.0;
 const PTY_P99_LIMIT_MS: f64 = 16.6;
 const SESSION_B_P99_LIMIT_MS: f64 = 50.0;
 
-pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
+pub(crate) async fn guard<F: BackendFactory>(factory: F) {
     let state = harness::state();
-    let (client_transport, server_transport) = pair();
+    let (client_transport, server_transport) = factory.pair().await;
     let (_server, _server_task) = harness::spawn_server(server_transport, Arc::clone(&state)).await;
     let mut client = harness::connect(client_transport, harness::owner_hello("guard-02")).await;
     let mut blobs = client.take_blob_inbox().expect("blob 收件箱");
@@ -70,8 +50,8 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
         .await
         .expect("会话 B 事件流");
 
-    let flood_shell = harness::open_shell(&client).await;
-    let echo_shell = harness::open_shell(&client).await;
+    let flood_shell = harness::open_shell(&client, &session_a.id).await;
+    let echo_shell = harness::open_shell(&client, &session_a.id).await;
     let pty_flood = client
         .attach_shell(&flood_shell, 0)
         .await
@@ -84,6 +64,7 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
 
     let blob_hash = state.blobs.put(vec![0xA5u8; BLOB_BYTES]);
     let blob_push = BlobPush {
+        session_id: session_a.id.clone(),
         hash: blob_hash,
         len: BLOB_BYTES as u64,
     };
@@ -116,7 +97,7 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
             index
         })
     };
-    // 洪峰 2：PTY 刷屏（服务端直推，不走控制面——测的正是"数据面 vs 控制面"的隔离）
+    // 洪峰 2：PTY 刷屏
     let flood_pty = {
         let handle = Arc::clone(&flood_handle);
         let stop = Arc::clone(&stop);
@@ -138,7 +119,7 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
         tokio::spawn(async move {
             let mut pushes = 0u64;
             while !stop.load(Ordering::Relaxed) {
-                if bus.send(blob_push).is_ok() {
+                if bus.send(blob_push.clone()).is_ok() {
                     pushes += 1;
                 }
                 tokio::time::sleep(Duration::from_millis(2)).await;
@@ -163,7 +144,6 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
         })
     };
 
-    // 排干任务：不排干的话订阅队列会满 → lag → 流被收，那就不是在量延迟了。
     let drain_a = {
         let counter = Arc::clone(&a_frames);
         let mut stream = stream_a;
@@ -201,12 +181,7 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
                         arrivals.lock().expect("arrivals").push(last.elapsed());
                         last = Instant::now();
                     }
-                    // 2 秒没有一帧＝已被饿死：把这 2 秒记进样本，别静默退出。
-                    Ok(Err(_)) => {
-                        arrivals.lock().expect("arrivals").push(last.elapsed());
-                        break;
-                    }
-                    Err(_) => {
+                    Ok(Err(_)) | Err(_) => {
                         arrivals.lock().expect("arrivals").push(last.elapsed());
                         break;
                     }
@@ -215,7 +190,7 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
         })
     };
 
-    // ── 阶段 1：控制面 RTT（Health，最便宜的真实 RPC） ──
+    // ── 阶段 1：控制面 RTT ──
     let mut control = Vec::with_capacity(CONTROL_SAMPLES);
     for _ in 0..CONTROL_SAMPLES {
         let started = Instant::now();
@@ -226,7 +201,7 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
         control.push(started.elapsed());
     }
 
-    // ── 阶段 2：PTY 回显 RTT（Write + 等回显帧） ──
+    // ── 阶段 2：PTY 回显 RTT ──
     let mut pty = Vec::with_capacity(PTY_SAMPLES);
     for index in 0..PTY_SAMPLES {
         let marker = format!("e{index:04}\n");
@@ -268,32 +243,37 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
     let b_p99 = harness::percentile_ms(&mut arrivals_ref, 0.99);
     let b_p50 = harness::percentile_ms(&mut arrivals.clone(), 0.5);
 
-    println!("[v3-guard-02] 机器：{}", harness::machine_fingerprint());
     println!(
-        "[v3-guard-02] 并发洪峰：会话A 发布 {session_frames} 帧（收到 {a_count}）；PTY 刷屏 {pty_chunks} 块 / {pty_flooded} B；blob 推送 {blob_pushes} 次 / 收到 {blob_delivered} B；会话B 心跳 {heartbeats} 条（样本 {}）",
+        "[v3-guard-02/{}] 机器：{}",
+        F::name(),
+        harness::machine_fingerprint()
+    );
+    println!(
+        "[v3-guard-02/{}] 并发洪峰：会话A 发布 {session_frames} 帧（收到 {a_count}）；PTY 刷屏 {pty_chunks} 块 / {pty_flooded} B；blob 推送 {blob_pushes} 次 / 收到 {blob_delivered} B；会话B 心跳 {heartbeats} 条（样本 {}）",
+        F::name(),
         arrivals.len()
     );
     println!(
-        "[v3-guard-02] 控制面 RTT n={} p50={control_p50:.3}ms p99={control_p99:.3}ms mean={:.3}ms max={:.3}ms（红线 P99 < {CONTROL_P99_LIMIT_MS}ms）",
+        "[v3-guard-02/{}] 控制面 RTT n={} p50={control_p50:.3}ms p99={control_p99:.3}ms mean={:.3}ms max={:.3}ms（红线 P99 < {CONTROL_P99_LIMIT_MS}ms）",
+        F::name(),
         control.len(),
         harness::mean_ms(&control),
         harness::max_ms(&control)
     );
     println!(
-        "[v3-guard-02] PTY 回显 RTT n={} p50={pty_p50:.3}ms p99={pty_p99:.3}ms mean={:.3}ms max={:.3}ms（红线 P99 ≤ {PTY_P99_LIMIT_MS}ms）",
+        "[v3-guard-02/{}] PTY 回显 RTT n={} p50={pty_p50:.3}ms p99={pty_p99:.3}ms mean={:.3}ms max={:.3}ms（红线 P99 ≤ {PTY_P99_LIMIT_MS}ms）",
+        F::name(),
         pty.len(),
         harness::mean_ms(&pty),
         harness::max_ms(&pty)
     );
     println!(
-        "[v3-guard-02] 会话B 帧间隔 n={} p50={b_p50:.3}ms p99={b_p99:.3}ms（红线 P99 < {SESSION_B_P99_LIMIT_MS}ms）",
+        "[v3-guard-02/{}] 会话B 帧间隔 n={} p50={b_p50:.3}ms p99={b_p99:.3}ms（红线 P99 < {SESSION_B_P99_LIMIT_MS}ms）",
+        F::name(),
         arrivals.len()
     );
 
-    // 洪峰必须真的压起来，否则延迟数字没有意义。
     assert!(a_count > 100, "会话 A 洪峰没跑起来（只收到 {a_count} 帧）");
-    // 门槛只问"洪峰是否真的在跑"，不问"跑了多少"：量测阶段的长度随机器速度变化，
-    // 把字节数绑死在某个绝对值上只会让守卫在不同宿主上假红。
     assert!(
         pty_flooded >= 256 * 1024,
         "PTY 刷屏没跑起来（只收到 {pty_flooded} B / {pty_chunks} 块）"
@@ -307,20 +287,22 @@ pub(crate) async fn guard<B: MuxTransport>(pair: fn() -> (B, B)) {
 
     assert!(
         control_p99 < CONTROL_P99_LIMIT_MS,
-        "控制面 P99 {control_p99:.3}ms 超过红线 {CONTROL_P99_LIMIT_MS}ms：按 ADR-0042 第四节第 10 条应整体切 iroh，不得放宽阈值"
+        "[{}] 控制面 P99 {control_p99:.3}ms 超过红线 {CONTROL_P99_LIMIT_MS}ms",
+        F::name()
     );
     assert!(
         pty_p99 <= PTY_P99_LIMIT_MS,
-        "PTY 回显 P99 {pty_p99:.3}ms 超过红线 {PTY_P99_LIMIT_MS}ms：按 ADR-0042 第四节第 10 条应整体切 iroh，不得放宽阈值"
+        "[{}] PTY 回显 P99 {pty_p99:.3}ms 超过红线 {PTY_P99_LIMIT_MS}ms",
+        F::name()
     );
     assert!(
         b_p99 < SESSION_B_P99_LIMIT_MS,
-        "会话 B 帧间隔 P99 {b_p99:.3}ms 超过红线 {SESSION_B_P99_LIMIT_MS}ms（被饿死）"
+        "[{}] 会话 B 帧间隔 P99 {b_p99:.3}ms 超过红线 {SESSION_B_P99_LIMIT_MS}ms",
+        F::name()
     );
 }
 
-/// 一直读到累计字节以 `needle` 结尾（回显是保序的，所以后缀匹配就够）。
-async fn read_until<S>(stream: &mut ShellOutputStream<S>, needle: &[u8]) -> ()
+async fn read_until<S>(stream: &mut ShellOutputStream<S>, needle: &[u8])
 where
     S: AsyncRead + Unpin,
 {

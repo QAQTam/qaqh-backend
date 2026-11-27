@@ -11,10 +11,10 @@
 //! 而不是把新旧字节拼在一起（拼出来的终端一定是坏的）。
 
 use qaqh_ringing_v3::{ShellOutputFrame, StreamAttach};
+use qaqh_v3_transport::{FrameIoError, read_frame};
 use tokio::io::AsyncRead;
 
 use super::ClientError;
-use super::framing::{FrameIoError, read_frame};
 
 /// Shell 流的体检数据。
 #[derive(Debug, Default, Clone)]
@@ -38,7 +38,7 @@ pub struct ShellOutputStream<S> {
 }
 
 impl<S> ShellOutputStream<S> {
-    pub(super) fn new(stream: S, attach: StreamAttach) -> Self {
+    pub(super) fn new(stream: S, attach: StreamAttach, from_offset: u64) -> Self {
         let stats = ShellStreamStats {
             frames: 0,
             bytes: 0,
@@ -49,7 +49,7 @@ impl<S> ShellOutputStream<S> {
             stream,
             attach,
             stats,
-            expected_offset: 0,
+            expected_offset: from_offset,
         }
     }
 
@@ -86,5 +86,58 @@ where
         self.stats.bytes += frame.bytes.len() as u64;
         self.stats.last_offset = frame.end_offset;
         Ok(frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use qaqh_ringing_v3::{DeliveryClass, FrameMeta, StreamKind};
+    use qaqh_v3_transport::write_frame;
+
+    #[tokio::test]
+    async fn reconnect_from_nonzero_offset_counts_zero_false_gaps() {
+        let (client, mut server) = tokio::io::duplex(4096);
+        let attach = StreamAttach {
+            stream: StreamKind::ShellPty {
+                shell_id: "sh-1".into(),
+                from_offset: 100,
+            },
+            seq: 110,
+            timeline_epoch: 0,
+        };
+        let cont = ShellOutputFrame {
+            meta: FrameMeta {
+                seq: 1,
+                server_ts_ms: 1,
+                delivery: DeliveryClass::Reliable,
+            },
+            start_offset: 100,
+            end_offset: 110,
+            bytes: Bytes::from_static(b"0123456789"),
+        };
+        let gapped = ShellOutputFrame {
+            meta: FrameMeta {
+                seq: 2,
+                server_ts_ms: 2,
+                delivery: DeliveryClass::Reliable,
+            },
+            start_offset: 120,
+            end_offset: 125,
+            bytes: Bytes::from_static(b"abcde"),
+        };
+        write_frame(&mut server, &cont).await.expect("write");
+        write_frame(&mut server, &gapped).await.expect("write");
+        drop(server);
+
+        let mut stream = ShellOutputStream::new(client, attach, 100);
+        let f1 = stream.next_frame().await.expect("first");
+        assert_eq!(f1.start_offset, 100);
+        assert_eq!(stream.stats().gaps, 0, "从 100 续读首帧 [100..110] 不得误报缺口");
+
+        let f2 = stream.next_frame().await.expect("second");
+        assert_eq!(f2.start_offset, 120);
+        assert_eq!(stream.stats().gaps, 1, "真正跳段 [110..120] 必须记录缺口");
     }
 }
