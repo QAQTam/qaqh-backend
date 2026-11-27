@@ -29,7 +29,8 @@ use qaqh_core_vocab::{
 use serde::{Deserialize, Serialize};
 
 use crate::stream::{
-    CompactionSummary, ExecSessionSnapshot, SessionEvent, ToolCallView, ToolCallStatus,
+    CompactionSummary, ExecSessionSnapshot, InteractionView, SessionEvent, ToolCallStatus,
+    ToolCallView,
 };
 
 /// 控制面请求信封（`command_id` 是幂等键，**不可省略**）。
@@ -198,12 +199,23 @@ pub enum SystemResponse {
 /// 会话域请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionRequest {
-    /// 首屏快照（`tail_blocks` 控制尾部窗口；向上翻页走 [`SessionRequest::TranscriptPage`]）。
+    /// 新建会话。
+    Create {
+        /// 可选标题。
+        title: Option<String>,
+        /// 工作目录（`None` = 默认工作区）。
+        cwd: Option<String>,
+        /// 初始工具模式（`None` = `Standard`）。
+        tool_mode: Option<ToolMode>,
+    },
+    /// 首屏快照（`tail_blocks`/`tail_turns` 控制尾部窗口；向上翻页走 [`SessionRequest::TranscriptPage`]）。
     GetSessionSnapshot {
         /// 会话 id。
         session_id: SessionId,
-        /// 尾部窗口块数上限。
+        /// 尾部块窗口上限。
         tail_blocks: u32,
+        /// 尾部回合窗口上限。
+        tail_turns: u32,
     },
     /// 向上翻页。
     ///
@@ -299,7 +311,7 @@ pub struct TurnSummary {
     pub started_at_ms: u64,
 }
 
-/// 首屏快照。
+/// 首屏快照（开箱即渲染：一次带齐块、工具调用、未决交互、执行会话与驱动权）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     /// 会话 id。
@@ -318,6 +330,14 @@ pub struct SessionSnapshot {
     pub tail_blocks: Vec<BlockView>,
     /// 尾部窗口里出现的工具调用（一次给齐，前端不必二次请求）。
     pub tool_calls: Vec<ToolCallView>,
+    /// 当前等待用户处置的交互（审批 / Ask）。
+    pub pending_interactions: Vec<InteractionView>,
+    /// 关联的 exec 执行会话快照。
+    pub exec_sessions: Vec<ExecSessionSnapshot>,
+    /// 当前驱动权客户端实例 id（无驱动端为 `None`）。
+    pub driver_client_instance_id: Option<String>,
+    /// 当前驱动权定序序号。
+    pub driver_ordinal: u64,
     /// **独立于 `turns` 窗口**的固定压缩摘要。
     pub pinned_compaction: Option<CompactionSummary>,
     /// 当前工具模式。
@@ -353,6 +373,8 @@ pub struct SessionSummary {
 /// 会话域回执。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionResponse {
+    /// 已新建会话。
+    Created(SessionSummary),
     /// 首屏快照。
     Snapshot(Box<SessionSnapshot>),
     /// 翻页结果。
@@ -395,14 +417,19 @@ pub enum CommandRequest {
     },
 }
 
-/// 交互处置（命令域的独立形状：**只允许两种结论**，不做"部分批准"）。
+/// 交互处置（覆盖审批批准/拒绝与 Ask 回答）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommandInteractionResolution {
     /// 批准。
     Approve,
-    /// 拒绝/回答（带文本）。
+    /// 拒绝（带理由）。
     Reject {
-        /// 理由或回答。
+        /// 拒绝理由。
+        text: String,
+    },
+    /// Ask 问答回答。
+    Answer {
+        /// 回答文本。
         text: String,
     },
 }
@@ -426,8 +453,10 @@ pub enum CommandResponse {
 /// Shell 域请求。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ShellRequest {
-    /// 打开一个 PTY（**独立并发句柄表**，不碰中央会话锁）。
+    /// 在指定会话下打开一个 PTY（**独立并发句柄表**，不碰中央会话锁）。
     Open {
+        /// 所属会话 id（显式绑定，不猜"当前会话"）。
+        session_id: SessionId,
         /// 列数。
         cols: u16,
         /// 行数。
@@ -456,8 +485,11 @@ pub enum ShellRequest {
         /// shell id。
         shell_id: String,
     },
-    /// 列出本会话的 shell。
-    List,
+    /// 列出指定会话的 shell。
+    List {
+        /// 会话 id。
+        session_id: SessionId,
+    },
 }
 
 /// Shell 视图。
@@ -772,21 +804,27 @@ pub enum GitxResponse {
 
 // ── Fs ──
 
-/// 文件系统域请求（**范围由会话授权决定，客户端无权指定越界路径**）。
+/// 文件系统域请求（**范围由所属会话授权决定，客户端无权指定越界路径**）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FsRequest {
     /// 元信息。
     Stat {
+        /// 会话 id。
+        session_id: SessionId,
         /// 路径（会话授权根内的相对路径）。
         path: String,
     },
     /// 列目录。
     List {
+        /// 会话 id。
+        session_id: SessionId,
         /// 目录路径。
         path: String,
     },
     /// 区间读（大文件分段，**不整读**）。
     ReadRange {
+        /// 会话 id。
+        session_id: SessionId,
         /// 路径。
         path: String,
         /// 起始偏移。
@@ -796,6 +834,8 @@ pub enum FsRequest {
     },
     /// 整写（原子替换）。
     Write {
+        /// 会话 id。
+        session_id: SessionId,
         /// 路径。
         path: String,
         /// 字节。

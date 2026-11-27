@@ -3,7 +3,7 @@
 //! ## 为什么是 postcard 而不是 JSON
 //!
 //! 发现文件是**同仓同版**的两端之间的事（不是对外 API）。用 JSON 会把
-//! `serde_json` 拖进这条链，等于在协议地基上留一条 `Value` 逃生口；
+//! JSON Value 库拖进这条链，等于在协议地基上留一条无类型逃生口；
 //! 用 postcard 则与线缆同一套编码，且**天生不支持字段别名与版本容错**——
 //! 正是我们要的"零兼容层"。
 //!
@@ -14,42 +14,40 @@
 //! 失配就是 [`EndpointReject`]，客户端应报"请重启 daemon"而不是硬连——
 //! 硬连的后果是 postcard 把旧形状按新形状解码，产出一屏貌似正常实则错位的数据。
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use serde::{Deserialize, Serialize};
 
 use crate::DAEMON_ENDPOINT_FILE;
 use crate::PROTOCOL_FINGERPRINT;
 use crate::PROTOCOL_REV;
 
-/// 传输载体（本地与远端同构：差异只在 [`DaemonEndpoint::transport`]）。
+static NEXT_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// 远端 `iroh` 端点信息（与本地 IPC 可并存，支撑 `v4.8` 同时监听本地与远端）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum EndpointTransport {
-    /// 本地 IPC：Unix domain socket / Windows named pipe（Owner-Only DACL）。
-    LocalIpc {
-        /// socket 或 pipe 的绝对路径（`\\\\.\\pipe\\...` 或 `/run/...`）。
-        path: String,
-    },
-    /// 远端：`iroh` 端点（QUIC，公钥寻址 + NAT 打洞 + 加密 relay）。
-    Iroh {
-        /// 32 字节 EndpointId。
-        endpoint_id: [u8; 32],
-        /// relay 地址（自建/公共；`None` = 仅直连/局域网）。
-        relay_url: Option<String>,
-    },
+pub struct IrohEndpointInfo {
+    /// 32 字节 EndpointId 公钥。
+    pub endpoint_id: [u8; 32],
+    /// relay 地址（自建/公共；`None` = 仅直连/局域网）。
+    pub relay_url: Option<String>,
 }
 
 /// 发布渠道（`stable` / `preview` / `dev`；决定客户端是否接受跨渠道连接）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EndpointChannel(pub String);
 
-/// 磁盘发现文件的内容（**永久无版本前缀**）。
+/// 磁盘发现文件的内容（**永久无版本前缀**；支持同时暴露本地 IPC 与远端 `iroh`）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaemonEndpoint {
     /// 构建 id（每次构建不同；用于识别"同一个二进制"）。
     pub build_id: String,
     /// 发布渠道。
     pub channel: EndpointChannel,
-    /// 传输载体。
-    pub transport: EndpointTransport,
+    /// 本地 IPC 路径（Unix domain socket / Windows named pipe，`None` 表示未监听本地）。
+    pub local_ipc: Option<String>,
+    /// 远端 `iroh` 端点（`None` 表示未监听远端）。
+    pub iroh: Option<IrohEndpointInfo>,
     /// 协议修订号。
     pub protocol_rev: u32,
     /// 协议指纹。
@@ -67,6 +65,9 @@ pub enum EndpointReject {
     /// 文件内容不是合法的 postcard `DaemonEndpoint`（旧版本写的、被截断、被篡改）。
     #[error("`{DAEMON_ENDPOINT_FILE}` 解码失败（多半是旧版 daemon 写的）：{0}")]
     Undecodable(String),
+    /// 未声明任何可用传输端点（既无本地 IPC 也无远端 iroh）。
+    #[error("`{DAEMON_ENDPOINT_FILE}` 未声明任何传输端点")]
+    NoTransport,
     /// 协议修订号不符（daemon 版本不对）。
     #[error("daemon 协议修订 {found} 与本端 {expected} 不同，请重启 daemon 或升级本端")]
     RevMismatch {
@@ -123,6 +124,9 @@ impl DaemonEndpoint {
                 found: self.channel.0.clone(),
             });
         }
+        if self.local_ipc.is_none() && self.iroh.is_none() {
+            return Err(EndpointReject::NoTransport);
+        }
         Ok(())
     }
 }
@@ -141,7 +145,7 @@ pub fn read_daemon_endpoint(
     Ok(endpoint)
 }
 
-/// 原子写发现文件（先写临时文件再 rename；daemon 启动期调用）。
+/// 原子写发现文件（唯一临时名 + `0600` 权限 + rename；daemon 启动期调用）。
 pub fn write_daemon_endpoint(
     data_dir: &std::path::Path,
     endpoint: &DaemonEndpoint,
@@ -150,8 +154,17 @@ pub fn write_daemon_endpoint(
     let bytes = endpoint
         .encode()
         .map_err(|error| std::io::Error::other(format!("encode daemon.endpoint: {error}")))?;
-    let staging = data_dir.join(format!("{DAEMON_ENDPOINT_FILE}.tmp"));
+    let seq = NEXT_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let staging = data_dir.join(format!(
+        "{DAEMON_ENDPOINT_FILE}.{}.{seq}.tmp",
+        std::process::id()
+    ));
     std::fs::write(&staging, &bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o600))?;
+    }
     std::fs::rename(&staging, &path)?;
     Ok(path)
 }
