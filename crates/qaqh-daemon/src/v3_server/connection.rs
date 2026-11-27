@@ -294,7 +294,7 @@ async fn serve_stream<T: MuxTransport, B: V3Backend>(
             if identity.is_revoked() {
                 return;
             }
-            serve_client_blob(&server, stream, role).await;
+            serve_client_blob(&server, stream, &identity, role).await;
         }
     }
 }
@@ -302,6 +302,7 @@ async fn serve_stream<T: MuxTransport, B: V3Backend>(
 async fn serve_client_blob<T: MuxTransport, B: V3Backend>(
     server: &V3Server<T, B>,
     mut stream: T::BiStream,
+    identity: &Arc<ConnectionIdentity>,
     role: BlobTransferRole,
 ) {
     match role {
@@ -321,7 +322,21 @@ async fn serve_client_blob<T: MuxTransport, B: V3Backend>(
                 log::warn!("v3_blob: ClientFetch 推送失败：{error:?}");
             }
         }
-        BlobTransferRole::ClientUpload { hash, len } => {
+        BlobTransferRole::ClientUpload {
+            session_id,
+            hash,
+            len,
+        } => {
+            let Some(session) = server.state.session(&session_id) else {
+                log::warn!("v3_blob: 上传目标会话 `{session_id}` 不存在");
+                let _ = write_frame(&mut stream, &false).await;
+                return;
+            };
+            if !session.can_access(&identity.device) {
+                log::warn!("v3_blob: 设备越权向会话 `{session_id}` 上传 blob");
+                let _ = write_frame(&mut stream, &false).await;
+                return;
+            }
             if len > MAX_CLIENT_UPLOAD_BLOB_BYTES {
                 log::warn!("v3_blob: 上传字节 {len} 超过上限 {MAX_CLIENT_UPLOAD_BLOB_BYTES}");
                 let _ = write_frame(&mut stream, &false).await;
@@ -647,12 +662,17 @@ async fn serve_shell_pty<T: MuxTransport, B: V3Backend>(
         log::warn!("v3_shell_pty: 没有 shell `{shell_id}`");
         return;
     };
-    let Some(session) = server.state.session(&handle.session_id) else {
-        log::warn!("v3_shell_pty: shell `{shell_id}` 的会话已不存在");
-        return;
-    };
-    if !session.can_access(&identity.device) {
-        log::warn!("v3_shell_pty: 设备越权访问 shell `{shell_id}`");
+    if let Some(session_id) = &handle.session_id {
+        let Some(session) = server.state.session(session_id) else {
+            log::warn!("v3_shell_pty: shell `{shell_id}` 的会话已不存在");
+            return;
+        };
+        if !session.can_access(&identity.device) {
+            log::warn!("v3_shell_pty: 设备越权访问 shell `{shell_id}`");
+            return;
+        }
+    } else if handle.owner != identity.device {
+        log::warn!("v3_shell_pty: 设备越权访问全局 shell `{shell_id}`");
         return;
     }
     let attach_parts = handle.attach(from_offset, &server.state.config);

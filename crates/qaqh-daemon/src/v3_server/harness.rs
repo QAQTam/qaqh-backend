@@ -153,10 +153,11 @@ pub(crate) async fn open_shell<B: MuxTransport>(
 ) -> String {
     match client
         .call(ControlRequest::Shell(ShellRequest::Open {
-            session_id: session_id.clone(),
+            session_id: Some(session_id.clone()),
             cols: 120,
             rows: 40,
             cwd: None,
+            shell: None,
         }))
         .await
         .expect("开 shell")

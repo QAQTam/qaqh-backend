@@ -16,7 +16,7 @@ use qaqh_ringing_v3::{
     ConfigResponse, FsRequest, FsResponse, GitxRequest, GitxResponse, MarketplaceRequest,
     MarketplaceResponse, PairingRequest, PairingResponse, RpcError, SessionRequest,
     SessionResponse, ShellRequest, ShellResponse, SystemRequest, SystemResponse,
-    ToolCatalogRequest, ToolCatalogResponse,
+    ToolCatalogRequest, ToolCatalogResponse, WorkspaceRequest, WorkspaceResponse,
 };
 use tokio::io::AsyncWrite;
 use tokio::sync::mpsc;
@@ -85,6 +85,12 @@ pub(crate) trait SessionFacade {
         context: &CallContext,
         request: ToolCatalogRequest,
     ) -> impl Future<Output = Result<ToolCatalogResponse, RpcError>> + Send;
+
+    fn handle_workspace(
+        &self,
+        context: &CallContext,
+        request: WorkspaceRequest,
+    ) -> impl Future<Output = Result<WorkspaceResponse, RpcError>> + Send;
 }
 
 /// Shell 域纯 `async` 门面（独立并发句柄表，热路径不碰中央会话锁）。
@@ -246,6 +252,14 @@ impl SessionFacade for SkeletonBackend {
         request: ToolCatalogRequest,
     ) -> Result<ToolCatalogResponse, RpcError> {
         self.session.handle_catalog(context, request).await
+    }
+
+    async fn handle_workspace(
+        &self,
+        context: &CallContext,
+        request: WorkspaceRequest,
+    ) -> Result<WorkspaceResponse, RpcError> {
+        self.session.handle_workspace(context, request).await
     }
 }
 

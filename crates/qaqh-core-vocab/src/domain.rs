@@ -81,6 +81,78 @@ pub enum ContentRef {
     Blob { hash: ContentHash, len: u64 },
 }
 
+/// 权限审批授予作用范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PermissionGrantScope {
+    /// 仅本次调用生效（单次凭证）。
+    #[default]
+    Once,
+    /// 本对话默认授权（当前会话生命周期内同类调用自动放行）。
+    Session,
+    /// 持久信任（写入持久信任规则）。
+    Persistent,
+}
+
+/// 会话持久目标状态机（六态同构）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GoalStatus {
+    /// 活跃中（允许自动续跑）。
+    Active,
+    /// 已暂停（仅用户恢复）。
+    Paused,
+    /// 阻塞等待处置。
+    Blocked,
+    /// 触发用量配额限制。
+    UsageLimited,
+    /// 触发 token 预算上限。
+    BudgetLimited,
+    /// 已完成。
+    Complete,
+}
+
+/// 回合执行子阶段。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TurnPhase {
+    /// 执行中（流式产出或工具运行）。
+    Running,
+    /// 等待用户输入。
+    WaitingUser,
+    /// 正在取消收口。
+    Cancelling,
+}
+
+/// 模型选择附加参数（`None` = 沿用配置默认）。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelectionOptions {
+    /// 单次输出 token 上限。
+    pub max_output_tokens: Option<u32>,
+    /// 推理强度档位。
+    pub reasoning_effort: Option<String>,
+    /// 原生联网检索开关。
+    pub native_web_search: Option<bool>,
+}
+
+/// 会话级模型绑定。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelSelection {
+    /// 服务商 id。
+    pub provider_id: String,
+    /// 模型 id。
+    pub model_id: String,
+    /// 覆盖选项。
+    pub options: ModelSelectionOptions,
+}
+
+/// 可继承设置统一表达：`Use(v)` 明确覆盖，`Inherit` 退回上层默认。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SettingOverride<T> {
+    /// 明确覆写。
+    Use(T),
+    /// 清除覆盖、继承默认。
+    #[default]
+    Inherit,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

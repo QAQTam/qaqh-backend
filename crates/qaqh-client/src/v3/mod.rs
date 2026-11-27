@@ -267,14 +267,22 @@ impl<B: MuxTransport> V3Client<B> {
         Ok(ShellOutputStream::new(stream, attach, from_offset))
     }
 
-    /// 向服务端上传一条内容寻址 blob（分片直传，零 Base64 膨胀）。
-    pub async fn upload_blob(&self, bytes: &[u8]) -> Result<ContentHash, ClientError> {
+    /// 向服务端上传一条属于指定会话的内容寻址 blob（分片直传，零 Base64 膨胀）。
+    pub async fn upload_blob(
+        &self,
+        session_id: &SessionId,
+        bytes: &[u8],
+    ) -> Result<ContentHash, ClientError> {
         let digest: [u8; 32] = Sha256::digest(bytes).into();
         let hash = ContentHash::from_bytes(digest);
         let len = bytes.len() as u64;
         let mut stream = self.transport.open_bi().await?;
         let kind = StreamKind::BlobTransfer {
-            role: BlobTransferRole::ClientUpload { hash, len },
+            role: BlobTransferRole::ClientUpload {
+                session_id: session_id.clone(),
+                hash,
+                len,
+            },
         };
         write_frame(&mut stream, &kind).await?;
         const CHUNK_BYTES: usize = 64 * 1024;
@@ -321,6 +329,16 @@ impl<B: MuxTransport> V3Client<B> {
             return Err(ClientError::Protocol("服务端拒绝了 blob 上传".to_string()));
         }
         Ok(hash)
+    }
+
+    /// 按内容哈希从服务端拉取一条 blob（经 `sha256` Fail-Closed 校验）。
+    pub async fn fetch_blob(&self, hash: &ContentHash) -> Result<bytes::Bytes, ClientError> {
+        let mut stream = self.transport.open_bi().await?;
+        let kind = StreamKind::BlobTransfer {
+            role: BlobTransferRole::ClientFetch { hash: *hash },
+        };
+        write_frame(&mut stream, &kind).await?;
+        blob::receive_fetched_blob(&mut stream, *hash).await
     }
 
     /// 取走 blob 收件箱（服务端推来的 `BlobTransfer` 流在这里被组装）。
