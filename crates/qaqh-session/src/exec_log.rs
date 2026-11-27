@@ -12,6 +12,8 @@
 //! [ADR-0017]: ../../docs/adr/0017-exec-full-output-terminal-lifecycle.md
 //! [ADR-0034]: ../../docs/adr/0034-exec-flood-memory-surface.md
 
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// 单会话 exec 日志目录：`<data_dir>/sessions/<session_id>/exec`。
@@ -26,6 +28,18 @@ pub fn exec_output_log_path_in(
     exec_session_id: &str,
 ) -> PathBuf {
     exec_output_log_dir(data_dir, session_id).join(format!("{exec_session_id}.log"))
+}
+
+/// 追加一块输出到日志。定序不变量（ADR-0017 决策 1）：先写日志、再更新 DB 水位、
+/// 再发 delta ⇒「客户端见过 offset X 的 delta ⇒ 日志必可以读到 X」。
+/// 失败只响亮报错、不阻断实时流；完整性由 settle 侧「日志字节 vs 水位」对账
+/// 如实标 `output_truncated`（宪规 5：不假装完整）。
+pub(crate) fn append_exec_log(path: &Path, text: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    file.write_all(text.as_bytes())
 }
 
 #[cfg(test)]

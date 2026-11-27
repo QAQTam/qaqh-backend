@@ -27,7 +27,7 @@ pub const MAX_ID_LEN: usize = 128;
 pub enum IdError {
     #[error("{kind} 不能为空")]
     Empty { kind: &'static str },
-    #[error("{kind} 超过 id 长度上限（实际 {len} 字符）")]
+    #[error("{kind} 超过 id 长度上限（实际 {len} 字节）")]
     TooLong { kind: &'static str, len: usize },
     #[error("{kind} 含控制字符（U+{codepoint:04X}）")]
     ControlChar { kind: &'static str, codepoint: u32 },
@@ -71,9 +71,19 @@ fn validate_id(kind: &'static str, raw: &str) -> Result<(), IdError> {
 macro_rules! string_id {
     ($(#[$meta:meta])* $name:ident, $kind:literal) => {
         $(#[$meta])*
-        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let raw = String::deserialize(deserializer)?;
+                Self::new(raw).map_err(serde::de::Error::custom)
+            }
+        }
 
         impl $name {
             /// 构造并校验（结构校验，见模块文档）。
@@ -245,6 +255,37 @@ mod tests {
             })
         );
         assert!(ExecSessionId::new("x".repeat(MAX_ID_LEN)).is_ok());
+    }
+
+    #[test]
+    fn deserializing_malformed_id_fails_closed() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::Error as DeError;
+
+        let ok: Result<SessionId, DeError> =
+            SessionId::deserialize("SES-01M8CJZ6RV4A70EV0V0ABFXV2V".into_deserializer());
+        assert_eq!(
+            ok.expect("合法 id 反序列化必须通过").as_str(),
+            "SES-01M8CJZ6RV4A70EV0V0ABFXV2V"
+        );
+
+        let too_long = "x".repeat(MAX_ID_LEN + 1);
+        for bad in [
+            "",
+            ".",
+            "..",
+            "../etc/passwd",
+            "a/b",
+            "a\\b",
+            "a\u{0}b",
+            too_long.as_str(),
+        ] {
+            let err: Result<SessionId, DeError> = SessionId::deserialize(bad.into_deserializer());
+            assert!(err.is_err(), "反序列化非法 id `{bad:?}` 必须被拒");
+            let exec_err: Result<ExecSessionId, DeError> =
+                ExecSessionId::deserialize(bad.into_deserializer());
+            assert!(exec_err.is_err(), "反序列化非法 ExecSessionId `{bad:?}` 必须被拒");
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! 纯净域枚举（`ADR-0042` 铁律 1）：`ActivityState` / `TurnTerminal` / `UsageInfo` /
 //! `ContentRef`。
 //!
-//! "纯净"指**没有任何协议外衣**：不藏 `serde_json::Value`、不带通道/序号/连接
+//! "纯净"指**没有任何协议外衣**：不藏动态 JSON `Value`、不带通道/序号/连接
 //! 元数据、不区分"哪个客户端看的版本"。这些是业务事实本身，`postcard` 直接编码。
 //!
 //! **与 V2 的关系**：V2 的真源仍是 `qaqh-ringing-contract`（冰封中，

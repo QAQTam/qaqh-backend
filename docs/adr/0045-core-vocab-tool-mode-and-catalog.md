@@ -27,8 +27,8 @@
    承载：8 个强类型 ID newtype（`SessionId`/`TurnId`/`BlockId`/`ToolCallId`/`InputId`/
    `InteractionId`/`ExecSessionId`/`ContentHash`）、纯净域枚举（`ActivityState`/
    `TurnTerminal`/`UsageInfo`/`ContentRef`）、`ToolMode`、`ToolCatalog`。
-2. **ID 构造即校验（结构级 Fail-Closed）**：id 同时是线缆键与磁盘路径组件，
-   空串 / 超长 / 控制字符 / 路径分隔符 / `.` / `..` 一律拒绝；**不发明语法**
+2. **ID 构造与反序列化双关校验（结构级 Fail-Closed）**：id 同时是线缆键与磁盘路径组件，
+   `new()` 与 `Deserialize` 均走同一套校验——空串 / 超长（字节上限）/ 控制字符 / 路径分隔符 / `.` / `..` 一律拒绝；**不发明语法**
    （不做 `SES-` 前缀臆断——那是各 id 生成器的自由）。
 3. **`ContentHash` 线上是 32 字节裸字节**，不是 64 字符 hex（hex 只出现在人类面，
    由 `to_hex`/`from_hex` 显式转换）。
@@ -87,11 +87,8 @@
       `did not match any packages`（＝不在依赖树里）
 - [x] `qaqh-types` / `qaqh-ringing-contract` 零改动（`git status` 为空）
 
-## 未验范围
+## 校验事实（已实施）
 
-- 禁词闸的精确表述：`rg 'serde_json|skip_serializing_if|serde\(tag|flatten|untagged|alias)|legacy_|compat_'`
-  在**注释与文档**里仍有命中（这些注释正是规则本身在解释"为什么禁止"）。
-  真正的闸门是 `cargo tree -i serde_json`（空）+ "非注释行 0 命中"：
-  `rg -n 'serde_json' crates/qaqh-core-vocab/src | grep -vE '^[^:]+:[0-9]+:\s*(//|\*)'` → 空。
-  逐字闸（连注释都不许提）会让"为什么禁"这件事无法写在代码旁边，因此不采用。
-- 目录投影只在测试中驱动；真实 V3 RPC 端点与前端面板在 `P3-4` / `qaqh-gpui` 接入。
+- 禁词静态扫描：按 `ADR-0042` §三.1 逐字正则扫描 `crates/qaqh-core-vocab/` **0 命中**（含注释与 `Cargo.toml`）；`cargo tree -p qaqh-core-vocab -e normal,build -i serde_json` 输出为空。
+- 反序列化 Fail-Closed：`ids.rs` 覆写 `Deserialize` 强制经 `Self::new` 校验，确保线缆输入与内存构造同口径拒收路径穿越与控制字符。
+- 未接线范围：目录投影只在测试中驱动；真实 V3 RPC 端点与前端面板在 `P3-4` / `qaqh-gpui` 接入。
