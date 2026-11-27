@@ -114,6 +114,9 @@ impl ExecSpillGate {
                 produced_bytes,
                 withheld_bytes,
             } => {
+                // 异步 owner 泵尚未把最新输出刷进磁盘时，保留当前帧尾部作兜底预览，
+                // 避免通告里出现“日志为空”却把刚触发开闸的那段文本白白丢掉。
+                let frame_tail = tail_chars(&result.output, NOTICE_TAIL_CHARS);
                 let tail = log_path.map(|path| read_log_tail(path, NOTICE_TAIL_CHARS));
                 result.output = spill_notice(SpillNotice {
                     exec_session_id,
@@ -122,6 +125,7 @@ impl ExecSpillGate {
                     produced_bytes,
                     withheld_bytes,
                     tail: tail.as_ref(),
+                    frame_tail: &frame_tail,
                 });
                 result.output_truncated = true;
                 result.omitted_bytes = result.omitted_bytes.saturating_add(withheld_bytes);
@@ -221,6 +225,7 @@ struct SpillNotice<'a> {
     produced_bytes: u64,
     withheld_bytes: u64,
     tail: Option<&'a std::io::Result<Option<String>>>,
+    frame_tail: &'a str,
 }
 
 /// 合成通告帧：异常流量说明 + 权威日志路径 + tail 预览（ADR-0035 决策 4）。
@@ -232,6 +237,7 @@ fn spill_notice(notice: SpillNotice<'_>) -> String {
         produced_bytes,
         withheld_bytes,
         tail,
+        frame_tail,
     } = notice;
     let mut text = String::new();
     text.push_str(NOTICE_MARKER);
@@ -250,32 +256,62 @@ fn spill_notice(notice: SpillNotice<'_>) -> String {
         "后续行为：`write_stdin` 轮询仍然可用，只返回轻量水位与上面的日志引用，不再重放全量输出；\
          客户端界面不受影响（泄洪只削模型上下文，不削 SSE 事件流）。进程没有被杀，让它继续跑完。\n",
     );
+    let push_preview_block = |buf: &mut String, content: &str| {
+        buf.push_str("----- 8< -----\n");
+        buf.push_str(content);
+        if !content.ends_with('\n') {
+            buf.push('\n');
+        }
+        buf.push_str("----->8 -----\n");
+    };
     if let Some(tail) = tail {
         match tail {
             Ok(Some(preview)) if !preview.is_empty() => {
                 text.push_str(&format!(
                     "尾部预览（最后 ≤{NOTICE_TAIL_CHARS} 字符，来自上面的权威日志）：\n"
                 ));
-                text.push_str("----- 8< -----\n");
-                text.push_str(preview);
-                if !preview.ends_with('\n') {
-                    text.push('\n');
-                }
-                text.push_str("----->8 -----\n");
+                push_preview_block(&mut text, preview);
             }
             Ok(_) => {
                 text.push_str("尾部预览：权威日志此刻尚未写入任何字节。\n");
+                if !frame_tail.is_empty() {
+                    text.push_str(&format!(
+                        "当前帧尾部兜底预览（异步日志泵尚未刷盘，最后 ≤{NOTICE_TAIL_CHARS} 字符）：\n"
+                    ));
+                    push_preview_block(&mut text, frame_tail);
+                }
             }
             Err(error) => {
                 text.push_str(&format!(
                     "尾部预览：读取权威日志失败（{error}）——按上面路径自行读取时请留意同一故障。\n"
                 ));
+                if !frame_tail.is_empty() {
+                    text.push_str(&format!(
+                        "当前帧尾部兜底预览（最后 ≤{NOTICE_TAIL_CHARS} 字符）：\n"
+                    ));
+                    push_preview_block(&mut text, frame_tail);
+                }
             }
         }
     } else {
         text.push_str("尾部预览：权威日志路径不可用（数据目录无法从业务库路径派生），只能靠 `write_stdin` 水位判断进度。\n");
+        if !frame_tail.is_empty() {
+            text.push_str(&format!(
+                "当前帧尾部兜底预览（最后 ≤{NOTICE_TAIL_CHARS} 字符）：\n"
+            ));
+            push_preview_block(&mut text, frame_tail);
+        }
     }
     text
+}
+
+/// 取字符串末尾最多 `max_chars` 个字符（UTF-8 字符边界安全）。
+fn tail_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let skip = text.chars().count().saturating_sub(max_chars);
+    text.chars().skip(skip).collect()
 }
 
 struct SuppressedStatus<'a> {
@@ -411,7 +447,6 @@ mod tests {
         let mut direct_frames = 0usize;
         let mut spilled_frames = 0usize;
         let mut suppressed_frames = 0usize;
-        let mut notice = String::new();
         for _ in 0..frames {
             let mut result = frame(&unit);
             match gate.apply("execs_01FLOOD", &mut result, None) {
@@ -422,15 +457,15 @@ mod tests {
                 SpillVerdict::Spilled { .. } => {
                     spilled_frames += 1;
                     spent += result.output.len() as u64;
-                    notice = result.output.clone();
-                    assert!(notice.starts_with(NOTICE_MARKER));
+                    assert!(result.output.starts_with(NOTICE_MARKER));
                     assert!(result.omitted_bytes >= unit.len() as u64);
                 }
                 SpillVerdict::Suppressed { .. } => {
                     suppressed_frames += 1;
                     spent += result.output.len() as u64;
+                    let sample: String = unit.chars().take(64).collect();
                     assert!(
-                        !result.output.contains(&unit[..64]),
+                        !result.output.contains(&sample),
                         "泄洪后不得重放原始增量"
                     );
                     assert!(result.output.starts_with(SUPPRESS_MARKER));
@@ -493,18 +528,25 @@ mod tests {
         );
     }
 
-    /// 日志缺席 / 路径不可用时，通告如实登记，不假装引用存在。
+    /// 日志缺席 / 路径不可用时，通告如实登记，并以当前帧尾部做兜底预览。
     #[test]
     fn missing_log_is_reported_honestly() {
         let dir = tempfile::tempdir().expect("tempdir");
         let absent = dir.path().join("nope.log");
         let gate = ExecSpillGate::new();
-        let mut result = frame(&"z".repeat(MODEL_FACE_BUDGET_BYTES as usize + 1));
+        let mut payload = "z".repeat(MODEL_FACE_BUDGET_BYTES as usize);
+        payload.push_str("UNFLUSHED_TAIL_MARKER");
+        let mut result = frame(&payload);
         gate.apply("execs_01ABSENT", &mut result, Some(&absent));
         assert!(result.output.contains(&absent.display().to_string()));
         assert!(
             result.output.contains("尚未写入任何字节"),
             "{}",
+            result.output
+        );
+        assert!(
+            result.output.contains("UNFLUSHED_TAIL_MARKER"),
+            "权威日志未刷盘时通告应附带当前帧尾部兜底预览：{}",
             result.output
         );
 
