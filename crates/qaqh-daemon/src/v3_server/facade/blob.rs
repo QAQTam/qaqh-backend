@@ -124,9 +124,9 @@ where
             )
         })?;
         offset = end;
-        // 每块让出、每 256 KiB 喘息 1ms：Blob 是"能等的"，避免占满发送窗口把控制面/PTY 挤在后面。
-        if seq.is_multiple_of(4) {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        // 每块让出、每 128 KiB 喘息 2ms：Blob 是"能等的"，避免填满管道/QUIC 发送窗口把控制面/PTY 挤在后面。
+        if seq.is_multiple_of(2) {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         } else {
             tokio::task::yield_now().await;
         }

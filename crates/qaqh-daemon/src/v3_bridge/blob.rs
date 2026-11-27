@@ -117,8 +117,8 @@ pub(crate) async fn push<W: AsyncWrite + Unpin>(
         .await
         .map_err(|error| super::internal(format!("write blob chunk: {error}")))?;
         offset = end;
-        if seq.is_multiple_of(4) {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        if seq.is_multiple_of(2) {
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         } else {
             tokio::task::yield_now().await;
         }
