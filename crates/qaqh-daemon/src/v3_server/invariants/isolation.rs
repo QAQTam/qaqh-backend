@@ -91,7 +91,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
                     format!("a{index:06};"),
                 ));
                 if index.is_multiple_of(128) {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                 } else if index.is_multiple_of(16) {
                     tokio::task::yield_now().await;
                 }
@@ -109,8 +109,8 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
             while !stop.load(Ordering::Relaxed) {
                 index += 1;
                 handle.push_output(chunk.clone());
-                if index.is_multiple_of(64) {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
+                if index.is_multiple_of(16) {
+                    tokio::time::sleep(Duration::from_millis(2)).await;
                 } else {
                     tokio::task::yield_now().await;
                 }
@@ -128,7 +128,7 @@ pub(crate) async fn guard<F: BackendFactory>(factory: F) {
                 if bus.send(blob_push.clone()).is_ok() {
                     pushes += 1;
                 }
-                tokio::time::sleep(Duration::from_millis(2)).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
             pushes
         })
